@@ -356,8 +356,13 @@ class ActivityPage(QWidget):
         from .canaries_view import CanariesView  # here: it uses this module's helpers
         self.canaries = CanariesView(sai)
         self.canaries.counted.connect(self.canaries_counted)
+        # What the safeguards refused or ended (sandbox-ai safeguards): why, and the command that would allow it.
+        from .safeguards_view import SafeguardsView
+        self.safeguards = SafeguardsView(sai)
+        self.safeguards.counted.connect(self.safeguards_counted)
         self.tabs.addTab(timeline, tr("Timeline"))
         self.tabs.addTab(self.canaries, tr("Canaries"))
+        self.tabs.addTab(self.safeguards, tr("Safeguards"))
         outer.addWidget(self.tabs)
         self.update_buttons()
         self.started = False
@@ -368,6 +373,18 @@ class ActivityPage(QWidget):
         self.tabs.setTabText(index, tr("Canaries ({count})", count=count) if count else tr("Canaries"))
         self.tabs.tabBar().setTabTextColor(index, theme.color("bad") if count else
                                            self.tabs.tabBar().palette().color(self.tabs.tabBar().foregroundRole()))
+
+    def safeguards_counted(self, count):
+        """The Safeguards tab names how many records there are, in the theme's warning colour when there are any."""
+        index = self.tabs.indexOf(self.safeguards)
+        self.tabs.setTabText(index, tr("Safeguards ({count})", count=count) if count else tr("Safeguards"))
+        self.tabs.tabBar().setTabTextColor(index, theme.color("warn") if count else
+                                           self.tabs.tabBar().palette().color(self.tabs.tabBar().foregroundRole()))
+
+    def show_safeguards(self):
+        """Open the Safeguards tab (a popup's button)."""
+        self.tabs.setCurrentWidget(self.safeguards)
+        self.safeguards.refresh()
 
     # -- what to show --
 
@@ -505,6 +522,7 @@ class ActivityPage(QWidget):
             self.started = True
             self.refresh_sources()
             self.canaries.refresh()  # the tab names how many events there are
+            self.safeguards.refresh()
 
     # -- the command --
 
@@ -854,3 +872,4 @@ class ActivityPage(QWidget):
         if event.type() == event.Type.PaletteChange:
             self.model.recolor()
             self.canaries.recolor()
+            self.safeguards.recolor()

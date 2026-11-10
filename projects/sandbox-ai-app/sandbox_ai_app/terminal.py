@@ -18,7 +18,7 @@ import weakref
 
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QUrl, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import chromium, theme
@@ -26,9 +26,11 @@ from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ask_first, background, fill, fit_columns, inform, plain_label, row_key, safe_tooltip, table, warn
+from .widgets import ask_first, background, disclosure, fill, fit_columns, inform, plain_label, row_key, safe_tooltip, table, warn
 
 WEB = Path(__file__).resolve().with_name("web")
+QWIDGETSIZE_MAX = (1 << 24) - 1  # Qt's "no maximum" of a widget's size
+TABS_MIN_HEIGHT = 160  # px: the terminal tabs' least height
 # The vendoring script next to the package (a checkout or sandbox-ai's installation; not in a wheel).
 VENDOR_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "vendor_xterm.py"
 VENDOR_FILES = ("xterm.js", "xterm.css", "addon-fit.js")
@@ -139,8 +141,19 @@ class TerminalView(QWidget):
         self.page.setWebChannel(self.channel)
         self.view.setPage(self.page)
         layout.addWidget(self.view)
+        # Chromium's page process may end on its own (out of memory, a crash in it): the app goes on, the tab says
+        # so, and the log window and app.log keep why (it was silent before: an empty tab).
+        self.page.renderProcessTerminated.connect(self.page_ended)
         self.page.load(page_url)
         _views.add(self)
+
+    def page_ended(self, status, code):
+        from . import applog
+        name = getattr(status, "name", str(status))
+        if name == "NormalTerminationStatus":
+            return
+        applog.log("ERROR", "terminal", f"the terminal page of {' '.join(self.argv[:3])} ended: {name}, exit code "
+                                        f"{code} (Chromium's page process; the command itself may still run)")
 
     @property
     def running(self):
@@ -154,9 +167,18 @@ class TerminalView(QWidget):
         bridge = self.bridge
         if bridge.running:
             _ending.add(bridge)
+            self.channel.deregisterObject(bridge)  # (the page goes with the tab; the bridge, once deleted, from it)
             bridge.setParent(None)
-            bridge.exited.connect(lambda _status, b=bridge: _ending.discard(b))
+            bridge.exited.connect(lambda _status, b=bridge: ended(b))
         bridge.close()
+
+
+def ended(bridge):
+    """The command of a closed tab has ended: its bridge goes. It has no parent any more, and its signal's connection
+    to the function that knows it held it alive inside Qt, where Python's collector does not look: every closed tab
+    left its bridge, its Pty and their notifiers and timers for the rest of the run (stability round 3, the soak)."""
+    _ending.discard(bridge)
+    bridge.deleteLater()
 
 
 def shutdown():
@@ -222,7 +244,7 @@ def attach_key(argv):
         base = argv[:-2]
         if base and base[-1] == "session":
             base = base[:-1]
-        if base and (base[-1].endswith("main.py") or os.path.basename(base[-1]) in ("sandbox-ai", "sandbox-session")):
+        if base and (base[-1].endswith("main.py") or os.path.basename(base[-1]) == "sandbox-ai"):
             return ("here", argv[-1])
     if len(argv) >= 2 and os.path.basename(argv[0]) == "ssh" and re.search(r"(?:^|\s)attach\s", argv[-1]):
         return ("ssh", tuple(argv))
@@ -256,8 +278,9 @@ def remote_words(command):
 def detaches(argv, launcher=None):
     """Whether closing the terminal of ARGV only detaches it, the start running on: attaching to a start (tmux),
     a start with --session, or an interactive agent start, which the launcher runs as a detachable session in tmux
-    by default (not with --no-tmux, --probe, --dry-run, --binary, a prompt or subcommand for the agent, or on macOS;
-    sandbox-ai's detachable() and resolve_tmux()). Everything else (a build, doctor, a task) ends with its tab."""
+    by default (not with --no-tmux, --probe, --dry-run, --binary, a prompt or subcommand for the agent, or on macOS
+    with a sandbox-ai from before attaching reached podman machine; sandbox-ai's detachable() and resolve_tmux()).
+    Everything else (a build, doctor, a task) ends with its tab."""
     if attach_key(argv) is not None:
         return True
     argv = [str(arg) for arg in argv]
@@ -276,7 +299,8 @@ def detaches(argv, launcher=None):
         return False
     if "--session" in names:
         return True
-    if names & {"--no-tmux", "--binary"} or sys.platform == "darwin":
+    # macOS: tmux by default since sandbox-ai attaches through podman exec (its on_machine); not before.
+    if names & {"--no-tmux", "--binary"} or (sys.platform == "darwin" and not hasattr(launcher, "on_machine")):
         return False
     if "--tmux" in names:
         return True
@@ -289,10 +313,12 @@ def detaches(argv, launcher=None):
 
 
 class TerminalsPage(QWidget):
-    """Tabs with terminals, and above them every start that runs on this machine (or a host of `sandbox-ai
-    hosts`), however it was started: the command line, the app, the web interface, another machine. One click
-    attaches a start in tmux (a tab per start: clicked again, its tab is shown); the others say why they have
-    no terminal to attach. The list is read when the page is shown and every few seconds while it is."""
+    """Tabs with terminals, and below them, folded away at first, Sessions: every start that runs on this machine
+    (or a host of `sandbox-ai hosts`), however it was started: the command line, the app, the web interface, another
+    machine. One click attaches a start in tmux (a tab per start: clicked again, its tab is shown); the others say
+    why they have no terminal to attach. The list is read when the page is shown and every few seconds while it is.
+    The line above the tabs says only what is wrong (no QtWebEngine or xterm.js, Chromium's sandbox): what the page
+    is for is the guided tour's and the Help's to say, not a sentence that stays."""
 
     def __init__(self, web=WEB, parent=None, sai=None, in_terminal=None):
         super().__init__(parent)
@@ -317,28 +343,44 @@ class TerminalsPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.setDocumentMode(True)
+        # A terminal needs some rows: the page (and so the window) keeps that much height, Sessions folded or not.
+        self.tabs.setMinimumHeight(TABS_MIN_HEIGHT)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.entries, self.problem, self.reading, self.shown_rows, self.ticks = [], "", None, None, 0
         self.starts = self.make_starts() if sai is not None else None
         if self.starts is None:
             layout.addWidget(self.tabs, 1)
         else:
-            split = QSplitter(Qt.Orientation.Vertical)
-            split.setChildrenCollapsible(False)
-            split.addWidget(self.starts)
-            split.addWidget(self.tabs)
-            split.setStretchFactor(1, 3)
-            layout.addWidget(split, 1)
+            # The terminals first; Sessions below them, folded to one line until opened (then ~30% of the height).
+            self.split = QSplitter(Qt.Orientation.Vertical)
+            self.split.setChildrenCollapsible(False)
+            self.split.addWidget(self.tabs)
+            self.split.addWidget(self.starts)
+            self.split.setStretchFactor(0, 7)
+            self.split.setStretchFactor(1, 3)
+            layout.addWidget(self.split, 1)
+            self.fold_sessions(self.sessions_fold.isChecked())
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.tick)
             self.timer.setInterval(backend_setting("sandboxes_interval"))  # started while the page is shown
 
-    # -- the running starts --
+    # -- the running starts (Sessions) --
 
     def make_starts(self):
-        box = QGroupBox(tr("Running starts"))
+        box = QFrame()
+        box.setObjectName("sessions")
+        box.setFrameShape(QFrame.Shape.StyledPanel)
         box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(6, 2, 6, 6)
         top = QHBoxLayout()
+        # Folded at first (the terminals are what the page is for); the window keeps whether it was opened.
+        self.sessions_fold = disclosure(QToolButton())
+        self.sessions_fold.setText(tr("Sessions"))
+        self.sessions_fold.setAccessibleName(tr("Sessions"))
+        self.sessions_fold.setToolTip(tr("Every start that runs on this machine or the host chosen beside it, however "
+                                         "it was started; one in tmux opens in a tab with one click"))
+        self.sessions_fold.toggled.connect(self.fold_sessions)
+        top.addWidget(self.sessions_fold)
         self.host = QComboBox()
         self.host.setToolTip(tr("This machine, or a host of sandbox-ai hosts (over SSH)"))
         self.host.setAccessibleName(tr("Host"))
@@ -357,10 +399,32 @@ class TerminalsPage(QWidget):
         self.list = table([tr("Name"), tr("Agent"), tr("State"), tr("Workspace"), tr("Terminal")], stretch=3,
                           compact=(1, 2, 4),
                           sortable=False)
-        self.list.setAccessibleName(tr("Running starts"))
+        self.list.setAccessibleName(tr("Sessions"))
         self.list.cellDoubleClicked.connect(lambda row, _column: self.attach_row(row))
         box_layout.addWidget(self.list, 1)
+        self.top_row = top
         return box
+
+    def fold_sessions(self, opened):
+        """Sessions opened (OPENED) or folded: folded, only its first line (the count, the host, Refresh) stays and
+        the terminals take the rest; opened, it takes about 30% of the page's height."""
+        self.list.setVisible(opened)
+        total = sum(self.split.sizes()) or self.split.height()
+        if opened:
+            self.starts.setMaximumHeight(QWIDGETSIZE_MAX)
+            if total > 0:
+                self.split.setSizes([total - total * 3 // 10, total * 3 // 10])
+        else:
+            margins = self.starts.layout().contentsMargins()
+            self.starts.setMaximumHeight(self.top_row.sizeHint().height() + margins.top() + margins.bottom()
+                                         + 2 * self.starts.frameWidth())
+            if total > 0:
+                self.split.setSizes([total, 0])  # the terminals take the rest (Sessions keeps its one line)
+
+    def reveal(self, target):
+        """A tour points at TARGET (MainWindow.point_at): Sessions opens to be seen."""
+        if target == "starts" and self.starts is not None:
+            self.sessions_fold.setChecked(True)
 
     def hosts_changed(self):
         """The hosts file changed: the chooser again; when its host left, this machine's starts."""
@@ -525,9 +589,7 @@ class TerminalsPage(QWidget):
     def show_state(self, problem=""):
         ok, why = available(self.web)
         if ok:
-            text = tr("Every terminal of the app opens here as a tab: starts in the app, sessions you attach, "
-                      "builds and logins. Any start that runs in tmux, wherever it was started, can be attached "
-                      "from the list.")
+            text = ""  # nothing wrong: nothing to say (the tour and the Help explain the page)
         elif MISSING:
             text = tr("Terminals inside the app are not available: {why}. Commands open in a terminal window "
                       "instead. Install QtWebEngine with: sandbox-ai-update --force (or pip install PySide6-Addons).",
@@ -536,11 +598,26 @@ class TerminalsPage(QWidget):
             text = tr("Terminals inside the app are not available: {why}. Commands open in a terminal "
                       "window instead.", why=why)
         if problem:
-            text += "\n" + tr("Download failed: {error}", error=problem)
+            text += ("\n" if text else "") + tr("Download failed: {error}", error=problem)
         if ok and self.sandbox_problem:
             text = self.sandbox_problem
-        self.hint.setText(text)
+        self.say(text)
         self.fetch.setVisible(not ok and not MISSING and VENDOR_SCRIPT.is_file())
+
+    def say(self, text):
+        """TEXT above the tabs; no text: no line (the space goes to the terminals)."""
+        self.hint.setText(text)
+        self.hint.setVisible(bool(text))
+        self.fit_hint()
+
+    def fit_hint(self):
+        """The line above the tabs as high as its text wraps to at its width: a narrow window gets taller, the
+        text is never cut (a word-wrapped label's own minimum is one line)."""
+        self.hint.setMinimumHeight(self.hint.heightForWidth(self.hint.width()) if self.hint.text() else 0)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt's name
+        super().resizeEvent(event)
+        self.fit_hint()
 
     def vendor(self):
         """Fetch xterm.js into this copy of the app, in the background."""
@@ -550,7 +627,7 @@ class TerminalsPage(QWidget):
         self.command = AsyncCommand(timeout=180, parent=self)
         self.command.finished.connect(self.vendored)
         self.fetch.setEnabled(False)
-        self.hint.setText(tr("Downloading xterm.js…"))
+        self.say(tr("Downloading xterm.js…"))
         self.command.start([sys.executable, "-I", str(VENDOR_SCRIPT), "--into", str(Path(self.web) / "vendor")])
 
     def vendored(self, status, out, err):

@@ -89,3 +89,21 @@ def test_the_board_and_the_start_page_offer_them(qapp, monkeypatch, tmp_path, en
         assert field.value() == ["/a.json"]
     finally:
         close(window)
+
+
+def test_check_refuses_a_file_inside_a_workspace_and_all_rules_lists_every_ruleset(tools, tmp_path, wait):
+    """Check is sandbox-ai rules check (a file inside a workspace refused as the start refuses it); All rules… is
+    sandbox-ai rules show: every ruleset of the start in order, with where it comes from."""
+    inside = tmp_path / "work" / "rules.json"
+    rules_tools.write_example(str(inside))
+    tools.listed.append(str(inside))
+    tools.check()
+    assert wait(lambda: tools.result.text().startswith(("✔", "✘")), 90), tools.result.text()
+    assert tools.result.text().startswith("✘") and "inside the workspace" in tools.result.text()
+    tools.listed[:] = [rules_tools.write_example(str(tmp_path / "config" / "github.json"))]
+    tools.show_all()
+    assert wait(lambda: widgets.SHOWN and widgets.SHOWN[-1][0] == "All rules of this start", 90), tools.result.text()
+    text = widgets.SHOWN[-1][1]
+    assert f"--rules github.json — from {tmp_path / 'config' / 'github.json'}" in text
+    assert "no-gists: deny" in text and "files-deletes: ask" in text
+    assert rules_tools.all_rules_text({"rulesets": []}).startswith("This start has no rulesets")

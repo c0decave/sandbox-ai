@@ -311,3 +311,18 @@ def test_the_vpn_node(sai):
     assert any("requires a VPN" in t for t in errors([], policy))
     assert any("only these VPN profiles: corp" in t for t in errors(["--vpn", "home"], policy))
     assert errors(["--vpn", "corp"], policy) == [] and errors(["--offline"], policy) == []
+
+
+def test_the_copy_of_a_ruleset_is_written_once_and_holds_the_bytes_it_is_named_by(tmp_path, monkeypatch):
+    """Stability review 2: every dry run of a board with a ruleset (each change of the board, on the GUI thread) made
+    its copy for --rules. The copy was written differently from the bytes it is named by (sha256), so it never
+    matched and was written - and synced to the disk - again at every change."""
+    import hashlib
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    rules = {"version": 1, "http": [{"id": "x", "host": "a.example", "decision": "allow"}]}
+    target = B.rules_copy(rules)
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == target.stem
+    written = []
+    monkeypatch.setattr(backend, "write_private_text", lambda *a: written.append(a))
+    monkeypatch.setattr(backend, "write_private_json", lambda *a: written.append(a))
+    assert B.rules_copy(rules) == target and written == [], "written once"

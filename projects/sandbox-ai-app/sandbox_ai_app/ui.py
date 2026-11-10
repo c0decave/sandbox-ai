@@ -6,12 +6,15 @@ import os
 import re
 from pathlib import Path
 import shlex
+import shutil
+import sys
 import textwrap
 import time
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, Signal, qVersion
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPen
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
+    QStyleOptionComboBox, QStylePainter,
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar,
@@ -36,11 +39,11 @@ from .kits_page import KitsPage
 from .state import State, scrub_arguments
 from .pages import ApprovalsPage, CredentialsPage, ImagesPage, StatisticsPage
 from .files_page import FilesPage
-from .reviews import home_review, review_refusal
+from .reviews import REVIEW_PATHS, home_review, restorable_paths, review_refusal
 from .start_tree import ID_ROLE, KEY_ROLE, KIND_ROLE, StartTree, id_host, related, row_id
 from . import wizard_llm as WL
 from .widgets import (
-    MONO, AsyncCommand, MessageText, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns,
+    MONO, AsyncCommand, MessageText, StartControls, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns,
     flow, inform, local_time, outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled,
     show_text, table, warn, shown_as_text, tame_combos, working,
 )
@@ -581,6 +584,31 @@ class OptionsForm(QTabWidget):
         self.mark_dangerous()
 
 
+PROJECTS_KEPT = 40  # the projects whose Start page form is kept (the ones shown last)
+
+
+def without_file_values(options, values, file_values):
+    """VALUES (OptionsForm.values) without what FILE_VALUES (a trusted .sandbox-ai.json's, values_from_argv) sets
+    the same: a flag set there, a value equal to the file's, the items of a list the file has."""
+    by_name = {option.long: option for option in options}
+    result = dict(values)
+    for name, given in file_values.items():
+        option = by_name.get(name)
+        if option is None or name not in result:
+            continue
+        if option.kind in ("list", "multi"):
+            rest = list(result[name] or [])
+            for item in given if isinstance(given, list) else [given]:
+                if item in rest:
+                    rest.remove(item)
+            result[name] = rest
+        elif option.kind == "flag":
+            result[name] = bool(result[name]) and not given
+        elif str(result[name] or "").strip() == str(given or "").strip():
+            result[name] = ""
+    return result
+
+
 class LaunchPage(QWidget):
     """Choose the agent and every option, see the command, start."""
     opened = Signal(str)  # a project folder was reviewed and trusted here
@@ -590,6 +618,9 @@ class LaunchPage(QWidget):
         self.sai, self.terminal = sai, terminal
         self.options = sai.options()
         self.project, self.state = None, None
+        # {project: values of its trusted .sandbox-ai.json} (argv: the launcher takes those from the file); the
+        # project whose form waits for that file to fill it (show_project_form), with the form as it was then.
+        self.file_values, self.seeding, self.switching = {}, None, False
         layout = QVBoxLayout(self)
         note = QHBoxLayout()
         self.project_note = plain_label(role="secondary")
@@ -678,23 +709,14 @@ class LaunchPage(QWidget):
         dry.setToolTip(tr("Check the options and show the plan; nothing is started"))
         dry.clicked.connect(self.dry_run)
         self.dry_button = dry
-        in_app = QPushButton(tr("Start in the app"))
-        in_app.setProperty("role", "primary")  # the main action of the page
-        in_app.setToolTip(tr("In a terminal tab of this window (Terminals)"))
-        in_app.clicked.connect(self.start_in_app)
-        start = QPushButton(tr("Start in a terminal window"))
-        start.clicked.connect(lambda: self.start())
-        self.session = QLineEdit()
-        self.session.setPlaceholderText(tr("session name"))
-        self.session.setAccessibleName(tr("Session name"))
-        self.session.setMaximumWidth(160)
-        session = QPushButton(tr("Start as session"))
-        session.setToolTip(tr("A detachable session: attach and detach from the Sandboxes page"))
-        session.clicked.connect(self.start_session)
+        # One Start: where, and whether as a session (a codename unless one is typed) - widgets.StartControls.
+        self.start_controls = StartControls(lambda embedded, session: self.start(session=session, embedded=embedded),
+                                            sai, sai.settings() if hasattr(sai, "settings") else None)
+        self.session = self.start_controls.name
         write = self.write_button = QPushButton(tr("Save as project configuration…"))
         write.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it"))
         write.clicked.connect(self.write_project)
-        layout.addWidget(flow(dry, in_app, start, self.session, session, write))
+        layout.addWidget(flow(dry, self.start_controls, write))
         self.host_choice.chosen.connect(lambda _host: self.host_changed())
         self.agent.currentTextChanged.connect(lambda _agent: self.read_host_options())
         self.form.changed.connect(self.update_preview)
@@ -1059,8 +1081,8 @@ class LaunchPage(QWidget):
     # -- kept for the next start --
 
     def attach_state(self, state):
-        """The agent and profile chosen, and per agent its last options and agent arguments, come back at the
-        next start (the workspace follows the project; agent arguments that may be secrets are left out)."""
+        """The agent and profile chosen, and per project and agent its last options and agent arguments, come back
+        at the next start (the workspace follows the project; agent arguments that may be secrets are left out)."""
         self.state = state
         saved = state.section("launch")
         if saved.get("agent") in self.sai.agents:
@@ -1079,10 +1101,57 @@ class LaunchPage(QWidget):
         state.collect(self.keep_form)
 
     def forms(self):
+        """{agent: its last options and agent arguments}: the current project's (what was entered there last), else
+        those of no project."""
+        if self.project:
+            return self.project_entry(self.project)["forms"]
+        return self.agent_forms()
+
+    def agent_forms(self):
+        """{agent: the options and agent arguments last entered for it}, whatever the project (the form at the
+        start, before a project is shown)."""
         saved = self.state.section("launch")
         if not isinstance(saved.get("forms"), dict):
             saved["forms"] = {}
         return saved["forms"]
+
+    def project_forms(self):
+        """{project: {"agent": the agent chosen there last, "forms": {agent: options and agent arguments}}}, the
+        PROJECTS_KEPT projects shown last; with the window's state (else for this run of the page only)."""
+        if self.state is None:
+            return self.__dict__.setdefault("unkept_projects", {})
+        saved = self.state.section("launch")
+        if not isinstance(saved.get("projects"), dict):
+            saved["projects"] = {}
+        return saved["projects"]
+
+    def project_entry(self, path):
+        projects = self.project_forms()
+        entry = projects.get(path)
+        if not isinstance(entry, dict) or not isinstance(entry.get("forms"), dict):
+            entry = projects[path] = {"agent": self.agent.currentText(), "forms": {}}
+        return entry
+
+    def kept_form(self, path):
+        """(agent, its options and agent arguments) entered last for project PATH, or None (not shown before)."""
+        entry = self.project_forms().get(path)
+        if not isinstance(entry, dict) or not isinstance(entry.get("forms"), dict):
+            return None
+        agent = entry.get("agent")
+        saved = entry["forms"].get(agent)
+        return (agent, saved) if agent in self.sai.agents and isinstance(saved, dict) else None
+
+    def keep_project(self, path):
+        """What the form holds now, as project PATH's (its tab is left): shown again when it comes back."""
+        entry = self.project_entry(path)
+        entry["agent"] = self.agent.currentText()
+        entry["forms"][entry["agent"]] = self.form_state()
+        projects = self.project_forms()
+        projects[path] = projects.pop(path)  # the one left last, last
+        while len(projects) > PROJECTS_KEPT:
+            projects.pop(next(iter(projects)))
+        if self.state is not None:
+            self.state.schedule()
 
     def form_state(self):
         values = self.form.values()
@@ -1092,20 +1161,30 @@ class LaunchPage(QWidget):
 
     def keep_form(self):
         saved = self.state.section("launch")
-        saved["agent"], saved["profile"] = self.agent.currentText(), self.profile.currentText()
+        agent = self.agent.currentText()
+        saved["agent"], saved["profile"] = agent, self.profile.currentText()
         saved["host"] = self.host()
-        self.forms()[self.agent.currentText()] = self.form_state()
+        self.agent_forms()[agent] = self.forms()[agent] = self.form_state()
+        if self.project:
+            self.project_entry(self.project)["agent"] = agent
 
     def agent_switched(self, agent):
         """Another agent: the form keeps this agent's options and shows the other's last ones (if any)."""
+        if self.switching:  # the project's own agent shown (show_form): its form follows
+            return
         self.forms()[self.current_agent] = self.form_state()
         self.current_agent = agent
         self.load_agent_form(agent)
 
     def load_agent_form(self, agent):
         saved = self.forms().get(agent)
-        if not isinstance(saved, dict):
-            return
+        if not isinstance(saved, dict):  # not used in this project yet: the agent's last options elsewhere
+            saved = self.agent_forms().get(agent)
+        if isinstance(saved, dict):
+            self.apply_form(saved)
+
+    def apply_form(self, saved):
+        """The form as SAVED says ({"options": launcher options, "arguments": agent arguments}); the workspace stays."""
         options = [str(o) for o in saved.get("options", []) if isinstance(o, str)] if isinstance(
             saved.get("options"), list) else []
         arguments = [str(a) for a in saved.get("arguments", []) if isinstance(a, str)] if isinstance(
@@ -1115,14 +1194,58 @@ class LaunchPage(QWidget):
         self.form.set_values(values)
         self.agent_args.setText(shlex.join(scrub_arguments(arguments)))
 
-    def set_project(self, path):
-        """Start in the project PATH: its folder becomes the first (and only) workspace. Its .sandbox-ai.json is
-        never copied into the form: the launcher applies a trusted one itself."""
-        self.project = path
+    def show_form(self, agent, saved):
+        """AGENT chosen and the form as SAVED says (apply_form): a project's own, not the agent's last elsewhere."""
+        if agent in self.sai.agents and agent != self.agent.currentText():
+            self.switching = True
+            try:
+                self.agent.setCurrentText(agent)
+            finally:
+                self.switching = False
+        self.current_agent = self.agent.currentText()
+        self.apply_form(saved)
+
+    def set_project(self, path, running=None):
+        """Start in the project PATH: its folder becomes the first (and only) workspace, and the form shows that
+        project's values - as the tabs switch, each project keeps what was entered for it last. A project shown the
+        first time shows what RUNNING ((agent, launcher options, agent arguments) of its session that runs) was
+        started with, else, once read, its trusted .sandbox-ai.json's; else the form stays as it is."""
+        previous, self.project = self.project, path
+        waiting = self.seeding is not None and self.seeding[0] == previous and \
+            self.seeding[1:] == (self.agent.currentText(), self.form_state())
+        if previous and previous != path and not waiting:  # (left before its file was read: read again next time)
+            self.keep_project(previous)
+        if path and previous != path:
+            self.show_project_form(path, running, reset=bool(previous))
         widget = self.form.widgets.get("--workspace")
         if widget is not None and self.host() == LOCAL:  # on another host the workspace is a folder there
             widget.set_value([path])
         self.show_project_note()
+
+    def show_project_form(self, path, running=None, reset=False):
+        """The form of project PATH (see set_project). RESET (another project was shown before): a project with
+        nothing of its own starts from the defaults, never with the last project's mounts, devices or limits."""
+        self.seeding = None
+        kept = self.kept_form(path)
+        if kept is not None:
+            self.show_form(*kept)
+        elif running:
+            agent, options, arguments = running
+            self.show_form(agent, {"options": list(options), "arguments": list(arguments)})
+        else:  # its trusted file fills the form once read (project_file_read), unless it was changed meanwhile
+            if reset:
+                self.apply_form({})
+            self.seeding = (path, self.agent.currentText(), self.form_state())
+
+    def applied_file(self):
+        """The values of the project's trusted .sandbox-ai.json when the launcher applies that file to this start (on
+        this machine, the project the first workspace), else {}."""
+        if self.host() != LOCAL or not self.project:
+            return {}
+        workspaces = self.form.values().get("--workspace") or []
+        if not workspaces or not same_folder(workspaces[0], self.project):
+            return {}
+        return self.file_values.get(self.project) or {}
 
     def show_project_note(self):
         """The note on the project's .sandbox-ai.json; its state is read in a thread (a slow disk)."""
@@ -1143,9 +1266,15 @@ class LaunchPage(QWidget):
         if token != self.note_token or project != self.project:
             return
         state = result[0] if error is None else "unreadable"
+        if state == "trusted":  # its options: shown in the form of a project shown first, left out of argv()
+            background(self.sai.review_project, project, timeout=STATE_WAIT,
+                       done=lambda review, error: alive(self) and self.project_file_read(project, review, error))
+        else:
+            self.file_values.pop(project, None)
         texts = {"none": tr("No .sandbox-ai.json in this project: the options below are all there is."),
-                 "trusted": tr("The project's trusted .sandbox-ai.json is applied by the launcher on top of these "
-                               "options."),
+                 "trusted": tr("The launcher applies the project's trusted .sandbox-ai.json: the form shows its "
+                               "options, the command line carries only what you add or change. To drop one of its "
+                               "options, save the form as the project configuration."),
                  "changed": tr("The project's .sandbox-ai.json changed since you trusted it: the launcher refuses "
                                "to start until you review it."),
                  "untrusted": tr("The project's .sandbox-ai.json is not trusted yet: the launcher refuses to start "
@@ -1158,10 +1287,27 @@ class LaunchPage(QWidget):
         self.project_note.style().polish(self.project_note)
         self.review_button.setVisible(state in ("changed", "untrusted"))
 
+    def project_file_read(self, project, review, error):
+        """The trusted .sandbox-ai.json of PROJECT, read: its values are known (argv), and a project shown the first
+        time whose form nobody changed since shows them."""
+        if error is not None or review is None or not review.trusted or not review.usable:
+            self.file_values.pop(project, None)
+            return
+        self.file_values[project] = backend.values_from_argv(self.options, review.options,
+                                                             backend.canonical_of(self.sai))[0]
+        seeding, self.seeding = self.seeding, None
+        if seeding is not None and seeding[0] == project == self.project and \
+                seeding[1:] == (self.agent.currentText(), self.form_state()):
+            self.show_form(review.agent, {"options": review.options, "arguments": review.agent_args})
+        self.update_preview()
+
     def argv(self):
         """The launcher's options of the form; for another host without the ones its launcher does not know (a start
-        or dry run refuses those by name first: refused_options)."""
-        return backend.argv_for_host(self.options, self.form.values(), self.known_options())
+        or dry run refuses those by name first: refused_options). What the project's trusted .sandbox-ai.json sets
+        the same is left out: the launcher applies the file itself, and some options given twice are refused (a
+        folder mounted twice)."""
+        values = without_file_values(self.options, self.form.values(), self.applied_file())
+        return backend.argv_for_host(self.options, values, self.known_options())
 
     def refused_options(self, title):
         """True (and said) when options set in the form are unknown to the chosen host's launcher: they would be left
@@ -1301,10 +1447,16 @@ class LaunchPage(QWidget):
             except (OSError, ValueError) as exc:
                 warn(self, tr("Not trusted"), printable(exc))
                 return False
-        self.set_from_argv(review.agent, ["--workspace", str(directory)])
+        # Its tab first (the project left keeps what was entered there), then the form shows the file's values.
+        self.opened.emit(str(directory))
+        project = self.project if same_folder(self.project, directory) else str(directory)
+        self.file_values[project] = backend.values_from_argv(self.options, review.options,
+                                                             backend.canonical_of(self.sai))[0]
+        self.seeding = None
+        self.show_form(review.agent, {"options": review.options, "arguments": review.agent_args})
+        self.form.widgets["--workspace"].set_value([project])
         inform(self, tr("Project configuration"), tr("Trusted: {path}. The form starts in that folder; the launcher "
                                                      "applies the file's options itself.", path=printable(review.path)))
-        self.opened.emit(str(directory))
         self.show_project_note()
         return True
 
@@ -1375,14 +1527,13 @@ class LaunchPage(QWidget):
         return True
 
     def start_in_app(self):
-        self.start(embedded=True)
+        """In a terminal tab, not as a session (kept for callers)."""
+        return self.start(embedded=True)
 
     def start_session(self):
-        name = self.session.text().strip()
-        if not name:
-            QMessageBox.information(self, tr("Session"), tr("Give the session a name first."))
-            return
-        self.start(session=name, embedded=None)
+        """As a session, where the Start controls say (kept for callers)."""
+        self.start_controls.as_session.setChecked(True)
+        return self.start_controls.start()
 
     def write_project(self):
         if self.host() != LOCAL:
@@ -1408,6 +1559,7 @@ class LaunchPage(QWidget):
             warn(self, tr("Not written"), printable(error))
             return
         inform(self, tr("Project configuration"), tr("Written and trusted: {path}", path=printable(path)))
+        self.show_project_note()  # trusted now: its values are read again
 
 
 GIT_URL_EXAMPLE = "https://git.example.org"  # the same in every language
@@ -1870,18 +2022,36 @@ class ResumeDialog(QDialog):
         form.addRow(tr("MCP servers"), self.servers)
         if servers:
             form.addRow("", plain_label(tr("Defined: {list}", list=printable(", ".join(servers))), role="secondary"))
+        self.options = QLineEdit()
+        self.options.setPlaceholderText(tr("launcher options, e.g. --gui --cpus 4 --allow-host docs.example.org"))
+        self.options.setToolTip(tr("An option with one value (--cpus, --memory, --gui, --mode …) replaces the saved "
+                                   "one, a list option (--allow-host, --env, --rules …) adds its value; checked as a "
+                                   "new start (sandbox-ai resume NAME OPTIONS)"))
+        form.addRow(tr("Other options"), self.options)
+        self.dropped = QLineEdit()
+        self.dropped.setPlaceholderText(tr("options to take out, e.g. gui allow-host=example.org"))
+        self.dropped.setToolTip(tr("Every value of an option, or one with =VALUE, taken out of its saved options "
+                                   "(--drop-option)"))
+        form.addRow(tr("Take out"), self.dropped)
         self.restart = QCheckBox(tr("Restart it now if it runs (the agent continues its conversation)"))
         self.restart.setChecked(running)
         form.addRow(self.restart)
-        form.addRow(plain_label(tr("What is added here is kept for its later starts."), role="secondary"))
+        form.addRow(plain_label(tr("What is added or changed here is kept for its later starts."), role="secondary"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def changed_options(self):
+        """(options, options taken out) as typed (words as a shell splits them). ValueError: quotes not closed."""
+        try:
+            return shlex.split(self.options.text()), shlex.split(self.dropped.text())
+        except ValueError as exc:
+            raise ValueError(tr("Other options: {error}", error=printable(exc))) from None
+
     def values(self):
         """(workspaces, [(source, destination, mode)], servers, restart). ValueError: a mount that is not
-        SOURCE:DESTINATION[:ro|rw]."""
+        SOURCE:DESTINATION[:ro|rw]. The other options: changed_options()."""
         mounts = []
         for line in self.mounts.toPlainText().splitlines():
             parts = line.strip().split(":")
@@ -2019,7 +2189,24 @@ class SandboxesPage(QWidget):
                                               "servers added (kept for its later starts), or restart it now "
                                               "(sandbox-ai resume)"))
         self.resume_with_button.clicked.connect(lambda _=False: self.resume_with())
-        session_row.addWidget(flow(*self.session_buttons.values(), self.resume_with_button))
+        # A session of this machine to a host of sandbox-ai hosts: its configuration started again there (session
+        # copy), or then stopped here too (session move).
+        self.transfer_buttons = {}
+        for move, text, name, tip in (
+                (False, tr("Copy to host…"), tr("Copy to host"),
+                 tr("Start the selected session's configuration again on a host as a session of its own, checked "
+                    "there first; logins and HOME are not copied ({command})", command="sandbox-ai session copy")),
+                (True, tr("Move to host…"), tr("Move to host"),
+                 tr("As Copy to host…, then stop the session here; its HOME stays until it is deleted ({command})",
+                    command="sandbox-ai session move"))):
+            button = QPushButton(text)
+            button.setAccessibleName(name)
+            button.setToolTip(safe_tooltip(tip))
+            button.clicked.connect(lambda _=False, m=move: self.transfer(m))
+            self.transfer_buttons["move" if move else "copy"] = button
+        self.copy_to_host_button, self.move_to_host_button = self.transfer_buttons["copy"], self.transfer_buttons["move"]
+        session_row.addWidget(flow(*self.session_buttons.values(), self.resume_with_button,
+                                   *self.transfer_buttons.values()))
         # What a running sandbox may reach (sandbox-ai net), its devices and limits (until it ends).
         run_box = QGroupBox(tr("While it runs"))
         run_layout = QVBoxLayout(run_box)
@@ -2046,7 +2233,11 @@ class SandboxesPage(QWidget):
                 ("remove-mcp", tr("Remove MCP server…"), tr("Take an MCP server from the selected start now and from "
                                                             "its later starts (sandbox-ai mcp detach --live)"),
                  self.remove_mcp),
-                ("limits", tr("Limits…"), tr("Change memory, CPUs and processes of the selected sandbox"), self.limits)):
+                ("limits", tr("Limits…"), tr("Change memory, CPUs and processes of the selected sandbox"), self.limits),
+                ("rules", tr("Reload rules"), tr("The selected sandbox reads its HTTP rules anew: your rules.json, its "
+                                                 "ruleset files and its project's rules as they are now; the "
+                                                 "administrator's and the security mode's stay (sandbox-ai rules "
+                                                 "reload)"), self.reload_rules)):
             button = QPushButton(text)
             button.setToolTip(safe_tooltip(tip))
             button.setAccessibleName(text.rstrip("…"))
@@ -2716,6 +2907,7 @@ class SandboxesPage(QWidget):
         why = gone or (None if instance.kind == "session" and state in ("running", "paused", "stopped") else
                        tr("Only for kept starts (sessions)."))
         set_enabled(self.resume_with_button, why is None, why)
+        self.update_transfer_buttons(instance)
         self.update_manage_buttons(instance, gone)
 
     def remote_action(self, instance, action, wait=None):
@@ -2746,7 +2938,7 @@ class SandboxesPage(QWidget):
                 for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button,
                                self.resume_with_button]:
                     set_enabled(button, False, tr("A command runs."))
-            for button in self.manage_buttons.values():
+            for button in [*self.manage_buttons.values(), *self.transfer_buttons.values()]:
                 set_enabled(button, False, tr("A command runs."))
             return
         none = self.no_start()
@@ -2758,6 +2950,7 @@ class SandboxesPage(QWidget):
             for button in [*self.run_buttons, *self.session_buttons.values(), self.stop_button,
                            self.resume_with_button]:
                 set_enabled(button, False, why)
+            self.update_transfer_buttons(instance, why)
             self.update_manage_buttons(instance, why)
             return
         self.update_manage_buttons(instance)
@@ -2794,6 +2987,7 @@ class SandboxesPage(QWidget):
                None if state in ("running", "paused", "stopped") else
                tr("Not while the session is {state}.", state=tr(STATE_TITLES.get(state, state))))
         set_enabled(self.resume_with_button, why is None, why)
+        self.update_transfer_buttons(instance)
         if instance is None:
             why = none
         elif kind == "unregistered":
@@ -2809,6 +3003,21 @@ class SandboxesPage(QWidget):
             why = None
         set_enabled(self.stop_button, why is None, why, tooltip=tr("End the selected sandbox: a session (its state is "
                                                                   "kept), an MCP server, or a run (sandbox-ai net stop)"))
+
+    def update_transfer_buttons(self, instance, why=None):
+        """Copy to host… and Move to host…: a session of this machine (sandbox-ai session copy|move here)."""
+        if why is None:
+            state = getattr(instance, "state", None)
+            why = (self.no_start() if instance is None else
+                   tr("A session of {host}: only a session of this machine is copied or moved from here ({command} "
+                      "runs where the session is).", host=printable(instance.host), command="sandbox-ai session copy")
+                   if getattr(instance, "host", LOCAL) != LOCAL else
+                   tr("Only for sessions: a run without a kept start has no configuration to start again elsewhere.")
+                   if instance.kind != "session" or not instance.session else
+                   None if state in ("running", "paused", "stopped") else
+                   tr("Not while the session is {state}.", state=tr(STATE_TITLES.get(state, state))))
+        for button in self.transfer_buttons.values():
+            set_enabled(button, why is None, why)
 
     def update_mcp_buttons(self, instance, why=None):
         """Add and Remove MCP server: a kept start (a session) that runs now - sandbox-ai mcp attach --live checks it
@@ -3554,6 +3763,37 @@ class SandboxesPage(QWidget):
         background(self.sai.host_run, host, "net", "untaint", run, owner=self, source=self.run_buttons, timeout=90,
                    work=True, done=lambda result, error: self.reported(title, result, error))
 
+    def reload_rules(self):
+        """`sandbox-ai rules reload RUN` (on its host): the selected running sandbox reads its HTTP rules anew - asked
+        first (what you loosened in your rulesets applies at once)."""
+        target = self.target()
+        if not target:
+            return
+        host, run = target
+        title = tr("Reload the rules of {run} on {host}", run=printable(run), host=printable(host)) if host != LOCAL \
+            else tr("Reload the rules of {run}", run=printable(run))
+        if not backend.valid_run(run) or not ask_first(self, "rules-reload", title, tr(
+                "Let {run} read its HTTP rules anew, as your rulesets and its project's are now? What you loosened in "
+                "them applies at once; the administrator's and the security mode's rules stay as they were.",
+                run=printable(run)), tr("Reload")):
+            return
+        background(self.sai.rules_reload, run, host, owner=self, source=self.run_buttons, timeout=120, work=True,
+                   done=lambda result, error: self.rules_reloaded(title, result, error))
+
+    def rules_reloaded(self, title, result, error):
+        if error is not None:
+            warn(self, title, tr("Not reloaded: {error}", error=printable(error)[-800:]))
+            return
+        lines = [tr("Its connection proxy holds these rulesets now:")]
+        for source in result.get("rules") or []:
+            if isinstance(source, dict):
+                lines.append(f"  {printable(source.get('name'))}: " + tr("{count} HTTP rules", count=len(
+                    source.get("http") or [])) + (" " + tr("(kept from its start)") if source.get("kept") else ""))
+        if result.get("not_reloaded"):
+            lines.append(tr("MCP, tool and device rules of {list} apply from its next start.",
+                            list=printable(", ".join(result["not_reloaded"]))))
+        inform(self, title, "\n".join(lines))
+
     def log(self):
         instance = self.current()
         if instance is not None and getattr(instance, "host", LOCAL) != LOCAL:
@@ -3643,7 +3883,8 @@ class SandboxesPage(QWidget):
             tr("Resume {name}", name=printable(name))
         try:
             workspaces, mounts, mcp, restart = dialog.values()
-            args = backend.resume_args(name, restart, workspaces, mounts, mcp)
+            options, dropped = dialog.changed_options()
+            args = backend.resume_args(name, restart, workspaces, mounts, mcp, options, dropped)
         except ValueError as exc:
             warn(self, title, printable(exc))
             return
@@ -3661,6 +3902,12 @@ class SandboxesPage(QWidget):
                 "Give {name} the tools of these MCP servers, from now on at every start: {list}?", name=printable(name),
                 list=printable(", ".join(mcp))), tr("Attach")):
             return
+        if (options or dropped) and not ask_first(self, "start-options", title, where + tr(
+                "Change the options of {name}, from now on at every start: {options}? They are checked as a new "
+                "start (the administrator's policy and the security mode still hold).", name=printable(name),
+                options=printable(" ".join([*options, *(f"--drop-option={value}" for value in dropped)]))),
+                tr("Change")):
+            return
 
         def go():
             def done(result, error):
@@ -3674,6 +3921,34 @@ class SandboxesPage(QWidget):
             self.resume_checked(instance, go)
             return
         go()
+
+    def transfer(self, move=False, instance=None):
+        """Copy to host… (MOVE: Move to host…): the selected session of this machine to a host of sandbox-ai hosts, in
+        SessionTransferDialog (`sandbox-ai session copy|move`; a move is asked first there). The lists are read again
+        after it, here and on that host."""
+        instance = instance or self.current()
+        if instance is None or instance.kind != "session" or not instance.session or \
+                getattr(instance, "host", LOCAL) != LOCAL:
+            QMessageBox.information(self, tr("Sessions"), tr("Select a session of this machine first."))
+            return
+        title = tr("Move to host") if move else tr("Copy to host")
+        try:
+            supported = self.sai.session_transfer_supported()
+        except Exception:  # noqa: BLE001 - sandbox-ai's sessions module cannot be loaded: said as not supported
+            supported = False
+        if not supported:
+            warn(self, title, tr("This sandbox-ai cannot copy a session to another host yet ({command}): update it.",
+                                 command="sandbox-ai session copy"))
+            return
+        from .session_transfer import SessionTransferDialog
+
+        def succeeded(host):
+            if alive(self):
+                self.refresh_soon(again=True)
+                self.refresh_remote([host])
+        dialog = SessionTransferDialog(self, self.sai, instance.session, move=move, owner=self, succeeded=succeeded)
+        dialog.exec()
+        dialog.deleteLater()  # a command still running reports to the page only (succeeded)
 
     def resume_checked(self, instance, go):
         """Before a stopped kept start starts again (GO): what changed in the start files of its HOME since its last
@@ -3706,6 +3981,37 @@ class SandboxesPage(QWidget):
         if ask_first(self, "home-review-skip", title, text + "\n\n" + tr("Resume it anyway?"), tr("Resume"),
                      details=details):
             go()
+            return
+        self.offer_restore(host, name, result)
+
+    def offer_restore(self, host, name, review):
+        """Not resumed after the HOME review: put back the text its changed start files had at its last start, where
+        the record kept it (`sandbox-ai resume NAME --restore-home --yes`), asked first. Starts nothing."""
+        paths = restorable_paths(review)
+        if not paths:
+            return
+        title = tr("Restore the HOME of {name}", name=printable(name))
+        if not ask_first(self, "home-restore", title, tr(
+                "Put back the text these files had at its last start, as recorded? {list}\nFiles added since, links "
+                "and files without recorded text stay as they are. It does not start.",
+                list=printable(", ".join(paths[:REVIEW_PATHS]) + (" …" if len(paths) > REVIEW_PATHS else ""))),
+                tr("Restore HOME")):
+            return
+        # Exactly the files asked about: the CLI would also restore what the question did not name.
+        background(self.sai.restore_home, name, host, tuple(paths), owner=self, work=True,
+                   source=[self.stop_button, *self.session_buttons.values()], timeout=150,
+                   done=lambda result, error: self.restored(title, result, error))
+
+    def restored(self, title, result, error):
+        if error is not None:
+            warn(self, title, tr("Nothing was put back: {error}", error=printable(error)[-800:]))
+            return
+        lines = [tr("Put back: {list}", list=printable(", ".join(result.get("restored") or [])) or "-")]
+        for entry in result.get("skipped") or []:
+            if isinstance(entry, dict):
+                lines.append(tr("Left as it is: {path} ({reason})", path=printable(entry.get("path")),
+                                reason=printable(entry.get("reason"))))
+        inform(self, title, "\n".join(lines[:40]))
 
 
 class ConnectionsPage(QWidget):
@@ -4916,7 +5222,10 @@ class SystemPage(QWidget):
         self.tray_box.toggled.connect(lambda on: self.sai.save_setting("tray", bool(on)))
         form.addRow(tr("Window"), self.tray_box)
         self.autostart_box = QCheckBox(tr("Start at login, in the tray"))
-        self.autostart_box.setToolTip(tr("Writes ~/.config/autostart/sandbox-ai-app.desktop; unticked, it is removed"))
+        self.autostart_box.setToolTip(  # macOS: a LaunchAgent (backend.autostart_file)
+            tr("Writes ~/Library/LaunchAgents/org.sandbox-ai.app.plist (a login item); unticked, it is removed")
+            if sys.platform == "darwin" else
+            tr("Writes ~/.config/autostart/sandbox-ai-app.desktop; unticked, it is removed"))
         self.autostart_box.setChecked(backend.autostart_enabled())
         self.autostart_box.toggled.connect(self.choose_autostart)
         form.addRow(tr("Login"), self.autostart_box)
@@ -5152,6 +5461,18 @@ PROJECT_SOURCES = {"recent": N_("opened in this app"), "trusted": N_("trusted pr
 PROJECT_STATES = {"none": N_("no .sandbox-ai.json yet"), "trusted": N_(".sandbox-ai.json trusted"),
                   "changed": N_(".sandbox-ai.json changed since you trusted it"),
                   "untrusted": N_(".sandbox-ai.json not trusted yet"), "unreadable": N_(".sandbox-ai.json cannot be read")}
+# What each state means for a start in the project: the project bar's icon says it on hover.
+PROJECT_STATE_MEANINGS = {
+    "none": N_("This folder has no project configuration: a start here takes only the options you give it. Save as "
+               "project configuration… on the Start page writes one."),
+    "trusted": N_("You reviewed this file and trusted exactly its content: every start in this folder applies its "
+                  "options. If it changes, it is not used until you trust it again."),
+    "changed": N_("The file changed since you trusted it: the launcher refuses to start here until you review and "
+                  "trust it again (Review and trust… on the Start page)."),
+    "untrusted": N_("Nobody has trusted this file yet: the launcher refuses to start here until you review and trust "
+                    "it (Review and trust… on the Start page)."),
+    "unreadable": N_("The file is there but cannot be read: the launcher cannot use it.")}
+PROJECT_WARNINGS = ("changed", "untrusted", "unreadable")  # states that hold up a start in the project
 
 
 def middle(text, limit=90):
@@ -5160,12 +5481,40 @@ def middle(text, limit=90):
 
 
 class ProjectCombo(QComboBox):
-    """The switcher: its list is read again each time it opens."""
+    """The switcher, at the top left of the window: the current project's name, large (its path below it and in the
+    tooltip); its list, read again each time it opens, names each project with its path."""
     opening = Signal()
+    NAME = Qt.ItemDataRole.UserRole + 7  # an entry's short name: what the closed switcher shows
 
     def showPopup(self):  # noqa: N802
         self.opening.emit()
+        # The list as wide as its entries (name and path), however narrow the name above it is.
+        view = self.view()
+        view.setMinimumWidth(min(max(self.width(), view.sizeHintForColumn(0) + 32), 900))
         super().showPopup()
+
+    def shown_text(self):
+        """What the closed switcher shows: the current entry's name (not its path)."""
+        name = self.currentData(self.NAME)
+        return name if isinstance(name, str) else self.currentText()
+
+    def paintEvent(self, _event):  # noqa: N802
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.currentText = self.shown_text()
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+    def sizeHint(self):  # noqa: N802 - as wide as the name shown, not as the longest entry of the list
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        metrics = self.fontMetrics()
+        size = QSize(metrics.horizontalAdvance(self.shown_text()) + 8, metrics.height())
+        return self.style().sizeFromContents(QStyle.ContentsType.CT_ComboBox, option, size, self)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.sizeHint()
 
 
 class KnownProjects(QObject):
@@ -5195,8 +5544,10 @@ class KnownProjects(QObject):
 
 
 class ProjectBar(QWidget):
-    """The current project, large, at the top of the window; the switcher lists the projects sandbox-ai and the
-    app know (SandboxAI.known_projects), then Open folder… and New project (wizard)…."""
+    """The current project at the top of the window: its name, large, is the switcher (a drop-down: the projects
+    sandbox-ai and the app know, SandboxAI.known_projects, then Open folder… and New project (wizard)…); beside it an
+    icon for the state of its .sandbox-ai.json (its name and meaning on hover); below, what runs there and its
+    path. Shown once: no second "Project: name - path" at the right end."""
     chosen = Signal(str)
     open_folder = Signal()
     new_project = Signal()
@@ -5218,15 +5569,20 @@ class ProjectBar(QWidget):
         texts = QVBoxLayout()
         texts.setSpacing(0)
         first = QHBoxLayout()
-        self.name = plain_label(tr("No project"), word_wrap=False)
-        self.name.setObjectName("projectName")
-        self.state = plain_label(word_wrap=False, role="secondary")
+        self.combo = ProjectCombo()
+        self.combo.setObjectName("projectName")  # large, as the project's name
+        self.combo.setMaximumWidth(520)
+        self.combo.setAccessibleName(tr("Project"))
+        self.combo.opening.connect(self.fill)
+        self.combo.activated.connect(self.activated)
+        # The state of its .sandbox-ai.json as an icon (theme.TRUST_GLYPHS); hovering says which and what it means.
+        self.state, self.state_key = QLabel(), None
+        self.state.setFixedSize(QSize(20, 20))
         self.where = plain_label(word_wrap=False, role="secondary")
         self.where.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        for label in (self.name, self.where):
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        first.addWidget(self.name)
-        first.addSpacing(10)
+        self.where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        first.addWidget(self.combo)
+        first.addSpacing(6)
         first.addWidget(self.state)
         first.addStretch()
         texts.addLayout(first)
@@ -5235,19 +5591,10 @@ class ProjectBar(QWidget):
         second.addWidget(self.activity)
         second.addWidget(self.where, 1)
         texts.addLayout(second)
-        self.combo = ProjectCombo()
-        self.combo.setMinimumWidth(240)
-        self.combo.setMaximumWidth(460)
-        self.combo.setToolTip(tr("Switch the project: the Start page, the Board, Connections, Statistics, Files and "
-                                 "Approvals follow it"))
-        self.combo.opening.connect(self.fill)
-        self.combo.activated.connect(self.activated)
         layout.addWidget(self.icon)
         layout.addLayout(texts, 1)
-        layout.addSpacing(12)
-        layout.addWidget(QLabel(tr("Project")))
-        layout.addWidget(self.combo)
         self.controls = layout
+        self.show_state(None)
         self.fill()
 
     def add_controls(self, buttons):
@@ -5258,6 +5605,7 @@ class ProjectBar(QWidget):
 
     def restyle(self):
         self.icon.setPixmap(theme.glyph("project", theme.colors()["title"], 26).pixmap(26, 26))
+        self.show_state(self.state_key, self.state_detail)
 
     def fill(self, read=True):
         """The known projects (as last read; READ: read again, in the background), the current one selected; then
@@ -5268,12 +5616,14 @@ class ProjectBar(QWidget):
         self.combo.blockSignals(True)
         self.combo.clear()
         if self.path is None:
-            self.combo.addItem(tr("No project chosen"), None)
+            self.combo.addItem(tr("No project"), None)
         paths = [path for path, _ in known]
         if self.path and self.path not in paths:
             known = [(self.path, set())] + list(known)
         for path, sources in known:
-            self.combo.addItem(f"{printable(Path(path).name or path)}  —  {printable(middle(path, 60))}", path)
+            name = printable(Path(path).name or path)
+            self.combo.addItem(f"{name}  —  {printable(middle(path, 60))}", path)
+            self.combo.setItemData(self.combo.count() - 1, middle(name, 40), ProjectCombo.NAME)
             names = ", ".join(tr(PROJECT_SOURCES[s]) for s in sorted(sources) if s in PROJECT_SOURCES)
             self.combo.setItemData(self.combo.count() - 1, safe_tooltip(printable(path) + ("\n" + tr(
                 "Known from: {list}", list=names) if names else "")), Qt.ItemDataRole.ToolTipRole)
@@ -5288,6 +5638,12 @@ class ProjectBar(QWidget):
         index = self.combo.findData(self.path)
         self.combo.setCurrentIndex(max(0, index))
         self.combo.blockSignals(False)
+        self.combo.updateGeometry()  # as wide as the name it shows now
+        self.combo.update()
+
+    def name(self):
+        """The project's name as the switcher shows it."""
+        return self.combo.shown_text()
 
     def activated(self, index):
         data = self.combo.itemData(index)
@@ -5299,16 +5655,33 @@ class ProjectBar(QWidget):
         elif isinstance(data, str) and data != self.path:
             self.chosen.emit(data)
 
-    def show_project(self, path, state=None, warning=False):
+    def show_project(self, path, state=None, detail=""):
+        """PATH as the current project; STATE: of its .sandbox-ai.json (a key of PROJECT_STATES; None: not read
+        yet), DETAIL: why it cannot be read."""
         self.path = path
-        self.name.setText(printable(middle(Path(path).name or path, 40)) if path else tr("No project"))
-        self.state.setText(state or "")
-        self.state.setProperty("role", "notice-warn" if warning else "secondary")
-        self.state.style().unpolish(self.state)
-        self.state.style().polish(self.state)
+        self.show_state(state if path else None, detail)
         self.where.setText(printable(middle(path)) if path else tr("Choose a project folder to work in"))
         self.where.setToolTip(safe_tooltip(path) if path else "")
+        self.combo.setToolTip(safe_tooltip("\n".join(filter(None, [printable(path) if path else "", tr(
+            "Switch the project: the Start page, the Board, Connections, Statistics, Files and Approvals follow it")]))))
         self.fill()
+
+    def show_state(self, state, detail=""):
+        """The icon of the .sandbox-ai.json's STATE (None: none shown); its tooltip and accessible name say the
+        state, the tooltip also what it means (and DETAIL: why it cannot be read)."""
+        self.state_key, self.state_detail = (state, detail) if state in PROJECT_STATES else (None, "")
+        self.state.setVisible(self.state_key is not None)
+        if self.state_key is None:
+            self.state.clear()
+            self.state.setToolTip("")
+            self.state.setAccessibleName("")
+            return
+        self.state.setPixmap(theme.trust_glyph(state, 20).pixmap(20, 20))
+        name = tr(PROJECT_STATES[state])
+        meaning = tr(PROJECT_STATE_MEANINGS[state]) + (f" ({printable(detail)[:200]})" if detail else "")
+        self.state.setToolTip(safe_tooltip(f"{name}\n{meaning}"))
+        self.state.setAccessibleName(name)
+        self.state.setAccessibleDescription(meaning)
 
 
 SECTION_ROLE = Qt.ItemDataRole.UserRole + 1  # the navigation's section headers
@@ -5567,27 +5940,56 @@ class InputWatch(QObject):
     KINDS = {QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseMove, QEvent.Type.Wheel,
              QEvent.Type.KeyPress, QEvent.Type.KeyRelease, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate}
 
+    # Watched where the platform's input arrives first: the app's own windows (their QWindow), each one shown or given
+    # the focus meanwhile (a dialog). Never with a filter on the whole application: a filter in Python sees every event
+    # of every object, Chromium's of the terminal tabs too, and with one installed the next terminal tab ended the
+    # process (a segmentation fault in PySide; stability round 3, the soak).
+
     def __init__(self, app):
         super().__init__()
-        self.app, self.last = app, 0.0
-        app.installEventFilter(self)
+        self.app, self.last, self.windows, self.paused = app, 0.0, [], False
+        app.focusWindowChanged.connect(self.focused)
+        self.resume()
 
     def eventFilter(self, _watched, event):  # noqa: N802
         if event.type() in self.KINDS:
             self.last = time.monotonic()
         return False
 
+    def own_windows(self):
+        return [handle for widget in QApplication.topLevelWidgets() if widget.isVisible()
+                and (handle := widget.windowHandle()) is not None]
+
+    def watch(self, window):
+        if window not in self.windows:
+            window.installEventFilter(self)
+            self.windows.append(window)
+
+    def focused(self, window):
+        if self.app is not None and not self.paused and window is not None and window in self.own_windows():
+            self.watch(window)
+
     def pause(self):
-        if self.app is not None:
-            self.app.removeEventFilter(self)
+        self.paused = True
+        for window in self.windows:
+            if alive(window):
+                window.removeEventFilter(self)
+        self.windows = []
 
     def resume(self):
-        if self.app is not None:
-            self.app.installEventFilter(self)
+        if self.app is None:
+            return
+        self.paused = False
+        for window in self.own_windows():
+            self.watch(window)
 
     def stop(self):
         if self.app is not None:
-            self.app.removeEventFilter(self)
+            self.pause()
+            try:
+                self.app.focusWindowChanged.disconnect(self.focused)
+            except (RuntimeError, TypeError):
+                pass
             self.app = None
 
 
@@ -5601,13 +6003,27 @@ class PanelDock(QDockWidget):
         self.closed_by_user.emit()
 
 
+def escape_closes(dock):
+    """Esc closes a panel floated out of the window (as it closes the app's dialogs): a shortcut of that panel, on
+    only while it floats (docked, Esc keeps its meaning in the window - the board folds its properties). Never an
+    application-wide filter (see InputWatch)."""
+    shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), dock)
+    shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+    shortcut.activated.connect(lambda: dock.isFloating() and dock.close())
+    shortcut.setEnabled(dock.isFloating())
+    dock.topLevelChanged.connect(shortcut.setEnabled)
+    return shortcut
+
+
 # (name, title, page, default area) of the panels that can be floated, docked elsewhere and closed.
 # The inspector (properties) also folds to a strip while docked and unfolds when a part is clicked (dock_fold); the
 # findings are closed until asked for.
 DOCKS = (("parts", N_("Board: parts"), "board", Qt.DockWidgetArea.LeftDockWidgetArea),
          ("inspector", N_("Board: properties"), "board", Qt.DockWidgetArea.RightDockWidgetArea),
          ("findings", N_("Board: security score and findings"), "board", Qt.DockWidgetArea.BottomDockWidgetArea),
-         ("questions", N_("Approvals: open questions"), "approvals", Qt.DockWidgetArea.TopDockWidgetArea))
+         ("questions", N_("Approvals: open questions"), "approvals", Qt.DockWidgetArea.TopDockWidgetArea),
+         # The log window: on every page (page None), at the bottom, folded to its title bar at first.
+         ("log", N_("Log"), None, Qt.DockWidgetArea.BottomDockWidgetArea))
 CLOSED_AT_FIRST = {"findings"}  # panels closed until asked for (also when the saved state predates them)
 
 
@@ -5816,9 +6232,24 @@ class MainWindow(QMainWindow):
         else:
             self.show_tray_state()
         self.notifier = notifications.Notifier(self, self.tray)
+        # While this window watches the questions and notifies of them, the launchers show no notification of their
+        # own (one prompt per question: this one, with its answers): a heartbeat every few seconds.
+        self.heartbeat_timer = QTimer(self)
+        self.heartbeat_timer.setInterval(5000)
+        self.heartbeat_timer.timeout.connect(self.watcher_heartbeat)
+        if approvals_interval:
+            self.heartbeat_timer.start()
+            QTimer.singleShot(0, self.watcher_heartbeat)
+        # The running sandboxes' safeguards that refuse or end something: popups (grouped) and the Safeguards tab.
+        from .safeguards_view import SafeguardAlerts
+        self.safeguard_alerts = SafeguardAlerts(sai, self.safeguard_popup,
+                                                interval=approvals_interval and backend.setting("sandboxes_interval"),
+                                                parent=self)
+        self.safeguard_alerts.arrived.connect(self.safeguards_arrived)
         self.update_window_controls()
         self.update_check = AsyncCommand(timeout=60, parent=self)
         self.update_check.finished.connect(self.update_checked)
+        self.make_update_notice()
         if check_updates:
             QTimer.singleShot(1500, self.check_updates)
         self.sandboxes_here = 0
@@ -6009,8 +6440,27 @@ class MainWindow(QMainWindow):
             page.activate(path)
         elif key == "connections":
             page.open_for_workspace(path)
+        elif key == "launch":
+            page.set_project(path, running=self.running_start(path))
         elif key in PROJECT_PAGES:
             page.set_project(path)
+
+    def running_start(self, path):
+        """(agent, launcher options, agent arguments) a session of project PATH was started with - the current tab's
+        session, else one that runs in the project (this machine's, as its session.json says) - or None."""
+        entry = self.tabs.entry(self.tabs.currentIndex()) if self.__dict__.get("tabs") is not None else None
+        idents = [entry.get("id")] if entry and entry.get("kind") == "session" and \
+            same_folder(entry.get("path"), path) else []
+        sandboxes = self.built("sandboxes")
+        for instance in (getattr(sandboxes, "instances", None) or {}).values():
+            if instance.kind == "session" and instance.host == LOCAL and instance.state == "running" and \
+                    same_folder(instance.project, path):
+                idents.append(instance.ident)
+        for ident in idents:
+            start = self.sai.session_start(ident)
+            if start is not None:
+                return start
+        return None
 
     def nav_changed(self, row):
         item = self.nav.item(row)
@@ -6146,6 +6596,10 @@ class MainWindow(QMainWindow):
         tasks = help_menu.addMenu(tr("Tours through a task"))
         for key, tour in tours.TASK_TOURS.items():
             action(tasks, f"task-tour:{key}", tours.say(tour.title), lambda k=key: self.start_task_tour(k))
+        help_menu.addSeparator()
+        action(help_menu, "check-updates", tr("Check for updates"), self.check_updates)
+        action(help_menu, "self-update", tr("Update sandbox-ai…"), self.update_now).setEnabled(False)
+        help_menu.addSeparator()
         action(help_menu, "log", tr("Show the log"), self.show_log_file)
         action(help_menu, "intro", tr("Watch the intro again"), self.play_intro)
         action(help_menu, "about", tr("About sandbox-ai-app"), self.about)
@@ -6281,6 +6735,9 @@ class MainWindow(QMainWindow):
                     and dock.widget() is not None and (
                     dock.widget() is widget or dock.widget().isAncestorOf(widget)):
                 self.set_panel(name, True)
+        reveal = getattr(getattr(self, page, None), "reveal", None)
+        if callable(reveal):  # a control the page has folded away (Terminals: Sessions) opens
+            reveal(target)
         child = widget
         while child is not None and child is not self:
             parent = child.parentWidget()
@@ -6458,7 +6915,7 @@ class MainWindow(QMainWindow):
             if self.built(key) is not None:
                 self.register_page_state(key)
         for section in s.get("nav_collapsed", []):
-            if section in self.section_rows:
+            if isinstance(section, str) and section in self.section_rows:
                 self.toggle_section(section, True)
         self.set_compact_nav(s.get("nav_compact", False) is True)
         s.collect(self.keep_window)
@@ -6496,6 +6953,8 @@ class MainWindow(QMainWindow):
             s.text("images-filter", page.filter)
         elif key == "sandboxes":
             s.check("sandboxes-only-project", page.only_project)
+        elif key == "terminals" and getattr(page, "starts", None) is not None:
+            s.check("terminals-sessions", page.sessions_fold)  # folded or opened, as it was left
         if key in ("connections", "statistics"):
             name = f"{key}-folder"
             folder = s.get(name, "")
@@ -6660,8 +7119,13 @@ class MainWindow(QMainWindow):
     def make_docks(self):
         """The Board's parts and its inspector, and the open questions of the Approvals page, as panels of the
         page area: they can be floated (a floating one stays on every page), docked elsewhere and closed."""
+        from . import logview
+        self.log_panel = logview.LogPanel(self.state.get("log_level", logview.DEFAULT_LEVEL)
+                                          if isinstance(self.state.get("log_level"), str) else logview.DEFAULT_LEVEL)
+        self.log_panel.level.currentIndexChanged.connect(
+            lambda _i: self.state.set("log_level", self.log_panel.chosen()))
         widgets = {"parts": self.board.parts_panel, "inspector": self.board.side, "findings": self.board.findings_panel,
-                   "questions": self.approvals.open_box}
+                   "questions": self.approvals.open_box, "log": self.log_panel}
         self.docks, self.closed_docks = {}, set(CLOSED_AT_FIRST)
         for name, title, _, area in DOCKS:
             dock = PanelDock(tr(title), self.workspace)
@@ -6675,6 +7139,7 @@ class MainWindow(QMainWindow):
                              | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
             self.workspace.addDockWidget(area, dock)
             dock.closed_by_user.connect(lambda n=name: self.panel_closed(n))
+            escape_closes(dock)  # floating: Esc closes it
             dock.topLevelChanged.connect(lambda _floating: self.docks_changed())
             dock.dockLocationChanged.connect(lambda _area: self.docks_changed())
             self.docks[name] = dock
@@ -6685,6 +7150,11 @@ class MainWindow(QMainWindow):
         self.inspector_fold = dock_fold.DockFold(self.docks["inspector"], self.workspace, folded=True)
         self.inspector_fold.changed.connect(lambda _folded: self.docks_changed())
         self.board.fold_request = self.fold_inspector
+        # The log window: folded to its title bar at first (it counts the warnings and errors that came meanwhile);
+        # unfolded, it takes about a fifth of the height.
+        self.log_fold = dock_fold.DockFold(self.docks["log"], self.workspace, folded=True, height=180)
+        self.log_fold.changed.connect(lambda _folded: (self.log_watch(), self.docks_changed()))
+        self.log_panel.unread.connect(self.log_unread)
         self.workspace.resizeDocks([self.docks["parts"]], [170], Qt.Orientation.Horizontal)
         self.default_docks = self.workspace.saveState()
 
@@ -6697,26 +7167,40 @@ class MainWindow(QMainWindow):
         self.inspector_fold.fold()
         return True
 
+    def log_unread(self, count):
+        """The log window's title names the warnings and errors that arrived while it was folded or hidden."""
+        dock = self.docks["log"]
+        title = tr("Log") if not count else tr("Log ({count} new)", count=count)
+        dock.setWindowTitle(title)  # (the fold's title bar follows it)
+
+    def log_watch(self):
+        """Read while unfolded and shown: nothing counts as new then."""
+        fold, dock = getattr(self, "log_fold", None), self.docks.get("log")
+        if fold is not None and dock is not None:
+            self.log_panel.set_watching(dock.isVisible() and not fold.is_folded())
+
     def put_away_docks(self, key):
         """Hide the docked (not floating) panels that are not of the page KEY, before it is shown."""
         for name, _, dock_page, _ in DOCKS:
             dock = self.docks[name]
-            if dock_page != key and not dock.isFloating() and not dock.isHidden():
+            if dock_page is not None and dock_page != key and not dock.isFloating() and not dock.isHidden():
                 dock.setVisible(False)
 
     def update_docks(self):
         page = self.current_page()
         for name, _, dock_page, _ in DOCKS:
             dock = self.docks[name]
-            wanted = name not in self.closed_docks and (dock.isFloating() or dock_page == page)
+            wanted = name not in self.closed_docks and (dock.isFloating() or dock_page is None or dock_page == page)
             if dock.isHidden() == wanted:
                 dock.setVisible(wanted)
             if hasattr(self, "panel_actions"):
                 self.panel_actions[name].setChecked(name not in self.closed_docks)
         self.board.score_button.setChecked("findings" not in self.closed_docks)
+        self.log_watch()
 
     def panel_closed(self, name):
-        if self.current_page() == dict((n, p) for n, _, p, _ in DOCKS)[name] or self.docks[name].isFloating():
+        page = dict((n, p) for n, _, p, _ in DOCKS)[name]
+        if page is None or self.current_page() == page or self.docks[name].isFloating():
             self.closed_docks.add(name)
         self.update_docks()
         self.save_docks()
@@ -6732,7 +7216,9 @@ class MainWindow(QMainWindow):
             self.closed_docks.discard(name)
             if name == "inspector":
                 self.inspector_fold.unfold()
-            if not self.docks[name].isFloating() and self.current_page() != page:
+            if name == "log":
+                self.log_fold.unfold()
+            if page is not None and not self.docks[name].isFloating() and self.current_page() != page:
                 self.show_page(page)
         else:
             self.closed_docks.add(name)
@@ -6758,6 +7244,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(50, lambda: self.keep_focus(focus))
         if name == "inspector":
             self.inspector_fold.unfold()
+        if name == "log":
+            self.log_fold.unfold()
         if dock.isVisible():
             dock.raise_()
 
@@ -6780,8 +7268,10 @@ class MainWindow(QMainWindow):
         for dock in self.docks.values():
             dock.setFloating(False)
         self.inspector_fold.folded = True  # (as at the first start)
+        self.log_fold.folded = True
         self.workspace.restoreState(self.default_docks)
         self.inspector_fold.apply()
+        self.log_fold.apply()
         self.update_docks()
         self.save_docks()
 
@@ -6791,9 +7281,12 @@ class MainWindow(QMainWindow):
         fold = getattr(self, "inspector_fold", None)
         if fold is None:  # (still being made)
             return
+        log = getattr(self, "log_fold", None)
+        folded = (["inspector"] if fold.folded else []) + (["log"] if log is not None and log.folded else [])
+        sizes = {"inspector": fold.sizes, **({"log": log.sizes} if log is not None else {})}
         self.state.set("docks", {"state": bytes(self.workspace.saveState().toBase64()).decode(),
                                  "closed": sorted(self.closed_docks), "known": sorted(self.docks),
-                                 "folded": ["inspector"] if fold.folded else [], "sizes": {"inspector": fold.sizes}})
+                                 "folded": folded, "sizes": sizes})
 
     def restore_docks(self):
         """Where the panels were at the last start (QMainWindow.saveState, kept in the app's state file)."""
@@ -6803,18 +7296,22 @@ class MainWindow(QMainWindow):
         try:
             if isinstance(state, str) and len(state) < 65536:
                 self.workspace.restoreState(QByteArray.fromBase64(state.encode()))
+            known = saved.get("known") if isinstance(saved.get("known"), list) else []
+            known = [n for n in known if isinstance(n, str)]
             if isinstance(closed, list):
-                known = saved.get("known") if isinstance(saved.get("known"), list) else []
-                self.closed_docks = {n for n in closed if n in self.docks} | (CLOSED_AT_FIRST - set(known))
-            fold, sizes = self.inspector_fold, saved.get("sizes")
-            if isinstance(saved.get("folded"), list):  # (else folded, as at the first start)
-                fold.folded = "inspector" in saved["folded"] and not self.docks["inspector"].isFloating()
-            if isinstance(sizes, dict) and isinstance(sizes.get("inspector"), dict):
-                for key in ("width", "height"):
-                    value = sizes["inspector"].get(key)
-                    if isinstance(value, int) and 80 <= value <= 4000:
-                        fold.sizes[key] = value
-            fold.apply()
+                self.closed_docks = {n for n in closed if isinstance(n, str) and n in self.docks} | \
+                    (CLOSED_AT_FIRST - set(known))
+            sizes = saved.get("sizes")
+            for name, fold in (("inspector", self.inspector_fold), ("log", self.log_fold)):
+                # (else folded, as at the first start; also the log window of a state from before it existed)
+                if isinstance(saved.get("folded"), list) and name in known:
+                    fold.folded = name in saved["folded"] and not self.docks[name].isFloating()
+                if isinstance(sizes, dict) and isinstance(sizes.get(name), dict):
+                    for key in ("width", "height"):
+                        value = sizes[name].get(key)
+                        if isinstance(value, int) and 80 <= value <= 4000:
+                            fold.sizes[key] = value
+                fold.apply()
         finally:
             self.restoring_docks = False
         self.update_docks()
@@ -6838,12 +7335,17 @@ class MainWindow(QMainWindow):
         if key == "help_buttons":
             help_view.set_shown(backend.setting("help_buttons"))
             return
+        if key == "board_grid" and self.built("board") is not None:  # its dots drawn again at the new spacing
+            self.board.view.resetCachedContent()
+            self.board.view.viewport().update()
         if key == "show_flags":  # the options (--…) beside the fields' names: the Start page's form, the board's
             labels.set_flags_shown(backend.setting("show_flags"))
             for form in self.findChildren(OptionsForm):
                 form.show_flags()
             self.board.inspect_timer.start()  # its inspector is made again
             return
+        if key == "sandboxes_interval" and self.safeguard_alerts.timer.isActive():
+            self.safeguard_alerts.timer.setInterval(backend.setting(key))
         pages = {"approvals_interval": "approvals", "sandboxes_interval": "sandboxes",
                  "connections_interval": "connections"}
         page = self.built(pages.get(key, ""))  # (one made later reads the setting then)
@@ -6894,7 +7396,7 @@ class MainWindow(QMainWindow):
         (what it uses). Kept for the next start."""
         try:
             self.project = self.sai.remember_project(path)
-        except OSError:  # a read-only configuration folder: the project is used, not kept
+        except (OSError, ValueError):  # a read-only or unreadable configuration: the project is used, not kept
             self.project = path
         for key in ("board", *PROJECT_PAGES, "connections"):  # those made yet; one made later shows it then
             self.show_project_in(key, path)
@@ -7131,20 +7633,19 @@ class MainWindow(QMainWindow):
             return
         token, project = self.state_token, self.project
         known = getattr(self, "project_states", {}).get(project)
-        self.project_bar.show_project(project, tr(PROJECT_STATES[known]) if known else "",
-                                      warning=known in ("changed", "untrusted", "unreadable"))
+        self.project_bar.show_project(project, *(known or (None, "")))
         self.update_activity()
         background(self.sai.project_state, project, timeout=STATE_WAIT,
                    done=lambda result, error: self.project_state_read(token, project, result, error))
 
     def project_state_read(self, token, project, result, error):
         state = result[0] if error is None else "unreadable"
+        detail = (result[1] or "" if state == "unreadable" else "") if error is None else str(error)
         self.project_states = getattr(self, "project_states", {})
-        self.project_states[project] = state
+        self.project_states[project] = (state, detail)
         if token != self.state_token or project != self.project:
             return
-        self.project_bar.show_project(project, tr(PROJECT_STATES[state]),
-                                      warning=state in ("changed", "untrusted", "unreadable"))
+        self.project_bar.show_project(project, state, detail)
         self.update_activity()
 
     def update_activity(self, sandboxes=None):
@@ -7235,8 +7736,7 @@ class MainWindow(QMainWindow):
             for run, question, key in entries[:NOTIFY_AT_ONCE]:
                 canary = isinstance(question, dict) and question.get("kind") == "canary"
                 self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), describe(question),
-                            level="error" if canary else "warning",
-                            action=(tr("Open approvals"), lambda k=key: self.open_question(k)))
+                            level="error" if canary else "warning", action=self.question_actions(key, canary))
             rest = entries[NOTIFY_AT_ONCE:]
             if rest:
                 self.notify(tr("sandbox-ai asks: {count} more questions", count=len(rest)),
@@ -7255,6 +7755,45 @@ class MainWindow(QMainWindow):
             for host, _, _ in keys:
                 counts[host] = counts.get(host, 0) + 1
             hosts.set_questions(counts)
+
+    def question_actions(self, key, canary=False):
+        """The buttons of a question's notification: answered right there - Allow, Allow always, Block, Block
+        always ("always" remembered for the project, as on the Approvals page, with its caps and its question before
+        an allow) - and the way to its page. A canary's alarm only leads to its page."""
+        open_page = (tr("Open approvals"), lambda k=key: self.open_question(k))
+        if canary:
+            return open_page
+        return [(tr("Allow"), lambda k=key: self.answer_question(k, "allow", "once")),
+                (tr("Allow always"), lambda k=key: self.answer_question(k, "allow", "always")),
+                (tr("Block"), lambda k=key: self.answer_question(k, "deny", "run")),
+                (tr("Block always"), lambda k=key: self.answer_question(k, "deny", "always")),
+                open_page]
+
+    def answer_question(self, key, decision, scope):
+        """A notification's answer: the Approvals page sends it (the same checks and questions as its own
+        buttons); a question answered or ended meanwhile is left alone."""
+        approvals = self.approvals
+        entry = approvals.questions.get(key)
+        if entry is None:
+            self.notify(tr("Not answered"), tr("The question is not open any more."), level="info")
+            return
+        approvals.answer(decision, scope, entry=entry, parent=self)
+
+    def watcher_heartbeat(self):
+        """Refresh the app's heartbeat while its question notifications are on; remove it when they are off."""
+        notify = backend.setting("notify") is not False
+        if notify or getattr(self, "heartbeat_on", False):
+            self.heartbeat_on = notify and self.sai.watcher_heartbeat(True)
+            if not notify:
+                self.sai.watcher_heartbeat(False)
+            elif not self.heartbeat_on and not getattr(self, "heartbeat_warned", False):
+                # Said once: then every question comes twice - the app's notification and the launcher's own.
+                self.heartbeat_warned = True
+                applog.log("WARNING", "approvals", tr(
+                    "The sandbox-ai in {path} cannot be told that this app shows the questions (it is older than "
+                    "0.1.86, or its state folder cannot be written): each question also comes as the launcher's own "
+                    "desktop notification. Update sandbox-ai; runs started before stay so until they are restarted.",
+                    path=printable(self.sai.directory)))
 
     def open_question(self, key):
         """A notification's action: the Approvals page with its question selected (when it is still open)."""
@@ -7284,6 +7823,22 @@ class MainWindow(QMainWindow):
             self.update_window_controls()
         super().changeEvent(event)
 
+    def safeguard_popup(self, level, title, text):
+        """A safeguard refused or ended something in a running sandbox: a warning (an error for a canary, an
+        out-of-memory kill, a failed check), with the way to the Safeguards tab."""
+        self.notify(title, text, level=level, action=(tr("Show safeguards"), self.show_safeguards))
+
+    def safeguards_arrived(self, records):
+        """New safeguard records: into the Safeguards tab when the Activity page was made (else it reads them
+        all when it is first shown)."""
+        page = self.built("activity")
+        if page is not None:
+            page.safeguards.add_live(records)
+
+    def show_safeguards(self):
+        self.show_page("activity")
+        self.activity.show_safeguards()
+
     def notify(self, title, text, level="warning", action=None):
         """A notification of LEVEL (info, success, warning, error): a popup in the app's theme at the corner of
         the screen, or the desktop's own (setting notify_style; also where a window cannot place itself, e.g.
@@ -7312,10 +7867,142 @@ class MainWindow(QMainWindow):
         if backend.newer(available, installed):
             text = tr("sandbox-ai {available} is available (installed: {installed}); update with: sandbox-ai update",
                       available=available, installed=installed)
-            self.statusBar().showMessage(text)
+            route, where = backend.update_route(self.sai.directory)
+            self.offer_update(installed, available, route, where, hint=text)
         else:
             text = tr("sandbox-ai {installed} is up to date.", installed=installed)
+            if not self.update_running:
+                self.offer_update()
         self.show_update_text(text)
+
+    def make_update_notice(self):
+        """In the status line, while a newer sandbox-ai is there: what the check found, and "Update now…" where this
+        copy can update itself (install.sh's installation; a system one with sudo) - else the hint stays, and its
+        tooltip says why there is no button. After a good update: "Restart the app"."""
+        self.update_offer, self.update_running, self.updated_to, self.restart_argv = None, False, None, None
+        self.update_notice = QWidget()
+        self.update_notice.setObjectName("update_notice")
+        row = QHBoxLayout(self.update_notice)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.update_label = plain_label(word_wrap=False)
+        self.update_label.setAccessibleName(tr("Update of sandbox-ai"))
+        self.update_now_button = QPushButton(tr("Update now…"))
+        self.update_now_button.setAccessibleName(tr("Update sandbox-ai now"))
+        self.update_now_button.clicked.connect(lambda _=False: self.update_now())
+        self.restart_button = QPushButton(tr("Restart the app"))
+        self.restart_button.setAccessibleName(tr("Restart the app"))
+        self.restart_button.setToolTip(safe_tooltip(tr("Quit the app the usual way and start it again: the new "
+                                                       "version")))
+        self.restart_button.clicked.connect(lambda _=False: self.restart_app())
+        row.addWidget(self.update_label)
+        row.addWidget(self.update_now_button)
+        row.addWidget(self.restart_button)
+        self.update_now_button.hide()
+        self.restart_button.hide()
+        self.update_notice.hide()
+        self.statusBar().addWidget(self.update_notice)
+
+    def offer_update(self, installed=None, available=None, route=None, where=None, hint=""):
+        """The status line's notice: "Update now…" beside what the check found when ROUTE (backend.update_route; WHERE:
+        the installation's folder) is one that `sandbox-ai update` takes; else HINT, its tooltip saying why there is
+        no button. Nothing given: no notice (but "Restart the app" after an update). The menu's entry follows."""
+        offered = available is not None and route in ("user", "root")
+        self.update_offer = (installed, available, route, where) if offered else None
+        if offered:
+            text = tr("sandbox-ai {available} is available (installed: {installed})", available=available,
+                      installed=installed)
+            self.update_now_button.setToolTip(safe_tooltip(
+                tr("Installed for every user in {path}: sudo sandbox-ai update runs in a terminal, where sudo asks "
+                   "for your password (the app never sees it)", path=printable(where)) if route == "root" else
+                tr("sandbox-ai update in a terminal: the newest signed release; the version before is kept")))
+            why = ""
+        else:
+            text = hint if available is not None else ""
+            why = {"package": tr("This sandbox-ai runs from a package (the AppImage, the macOS app or the .pyz): it "
+                                 "does not update itself. Download the new one from the release page."),
+                   "checkout": tr("This sandbox-ai is a git checkout ({path}): update it with git pull.",
+                                  path=printable(where or "")),
+                   "other": tr("This sandbox-ai was not installed with install.sh: a pip installation updates "
+                               "with pip install -U sandbox-ai.")}.get(route, "")
+        if not text and self.updated_to is not None:
+            text = tr("sandbox-ai updated to {version}: restart the app to use it", version=self.updated_to)
+        self.update_label.setText(text)
+        self.update_label.setToolTip(safe_tooltip(why) if why else "")
+        self.update_now_button.setVisible(offered)
+        self.update_now_button.setEnabled(offered and not self.update_running)
+        self.restart_button.setVisible(self.updated_to is not None and not offered)
+        self.update_notice.setVisible(bool(text))
+        self.actions["self-update"].setEnabled(offered and not self.update_running)
+
+    def update_now(self):
+        """"Update now…": asked first (from which version to which), then `sandbox-ai update` - or, for a system
+        installation, `sudo sandbox-ai update` - in a terminal tab of the app (or a terminal window, as the setting
+        says), where the human answers a password prompt; no password ever passes through the app. Its end:
+        update_ended."""
+        offer = self.update_offer
+        if offer is None or self.update_running:
+            return
+        installed, available, route, where = offer
+        try:
+            argv = backend.self_update_command(self.sai, route)
+        except backend.NoSudo as exc:
+            warn(self, tr("Update sandbox-ai"), tr(
+                "sandbox-ai is installed for every user ({path}): only root can update it, and there is no sudo "
+                "here. Run as root (e.g. after su -):\n\n{command}", path=printable(where), command=printable(exc)))
+            return
+        except ValueError as exc:
+            warn(self, tr("Update sandbox-ai"), printable(exc))
+            return
+        text = " ".join((
+            tr("Update sandbox-ai from {installed} to {available}?", installed=installed, available=available),
+            tr("It is installed for every user: the update runs as root, sudo asks for your password in the "
+               "terminal.") if route == "root" else tr("It runs in a terminal."),
+            tr("The app keeps running; restart it afterwards to use the new version.")))
+        if not ask_first(self, "self-update", tr("Update sandbox-ai"), text, tr("Update"), details=shlex.join(argv)):
+            return
+        self.update_running = True
+        self.offer_update(*offer)
+        title = tr("Update sandbox-ai to {version}", version=available)
+        if not self.in_terminal(argv, title, ended=lambda status: self.update_ended(available, status)):
+            self.update_running = False
+            self.offer_update(*offer)
+
+    def update_ended(self, available, status):
+        """The update's command has ended: 0 - a notification with "Restart the app" (the status line keeps that
+        button); else the status line says it failed (its terminal shows why) and "Update now…" may try again."""
+        self.update_running = False
+        if status == 0:
+            self.updated_to = available
+            self.offer_update()
+            text = self.update_label.text()
+            self.show_update_text(text)
+            self.notify(tr("sandbox-ai updated"), text, level="success",
+                        action=(tr("Restart the app"), self.restart_app))
+            return
+        if self.update_offer is not None:
+            self.offer_update(*self.update_offer)
+        self.update_label.setText(tr("The update to {version} failed (exit status {status}): its terminal shows why.",
+                                     version=available, status=status))
+        self.update_notice.show()
+        self.show_update_text(self.update_label.text())
+
+    def restart_app(self):
+        """Quit the usual way (with its questions) and start the app again: the new process waits for this one to end
+        (main.py --wait-for-pid), as the single-instance guard is free only then; started once the window has really
+        closed (finish)."""
+        self.restart_argv = backend.restart_command(os.getpid(), self.sai.directory)
+        if not self.quit_app() and not getattr(self, "stopping", False):
+            self.restart_argv = None  # the quit was refused: no restart later
+
+    def start_again(self):
+        """The new app, detached (finish: the window has closed for good)."""
+        argv, self.restart_argv = getattr(self, "restart_argv", None), None
+        if not argv:
+            return
+        started = QProcess.startDetached(argv[0], argv[1:])
+        ok = started[0] if isinstance(started, tuple) else started
+        applog.write(f"{applog.header('INFO' if ok else 'ERROR', 'restart')}\n  "
+                     f"{'started' if ok else 'could not start'}: {shlex.join(argv)}\n")
 
     def show_update_text(self, text):
         """What the update check says, on the System page (one made later shows it then)."""
@@ -7326,11 +8013,12 @@ class MainWindow(QMainWindow):
 
     # -- terminals --
 
-    def in_terminal(self, argv, title, embedded=None, cwd=None):
+    def in_terminal(self, argv, title, embedded=None, cwd=None, ended=None):
         """Run ARGV in a terminal: a tab of the app (EMBEDDED True, or None and the setting says so, QtWebEngine with
         xterm.js is there and Chromium's sandbox can start now: TerminalsPage.chromium_ready, checked in a thread),
         else a terminal window. True when it runs or will (the tab or, if Chromium's sandbox cannot start, the
-        window follows the check), False when no terminal window could be started."""
+        window follows the check), False when no terminal window could be started. ENDED(status): called with the
+        command's exit status when it ends (in a window too: terminal_window)."""
         if embedded is None:
             embedded = self.sai.settings().get("terminal", "app") == "app"
         directory = cwd if cwd and os.path.isdir(cwd) else None
@@ -7340,8 +8028,13 @@ class MainWindow(QMainWindow):
         if embedded and terminal.available()[0]:
             def opened(view):
                 if view is None:  # Chromium's sandbox cannot start now: a terminal window instead
-                    self.terminal_window(argv, title)
+                    if ended is None:
+                        self.terminal_window(argv, title)
+                    elif not self.terminal_window(argv, title, ended=ended):
+                        ended(-1)
                     return
+                if ended is not None:
+                    view.exited.connect(ended)
                 self.show_page("terminals")
                 started = started_agent(argv)
                 options = argv[:argv.index("--")] if "--" in argv else argv  # not the agent's own arguments
@@ -7353,10 +8046,18 @@ class MainWindow(QMainWindow):
                                             time.monotonic()))
             self.terminals.open(argv, title, directory, done=opened)
             return True
-        return self.terminal_window(argv, title)
+        return self.terminal_window(argv, title) if ended is None else self.terminal_window(argv, title, ended=ended)
 
-    def terminal_window(self, argv, title):
-        """ARGV in a terminal window of the desktop (SANDBOX_AI_TERMINAL, or one found); False if none starts."""
+    def terminal_window(self, argv, title, ended=None):
+        """ARGV in a terminal window of the desktop (SANDBOX_AI_TERMINAL, or one found); False if none starts.
+        ENDED(status): called with ARGV's exit status, which the window's shell writes to a file of a private folder
+        (looked for every second: the window's own process says nothing, a terminal may hand it to a server)."""
+        status_file = None
+        if ended is not None:
+            import tempfile
+            status_file = Path(tempfile.mkdtemp(prefix="sandbox-ai-app-status.")) / "status"
+            argv = ["sh", "-c", 'f=$1; shift; "$@"; s=$?; echo "$s" > "$f.part" && mv -f "$f.part" "$f"; exit "$s"',
+                    "sh", str(status_file), *argv]
         command = self.sai.in_terminal(argv, title)
         if command is None:
             QMessageBox.warning(self, tr("No terminal"), shown_as_text(tr(
@@ -7366,7 +8067,30 @@ class MainWindow(QMainWindow):
         ok = started[0] if isinstance(started, tuple) else started
         if not ok:
             QMessageBox.warning(self, tr("Not started"), shown_as_text(shlex.join(command)))
+        elif status_file is not None:
+            self.await_status_file(status_file, ended)
         return ok
+
+    STATUS_LIMIT = 6 * 3600  # seconds a command in a terminal window is waited for (then its end is not reported)
+
+    def await_status_file(self, path, ended):
+        """ENDED(status) once PATH holds the exit status (terminal_window); its folder is removed then."""
+        timer, began = QTimer(self), time.monotonic()
+
+        def look():
+            try:
+                said = path.read_text().strip()
+            except OSError:
+                if time.monotonic() - began < self.STATUS_LIMIT:
+                    return
+                said = None
+            timer.stop()
+            timer.deleteLater()
+            shutil.rmtree(path.parent, ignore_errors=True)
+            if said is not None:
+                ended(int(said) if said.isdigit() else -1)
+        timer.timeout.connect(look)
+        timer.start(1000)
 
     def make_busy_indicator(self):
         """At the right of the status bar, while a page has work in the background (a command, a copy, an install): a
@@ -7459,6 +8183,7 @@ class MainWindow(QMainWindow):
     def terminate(self):
         """SIGTERM (logout, systemctl stop): no question, the work is stopped (bounded), the app quits."""
         self.quitting = True
+        self.keep_state_now()
         self.stop_work()
         QApplication.quit()
 
@@ -7521,9 +8246,32 @@ class MainWindow(QMainWindow):
         stopped within QUIT_WAIT. If the session goes on after all (the logout was cancelled), the window
         behaves as before after SESSION_GRACE seconds."""
         self.quitting = True
+        self.keep_state_now()
         if not self.stopped:
             self.stop_work()
         self.session_timer.start(SESSION_GRACE * 1000)
+
+    def commit_edits(self):
+        """What is being typed on the board (its inspector) taken now, before the state is written for good."""
+        board = self.built("board")
+        if board is not None:
+            try:
+                board.commit_edits()
+            except Exception as exc:  # noqa: BLE001 - never stops the quitting
+                applog.log("WARNING", "board", f"what was being typed could not be taken: {exc}")
+
+    def keep_state_now(self):
+        """The window's state (panels, tabs, the board's changes not applied) on the disk now, before the work is
+        stopped: at a logout or SIGTERM the app may be killed before shutdown() writes it."""
+        if getattr(self, "shut_down", False):
+            return
+        try:
+            self.commit_edits()
+            self.save_docks()
+            self.save_tabs()
+            self.state.flush()
+        except Exception as exc:  # noqa: BLE001 - never stops the quitting
+            applog.log("WARNING", "state", f"not written before quitting: {exc}")
 
     def session_goes_on(self):
         if not self.finished:
@@ -7598,16 +8346,22 @@ class MainWindow(QMainWindow):
         self.finished = True
         self.shutdown()
         event.accept()
+        self.start_again()  # "Restart the app": the new one waits until this process has ended
         self.closed.emit()
 
     def shutdown(self):
         """Stop timers, commands and terminals; once (closing, app.aboutToQuit and tests may all call it)."""
         if getattr(self, "shut_down", False):
             return
+        self.commit_edits()
         self.save_docks()
         self.save_tabs()
         self.state.flush()
         self.shut_down = True
+        self.heartbeat_timer.stop()
+        if getattr(self, "heartbeat_on", False):  # the launchers notify again from now on
+            self.sai.watcher_heartbeat(False)
+            self.heartbeat_on = False
         ThreadCall.abandon_all()  # no result reaches a page after this
         # What still runs is reads and polls (the work was asked about and stopped before): ended without a grace
         # period, with what they started, so that no `sandbox-ai hosts run`, ssh or podman outlives the app.

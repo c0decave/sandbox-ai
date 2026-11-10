@@ -27,8 +27,10 @@ def test_the_terminal_tabs_run_without_the_gpu_unless_asked():
     no_gpu = "--disable-gpu --disable-gpu-compositing --disable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"
     assert chromium_flags({}) == no_gpu + " --log-level=2"
     assert chromium_flags({"SANDBOX_AI_APP_GPU": "1"}) == "--log-level=2"
-    assert chromium_flags({"SANDBOX_AI_APP_DEBUG": "1"}) == no_gpu
-    assert chromium_flags({"SANDBOX_AI_APP_GPU": "1", "SANDBOX_AI_APP_DEBUG": "1"}) is None
+    # --debug keeps Chromium quiet (its chatter flooded the terminal); --debug=all lets it talk
+    assert chromium_flags({"SANDBOX_AI_APP_DEBUG": "1"}) == no_gpu + " --log-level=2"
+    assert chromium_flags({"SANDBOX_AI_APP_DEBUG": "all"}) == no_gpu
+    assert chromium_flags({"SANDBOX_AI_APP_GPU": "1", "SANDBOX_AI_APP_DEBUG": "all"}) is None
     assert chromium_flags({"QTWEBENGINE_CHROMIUM_FLAGS": "--enable-gpu-rasterization"}) is None  # yours wins
     assert chromium_flags({"QTWEBENGINE_CHROMIUM_FLAGS": ""}) is None
 
@@ -107,3 +109,15 @@ def test_main_takes_the_package_launcher_out_of_the_environment(monkeypatch):
     import os
     assert "SANDBOX_AI_APP_PACKAGE_LAUNCHER" not in os.environ
     assert backend.PACKAGE_LAUNCHER == "/apps/sandbox-ai.AppImage"
+
+
+def test_no_test_opens_a_real_browser():
+    """In a sandbox $BROWSER and xdg-open hand a URL to the human's desktop: the tests never reach them."""
+    import os
+    import shutil
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+    import conftest
+    assert "no-browser-bin" in os.environ["BROWSER"] and "no-browser-bin" in shutil.which("xdg-open")
+    QDesktopServices.openUrl(QUrl("https://login.example/never"))
+    assert conftest.OPENED_URLS[-1].toString() == "https://login.example/never"

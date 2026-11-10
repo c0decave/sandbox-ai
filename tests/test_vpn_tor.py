@@ -2,6 +2,7 @@
 redirects as nft text, the bootstrap wait, the checks (IsTor, tor's DNSPort, .onion mapping) and the agent's
 firewall, without Podman or tor. The bypass tests are named after what an agent would try."""
 import argparse
+import contextlib
 import importlib.util
 import ipaddress
 import json
@@ -510,17 +511,31 @@ def test_the_tor_container(home):
         assert f"--cap-add={cap}" in command
     assert "--cap-add=NET_RAW" not in command and "--device=/dev/net/tun" not in command
     assert f"--tmpfs=/var/lib/tor:rw,nosuid,nodev,mode=0700,uid={rt.TOR_UID},gid={rt.TOR_UID}" in command
-    assert command[-4:] == [v.VPN_IMAGE, "-I", "/vpn/vpn_runtime.py", "serve"]
+    # Tor is not a VPN: its own image, never the VPN image.
+    assert command[-4:] == [v.TOR_IMAGE, "-I", "/vpn/vpn_runtime.py", "serve"] and v.VPN_IMAGE not in command
+    assert v.image(tor_profile()) == v.TOR_IMAGE and v.build_command(tor_profile()) == "sandbox-ai build tor"
     assert v.mark_expression(tor_profile()) == f"meta skuid {rt.TOR_UID}"
 
 
-def test_the_vpn_image_has_tor_with_its_fixed_uid():
-    recipe = (ROOT / "sandbox" / "Containerfile.vpn").read_text()
-    for part in (" tor ", "tor-geoipdb", "obfs4proxy", f"--uid {rt.TOR_UID}", "--home-dir /var/lib/tor"):
+def test_the_tor_image_has_tor_with_its_fixed_uid():
+    recipe = (ROOT / "sandbox" / "Containerfile.tor").read_text()
+    for part in (" tor ", "tor-geoipdb", "obfs4proxy", f"--uid {rt.TOR_UID}", "--home-dir /var/lib/tor", "nftables",
+                 "iproute2", "python3", "LABEL sandbox-ai.role=tor", '"/vpn/vpn_runtime.py"'):
         assert part in recipe, part
     # The user exists before the package, which keeps an existing debian-tor (a system uid).
     assert recipe.index(f"--uid {rt.TOR_UID}") < recipe.index("tor-geoipdb")
     assert 100 <= rt.TOR_UID <= 999 and rt.TOR_UID != s.PROXY_UID
+
+
+def test_tor_and_the_vpn_share_no_image():
+    """Tor is not a VPN: the Tor image has no VPN software, the VPN image no Tor (and no debian-tor)."""
+    instructions = lambda name: "\n".join(  # noqa: E731 - the recipe without its comments
+        line for line in (ROOT / "sandbox" / name).read_text().splitlines() if not line.lstrip().startswith("#"))
+    tor, vpn = instructions("Containerfile.tor"), instructions("Containerfile.vpn")
+    for part in ("wireguard", "openvpn", "tailscale", "golang"):
+        assert part not in tor.lower(), part
+    for part in (" tor ", "tor-geoipdb", "obfs4proxy", "debian-tor", str(rt.TOR_UID)):
+        assert part not in vpn, part
 
 
 # --- the plan, MCP servers ------------------------------------------------------------------------------------
@@ -566,6 +581,54 @@ def test_doctor_does_not_ask_tor_for_a_tunnel_device(home, tmp_path, monkeypatch
     conf.chmod(0o600)
     assert v.main(["add", "wg", "--wireguard", str(conf)]) == 0
     assert doctor.check_vpn(tun=tmp_path / "no-tun")[:3] == ("fail", "VPN", "/dev/net/tun is missing")
+
+
+def test_doctor_checks_the_images_the_profiles_need(home, tmp_path, monkeypatch):
+    """Tor has an image of its own: a Tor profile needs localhost/sandbox-ai-tor, a WireGuard one the VPN image;
+    the hint names the build of each image missing."""
+    doctor = load("sandbox_doctor_tor_images_test", "doctor.py")
+    assert v.main(["add", "anon", "--tor"]) == 0
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
+    present, asked = set(), []
+
+    def run(command, timeout=30):
+        asked.append(command[-1])
+        return (0 if command[-1] in present else 1), ""
+    monkeypatch.setattr(doctor, "run", run)
+    assert doctor.check_vpn(tun=tmp_path / "no-tun") == ("warn", "VPN", f"{v.TOR_IMAGE} missing", "sandbox-ai build tor")
+    assert asked == [v.TOR_IMAGE]  # only Tor profiles: the VPN image is not needed
+    present.add(v.TOR_IMAGE)
+    status, _, detail, _ = doctor.check_vpn(tun=tmp_path / "no-tun")
+    assert status == "ok" and "Tor only" in detail and "WireGuard" not in detail
+    conf = tmp_path / "wg.conf"
+    key = "a" * 42 + "A="
+    conf.write_text(f"[Interface]\nPrivateKey = {key}\nAddress = 10.66.0.2/32\n\n[Peer]\n"
+                    f"PublicKey = {key}\nAllowedIPs = 0.0.0.0/0\nEndpoint = 198.51.100.7:51820\n")
+    conf.chmod(0o600)
+    assert v.main(["add", "wg", "--wireguard", str(conf)]) == 0
+    assert doctor.check_vpn(tun=tmp_path / "no-tun") == ("warn", "VPN", f"{v.VPN_IMAGE} missing", "sandbox-ai build vpn")
+    present.clear()
+    assert doctor.check_vpn(tun=tmp_path / "no-tun") == (
+        "warn", "VPN", f"{v.TOR_IMAGE} and {v.VPN_IMAGE} missing", "sandbox-ai build tor; sandbox-ai build vpn")
+
+
+def test_a_tor_start_needs_the_tor_image(home, monkeypatch):
+    """The start asks for the image its profile runs in and names the build that makes it."""
+    v.main(["add", "anon", "--tor"])
+    asked = []
+
+    def podman_run(command, **kwargs):
+        asked.append(command)
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    monkeypatch.setattr(v, "podman_run", podman_run)
+    launcher = types.SimpleNamespace(podman_command=lambda a: ["podman"], printable=str)
+    monkeypatch.setattr(v, "launcher", lambda: launcher)
+    a = argparse.Namespace(vpn="anon", vpn_profile=v.load_profile("anon"), vpn_check="stop")
+    with pytest.raises(ValueError, match=r"The Tor image localhost/sandbox-ai-tor:latest is missing; build it with: "
+                                         r"sandbox-ai build tor"):
+        v.agent_up(a, "session", "/home", [], contextlib.ExitStack())
+    assert asked == [["podman", "image", "exists", v.TOR_IMAGE]]
+    assert v.plan(a)["image"] == v.TOR_IMAGE
 
 
 @pytest.mark.parametrize("user, refused", [("950", True), ("950:950", True), ("debian-tor", True), ("tor", True),

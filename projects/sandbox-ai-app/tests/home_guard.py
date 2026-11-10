@@ -38,8 +38,27 @@ def ensure(environ=os.environ):
         environ[name] = str(root / name.lower())
     for name in DROPPED:
         environ.pop(name, None)
+    no_browser(root, environ)
     environ[MARKER] = str(root)
     return root
+
+
+BROWSER_COMMANDS = ("xdg-open", "open", "sensible-browser", "x-www-browser", "www-browser", "gio")
+
+
+def no_browser(root, environ=os.environ):
+    """No test ever opens a real browser: in a sandbox $BROWSER and xdg-open hand every URL to the human's desktop as
+    a question (a test answering a browser question with Allow asked the human to open https://login.example/...).
+    $BROWSER and the usual openers found first on PATH only write what they were given to ROOT/browser-opens."""
+    directory = root / "no-browser-bin"
+    directory.mkdir(exist_ok=True)
+    for name in BROWSER_COMMANDS:
+        opener = directory / name
+        opener.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{root}/browser-opens"\nexit 0\n')
+        opener.chmod(0o755)
+    environ["BROWSER"] = str(directory / "xdg-open")
+    environ["PATH"] = f"{directory}{os.pathsep}{environ.get('PATH', '')}"
+    return directory
 
 
 def login_files(environ=os.environ):

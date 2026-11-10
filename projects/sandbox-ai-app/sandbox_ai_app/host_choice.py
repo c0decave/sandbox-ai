@@ -133,12 +133,13 @@ def _disconnect(signal, slot):
 
 
 class HostChooser(QWidget):
-    """"Host: [this machine | a host …]". CHANGED(host) when the human chooses another one (not while it is filled)."""
+    """"Host: [this machine | a host …]". CHANGED(host) when the human chooses another one (not while it is filled).
+    LOCAL False: the hosts of sandbox-ai hosts only, never this machine (host() is None while there is none)."""
     changed = Signal(str)
 
-    def __init__(self, sai, tooltip=None, parent=None):
+    def __init__(self, sai, tooltip=None, parent=None, local=True):
         super().__init__(parent)
-        self.sai = sai
+        self.sai, self.local = sai, local
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(plain_label(tr("Host"), word_wrap=False))
@@ -163,7 +164,8 @@ class HostChooser(QWidget):
             self.problem = printable(exc)
         self.box.blockSignals(True)
         self.box.clear()
-        self.box.addItem(host_label(LOCAL), LOCAL)
+        if self.local:
+            self.box.addItem(host_label(LOCAL), LOCAL)
         for entry in entries:
             name = entry.get("name")
             if entry.get("kind") == "local" or name == LOCAL or valid_host(name) is None:
@@ -172,11 +174,13 @@ class HostChooser(QWidget):
         index = self.box.findData(current) if current else 0
         self.box.setCurrentIndex(max(index, 0))
         self.box.blockSignals(False)
-        if current and index < 0:
+        if current and index < 0 and self.box.count():
             self.changed.emit(self.host())  # its host is gone: this machine's, never that host's rows under it
 
     def host(self):
-        return valid_host(self.box.currentData()) if self.box.count() else LOCAL
+        if not self.box.count():
+            return LOCAL if self.local else None
+        return valid_host(self.box.currentData())
 
     def remote(self):
         return self.host() not in (None, LOCAL)

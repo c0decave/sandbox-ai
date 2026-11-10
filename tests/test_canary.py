@@ -320,7 +320,7 @@ def test_rulesets_decide_the_strictest():
     a = s.parse_args(["codex", "--no-config", "-w", "/nonexistent-ws", "--telemetry", "on"])  # no ruleset of its own
     a.policy_rules, a.project_document = {"version": 1, "canary": {"on_read": "ask"}}, None
     assert c.decisions(s.load_rulesets(a))["on_read"] == "ask"
-    assert s.proxy_rules(a, {}) == {}
+    assert s.proxy_rules(a, {}) == {"rules": [], "pinned": {}}  # no HTTP rules (the addresses always go along)
 
 
 # --- the supervisor: files and names --------------------------------------------------------------

@@ -226,3 +226,31 @@ def test_a_flooded_folder_does_not_hide_the_others(home, tmp_path):
     named = {change["path"] for change in review["changes"]}
     assert {".claude/settings.json", ".gitconfig", ".local/lib/python3.12/site-packages/x.pth"} <= named, named
     assert review["complete"] is False  # the flood itself is not all checked, and says so
+
+
+def test_put_back_writes_only_watched_files_and_never_through_a_link(tmp_path):
+    """--restore-home's writer: a watched path only (no "..", nothing absolute), a link in the file's place is
+    replaced (not written through), a link on the way stops it, a missing folder is made with its recorded mode."""
+    home, outside = tmp_path / "home", tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    for bad in ("../x", "/etc/passwd", ".bashrc/../../x", "notes.txt", ""):
+        assert not hr.watched(bad)
+        with pytest.raises(ValueError):
+            hr.put_back(home, bad, b"x", 0o644)
+    assert hr.watched(".claude/hooks/a.sh") and hr.watched(".local/lib/python3.12/site-packages/x.pth")
+    (home / ".bashrc").symlink_to(outside / "target")
+    hr.put_back(home, ".bashrc", b"export A=1\n", 0o4755)
+    assert (home / ".bashrc").read_text() == "export A=1\n" and not (outside / "target").exists()
+    assert (home / ".bashrc").stat().st_mode & 0o7777 == 0o755  # never setuid
+    hr.put_back(home, ".claude/hooks/check.sh", b"#!/bin/sh\n", 0o700, {".claude": 0o750})
+    assert (home / ".claude").stat().st_mode & 0o777 == 0o750 and (home / ".claude/hooks").stat().st_mode & 0o777 == 0o700
+    (home / ".config").symlink_to(outside)
+    with pytest.raises(OSError):
+        hr.put_back(home, ".config/git/config", b"[alias]\n", 0o644)
+    assert not any(outside.iterdir())
+    (home / ".ssh").mkdir()
+    (home / ".ssh/config").mkdir()  # a folder in the file's place: left alone
+    with pytest.raises(ValueError, match="folder"):
+        hr.put_back(home, ".ssh/config", b"Host x\n", 0o600)
+    assert not [p for p in home.rglob(".sandbox-ai-restore-*")]

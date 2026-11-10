@@ -473,9 +473,10 @@ class ApprovalsPage(QWidget):
         # The page's own questions before an answer (Allow…, Block always…) are open: no Questions window above them,
         # where a second answer could be started on top of the first.
         self.confirming = 0
-        # The keys of the answers (eventFilter): the application's filter is on while the open questions are shown.
+        # The keys of the answers (eventFilter): taken from the open questions and every widget in them (watch_keys),
+        # while they are shown (keys_on).
         self.keys_on = False
-        open_box.installEventFilter(self)
+        self.watch_keys(open_box)
         # The timer scans in a thread, so the questions are read even while something else keeps the window
         # busy; a newer scan (or a direct poll) makes an older result void.
         self.polling, self.generation = None, 0
@@ -803,7 +804,7 @@ class ApprovalsPage(QWidget):
         if window is None:
             window = self.questions_window = QuestionsWindow(self)
             window.finished.connect(lambda _=0: self.dismissed.update(self.questions))
-            window.installEventFilter(self)  # its Show and Hide turn the keys of the answers on and off
+            self.watch_keys(window)  # its Show and Hide turn the keys of the answers on and off
         window.show_questions()
         window.show()
         window.raise_()
@@ -1016,17 +1017,33 @@ class ApprovalsPage(QWidget):
         if self.questions_window is not None:
             self.questions_window.update_buttons()
 
+    def watch_keys(self, root):
+        """The keys of the answers are taken from ROOT (the open questions, the Questions window) and every widget in
+        it, also one added later: a filter on each of them. Never one on the whole application: a filter in Python
+        sees every event of every object there, Chromium's of the terminal tabs too, and while it was on (the open
+        questions shown), the next terminal tab ended the process - a segmentation fault (stability round 3, the
+        soak)."""
+        for widget in [root, *root.findChildren(QWidget)]:
+            if not widget.property("answerKeys"):
+                widget.setProperty("answerKeys", True)
+                widget.installEventFilter(self)
+
     def eventFilter(self, watched, event):  # noqa: N802
         """Ctrl+Return (allow), Ctrl+Shift+D (deny for the run) and Ctrl+Shift+K (block always, asked first) while the
         focus is in the open questions (on this page, in their panel wherever it is docked, or in the Questions
-        window): taken before any shortcut of the window. The application's filter is on only while one of them is
-        shown (update_key_filter)."""
+        window): taken before any shortcut of the window, while one of them is shown (update_key_filter)."""
         kind = event.type()
         if kind in (QEvent.Type.Show, QEvent.Type.Hide) and (
                 watched is self.open_box or watched is self.questions_window):
+            if kind == QEvent.Type.Show:
+                self.watch_keys(watched)
             QTimer.singleShot(0, self.update_key_filter)  # once the change of visibility is done
             return False
-        if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and isinstance(watched, QWidget):
+        if kind == QEvent.Type.ChildPolished and isinstance(event.child(), QWidget):
+            self.watch_keys(event.child())  # (a widget put in later: ready by now, unlike at ChildAdded)
+            return False
+        if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and self.keys_on \
+                and isinstance(watched, QWidget):
             action = shortcut_of(event)
             target = self.key_target(watched) if action else None
             if target is not None:
@@ -1047,19 +1064,11 @@ class ApprovalsPage(QWidget):
         return None
 
     def update_key_filter(self):
-        app = QApplication.instance()
         window = self.questions_window
         try:
-            wanted = self.open_box.isVisible() or (window is not None and window.isVisible())
+            self.keys_on = self.open_box.isVisible() or (window is not None and window.isVisible())
         except RuntimeError:  # the page is being deleted
             return
-        if app is None or wanted == self.keys_on:
-            return
-        self.keys_on = wanted
-        if wanted:
-            app.installEventFilter(self)
-        else:
-            app.removeEventFilter(self)
 
     def shortcut(self, action):
         button = {"allow": self.allow_button, "deny": self.deny_button, "block": self.block_button}[action]

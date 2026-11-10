@@ -78,7 +78,7 @@ def test_a_part_dragged_from_the_palette_lands_where_it_is_dropped(page, qapp):
     assert page.drop_what(mime) == ("part", "mount")
     point = QPoint(500, 600)
     ghost, accepted = drag(page, qapp, mime, point, drop=False)
-    assert accepted and ghost is not None and ghost.label.text() == "Drop to add Mount" and not ghost.refused
+    assert accepted and ghost is not None and ghost.label.text() == "Drop to add Extra folder" and not ghost.refused
     assert ghost.pen().color() == QColor(theme.colors()["accent"]), "the indicator is in the theme's accent colour"
     scene = page.view.mapToScene(point)
     assert ghost.pos() == QPointF(B.snap(scene.x() - NODE_W / 2, 20), B.snap(scene.y() - NODE_H / 2, 20))
@@ -115,11 +115,10 @@ def test_the_keyboard_still_adds_a_part(page, qapp):
     assert page.board.first("display") is not None
 
 
-# On CI runners (offscreen, no display, no GPU) this test crashes now and then in Qt's own code on the main thread
-# while it processes events (faulthandler: "<no Python frame>"), since 0.1.66; with a display it passes. Set aside
-# there until the native crash is found (TODO.md, "The app"), so the job shows every other result.
-@pytest.mark.skipif(os.environ.get("CI") == "true" and os.environ.get("QT_QPA_PLATFORM") == "offscreen",
-                    reason="native crash in offscreen event processing on CI runners (TODO.md, The app)")
+# This test crashed now and then on CI runners (offscreen, since 0.1.66) inside Qt's event processing, with
+# QtWebEngine loaded. Likely cause, fixed in 0.1.90: event filters on the whole application (installed while a
+# window built its pages, left behind by earlier tests) together with QtWebEngine. It runs on CI again, and the
+# job repeats this file under gdb so that a crash leaves a native backtrace (ci.yml).
 def test_folders_and_files_from_a_file_manager(page, qapp, tmp_path, monkeypatch):
     folder, other, data = tmp_path / "project", tmp_path / "data set", tmp_path / "notes.txt"
     folder.mkdir()

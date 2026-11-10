@@ -1,5 +1,5 @@
 {
- "comment": "The desktop app's themes (sandbox_ai_app/theme.py THEMES_DATA), for the web interface; the app's tests/test_theme.py checks that both agree.",
+ "comment": "The desktop app's themes (sandbox_ai_app/theme.py THEMES_DATA) and the fonts its settings offer (sandbox_ai_app/fonts.py: family, how to get it), for the web interface; the app's tests/test_theme.py checks that both agree.",
  "themes": {
   "light": {
    "label": "light",
@@ -527,6 +527,593 @@
     "cursor": "#4dff88",
     "selectionBackground": "#1c5a32"
    }
+  },
+  "solarized_dark": {
+   "label": "Solarized Dark",
+   "dark": true,
+   "colors": {
+    "window": "#002b36",
+    "base": "#002b36",
+    "alternate": "#073642",
+    "text": "#93a1a1",
+    "secondary": "#839496",
+    "placeholder": "#839496",
+    "button": "#002b36",
+    "border": "#657b83",
+    "highlight": "#586e75",
+    "highlight_text": "#fdf6e3",
+    "accent": "#2aa198",
+    "accent_text": "#002b36",
+    "danger": "#e56462",
+    "tooltip": "#073642",
+    "disabled": "#586e75",
+    "nav": "#073642",
+    "nav_text": "#93a1a1",
+    "nav_selected": "#586e75",
+    "nav_selected_text": "#fdf6e3",
+    "title": "#eee8d5",
+    "canvas": "#002b36",
+    "grid": "#657b83",
+    "node": "#073642",
+    "node_header": "#586e75",
+    "node_title": "#fdf6e3"
+   },
+   "status": {
+    "ok": "#859900",
+    "warn": "#b58900",
+    "bad": "#e56462",
+    "muted": "#839496"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 4,
+   "bevel": false,
+   "terminal": {
+    "background": "#002b36",
+    "foreground": "#839496",
+    "cursor": "#93a1a1",
+    "selectionBackground": "#073642"
+   }
+  },
+  "solarized_light": {
+   "label": "Solarized Light",
+   "dark": false,
+   "colors": {
+    "window": "#fdf6e3",
+    "base": "#fdf6e3",
+    "alternate": "#eee8d5",
+    "text": "#073642",
+    "secondary": "#586e75",
+    "placeholder": "#586e75",
+    "button": "#fdf6e3",
+    "border": "#657b83",
+    "highlight": "#2076b3",
+    "highlight_text": "#fdf6e3",
+    "accent": "#2076b3",
+    "accent_text": "#fdf6e3",
+    "danger": "#da2925",
+    "tooltip": "#eee8d5",
+    "disabled": "#93a1a1",
+    "nav": "#eee8d5",
+    "nav_text": "#073642",
+    "nav_selected": "#93a1a1",
+    "nav_selected_text": "#002b36",
+    "title": "#002b36",
+    "canvas": "#eee8d5",
+    "grid": "#657b83",
+    "node": "#fdf6e3",
+    "node_header": "#eee8d5"
+   },
+   "status": {
+    "ok": "#697800",
+    "warn": "#8f6c00",
+    "bad": "#da2925",
+    "muted": "#586e75"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 4,
+   "bevel": false,
+   "terminal": {
+    "background": "#fdf6e3",
+    "foreground": "#657b83",
+    "cursor": "#586e75",
+    "selectionBackground": "#eee8d5"
+   }
+  },
+  "dracula": {
+   "label": "Dracula",
+   "dark": true,
+   "colors": {
+    "window": "#21222c",
+    "base": "#282a36",
+    "alternate": "#343746",
+    "text": "#f8f8f2",
+    "secondary": "#8390b7",
+    "placeholder": "#8390b7",
+    "button": "#282a36",
+    "border": "#6272a4",
+    "highlight": "#44475a",
+    "highlight_text": "#f8f8f2",
+    "accent": "#bd93f9",
+    "accent_text": "#282a36",
+    "danger": "#ff5555",
+    "tooltip": "#343746",
+    "disabled": "#6272a4",
+    "nav": "#191a21",
+    "nav_text": "#f8f8f2",
+    "nav_selected": "#44475a",
+    "nav_selected_text": "#f8f8f2",
+    "title": "#f8f8f2",
+    "canvas": "#21222c",
+    "grid": "#6272a4",
+    "node": "#282a36",
+    "node_header": "#44475a"
+   },
+   "status": {
+    "ok": "#50fa7b",
+    "warn": "#ffb86c",
+    "bad": "#ff5555",
+    "muted": "#8390b7"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 6,
+   "bevel": false,
+   "terminal": {
+    "background": "#282a36",
+    "foreground": "#f8f8f2",
+    "cursor": "#f8f8f2",
+    "selectionBackground": "#44475a"
+   }
+  },
+  "nord": {
+   "label": "Nord",
+   "dark": true,
+   "colors": {
+    "window": "#2e3440",
+    "base": "#2e3440",
+    "alternate": "#3b4252",
+    "text": "#d8dee9",
+    "secondary": "#919cb1",
+    "placeholder": "#919cb1",
+    "button": "#2e3440",
+    "border": "#5e81ac",
+    "highlight": "#434c5e",
+    "highlight_text": "#eceff4",
+    "accent": "#88c0d0",
+    "accent_text": "#2e3440",
+    "danger": "#cf888f",
+    "tooltip": "#3b4252",
+    "disabled": "#616e88",
+    "nav": "#3b4252",
+    "nav_text": "#d8dee9",
+    "nav_selected": "#4c566a",
+    "nav_selected_text": "#eceff4",
+    "title": "#eceff4",
+    "canvas": "#2e3440",
+    "grid": "#5e81ac",
+    "node": "#3b4252",
+    "node_header": "#434c5e"
+   },
+   "status": {
+    "ok": "#a3be8c",
+    "warn": "#ebcb8b",
+    "bad": "#cf888f",
+    "muted": "#919cb1"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 4,
+   "bevel": false,
+   "terminal": {
+    "background": "#2e3440",
+    "foreground": "#d8dee9",
+    "cursor": "#d8dee9",
+    "selectionBackground": "#434c5e"
+   }
+  },
+  "gruvbox_dark": {
+   "label": "Gruvbox Dark",
+   "dark": true,
+   "colors": {
+    "window": "#282828",
+    "base": "#282828",
+    "alternate": "#32302f",
+    "text": "#ebdbb2",
+    "secondary": "#a89984",
+    "placeholder": "#a89984",
+    "button": "#282828",
+    "border": "#928374",
+    "highlight": "#504945",
+    "highlight_text": "#fbf1c7",
+    "accent": "#83a598",
+    "accent_text": "#282828",
+    "danger": "#fb533f",
+    "tooltip": "#3c3836",
+    "disabled": "#7c6f64",
+    "nav": "#3c3836",
+    "nav_text": "#ebdbb2",
+    "nav_selected": "#504945",
+    "nav_selected_text": "#fbf1c7",
+    "title": "#fbf1c7",
+    "canvas": "#1d2021",
+    "grid": "#7c6f64",
+    "node": "#282828",
+    "node_header": "#3c3836"
+   },
+   "status": {
+    "ok": "#b8bb26",
+    "warn": "#fabd2f",
+    "bad": "#fb533f",
+    "muted": "#a89984"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 4,
+   "bevel": false,
+   "terminal": {
+    "background": "#282828",
+    "foreground": "#ebdbb2",
+    "cursor": "#ebdbb2",
+    "selectionBackground": "#504945"
+   }
+  },
+  "one_dark": {
+   "label": "One Dark",
+   "dark": true,
+   "colors": {
+    "window": "#21252b",
+    "base": "#282c34",
+    "alternate": "#2c313a",
+    "text": "#abb2bf",
+    "secondary": "#9da5b4",
+    "placeholder": "#9da5b4",
+    "button": "#282c34",
+    "border": "#828997",
+    "highlight": "#3e4451",
+    "highlight_text": "#d7dae0",
+    "accent": "#61afef",
+    "accent_text": "#282c34",
+    "danger": "#e17079",
+    "tooltip": "#21252b",
+    "disabled": "#5c6370",
+    "nav": "#21252b",
+    "nav_text": "#abb2bf",
+    "nav_selected": "#2c313a",
+    "nav_selected_text": "#d7dae0",
+    "title": "#d7dae0",
+    "canvas": "#21252b",
+    "grid": "#828997",
+    "node": "#282c34",
+    "node_header": "#3e4451"
+   },
+   "status": {
+    "ok": "#98c379",
+    "warn": "#e5c07b",
+    "bad": "#e17079",
+    "muted": "#9da5b4"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 4,
+   "bevel": false,
+   "terminal": {
+    "background": "#282c34",
+    "foreground": "#abb2bf",
+    "cursor": "#528bff",
+    "selectionBackground": "#3e4451"
+   }
+  },
+  "catppuccin_mocha": {
+   "label": "Catppuccin Mocha",
+   "dark": true,
+   "colors": {
+    "window": "#181825",
+    "base": "#1e1e2e",
+    "alternate": "#181825",
+    "text": "#cdd6f4",
+    "secondary": "#a6adc8",
+    "placeholder": "#9399b2",
+    "button": "#313244",
+    "border": "#6c7086",
+    "highlight": "#45475a",
+    "highlight_text": "#cdd6f4",
+    "accent": "#cba6f7",
+    "accent_text": "#11111b",
+    "danger": "#f38ba8",
+    "tooltip": "#313244",
+    "disabled": "#6c7086",
+    "nav": "#11111b",
+    "nav_text": "#bac2de",
+    "nav_selected": "#313244",
+    "nav_selected_text": "#cdd6f4",
+    "title": "#cdd6f4",
+    "canvas": "#11111b",
+    "grid": "#6c7086",
+    "node": "#1e1e2e",
+    "node_header": "#313244"
+   },
+   "status": {
+    "ok": "#a6e3a1",
+    "warn": "#f9e2af",
+    "bad": "#f38ba8",
+    "muted": "#a6adc8"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 8,
+   "bevel": false,
+   "terminal": {
+    "background": "#1e1e2e",
+    "foreground": "#cdd6f4",
+    "cursor": "#f5e0dc",
+    "selectionBackground": "#45475a"
+   }
+  },
+  "catppuccin_latte": {
+   "label": "Catppuccin Latte",
+   "dark": false,
+   "colors": {
+    "window": "#eff1f5",
+    "base": "#eff1f5",
+    "alternate": "#e6e9ef",
+    "text": "#4c4f69",
+    "secondary": "#5c5f77",
+    "placeholder": "#5c5f77",
+    "button": "#eff1f5",
+    "border": "#7c7f93",
+    "highlight": "#ccd0da",
+    "highlight_text": "#4c4f69",
+    "accent": "#8839ef",
+    "accent_text": "#eff1f5",
+    "danger": "#d20f39",
+    "tooltip": "#e6e9ef",
+    "disabled": "#8c8fa1",
+    "nav": "#e6e9ef",
+    "nav_text": "#4c4f69",
+    "nav_selected": "#ccd0da",
+    "nav_selected_text": "#4c4f69",
+    "title": "#4c4f69",
+    "canvas": "#e6e9ef",
+    "grid": "#7c7f93",
+    "node": "#eff1f5",
+    "node_header": "#dce0e8"
+   },
+   "status": {
+    "ok": "#327d22",
+    "warn": "#996214",
+    "bad": "#d20f39",
+    "muted": "#5c5f77"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 8,
+   "bevel": false,
+   "terminal": {
+    "background": "#eff1f5",
+    "foreground": "#4c4f69",
+    "cursor": "#dc8a78",
+    "selectionBackground": "#ccd0da"
+   }
+  },
+  "tokyo_night": {
+   "label": "Tokyo Night",
+   "dark": true,
+   "colors": {
+    "window": "#16161e",
+    "base": "#1a1b26",
+    "alternate": "#16161e",
+    "text": "#c0caf5",
+    "secondary": "#a9b1d6",
+    "placeholder": "#a9b1d6",
+    "button": "#292e42",
+    "border": "#737aa2",
+    "highlight": "#283457",
+    "highlight_text": "#c0caf5",
+    "accent": "#7aa2f7",
+    "accent_text": "#16161e",
+    "danger": "#f7768e",
+    "tooltip": "#16161e",
+    "disabled": "#545c7e",
+    "nav": "#16161e",
+    "nav_text": "#a9b1d6",
+    "nav_selected": "#292e42",
+    "nav_selected_text": "#c0caf5",
+    "title": "#c0caf5",
+    "canvas": "#16161e",
+    "grid": "#737aa2",
+    "node": "#1a1b26",
+    "node_header": "#292e42"
+   },
+   "status": {
+    "ok": "#9ece6a",
+    "warn": "#e0af68",
+    "bad": "#f7768e",
+    "muted": "#a9b1d6"
+   },
+   "font": {
+    "families": [
+     "Inter",
+     "Cantarell",
+     "Noto Sans",
+     "Segoe UI",
+     "Ubuntu",
+     "DejaVu Sans",
+     "sans-serif"
+    ],
+    "size": 10
+   },
+   "radius": 6,
+   "bevel": false,
+   "terminal": {
+    "background": "#1a1b26",
+    "foreground": "#c0caf5",
+    "cursor": "#c0caf5",
+    "selectionBackground": "#283457"
+   }
   }
+ },
+ "fonts": {
+  "ui": [
+   [
+    "Inter",
+    "Debian/Ubuntu: fonts-inter · Fedora: rsms-inter-fonts · Arch: inter-font · macOS: brew install --cask font-inter · rsms.me/inter"
+   ],
+   [
+    "IBM Plex Sans",
+    "Debian/Ubuntu: fonts-ibm-plex · Fedora: ibm-plex-sans-fonts · Arch: ttf-ibm-plex · macOS: brew install --cask font-ibm-plex-sans · github.com/IBM/plex"
+   ],
+   [
+    "Noto Sans",
+    "Debian/Ubuntu: fonts-noto-core · Fedora: google-noto-sans-fonts · Arch: noto-fonts · macOS: brew install --cask font-noto-sans · fonts.google.com/noto"
+   ],
+   [
+    "Cantarell",
+    "Debian/Ubuntu: fonts-cantarell · Fedora: abattis-cantarell-fonts · Arch: cantarell-fonts · macOS: brew install --cask font-cantarell · gitlab.gnome.org/GNOME/cantarell-fonts"
+   ],
+   [
+    "Ubuntu",
+    "Ubuntu: fonts-ubuntu · Arch: ttf-ubuntu-font-family · macOS: brew install --cask font-ubuntu · design.ubuntu.com/font"
+   ],
+   [
+    "DejaVu Sans",
+    "Debian/Ubuntu: fonts-dejavu-core · Fedora: dejavu-sans-fonts · Arch: ttf-dejavu · macOS: brew install --cask font-dejavu · dejavu-fonts.github.io"
+   ],
+   [
+    "Liberation Sans",
+    "Debian/Ubuntu: fonts-liberation · Fedora: liberation-sans-fonts · Arch: ttf-liberation · github.com/liberationfonts"
+   ]
+  ],
+  "mono": [
+   [
+    "JetBrains Mono",
+    "Debian/Ubuntu: fonts-jetbrains-mono · Fedora: jetbrains-mono-fonts · Arch: ttf-jetbrains-mono · macOS: brew install --cask font-jetbrains-mono · jetbrains.com/lp/mono"
+   ],
+   [
+    "Fira Code",
+    "Debian/Ubuntu: fonts-firacode · Fedora: fira-code-fonts · Arch: ttf-fira-code · macOS: brew install --cask font-fira-code · github.com/tonsky/FiraCode"
+   ],
+   [
+    "Cascadia Code",
+    "Debian/Ubuntu: fonts-cascadia-code · Fedora: cascadia-code-fonts · Arch: ttf-cascadia-code · macOS: brew install --cask font-cascadia-code · github.com/microsoft/cascadia-code"
+   ],
+   [
+    "Source Code Pro",
+    "Fedora: adobe-source-code-pro-fonts · Arch: adobe-source-code-pro-fonts · macOS: brew install --cask font-source-code-pro · github.com/adobe-fonts/source-code-pro"
+   ],
+   [
+    "Hack",
+    "Debian/Ubuntu: fonts-hack · Arch: ttf-hack · macOS: brew install --cask font-hack · sourcefoundry.org/hack"
+   ],
+   [
+    "IBM Plex Mono",
+    "Debian/Ubuntu: fonts-ibm-plex · Fedora: ibm-plex-mono-fonts · Arch: ttf-ibm-plex · macOS: brew install --cask font-ibm-plex-mono · github.com/IBM/plex"
+   ],
+   [
+    "Iosevka",
+    "Arch: ttc-iosevka · macOS: brew install --cask font-iosevka · typeof.net/Iosevka"
+   ],
+   [
+    "Ubuntu Mono",
+    "Ubuntu: fonts-ubuntu · Arch: ttf-ubuntu-font-family · macOS: brew install --cask font-ubuntu-mono · design.ubuntu.com/font"
+   ],
+   [
+    "DejaVu Sans Mono",
+    "Debian/Ubuntu: fonts-dejavu-core · Fedora: dejavu-sans-mono-fonts · Arch: ttf-dejavu · macOS: brew install --cask font-dejavu · dejavu-fonts.github.io"
+   ],
+   [
+    "Noto Sans Mono",
+    "Debian/Ubuntu: fonts-noto-core · Fedora: google-noto-sans-mono-fonts · Arch: noto-fonts · macOS: brew install --cask font-noto-sans-mono · fonts.google.com/noto"
+   ],
+   [
+    "Liberation Mono",
+    "Debian/Ubuntu: fonts-liberation · Fedora: liberation-mono-fonts · Arch: ttf-liberation · github.com/liberationfonts"
+   ],
+   [
+    "Menlo",
+    "comes with macOS"
+   ]
+  ]
  }
 }

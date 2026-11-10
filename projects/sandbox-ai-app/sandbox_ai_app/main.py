@@ -34,12 +34,12 @@ NO_GPU = ("--disable-gpu", "--disable-gpu-compositing", "--disable-features=Vulk
 def chromium_flags(environ):
     """QTWEBENGINE_CHROMIUM_FLAGS for the terminal tabs: without the GPU and Vulkan (xterm.js needs neither, and a
     machine without usable acceleration filled the log with Vulkan, GLX and command-buffer errors), Chromium's own
-    messages from errors up (all with --debug). None: leave the variable as it is (yours wins; SANDBOX_AI_APP_GPU=1
+    messages from errors up (all with --debug=all). None: leave the variable as it is (yours wins; SANDBOX_AI_APP_GPU=1
     keeps the GPU)."""
     if "QTWEBENGINE_CHROMIUM_FLAGS" in environ:
         return None
     flags = [] if environ.get("SANDBOX_AI_APP_GPU") == "1" else list(NO_GPU)
-    if not environ.get("SANDBOX_AI_APP_DEBUG"):
+    if environ.get("SANDBOX_AI_APP_DEBUG") != "all":  # Chromium's chatter only when everything is asked for
         flags.append("--log-level=2")
     return " ".join(flags) or None
 
@@ -71,6 +71,12 @@ def main(argv=None):
     # AppImage's, the macOS app's and CI's checks run, e.g. with QT_QPA_PLATFORM=offscreen). No dialog, no intro,
     # no tour; a problem is printed and ends it with 1.
     self_test = "--self-test" in arguments[1:]
+    # --wait-for-pid=PID ("Restart the app" after an update): the app before must have ended first - its
+    # single-instance guard would take this start for a second one (bounded: backend.RESTART_WAIT).
+    waited = [arg for arg in arguments[1:] if arg.startswith(backend.WAIT_FOR_PID)]
+    arguments = [arg for arg in arguments if not arg.startswith(backend.WAIT_FOR_PID)]
+    if waited and waited[-1][len(backend.WAIT_FOR_PID):].isdigit():
+        backend.wait_for_exit(int(waited[-1][len(backend.WAIT_FOR_PID):]))  # before any window: nothing to paint yet
     # Set by the AppImage's or the macOS app's start for this process only (see backend.installed_launcher).
     backend.PACKAGE_LAUNCHER = os.environ.pop("SANDBOX_AI_APP_PACKAGE_LAUNCHER", None) or backend.PACKAGE_LAUNCHER
     problem = broken_pyside()
@@ -93,6 +99,20 @@ def main(argv=None):
                  f"{'off (QTWEBENGINE_DISABLE_SANDBOX)' if no_sandbox else 'on (checked before each terminal tab)'}\n")
 
     app = QApplication.instance() or QApplication([arg for arg in arguments if arg != "--self-test"])
+    # One app per user (single_instance.py): a second start shows the first one's window and ends - two would write
+    # the same state file, the last to quit overwriting the other's unapplied board changes.
+    instance = None
+    if not self_test and not os.environ.get("SANDBOX_AI_APP_ANOTHER"):
+        from .single_instance import Instance
+        instance = Instance()
+        if not instance.claim(hidden="--hidden" in arguments[1:]):
+            print("sandbox-ai-app: already running - its window is brought to the front", file=sys.stderr)
+            return 0
+    from . import crashguard, logview
+    logview.hub()  # every entry from now on reaches the log window, also those before the window is made
+    # The record of this run (app-run.json): the last run's, left by a process that is gone, is an unexpected end
+    # (killed from outside: nothing of it is in app.log otherwise), said in the log window at this start.
+    guard = None if self_test else crashguard.Guard(wait=False).start()
     from .widgets import collect_on_gui_thread
     collect_on_gui_thread()  # never a Qt object deleted by the cycle collector in a worker thread
     app.setApplicationName("sandbox-ai")
@@ -118,6 +138,8 @@ def main(argv=None):
     if backend.setting("debug", settings):
         applog.set_debug(True)
     i18n.set_language(settings.get("language", "system"))
+    from . import fonts
+    fonts.use(settings, app)  # the fonts chosen in the settings, when installed; theme.apply() applies them
     theme.apply(settings.get("theme", "system"), app)
     from .ui import MainWindow, risk_text
     from .widgets import ask_first
@@ -181,9 +203,32 @@ def main(argv=None):
     # loop ends and Python's exit handlers run (they remove what unfinished copies created). The approvals
     # timer gives Python a moment every second to handle the signal.
     signal.signal(signal.SIGTERM, lambda *_: window.terminate())
+    if instance is not None:  # a later start of the app: this window, to the front (a start for the tray: nothing)
+        instance.asked.connect(lambda word: word == "show" and bring_to_front(window))
+    if guard is not None:
+        from PySide6.QtCore import QTimer
+        ticks = QTimer(window)
+        ticks.timeout.connect(lambda: guard.tick(window.current_page()))
+        ticks.start(crashguard.TICK * 1000)
+        if guard.last:  # the last run ended without quitting: said once, the details in the log window
+            QTimer.singleShot(1500, lambda: window.notify(
+                i18n.tr("The app ended unexpectedly last time"),
+                i18n.tr("What is known of it is in the log window (and app.log)."), level="warning",
+                action=(i18n.tr("Show the log"), lambda: window.set_panel("log", True))))
     code = app.exec()
     end_widgets(app, window)
+    if guard is not None:
+        guard.stop()  # a clean end: no record left
+    if instance is not None:
+        instance.release()
     return code
+
+
+def bring_to_front(window):
+    """The window shown (from the tray, minimized or behind others), on the page it shows."""
+    if window.isMinimized():
+        window.showNormal()
+    window.show_page(window.current_page() or "launch")
 
 
 def end_widgets(app, window):

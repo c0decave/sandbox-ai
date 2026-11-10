@@ -680,15 +680,35 @@ def status(name):
     return "running" if any(arg == directory or arg == directory + b"/server.sock" for arg in cmdline) else "stopped"
 
 
-def wait_for_socket(path, log, process, timeout=READY_TIMEOUT):
+def wait_for_socket(path, log, process, timeout=READY_TIMEOUT, ready=None):
+    """Until the server's socket PATH is there (READY: macOS, see machine_ready), or the sandbox ended."""
     deadline = time.monotonic() + timeout
-    while not path.exists():
+    ready = ready or path.exists
+    while not ready():
         if process.poll() is not None:
             tail = launcher().printable(log.read_text(errors="replace")[-3000:]) if log.exists() else ""
             raise RuntimeError(f"MCP server sandbox failed to start (status {process.returncode}):\n{tail}")
         if time.monotonic() > deadline:
             raise RuntimeError(f"MCP server did not become ready within {timeout} s; see {log}")
         time.sleep(0.2)
+
+
+def machine_ready(name, a, runner=None):
+    """macOS: {"ready": probe} for wait_for_socket - the server's socket lies in a Podman volume in podman machine's
+    VM (agent_sandbox.mcp_volume), asked for through podman exec into the server's container; {} elsewhere."""
+    if not launcher().on_machine(a):
+        return {}
+    record = {"pod": pod_name(name), "podman_url": a.podman_url}
+
+    def probe():
+        command = launcher().machine_exec(record, ["--internal-attach-probe",
+                                                   f"{launcher().MCP_SERVE_DIR}/server.sock"], interactive=False)
+        try:
+            return (runner or subprocess.run)(command, stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                                              check=False).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return {"ready": probe}
 
 
 def definition_digest(definition, backend, podman_url=None):
@@ -795,6 +815,12 @@ def ensure_running_locked(name, a, vpn=None):
                                a.backend, a.podman_url)
     if vpn is not None:
         launcher().load_vpn_module().check_name(vpn)
+    if launcher().on_machine(a) and ("image" in definition or "rootfs" in definition):
+        # The bridge of a catalog server runs on this host and listens on a Unix socket there, which the sandboxes in
+        # podman machine's VM cannot connect to (TODO.md: macOS support, stage 4).
+        raise ValueError(f"MCP server {name} is a container image of a catalog; on macOS such servers are not "
+                         "supported yet (their bridge would run on the Mac, out of reach of podman machine's VM). "
+                         "A server defined with a command (\"command\" in mcp.json) works.")
     if status(name) == "running":
         if load_state(name).get("definition") != digest:
             # Another project's definition of this name: its workspace must not reach this agent. Other rules
@@ -804,7 +830,7 @@ def ensure_running_locked(name, a, vpn=None):
         if vpn is not None and load_state(name).get("vpn") != vpn:
             raise ValueError(f"MCP server {name} is running without the VPN {vpn}; stop it first: sandbox-ai mcp stop "
                              f"{name}")
-        if (launcher().mcp_socket_dir(name) / "server.sock").exists():
+        if machine_ready(name, a).get("ready", (launcher().mcp_socket_dir(name) / "server.sock").exists)():
             return "running"
         stop_locked(name)  # alive but its socket is gone: replace it rather than start a second one
     sock = launcher().mcp_socket_dir(name)
@@ -887,7 +913,7 @@ def ensure_running_locked(name, a, vpn=None):
                           "definition": digest, "vpn": vpn,
                           "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
-        wait_for_socket(sock / "server.sock", directory / "supervisor.log", process)
+        wait_for_socket(sock / "server.sock", directory / "supervisor.log", process, **machine_ready(name, a))
         print(f"agent-sandbox: helper {definition['helper']} ({name}) started in its own sandbox", file=sys.stderr)
         return "started"
     cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), definition.get("agent", "codex"),
@@ -907,7 +933,7 @@ def ensure_running_locked(name, a, vpn=None):
                       "command": definition["command"], "backend": a.backend,
                       "podman_url": a.podman_url, "definition": digest, "vpn": used_vpn,
                       "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "started_for": started_for(a)})
-    wait_for_socket(sock / "server.sock", log, process)
+    wait_for_socket(sock / "server.sock", log, process, **machine_ready(name, a))
     print(f"agent-sandbox: MCP server {name} started in its own sandbox", file=sys.stderr)
     return "started"
 
@@ -1007,12 +1033,14 @@ def stop_locked(name, timeout=30):
         print(f"sandbox-ai mcp: MCP server {name} is not running", file=sys.stderr)
         return 0
     pid = load_state(name)["pid"]
-    os.kill(pid, signal.SIGTERM)
+    with contextlib.suppress(ProcessLookupError):  # it ended right after the check: stopped all the same
+        os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + timeout
     while status(name) == "running" and time.monotonic() < deadline:
         time.sleep(0.2)
     if status(name) == "running":
-        os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
         time.sleep(0.5)
         state = load_state(name)
         if state.get("backend") == "podman":

@@ -74,7 +74,7 @@ def user_bus():
         return False
 
 
-# Without a systemd user session every local build runs with cgroupfs (sandbox-build-image): its global option
+# Without a systemd user session every local build runs with cgroupfs (sandbox-ai build): its global option
 # comes first. On a desktop login there is none.
 CGROUPS = [] if user_bus() else ["--cgroup-manager=cgroupfs"]
 
@@ -96,7 +96,7 @@ def fake_podman(tmp_path, monkeypatch):
 def test_builder_selects_one_recipe_and_image(agent, remote, fake_podman):
     options = ["--podman-url", "unix:///tmp/test-engine.sock"] if remote else []
     version = f"{agent.upper()}_VERSION=1.2.3"
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), *options, agent, "--build-arg", version], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", *options, agent, "--build-arg", version], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(fake_podman.read_text()) == [
         *(["--remote", "--url", "unix:///tmp/test-engine.sock"] if remote else CGROUPS),
@@ -135,12 +135,12 @@ def test_builder_selects_one_recipe_and_image(agent, remote, fake_podman):
                                      ["codex", "--build-arg=CODEX_VERSION="],
                                      ["--pin", "1.0.0", "codex", "--build-arg", "CODEX_VERSION=2.0.0"]])
 def test_builder_rejects_missing_or_unknown_agent_before_podman(options, fake_podman):
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), *options], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", *options], capture_output=True, text=True)
     assert result.returncode == 2
     assert "Usage:" in result.stderr or "sandbox-ai build:" in result.stderr
-    # review 6 L6: the errors name the command the user is told to type (only the old name's deprecation note keeps it)
+    # review 6 L6: the errors name the command the user is told to type
     assert not [line for line in result.stderr.splitlines()
-                if line.startswith("sandbox-build-image:") and "deprecated" not in line]
+                if line.startswith("sandbox-build-image:")]
     assert not fake_podman.exists()
 
 
@@ -153,7 +153,7 @@ def fake_npm(tmp_path):
 
 @pytest.mark.parametrize("agent", HOSTS)
 def test_builder_pins_latest_release_and_refreshes_base(agent, fake_podman, fake_npm):
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), agent], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", agent], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     version = {"codex": "9.1.0", "claude": "9.2.0", "opencode": "9.3.0"}[agent]
     assert json.loads(fake_podman.read_text()) == [
@@ -169,7 +169,7 @@ def test_builder_all_builds_every_image(tmp_path, fake_npm, monkeypatch):
     (tmp_path / "podman").chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + ":/usr/bin:/bin")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "all"], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "all"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     lines = log.read_text().splitlines()
     assert [line.split()[2 + len(CGROUPS)] for line in lines] == [
@@ -195,7 +195,8 @@ def test_builder_without_npm_queries_registry_with_python(tmp_path, monkeypatch)
     monkeypatch.setenv("BUILD_LOG", str(log))
     monkeypatch.setenv("SANDBOX_AI_PYTHON", sys.executable)  # images.py checks the extensions, not the stand-in
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    result = subprocess.run(["/bin/bash", str(ROOT / "sandbox-build-image"), "claude"], capture_output=True, text=True)
+    # build_image.sh itself (what sandbox-ai build runs): python3 on PATH is the stand-in, it could not run main.py
+    result = subprocess.run(["/bin/bash", str(ROOT / "sandbox/build_image.sh"), "claude"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert "CLAUDE_VERSION=7.7.7" in json.loads(log.read_text())
 
@@ -203,7 +204,7 @@ def test_builder_without_npm_queries_registry_with_python(tmp_path, monkeypatch)
 def test_builder_rejects_unexpected_version_before_building(tmp_path, monkeypatch, fake_podman):
     (tmp_path / "npm").write_text("#!/bin/sh\necho '1.0.0; rm -rf /'\n")
     (tmp_path / "npm").chmod(0o700)
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "codex"], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "codex"], capture_output=True, text=True)
     assert result.returncode != 0
     assert "unexpected version" in result.stderr
     assert not fake_podman.exists()
@@ -212,22 +213,22 @@ def test_builder_rejects_unexpected_version_before_building(tmp_path, monkeypatc
 def test_builder_all_resolves_every_version_before_building(tmp_path, fake_podman):
     (tmp_path / "npm").write_text("#!/bin/sh\n[ \"$2\" = @anthropic-ai/claude-code ] && exit 1\necho 1.2.3\n")
     (tmp_path / "npm").chmod(0o700)
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "all"], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "all"], capture_output=True, text=True)
     assert result.returncode != 0
     assert not fake_podman.exists(), "no image may be rebuilt when any version lookup fails"
 
 
 def test_builder_refuses_removed_update_option(fake_podman):
     """--update was a no-op kept for compatibility; it is gone like any unknown option."""
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "--update", "claude"], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "--update", "claude"], capture_output=True, text=True)
     assert result.returncode == 2 and "codex|claude|opencode" in result.stderr
-    assert "--update" not in subprocess.run([str(ROOT / "sandbox-build-image"), "--help"],
+    assert "--update" not in subprocess.run([str(ROOT / "sandbox-ai"), "build", "--help"],
                                             capture_output=True, text=True).stdout
     assert not fake_podman.exists()
 
 
 def test_builder_help_does_not_build(fake_podman):
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "--help"], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "--help"], capture_output=True, text=True)
     assert result.returncode == 0
     assert "codex|claude|opencode" in result.stdout
     assert not fake_podman.exists()
@@ -238,7 +239,7 @@ def test_builder_defaults_to_newest_and_pins_on_request(scenario, fake_podman, f
     """Without flags every build resolves the newest agent; --pin/--uv/--node fix versions."""
     options = {"latest": ["claude"], "pinned": ["--pin", "1.0.42", "claude"],
                "bases": ["--uv", "0.5.11", "--node", "docker.io/library/node@sha256:abc", "claude"]}[scenario]
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), *options], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", *options], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     args = json.loads(fake_podman.read_text())
     version = "1.0.42" if scenario == "pinned" else "9.2.0"

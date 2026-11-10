@@ -131,8 +131,9 @@ def check(name, entry):
         raise ValueError(f"host {name}: description is one line of at most 200 characters")
     command = entry.get("command")
     if command is not None and (not isinstance(command, str) or not COMMAND.fullmatch(command)
-                                or command.startswith("-")):
-        raise ValueError(f"host {name}: command is the path of sandbox-ai there (not starting with '-')")
+                                or command.startswith("-") or "~" in command.removeprefix("~/")):
+        raise ValueError(f"host {name}: command is the path of sandbox-ai there (absolute, or ~/..., not starting "
+                         "with '-')")
     update_sudo = entry.get("update_sudo", False)
     if not isinstance(update_sudo, bool):
         raise ValueError(f"host {name}: update_sudo is true or false")
@@ -455,6 +456,14 @@ def ssh_base(entry, tty=False, control=None):
 SUDO = {"batch": "sudo -n -- ", "prompt": "sudo -- "}
 
 
+def command_word(command):
+    """A host's own COMMAND for the remote shell, quoted; a leading ~/ as "$HOME"/ (a quoted ~ is not expanded, so
+    ~/bin/sandbox-ai would name a folder called ~)."""
+    if command.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(command[2:])
+    return shlex.quote(command)
+
+
 def remote_command(entry, args, sudo=None):
     """The one string ssh hands the remote shell: sandbox-ai with ARGS, each quoted; sandbox-ai from PATH, else
     ~/.local/bin/sandbox-ai (a non-interactive login reads no ~/.bashrc), else the host's own command. SUDO:
@@ -463,7 +472,7 @@ def remote_command(entry, args, sudo=None):
     quoted = " ".join(shlex.quote(str(arg)) for arg in args)
     prefix = SUDO[sudo] if sudo else ""
     if entry.get("command"):
-        return f"exec {prefix}{shlex.quote(entry['command'])} {quoted}".rstrip()
+        return f"exec {prefix}{command_word(entry['command'])} {quoted}".rstrip()
     if sudo:
         return (f'if command -v sandbox-ai >/dev/null 2>&1; then exec {prefix}"$(command -v sandbox-ai)" {quoted}; '
                 f'else exec {prefix}"$HOME/.local/bin/sandbox-ai" {quoted}; fi')

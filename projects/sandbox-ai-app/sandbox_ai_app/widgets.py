@@ -20,7 +20,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QTextDocument, QTextOption
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel,
+    QLayout, QLineEdit,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
     QTableView, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
 )
@@ -2056,3 +2057,67 @@ class Busy:
     def __exit__(self, *exc):
         QApplication.restoreOverrideCursor()
 
+
+
+START_WHERE = (("app", i18n.N_("in the app")), ("window", i18n.N_("in a terminal window")))
+
+
+class StartControls(QWidget):
+    """One Start for the Board and the Start page: where (a terminal tab of the app or a terminal window) and whether
+    it starts as a session - kept running in tmux when its terminal or the app closes (or the app crashes), attached
+    again from Sandboxes & sessions or Terminals - named by a codename unless a name of its own is typed. Before,
+    three buttons (Start in the app, Start in a terminal window, Start as session) said the same less clearly.
+    START(embedded, session) is called with True (the app) or False (a window) and the session's name or None."""
+
+    def __init__(self, start, sai=None, settings=None, parent=None):
+        super().__init__(parent)
+        self.start_function, self.sai = start, sai
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.where = QComboBox()
+        self.where.setAccessibleName(tr("Where it starts"))
+        for key, title in START_WHERE:
+            self.where.addItem(tr(title), key)
+        chosen = (settings or {}).get("terminal", "app") if isinstance(settings, dict) else "app"
+        self.where.setCurrentIndex(max(0, self.where.findData("window" if chosen == "window" else "app")))
+        self.where.setToolTip(safe_tooltip(tr("A terminal tab of this window (Terminals), or your terminal program")))
+        self.as_session = QCheckBox(tr("as session"))
+        self.as_session.setChecked(True)
+        self.as_session.setToolTip(safe_tooltip(tr(
+            "Keeps running when its terminal or the app closes; attach it again from Sandboxes & sessions or "
+            "Terminals. Off: it ends with its terminal.")))
+        self.name = QLineEdit()
+        self.name.setAccessibleName(tr("Session name"))
+        self.name.setMaximumWidth(220)
+        self.suggestion = ""
+        self.as_session.toggled.connect(self.name.setEnabled)
+        self.button = QPushButton(tr("Start"))
+        self.button.setProperty("role", "primary")  # the main action of its page
+        self.button.clicked.connect(lambda _=False: self.start())
+        for widget in (self.button, self.where, self.as_session, self.name):
+            layout.addWidget(widget)
+        self.new_name()
+
+    def new_name(self):
+        """A codename for the next session (as the launcher names starts), shown in the empty name field."""
+        try:
+            name = self.sai.module("codenames").codename() if self.sai is not None else ""
+        except Exception:  # noqa: BLE001 - an older sandbox-ai without codenames: a name must be typed
+            name = ""
+        self.suggestion = name
+        self.name.setPlaceholderText(name or tr("session name"))
+        self.name.setToolTip(safe_tooltip(tr("Empty: the session is called {name}", name=name) if name else
+                                          tr("The name of the session")))
+
+    def start(self):
+        embedded = self.where.currentData() != "window"
+        session = None
+        if self.as_session.isChecked():
+            session = self.name.text().strip() or self.suggestion
+            if not session:
+                inform(self, tr("Session"), tr("Give the session a name first."))
+                return False
+        started = self.start_function(embedded, session)
+        if started and session and not self.name.text().strip():
+            self.new_name()  # the next one gets another
+        return started

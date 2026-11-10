@@ -65,6 +65,50 @@ def stat_mode(path):
     return os.stat(path).st_mode & 0o777
 
 
+def test_fonts_are_chosen_installed_or_marked_with_how_to_get_them(qapp, env, monkeypatch):
+    """Appearance: the theme's font or one of the list; one that is not installed is marked so, says how to get it
+    (its tooltip, and under the box once chosen) and the theme's font stays; an installed one applies at once."""
+    from PySide6.QtCore import Qt
+    from sandbox_ai_app import fonts, theme
+    from sandbox_ai_app.settings import SettingsDialog
+    monkeypatch.setattr(fonts, "_families", ["Hack", "DejaVu Sans"])
+    sai = backend.SandboxAI()
+    dialog = SettingsDialog(sai)
+    try:
+        mono, ui = dialog.fields["mono_font"], dialog.fields["ui_font"]
+        assert mono.currentData() == "" and ui.currentData() == "", "the theme's by default"
+        texts = {mono.itemData(i): mono.itemText(i) for i in range(mono.count())}
+        assert texts["Hack"] == "Hack" and texts["JetBrains Mono"] == "JetBrains Mono (not installed)"
+        tip = mono.itemData(mono.findData("JetBrains Mono"), Qt.ItemDataRole.ToolTipRole)
+        installed_tip = mono.itemData(mono.findData("Hack"), Qt.ItemDataRole.ToolTipRole) or ""
+        # (an installed one's tooltip, if any, is its name alone: entries explain themselves on hover since 0.1.80)
+        assert "fonts-jetbrains-mono" in tip and "install" not in installed_tip.lower()
+        assert ui.findData("Inter") > 0 and ui.itemText(ui.findData("Inter")) == "Inter (not installed)"
+        mono.setCurrentIndex(mono.findData("JetBrains Mono"))
+        qapp.processEvents()
+        assert sai.settings()["mono_font"] == "JetBrains Mono", "kept for when it is installed"
+        hint = dialog.font_hints["mono"]
+        assert not hint.isHidden() and "not installed" in hint.text() and "fonts-jetbrains-mono" in hint.text()
+        assert widgets.MONO.families() == ["monospace"], "the theme's font until then"
+        mono.setCurrentIndex(mono.findData("Hack"))
+        qapp.processEvents()
+        assert sai.settings()["mono_font"] == "Hack" and hint.isHidden()
+        assert widgets.MONO.families() == ["Hack", "monospace"]
+        assert json.loads(theme.terminal_theme())["fontFamily"].startswith("Hack, ")
+        mono.setCurrentIndex(0)
+        qapp.processEvents()
+        assert sai.settings()["mono_font"] == "" and widgets.MONO.families() == ["monospace"]
+        before = qapp.font().families()
+        ui.setCurrentIndex(ui.findData("DejaVu Sans"))
+        assert sai.settings()["ui_font"] == "DejaVu Sans" and qapp.font().families()[0] == "DejaVu Sans"
+        ui.setCurrentIndex(0)
+        assert qapp.font().families() == before, "the theme's font again"
+    finally:
+        monkeypatch.setattr(fonts, "_families", None)
+        fonts.use({})
+        theme.apply("system")
+
+
 def test_the_policy_is_shown_and_greyed_out_in_the_form(qapp, env, monkeypatch):
     from sandbox_ai_app.settings import SettingsDialog
     from sandbox_ai_app.ui import LaunchPage

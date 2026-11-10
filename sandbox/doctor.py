@@ -289,8 +289,9 @@ def check_image(agent, podman_url=None):
 
 
 def check_vpn(podman_url=None, modules=Path("/sys/module"), tun=Path("/dev/net/tun")):
-    """--vpn: the image, /dev/net/tun, and whether WireGuard runs in the kernel or as wireguard-go. Only once
-    there is a profile (sandbox-ai vpn list)."""
+    """--vpn: the images the profiles need (localhost/sandbox-ai-vpn for WireGuard, OpenVPN and Tailscale,
+    localhost/sandbox-ai-tor for Tor), /dev/net/tun, and whether WireGuard runs in the kernel or as wireguard-go.
+    Only once there is a profile (sandbox-ai vpn list)."""
     spec = importlib.util.spec_from_file_location("sandbox_vpn_for_doctor", HERE / "vpn.py")
     vpn = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(vpn)
@@ -299,20 +300,28 @@ def check_vpn(podman_url=None, modules=Path("/sys/module"), tun=Path("/dev/net/t
         return "skip", "VPN", "no profiles", ""
     if not shutil.which("podman"):
         return "fail", "VPN", "no podman", "--vpn needs the Podman backend"
-    if run([*podman_base(podman_url), "image", "exists", vpn.VPN_IMAGE])[0] != 0:
-        return "warn", "VPN", f"{vpn.VPN_IMAGE} missing", "sandbox-ai build vpn"
-    # Tor has no tunnel device: /dev/net/tun only matters for the other kinds.
     kinds = set()
     for profile in profiles:
         try:
             kinds.add(vpn.load_profile(profile).get("type"))
         except (OSError, ValueError):
             kinds.add(None)
+    # A profile that cannot be read is no reason to ask for an image; one of a known type needs its own.
+    images = sorted({vpn.image({"type": kind}) for kind in kinds if kind})
+    missing = [image for image in images if run([*podman_base(podman_url), "image", "exists", image])[0] != 0]
+    if missing:
+        return ("warn", "VPN", " and ".join(missing) + " missing",
+                "; ".join(vpn.build_command(image) for image in missing))
+    # Tor has no tunnel device: /dev/net/tun only matters for the other kinds.
     if not podman_url and not tun.exists() and kinds - {"tor"}:
         return "fail", "VPN", "/dev/net/tun is missing", "sudo modprobe tun"
+    if kinds == {"tor"}:
+        return "ok", "VPN", f"{len(profiles)} profile(s); Tor only", ""
     kernel = (modules / "wireguard").exists()
     return ("ok", "VPN", f"{len(profiles)} profile(s); WireGuard "
-            + ("in the kernel" if kernel or podman_url else "as wireguard-go (no wireguard module loaded)"), "")
+            + ("in the kernel" if kernel or podman_url else
+               "as wireguard-go (no wireguard module loaded; an image built without wireguard-go needs "
+               "sudo modprobe wireguard)"), "")
 
 
 def check_bwrap_tools():
@@ -359,6 +368,9 @@ def check_login(agent):
     where, problem = l.login_state(agent)
     source = l.auth_sources(agent)[0][0]
     title = f"Login {agent}" + (" (login store)" if where == "store" else "")
+    if problem == "missing" and agent == "claude" and where == "host" and l.claude_keychain_login():
+        return ("warn", title, "Claude Code keeps this Mac's login in the Keychain, which sandboxes cannot use",
+                f"sandbox-ai login {agent}")
     if problem == "missing":
         return "warn", title, f"{source}: no login", f"sandbox-ai login {agent} (or log in on the host)"
     if problem == "expired":

@@ -268,15 +268,8 @@ def ended_run(name, data):
 
 def descendants(pid):
     children = {}
-    for entry in PROC.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            # comm may contain spaces and parentheses; fields follow the last ')'.
-            ppid = int((entry / "stat").read_text().rpartition(")")[2].split()[1])
-        except (OSError, IndexError, ValueError):
-            continue
-        children.setdefault(ppid, []).append(int(entry.name))
+    for child, (ppid, _, _) in launcher().procinfo().table(PROC).items():  # /proc; sysctl on macOS
+        children.setdefault(ppid, []).append(child)
     order, queue = [], [pid]
     while queue:
         current = queue.pop(0)
@@ -290,10 +283,7 @@ def descendants(pid):
 
 def mcp_supervisor(pid):
     """An MCP server supervisor started from this session; it serves other agents too."""
-    try:
-        return b"--mcp-socket-dir" in (PROC / str(pid) / "cmdline").read_bytes().split(b"\0")
-    except OSError:
-        return False
+    return b"--mcp-socket-dir" in (launcher().procinfo().cmdline(pid, PROC) or [])
 
 
 def signal_tree(pid, sig, include_root=True):
@@ -439,6 +429,25 @@ def relay_listening(socket_path):
         client.close()
 
 
+def machine_relay_listening(data, runner=None):
+    """macOS: the terminal relay in podman machine's VM accepts (runtime.py --internal-attach-probe through podman
+    exec; its socket does not cross the VM's shared folders)."""
+    try:
+        done = (runner or subprocess.run)(launcher().machine_exec(data, ["--internal-attach-probe",
+                                                                          launcher().ATTACH_SOCKET], interactive=False),
+                                          stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return done.returncode == 0
+
+
+def terminal_listening(name, data):
+    """The session's terminal relay still accepts connections (the sandbox runs)."""
+    if launcher().machine_record(data):
+        return machine_relay_listening(data)
+    return relay_listening(session_dir(name) / "tmux" / "attach.sock")
+
+
 def begin(a, argv):
     """A kept start in the foreground (a task, no terminal, --no-tmux): its directory, HOME and session.json,
     made by the launcher that runs it right here (plan_kept_home chose a.start_key and a.state_dir)."""
@@ -498,9 +507,15 @@ def prune(name, locked=False):
     try:
         if locked:
             return remove()
+        # A first look without the lock: what keeps its HOME or runs is not locked at all (sandbox-ai list and the
+        # app look at every session often; a start, stop or pause of one at that moment would be refused as busy).
+        data = load(name)
+        if keeps_home(data) or status(name, data) != "stopped":
+            return False
         with session_lock(name):
             return remove()
-    except (OSError, ValueError):  # gone, damaged, or being started or stopped by another command
+    # gone, damaged (a session.json that is no object included), or being started or stopped by another command
+    except (OSError, ValueError, AttributeError, TypeError):
         return False
 
 
@@ -509,13 +524,12 @@ def after_attach(name):
     back, 0), or the agent ended (wait for the supervisor's cleanup; its exit status)."""
     data = load(name)
     shown = launcher().printable(display(name, data))
-    socket_path = session_dir(name) / "tmux" / "attach.sock"
     if not alive(name, data) and lost(name, data):
         print(f"agent-sandbox: detached from {shown}; it runs on without its supervisor. End it with: sandbox-ai stop "
               f"{shown}, then continue it with: sandbox-ai resume {shown}", file=sys.stderr)
         return 0
     deadline = time.monotonic() + DETACH_GRACE
-    while alive(name, data) and relay_listening(socket_path):
+    while alive(name, data) and terminal_listening(name, data):
         if time.monotonic() >= deadline:
             print(f"agent-sandbox: detached from {shown}; it keeps running. Back: sandbox-ai attach {shown}, "
                   f"end it: sandbox-ai stop {shown}", file=sys.stderr)
@@ -577,11 +591,13 @@ def effective(data):
     return a, document
 
 
-def wait_ready(directory, process, timeout=READY_TIMEOUT):
-    # The terminal relay starts after the tmux session exists.
+def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None):
+    """Until the terminal relay is there (it starts after the tmux session exists): its socket on the host, or
+    READY() (macOS: a probe through podman exec)."""
     socket_path = directory / "tmux" / "attach.sock"
+    ready = ready or socket_path.exists
     deadline = time.monotonic() + timeout
-    while not socket_path.exists():
+    while not ready():
         if process.poll() is not None:
             log = launcher().printable((directory / "supervisor.log").read_text(errors="replace")[-3000:])
             raise RuntimeError(f"Session failed to start (status {process.returncode}):\n{log}")
@@ -643,7 +659,8 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
     shown = display(name, data)
     starts().record(shown, event, name, run, agent=data["agent"], workspace=data.get("workspace"))
     try:
-        wait_ready(directory, process)
+        wait_ready(directory, process, ready=(lambda: machine_relay_listening(data))
+                   if launcher().machine_record(data) else None)
     except RuntimeError:
         if process.poll() is not None:
             starts().record(shown, "exit", name, run, status=process.returncode)
@@ -740,10 +757,30 @@ def attach(name):
     # nothing the agent's tmux server requests can execute on the host.
     activity_event(name, "attach")
     try:
-        launcher().attach_client(str(session_dir(name) / "tmux" / "attach.sock"))
+        if launcher().machine_record(data):
+            attach_machine(data)
+        else:
+            launcher().attach_client(str(session_dir(name) / "tmux" / "attach.sock"))
     finally:
         activity_event(name, "detach")
     return after_attach(name)
+
+
+def attach_machine(data, runner=None):
+    """macOS: attach this terminal to the session's relay in podman machine's VM: the same dumb byte pipe as on
+    Linux (runtime.attach_client), run in the container by podman exec, which carries the keys, the screen and the
+    window size. Nothing of the sandbox runs on the Mac."""
+    tty = sys.stdin.isatty() and sys.stdout.isatty()
+    command = launcher().machine_exec(data, ["--internal-attach-client", launcher().ATTACH_SOCKET], tty=tty)
+    try:
+        done = (runner or subprocess.run)(command, check=False)
+    except OSError as exc:
+        raise RuntimeError(f"Session terminal relay not reachable: podman exec did not run ({exc.strerror or exc})") \
+            from None
+    if done.returncode != 0:
+        raise RuntimeError(f"Session terminal relay not reachable through podman machine (podman exec: status "
+                           f"{done.returncode})")
+    return 0
 
 
 def pause(name):
@@ -835,11 +872,166 @@ def added_options(data, workspaces=(), mounts=(), mcp=()):
     return options
 
 
-def resume(name, workspaces=(), mounts=(), mcp=()):
+# Options a rebirth does not change (resume NAME OPTION): the start's own (its name, HOME, tmux, pod), what only a
+# new start decides (its backend and Podman service, its project file), what starts nothing, and the workspaces,
+# mounts and MCP servers resume adds with options of its own (--workspace, --mount, --mcp).
+REBIRTH_FIXED = ("--session", "--name", "--project-name", "--name-style", "--keep", "--no-keep", "--state-dir",
+                 "--start-id", "--tmux-socket-dir", "--pod-name", "--mcp-socket-dir", "--helper-of",
+                 "--mcp-approvals-dir", "--workspace-name", "--workspaces-as-given", "--tmux", "--no-tmux",
+                 "--dry-run", "--probe", "--version", "--help", "--backend", "--podman-url", "--config", "--no-config",
+                 "--workspace", "--mount", "--mcp")
+# ... of which --drop-option may take back these (a mount or an MCP server added earlier).
+DROPPABLE = ("--mount", "--mcp")
+
+
+def option_groups(options, actions):
+    """OPTIONS (long forms, as canonical_options writes them) as [(action or None, option, value or None, tokens)]:
+    one entry per option with its value."""
+    groups, index = [], 0
+    while index < len(options):
+        token = options[index]
+        name, equals, value = token.partition("=")
+        action = actions.get(name) if token.startswith("--") else None
+        if action is None or action.nargs == 0:
+            groups.append((action, name if action else token, None, [token]))
+            index += 1
+        elif equals:
+            groups.append((action, name, value, [token]))
+            index += 1
+        else:
+            groups.append((action, name, options[index + 1] if index + 1 < len(options) else None,
+                           options[index:index + 2]))
+            index += 2
+    return groups
+
+
+def is_list(action):
+    """ACTION adds to a list (repeatable: --allow-host, --env, --allow-pypi ...) rather than setting one value."""
+    return type(action).__name__ in ("_AppendAction", "_AppendConstAction")
+
+
+def same_value(action, a, b):
+    if a is None or b is None:
+        return a == b
+    if action.type is str.lower:
+        return a.lower() == b.lower()
+    if action.type is Path or action.option_strings[-1] in launcher().PATH_OPTIONS:
+        return os.path.normpath(os.path.expanduser(a)) == os.path.normpath(os.path.expanduser(b))
+    return a == b
+
+
+def absolute_value(option, value):
+    """VALUE of OPTION with its host path made absolute from here (the session starts in its own directory)."""
+    part = launcher().PATH_OPTIONS.get(option)
+    path = part(value) if part and value else None
+    if not path or os.path.isabs(os.path.expanduser(path)):
+        return value
+    absolute = str(Path(path).absolute())
+    return absolute + value[len(path):] if value.startswith(path) else value[:len(value) - len(path)] + absolute
+
+
+def changed_options(data, given=(), dropped=()):
+    """(options, changes) of a rebirth with other options: the session's saved options with DROPPED (OPTION or
+    OPTION=VALUE: every value of OPTION, or that one) taken out, then GIVEN (launcher options) applied - a
+    single-valued option (--cpus N, --gui, --memory SIZE, --mode MODE, --canaries/--no-canaries ...) replaces the one
+    saved, a list option (--allow-host, --env, --allow-pypi ...) adds its value unless saved already. CHANGES: lines
+    that say what changed. What the project file sets is not among the saved options (change the file). Checked as
+    the launcher parses them; the checks of a start (policy, mode, private locations, trust) are check_start's."""
+    l = launcher()
+    printable = l.printable
+    actions = l.option_actions()
+    shown = printable(data.get("name") or "the start")
+    groups = option_groups(l.canonical_options(list(data["options"])), actions)
+    changes = []
+    for spec in dict.fromkeys(dropped):
+        option, equals, value = str(spec).partition("=")
+        option = l.canonical_options([option if option.startswith("-") else "--" + option])[0]
+        action = actions.get(option)
+        if action is None:
+            raise ValueError(f"--drop-option {printable(spec)}: no such option (see sandbox-ai claude --help)")
+        if option in REBIRTH_FIXED and option not in DROPPABLE:
+            raise ValueError(f"--drop-option {printable(spec)}: {printable(option)} is not changed by a rebirth; "
+                             "start anew")
+        value = value if equals else None
+        if value is not None and action.nargs == 0:
+            raise ValueError(f"--drop-option {printable(spec)}: {printable(option)} takes no value")
+        value = absolute_value(option, value) if value is not None else None
+
+        def matches(group):
+            found, name, saved, _ = group
+            if found is None or found.dest != action.dest:
+                return False
+            if type(action).__name__ == "_AppendConstAction":
+                return name == option  # --allow-pypi among the presets: that one only
+            return value is None or same_value(action, saved, value)
+        kept = [group for group in groups if not matches(group)]
+        if len(kept) == len(groups):
+            raise ValueError(f"--drop-option {printable(spec)}: not among the saved options of {shown} (what its "
+                             "project file sets stays: change the file)")
+        changes += [f"dropped: {printable(' '.join(tokens))}" for group in groups if matches(group)
+                    for tokens in [group[3]]]
+        groups = kept
+    for action, option, value, tokens in option_groups(l.canonical_options(list(given)), actions):
+        if action is None:
+            raise ValueError(f"{printable(option)}: not an option of the launcher (see sandbox-ai claude --help)")
+        if option in REBIRTH_FIXED:
+            hint = {"--keep": "a kept start keeps its HOME", "--no-keep": "delete it instead: sandbox-ai delete NAME",
+                    "--workspace": "--workspace DIR of resume", "--mount": "--mount SPEC of resume",
+                    "--mcp": "--mcp NAME of resume"}.get(option, "start anew for that")
+            raise ValueError(f"{printable(option)} is not changed by a rebirth ({hint})")
+        if action.nargs != 0 and value is None:
+            raise ValueError(f"{printable(option)} needs a value")
+        if value is not None:
+            value = absolute_value(option, value)
+            tokens = [option, value]
+        if is_list(action):
+            if any(found is not None and found.dest == action.dest and name == option
+                   and same_value(action, saved, value) for found, name, saved, _ in groups):
+                changes.append(f"kept: {printable(' '.join(tokens))} (saved already)")
+                continue
+            groups.append((action, option, value, tokens))
+            changes.append(f"added: {printable(' '.join(tokens))}")
+            continue
+        before = [group for group in groups if group[0] is not None and group[0].dest == action.dest]
+        groups = [group for group in groups if group not in before]
+        groups.append((action, option, value, tokens))
+        was = " ".join(token for group in before for token in group[3])
+        changes.append(f"set: {printable(' '.join(tokens))}" + (f" (was: {printable(was)})" if was else ""))
+    options = [token for group in groups for token in group[3]]
+    with in_directory(data["cwd"]):
+        try:
+            l.parse_args([data["agent"], *options])
+        except SystemExit:
+            raise ValueError("these options do not go together; see sandbox-ai claude --help") from None
+    return options, changes
+
+
+def check_start(name, data):
+    """The checks of a new start for the session's options as they are now: the launcher with --dry-run, as the
+    supervisor will start (its project file and whether it is trusted, the administrator's policy, the security
+    mode, private locations, devices, the network). Nothing is started or written; ValueError with what the
+    launcher said when it would refuse."""
+    directory = session_dir(name)
+    cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), data["agent"], *run_options(data),
+           *(["--state-dir", str(directory / "home")] if keeps_home(data) else []),
+           "--tmux-socket-dir", str(directory / "tmux"), "--start-id", name, "--dry-run"]
+    try:
+        result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=data["cwd"],
+                                timeout=READY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise ValueError("the checks of the start took too long; nothing was changed") from None
+    if result.returncode != 0:
+        said = [line for line in result.stderr.splitlines() if line.strip()][-6:]
+        raise ValueError("a start with these options would be refused, so nothing was changed:\n  "
+                         + "\n  ".join(launcher().printable(line) for line in said or ["(no reason given)"]))
+
+
+def resume(name, workspaces=(), mounts=(), mcp=(), options=(), dropped=()):
     """Thaw or restart the session NAME; with WORKSPACES, MOUNTS or MCP servers a stopped session starts with them
-    added (kept for its later starts)."""
+    added, with OPTIONS (launcher options) and DROPPED (--drop-option) its saved options changed (changed_options);
+    kept for its later starts."""
     with session_lock(name):
-        result, restarted = resume_locked(name, workspaces, mounts, mcp)
+        result, restarted = resume_locked(name, workspaces, mounts, mcp, options, dropped)
     return attach_if_terminal(name) if restarted and not result else result
 
 
@@ -853,13 +1045,13 @@ def add_mcp(name, servers):
         return list(data["options"])
 
 
-def resume_locked(name, workspaces=(), mounts=(), mcp=()):
+def resume_locked(name, workspaces=(), mounts=(), mcp=(), options=(), dropped=()):
     data = load(name)
     state = status(name, data)
     shown = launcher().printable(display(name, data))
-    if (workspaces or mounts or mcp) and state in ("paused", "running"):
-        raise ValueError(f"{shown} is {state}: a workspace, mount or MCP server is added at a start; add --restart "
-                         "(the agent continues its conversation)")
+    if (workspaces or mounts or mcp or options or dropped) and state in ("paused", "running"):
+        raise ValueError(f"{shown} is {state}: a workspace, mount, MCP server or other option is added at a start; "
+                         "add --restart (the agent continues its conversation)")
     if state == "paused":
         thaw(name, data)
         activity_event(name, "resume")
@@ -882,6 +1074,14 @@ def resume_locked(name, workspaces=(), mounts=(), mcp=()):
     before = list(data["options"])
     if workspaces or mounts or mcp:
         data["options"] = added_options(data, workspaces, mounts, mcp)
+    changes = []
+    if options or dropped:
+        data["options"], changes = changed_options({**data, "name": display(name, data)}, options, dropped)
+        try:
+            check_start(name, data)  # the checks of a new start, before anything is saved or started
+        except ValueError:
+            data["options"] = before
+            raise
     review_home(name, data)
     print(f"agent-sandbox: restarting stopped session {shown}; the agent continues its last conversation",
           file=sys.stderr)
@@ -892,6 +1092,9 @@ def resume_locked(name, workspaces=(), mounts=(), mcp=()):
     for server in dict.fromkeys(mcp):
         print(f"agent-sandbox: added: the MCP server {launcher().printable(server)} (--mcp), kept for its later "
               "starts", file=sys.stderr)
+    for line in changes:
+        print(f"agent-sandbox: {line}" + ("" if line.startswith("kept:") else ", kept for its later starts"),
+              file=sys.stderr)
     a, document = effective(data)
     args = restart_args(data, (document or {}).get("agent_args", []), bool(a and a.binary))
     try:
@@ -958,6 +1161,84 @@ def review(name, as_json=False, out=print):
         out(f"{launcher().printable(shown)} is {state}; what its latest start found:")
     reviews.report(found, shown, launcher().printable, out)
     return 0
+
+
+def restore_home(name, paths=(), yes=False, as_json=False, out=print, ask=None):
+    """sandbox-ai resume NAME --restore-home: put back, in the stopped start's HOME, the text its changed start files
+    had at its last start, as its manifest kept it (home_review.restorable: small text files, no keys or tokens;
+    links never followed). PATHS: only these. Asked file by file in a terminal (ASK(question) -> answer), or every
+    one with YES. Starts nothing."""
+    with session_lock(name):
+        data = load(name)
+        shown = display(name, data)
+        printable = launcher().printable
+        if not keeps_home(data):
+            raise ValueError(f"{printable(shown)} keeps no HOME: there is nothing to restore")
+        state = status(name, data)
+        if state != "stopped":
+            raise ValueError(f"{printable(shown)} is {state}: its agent could write the files again meanwhile; stop it "
+                             f"first (sandbox-ai stop {printable(shown)})")
+        reviews = home_review()
+        home, directory = session_dir(name) / "home", session_dir(name)
+        manifest = reviews.load(directory)
+        if manifest is None:
+            raise ValueError(f"{printable(shown)}: no record of its HOME yet (it is made at every start from version "
+                             "0.1.30 on): nothing to restore")
+        found = reviews.restorable(reviews.compare(home, directory, with_diffs=True), manifest)
+        if paths:
+            known = {item["path"] for item in found}
+            unknown = [path for path in paths if path not in known]
+            if unknown:
+                raise ValueError(f"not among the changes of its HOME: {', '.join(printable(p) for p in unknown)} "
+                                 f"(see sandbox-ai resume {printable(shown)} --review-home)")
+            found = [item for item in found if item["path"] in paths]
+        if not yes and any(item["data"] is not None for item in found) and not (
+                ask is not None or (sys.stdin.isatty() and sys.stdout.isatty() and not as_json)):
+            raise ValueError("--restore-home asks file by file in a terminal; elsewhere add --yes (and --path PATH "
+                             "for only some files)")
+        ask = ask or (lambda question: input(question))
+        folders = {path: entry.get("mode") for path, entry in manifest["files"].items()
+                   if isinstance(entry, dict) and entry.get("type") == "dir" and isinstance(entry.get("mode"), int)}
+        restored, skipped = [], []
+        for item in found:
+            path = item["path"]
+            if item["data"] is None:
+                skipped.append({"path": path, "change": item["change"], "reason": item["why"]})
+                continue
+            if not yes:
+                current = reviews.read_regular(home / path, reviews.TEXT_LIMIT + 1)
+                now = current[0].decode("utf-8", "replace") if current else ""
+                diff = reviews.differences(now, item["data"].decode("utf-8"), path) or ""
+                out(f"== {item['change']} {reviews.shown_path(path, printable)}: back to its text at the last start")
+                for line in diff.splitlines()[2:]:
+                    out(printable(line))
+                try:
+                    answer = ask(f"agent-sandbox: put back {reviews.shown_path(path, printable)}? [y/N] ").strip().lower()
+                except EOFError:
+                    answer = "n"
+                if answer not in ("y", "yes", "j", "ja"):
+                    skipped.append({"path": path, "change": item["change"], "reason": "not put back (your answer)"})
+                    continue
+            try:
+                reviews.put_back(home, path, item["data"], item["mode"], folders)
+            except (OSError, ValueError) as exc:
+                reason = (f"a link or no folder on the way: not followed ({exc.strerror})"
+                          if isinstance(exc, OSError) and exc.strerror else str(exc))
+                skipped.append({"path": path, "change": item["change"], "reason": reason})
+                continue
+            restored.append(path)
+        if restored:
+            starts().record(shown, "restore-home", name, current_run(name, data), paths=restored[:50])
+        if as_json:
+            out(json.dumps({"name": shown, "id": name, "restored": restored, "skipped": skipped}, indent=2))
+            return 0
+        for path in restored:
+            out(f"put back: {reviews.shown_path(path, printable)}")
+        for entry in skipped:
+            out(f"left as it is: {reviews.shown_path(entry['path'], printable)} ({printable(entry['reason'])})")
+        if not found:
+            out(f"{printable(shown)}: nothing changed in the watched files of its HOME since its last start")
+        return 0
 
 
 def check_keep_policy(shown):
@@ -1119,6 +1400,171 @@ def list_sessions(out=print):
     return 0
 
 
+# -- a session to another host: its configuration copied there, started again --
+
+_hosts = None
+
+
+def hosts():
+    """hosts.py (sandbox-ai hosts: SSH to the other machines)."""
+    global _hosts
+    if _hosts is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_hosts_for_sessions", HERE / "hosts.py")
+        with LOADING:
+            if _hosts is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _hosts = loaded
+    return _hosts
+
+
+def parse_maps(maps):
+    """[(local prefix, remote prefix)] of --map LOCAL=REMOTE (absolute paths), the longest prefix first."""
+    pairs = []
+    for value in maps:
+        local, equals, remote = str(value).partition("=")
+        if not equals or not local.startswith("/") or not remote.startswith("/"):
+            raise ValueError(f"--map takes LOCAL=REMOTE, both absolute paths: {launcher().printable(value)}")
+        pairs.append((local.rstrip("/") or "/", remote.rstrip("/") or "/"))
+    return sorted(pairs, key=lambda pair: len(pair[0]), reverse=True)
+
+
+def mapped(path, maps):
+    for local, remote in maps:
+        if path == local or path.startswith(local.rstrip("/") + "/"):
+            return remote + path[len(local):] if local != "/" else remote.rstrip("/") + path
+    return path
+
+
+def map_options(options, maps):
+    """OPTIONS with the host paths of path options (the launcher's PATH_OPTIONS, -w too) moved by MAPS."""
+    path_options = dict(launcher().PATH_OPTIONS)
+    path_options.update({"-w": str, "--workspace-ro": str})
+    result, pending = [], None
+    for value in options:
+        if pending is not None:
+            part = path_options[pending](value)
+            result.append(value.replace(part, mapped(part, maps), 1) if part else value)
+            pending = None
+        elif value in path_options:
+            pending = value
+            result.append(value)
+        elif "=" in value and value.split("=", 1)[0] in path_options:
+            name, inner = value.split("=", 1)
+            part = path_options[name](inner)
+            result.append(f"{name}={inner.replace(part, mapped(part, maps), 1)}" if part else value)
+        else:
+            result.append(value)
+    return result
+
+
+def option_paths(options):
+    """The absolute host paths the launcher OPTIONS name (path options, -w and --workspace-ro too), in their order,
+    each once: what a copy to another host may need moved (--map)."""
+    getters = dict(launcher().PATH_OPTIONS)
+    getters.update({"-w": str, "--workspace-ro": str})
+    found, pending = [], None
+    for value in map(str, options):
+        if pending is not None:
+            name, inner, pending = pending, value, None
+        elif value in getters:
+            pending = value
+            continue
+        elif "=" in value and value.split("=", 1)[0] in getters:
+            name, inner = value.split("=", 1)
+        else:
+            continue
+        try:
+            part = str(getters[name](inner) or "")
+        except (TypeError, ValueError, IndexError):
+            continue
+        part = part.rstrip("/") or part
+        if part.startswith("/") and "\n" not in part and part not in found:
+            found.append(part)
+    return found
+
+
+def plan_json(name, maps=()):
+    """`session plan NAME --json`: what a copy of NAME to another host would start with ({"agent", "options",
+    "agent_args", "paths", "problems"}) - for the app and the web, which never change directory in their own
+    process to read it."""
+    agent, options, agent_args, problems = transfer_plan(name, maps)
+    return {"agent": agent, "options": options, "agent_args": agent_args, "paths": option_paths(options),
+            "problems": [str(p) for p in problems]}
+
+
+def transfer_plan(name, maps=()):
+    """(agent, options, agent arguments, problems) a copy of session NAME starts with on another host: its saved
+    options with what its trusted project file added (the copy passes --no-config: the other host's file of that
+    folder, if any, is not read - exactly this configuration starts), host paths moved by MAPS, and the agent's own
+    options of its first start (not a task or prompt: that is not run again). PROBLEMS: what cannot go along."""
+    data = load(name)
+    l = launcher()
+    argv = [data["agent"], *run_options(data)]
+    problems, document = [], None
+    try:
+        with in_directory(data["cwd"]):
+            a = l.parse_args(argv)
+            _, document = l.load_project_config(a)
+            if document:
+                argv = l.merge_config(argv, a, document)
+    except (OSError, ValueError, SystemExit) as exc:
+        problems.append(f"the session's configuration cannot be read here: {exc}")
+    if isinstance(document, dict) and document.get("mcp_servers"):
+        names = ", ".join(sorted(map(str, document["mcp_servers"])))
+        problems.append(f"the project defines its own MCP servers ({names}) in its .sandbox-ai.json: trust that "
+                        "file on the other host and start the project there, or register the servers there "
+                        "(sandbox-ai mcp add)")
+    if isinstance(document, dict) and document.get("rules"):
+        problems.append("the project's own ruleset (.sandbox-ai.json \"rules\") holds only on this machine: give it "
+                        "there as a file (--rules FILE)")
+    options, agent_args = split_argv(argv)
+    options = [value for value in options if value not in ("--no-config",)]
+    return data["agent"], map_options(options, parse_maps(maps)), leading_options(data["agent"],
+                                                                                  data.get("agent_args") or []), problems
+
+
+def copy_to_host(name, host, new_name=None, maps=(), move=False, start=True, run=None, out=print):
+    """Session NAME to HOST (a host of sandbox-ai hosts): its configuration checked there (a dry run with exactly
+    those options), then started there as a session of its own (NEW_NAME, else the same name); MOVE stops this
+    one afterwards (its HOME stays here until it is deleted). Logins and the session's HOME are not copied: the
+    other host uses its own (sandbox-ai login there). Returns the exit status."""
+    run = run or hosts().run
+    shown = launcher().printable(display(name, load(name)))
+    target = new_name or display(name, load(name))
+    if not re.fullmatch(launcher().SESSION_NAME, str(target)):
+        raise ValueError(f"not a session name: {launcher().printable(target)}")
+    agent, options, agent_args, problems = transfer_plan(name, maps)
+    if problems:
+        for problem in problems:
+            out(f"sandbox-ai session copy: {problem}")
+        return 1
+    check = [agent, "--dry-run", "--no-config", *options]
+    status, stdout, stderr = run(host, check, timeout=180)
+    if status != 0:
+        out(f"sandbox-ai session copy: {shown} cannot start on {launcher().printable(host)} as it is:")
+        for line in (stderr or stdout or "").strip().splitlines()[-12:]:
+            out(f"  {launcher().printable(line)}")
+        out("  (folders of this machine that lie elsewhere there: --map LOCAL=REMOTE)")
+        return 1
+    if not start:
+        out(f"sandbox-ai session copy: {shown} can start on {launcher().printable(host)} (checked, not started)")
+        return 0
+    command = [agent, "--session", target, "--no-config", *options, *(["--", *agent_args] if agent_args else [])]
+    status, stdout, stderr = run(host, command, timeout=900)
+    if status != 0:
+        out(f"sandbox-ai session copy: the start on {launcher().printable(host)} failed (exit {status}):")
+        for line in (stderr or stdout or "").strip().splitlines()[-12:]:
+            out(f"  {launcher().printable(line)}")
+        return status or 1
+    out(f"sandbox-ai session copy: {shown} runs on {launcher().printable(host)} as {launcher().printable(target)} "
+        f"(attach: sandbox-ai hosts run {launcher().printable(host)} -- session attach {launcher().printable(target)})")
+    if move:
+        stop(name)
+        out(f"sandbox-ai session copy: {shown} stopped here; its HOME stays until: sandbox-ai session delete {shown}")
+    return 0
+
+
 def cli(argv):
     p = argparse.ArgumentParser(prog="sandbox-ai session", description="Manage named sandbox sessions. "
                                 "Start one with: <agent>-sandbox --session NAME [options]")
@@ -1133,9 +1579,27 @@ def cli(argv):
         sub.add_argument("name")
         if command == "delete":
             sub.add_argument("-y", "--yes", action="store_true", help="Confirm removal of the session's HOME")
+    for command, text in [("copy", "Start a session's configuration again on another host (sandbox-ai hosts)"),
+                          ("move", "As copy, then stop the session here (its HOME stays until it is deleted)")]:
+        sub = commands.add_parser(command, help=text)
+        sub.add_argument("name")
+        sub.add_argument("host", help="a host of sandbox-ai hosts")
+        sub.add_argument("--as", dest="new_name", metavar="NAME", help="the session's name there (default: the same)")
+        sub.add_argument("--map", action="append", default=[], metavar="LOCAL=REMOTE",
+                         help="a folder of this machine that lies elsewhere there (repeatable)")
+        sub.add_argument("--check", action="store_true", help="only check that it can start there")
+    plan = commands.add_parser("plan", help="What a copy of a session to another host starts with (JSON)")
+    plan.add_argument("name")
+    plan.add_argument("--map", action="append", default=[], metavar="LOCAL=REMOTE")
+    plan.add_argument("--json", action="store_true", help="(the only output there is)")
     a = p.parse_args(argv)
     if a.command == "list":
         return list_sessions()
+    if a.command == "plan":
+        print(json.dumps(plan_json(resolve(a.name), a.map), indent=2))
+        return 0
+    if a.command in ("copy", "move"):
+        return copy_to_host(resolve(a.name), a.host, a.new_name, a.map, move=a.command == "move", start=not a.check)
     key = resolve(a.name)
     if a.command == "delete":
         return delete(key, a.yes)

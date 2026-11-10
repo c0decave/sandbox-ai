@@ -25,6 +25,8 @@ def pytest_addoption(parser):
     group.addoption("--local-llm", default=None, metavar="KIND:IP:PORT",
                     help="Live-test OpenCode against a local server, e.g. ollama:192.168.1.20:11434 (lmstudio, vllm)")
     group.addoption("--free-model", default="opencode/glm-5.3-flash-free", help="Zero-price OpenCode model for practical tool checks")
+    group.addoption("--live-vpn-profile", default=None, metavar="NAME",
+                    help="A VPN profile (sandbox-ai vpn add) for the live VPN checks of test_live_check.py")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -46,6 +48,10 @@ def pytest_configure(config):
     else:
         _REAL_LOGINS.update(home_guard.fingerprint(home_guard.login_files()))
         home_guard.ensure()
+        # Builds with a fake podman: no check of names first (its own tests in test_images.py turn it on).
+        os.environ.setdefault("SANDBOX_AI_BUILD_NO_DNS_CHECK", "1")
+        # Starts with --llm ask no server for its context window (test_llm.py turns it on for its fake servers).
+        os.environ.setdefault("SANDBOX_AI_LLM_NO_CONTEXT_FETCH", "1")
     config.addinivalue_line("markers", "agent_live: launches real sandboxes")
     config.addinivalue_line("markers", "agent_provider: makes a real authenticated model request")
     config.addinivalue_line("markers", "agent_network: downloads from the internet inside the sandbox")

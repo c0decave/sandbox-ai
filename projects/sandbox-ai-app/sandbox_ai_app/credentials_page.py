@@ -11,10 +11,11 @@ ssh -tt)."""
 from __future__ import annotations
 
 import functools
+import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit, QMenu,
     QMessageBox, QPushButton, QRadioButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -24,7 +25,7 @@ from .files import printable
 from .i18n import N_, tr
 from .host_choice import on_host
 from .name_fields import NameField, publish as publish_names
-from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
+from .widgets import ask_first, background, fill, inform, outcome, plain_label, safe_tooltip, selected, show_text, table
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
 # The overview's kinds, in the order of the tabs.
@@ -160,6 +161,81 @@ class GitLoginsBox(LoginsBox):
     def replaces(self, values):
         url = (values.get("url") or "").strip().rstrip("/").lower()
         return next((e.get("url") for e in self.entries if str(e.get("url", "")).rstrip("/").lower() == url), None)
+
+    def more_buttons(self):
+        if not hasattr(self, "give_button"):
+            self.give_button = QPushButton(tr("Give to a running sandbox…"))
+            self.give_button.setToolTip(safe_tooltip(tr(
+                "A sandbox started before this login was added gets it now (sandbox-ai net allow RUN --git-token-secret); "
+                "every sandbox started later has it anyway")))
+            self.give_button.clicked.connect(lambda _=False: self.give())
+            self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            self.list.customContextMenuRequested.connect(self.menu)
+        return [self.give_button]
+
+    def menu(self, point):
+        """A login's menu: give it to a running sandbox, check, remove."""
+        row = self.list.rowAt(point.y())
+        if row < 0:
+            return
+        self.list.selectRow(row)
+        menu = QMenu(self)
+        menu.addAction(tr("Give to a running sandbox…"), self.give)
+        menu.addAction(tr("Check"), self.check)
+        menu.addSeparator()
+        menu.addAction(tr("Remove…"), self.remove)
+        menu.exec(self.list.viewport().mapToGlobal(point))
+
+    def chosen(self):
+        rows = sorted({index.row() for index in self.list.selectedIndexes()})
+        return self.entries[rows[0]] if rows and rows[0] < len(self.entries) else None
+
+    def give(self):
+        """Give the chosen login to a sandbox that runs (on this host): its runs are read in the background, then
+        one is chosen, asked about (the app's one policy for widening a run) and `net allow` sent."""
+        if self.host != LOCAL:
+            self.message.setText(tr("Only a login of this machine is given to a sandbox from here."))
+            return
+        entry = self.chosen()
+        if entry is None:
+            self.message.setText(tr("Choose a login in the list first."))
+            return
+        if not entry.get("secret"):
+            self.message.setText(tr("This login names no secret: only a login with its token in a secret can be given."))
+            return
+        background(self.sai.instances, owner=self, source=self.give_button, timeout=60,
+                   done=lambda found, error: self.give_to(entry, found, error))
+
+    def give_to(self, entry, found, error):
+        runs = running_here(found, error)
+        if not runs:
+            self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable(error))
+            return
+        dialog = GiveDialog(self, runs)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        run, keep = dialog.run(), dialog.keep.isChecked()
+        target = git_login_url(entry)
+        question = tr("Give the Git login for {url} (secret {secret}) to {run} until it ends, at once? Its Git "
+                      "logs in with it from now on (the token stays outside the sandbox: its proxy uses it).",
+                      url=printable(target), secret=printable(entry["secret"]), run=printable(run))
+        if keep:
+            question += "\n\n" + tr("It is also kept for the later starts of its project: written into its trusted "
+                                     ".sandbox-ai.json.")
+        if not ask_first(self, "net-allow", tr("Give the login"), question, tr("Give")):
+            return
+        self.message.setText(tr("Giving the login…"))
+        background(self.sai.host_run, LOCAL, "net", "allow", run, "--git-token-secret", f"{target}={entry['secret']}",
+                   *(["--keep"] if keep else []), owner=self, work=True, source=self.give_button, timeout=150,
+                   done=lambda result, error_: self.given(run, result, error_))
+
+    def given(self, run, result, error):
+        status, out, err = result if error is None and isinstance(result, tuple) else (1, "", str(error or ""))
+        if status == 0:
+            self.message.setText(tr("{run} has the login now.", run=printable(run)))
+        else:
+            self.message.setText(printable((err or out or "").strip().splitlines()[-1:] and
+                                           (err or out).strip().splitlines()[-1] or tr("Not given")))
 
     def add(self):
         dialog = LoginDialog(self, tr("New Git login"), self.secret_names,
@@ -424,9 +500,16 @@ class CredentialsPage(QWidget):
         delete.setToolTip(tr("Remove the selected secret (asked first): every start, VPN profile and Git login that "
                              "names it goes without it"))
         delete.clicked.connect(self.delete_secret)
+        give = self.give_key_button = QPushButton(tr("Give to a running sandbox…"))
+        give.setToolTip(safe_tooltip(tr(
+            "The selected secret as an API key of a sandbox that runs (sandbox-ai net allow RUN --api-key "
+            "HOST=NAME=SECRET): its proxy puts the key in on the wire, the agent only sees a placeholder")))
+        give.clicked.connect(lambda _=False: self.give_secret())
+        self.secrets.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.secrets.customContextMenuRequested.connect(self.secret_menu)
         self.secret_buttons = [keep, delete]
         self.generation = 0
-        for widget in (keep, delete):
+        for widget in (keep, delete, give):
             row.addWidget(widget)
         row.addStretch()
         secrets_layout.addLayout(row)
@@ -451,6 +534,65 @@ class CredentialsPage(QWidget):
         self.vpn = VpnBox(sai)
         self.vpn.on_change = self.show_overview
         self.add_tab("vpn", self.vpn)
+
+    def secret_menu(self, point):
+        """A secret's menu: give it to a running sandbox as an API key, remove."""
+        row = self.secrets.rowAt(point.y())
+        if row < 0:
+            return
+        self.secrets.selectRow(row)
+        menu = QMenu(self)
+        menu.addAction(tr("Give to a running sandbox…"), self.give_secret)
+        menu.addSeparator()
+        menu.addAction(tr("Remove…"), self.delete_secret)
+        menu.exec(self.secrets.viewport().mapToGlobal(point))
+
+    def give_secret(self):
+        """The chosen secret as an API key of a sandbox that runs on this machine: its runs are read in the
+        background, then one is chosen with the server and variable, asked about, and `net allow --api-key` sent."""
+        name = selected(self.secrets)
+        if self.host() != LOCAL:
+            self.message.setText(tr("Only a secret of this machine is given to a sandbox from here."))
+            return
+        if not name:
+            self.message.setText(tr("Choose a secret in the list first."))
+            return
+        background(self.sai.instances, owner=self, source=self.give_key_button, timeout=60,
+                   done=lambda found, error: self.give_secret_to(name, found, error))
+
+    def give_secret_to(self, secret, found, error):
+        runs = running_here(found, error)
+        if not runs:
+            self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable(error))
+            return
+        dialog = GiveDialog(self, runs, secret=secret)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        run, keep = dialog.run(), dialog.keep.isChecked()
+        host, variable = dialog.host.text().strip().lower().rstrip("."), dialog.variable.text().strip()
+        question = tr("Give the secret {secret} to {run} as the API key {name} for {host}, until it ends? Its proxy "
+                      "puts the key in on the wire for HTTPS requests to {host}; the agent sends the placeholder "
+                      "and never sees the key. {host} is allowed too.", secret=printable(secret), run=printable(run),
+                      name=printable(variable), host=printable(host))
+        if keep:
+            question += "\n\n" + tr("It is also kept for the later starts of its project: written into its trusted "
+                                     ".sandbox-ai.json.")
+        if not ask_first(self, "net-allow", tr("Give the key"), question, tr("Give")):
+            return
+        self.message.setText(tr("Giving the key…"))
+        background(self.sai.host_run, LOCAL, "net", "allow", run, "--api-key", f"{host}={variable}={secret}",
+                   *(["--keep"] if keep else []), owner=self, work=True, source=self.give_key_button, timeout=150,
+                   done=lambda result, error_: self.secret_given(run, variable, result, error_))
+
+    def secret_given(self, run, variable, result, error):
+        status, out, err = result if error is None and isinstance(result, tuple) else (1, "", str(error or ""))
+        if status == 0:
+            self.message.setText(tr("{run} has the key now: in the sandbox, export {name}={placeholder}",
+                                    run=printable(run), name=printable(variable),
+                                    placeholder=f"sandbox-ai-api-key-placeholder-{variable}"))
+        else:
+            lines = (err or out or "").strip().splitlines()
+            self.message.setText(printable(lines[-1]) if lines else tr("Not given"))
 
     TAB_TITLES = {"logins": N_("Agent logins"), "secrets": N_("Secrets"), "git": N_("Git logins"),
                   "publish": N_("Publish logins"), "identities": N_("Identities"), "vpn": N_("VPN")}
@@ -507,7 +649,8 @@ class CredentialsPage(QWidget):
     def store_read(self, token, host, result, error):
         if token != self.store_token or host != self.host():
             return
-        stores = {"keyring": tr("your system keyring (Secret Service)"), "file": tr("private files (mode 0600)")}
+        stores = {"keyring": tr("your system keyring (Secret Service)"), "keychain": tr("the macOS Keychain"),
+                  "file": tr("private files (mode 0600)")}
         if error is not None or not isinstance(result, str):
             text = tr("Secrets backend: not known ({error})", error=printable(error)[:200])
         else:
@@ -621,7 +764,8 @@ class CredentialsPage(QWidget):
         return self.host()
 
     def show_secrets(self, host, store, names):
-        stores = {"keyring": tr("your system keyring (Secret Service)"), "file": tr("private files (mode 0600)")}
+        stores = {"keyring": tr("your system keyring (Secret Service)"), "keychain": tr("the macOS Keychain"),
+                  "file": tr("private files (mode 0600)")}
         text = tr("Kept in: {store}", store=stores.get(store, printable(store)))
         self.backend_label.setText(text if host == "local" else tr("On {host}: {text}", host=printable(host),
                                                                     text=text))
@@ -828,3 +972,79 @@ class CredentialsPage(QWidget):
 
 
 __all__ = ["CredentialsPage"]
+
+def git_login_url(entry):
+    """http(s)://[USER@]HOST[:PORT] of a Git login, as `net allow --git-token-*` takes it."""
+    url, user = str(entry.get("url", "")).rstrip("/"), str(entry.get("user") or "")
+    if user and "://" in url and "@" not in url.split("://", 1)[1]:
+        scheme, rest = url.split("://", 1)
+        return f"{scheme}://{user}@{rest}"
+    return url
+
+
+def running_here(found, error):
+    """The runs and sessions that run on this machine now, of `instances` (FOUND, ERROR as background gives them)."""
+    instances = (found[0] if isinstance(found, tuple) else found) if error is None else []
+    return [i for i in instances or [] if getattr(i, "run", None) and getattr(i, "state", "") == "running"
+            and getattr(i, "kind", "") in ("run", "session") and getattr(i, "host", LOCAL) == LOCAL]
+
+
+API_HOST = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}")
+API_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+class GiveDialog(QDialog):
+    """Which running sandbox gets the login (or, with SECRET, the secret as an API key: for which host, under which
+    variable), and whether its project keeps it."""
+
+    def __init__(self, parent, runs, secret=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Give to a running sandbox"))
+        layout = QVBoxLayout(self)
+        self.choice = QComboBox()
+        self.choice.setAccessibleName(tr("Sandbox"))
+        for instance in runs:
+            label = f"{instance.name}  ({instance.agent})" if getattr(instance, "agent", "") else instance.name
+            self.choice.addItem(printable(label), instance.run)
+        self.keep = QCheckBox(tr("Also for the later starts of its project"))
+        layout.addWidget(plain_label(tr("The sandbox that gets the key:") if secret else
+                                     tr("The sandbox that gets the login:")))
+        layout.addWidget(self.choice)
+        self.host = self.variable = None
+        if secret:
+            form = QFormLayout()
+            self.host = QLineEdit()
+            self.host.setPlaceholderText(tr("api.example.com"))
+            self.host.setToolTip(tr("The HTTPS server the key is for: the sandbox's proxy puts it in on the wire for "
+                                    "requests there only, and the sandbox may reach it from now on"))
+            self.variable = QLineEdit(re.sub(r"[^A-Za-z0-9_]", "_", secret)[:64])
+            self.variable.setToolTip(tr("The variable whose placeholder the agent sends (export NAME=… in the "
+                                        "sandbox: the app says the line)"))
+            form.addRow(tr("Server"), self.host)
+            form.addRow(tr("Variable"), self.variable)
+            layout.addLayout(form)
+        layout.addWidget(self.keep)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def run(self):
+        return self.choice.currentData()
+
+    def problem(self):
+        """Why the host or variable typed cannot be taken (None: they can)."""
+        if self.host is None:
+            return None
+        if not API_HOST.fullmatch(self.host.text().strip().lower().rstrip(".")):
+            return tr("Name the server as a host name, such as api.example.com (no address, no https://).")
+        if not API_VARIABLE.fullmatch(self.variable.text().strip()):
+            return tr("The variable: letters, digits and _, not starting with a digit.")
+        return None
+
+    def accept(self):
+        problem = self.problem()
+        if problem:
+            inform(self, tr("Give to a running sandbox"), problem)
+            return
+        super().accept()

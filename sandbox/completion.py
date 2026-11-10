@@ -132,6 +132,10 @@ def llm_names():
     return quietly(lambda: sorted(module("llm").load_store().get("endpoints", {})))
 
 
+def preset_names():
+    return quietly(lambda: sorted(module("presets").catalog()))
+
+
 def vpn_names():
     return quietly(lambda: module("vpn").list_profiles())
 
@@ -174,8 +178,9 @@ NAMED = {
     ("delete", None, "name"): start_names, ("rename", None, "old"): start_names,
     ("list", None, "history"): start_names, ("ps", None, "history"): start_names,
     ("net", "*", "run"): run_names, ("devices", "*", "run"): run_names, ("workspace", "list", "run"): run_names,
-    ("limits", None, "run"): run_names,
+    ("limits", None, "run"): run_names, ("usage", None, "run"): run_names,
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
+    ("safeguards", None, "run"): run_names,
     ("hosts", "*", "name"): host_names, ("mcp", "*", "name"): mcp_names, ("llm", "*", "name"): llm_names,
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,
     **{("kits", sub, "name"): plugin_kit_names for sub in ("add-plugin", "remove-plugin", "enable-plugin",
@@ -189,10 +194,12 @@ NAMED = {
     ("approvals", "allow", "id"): question_ids, ("approvals", "deny", "id"): question_ids,
     ("team", "*", "name"): team_names, ("approvals", "history", "run"): run_names,
     ("hosts", "update", "names"): host_names, ("mcp", "attach", "start"): start_names,
-    ("mcp", "detach", "start"): start_names,
+    ("mcp", "detach", "start"): start_names, ("rules", "show", "name"): start_names,
+    ("rules", "reload", "name"): start_names, ("presets", "show", "name"): preset_names,
+    ("presets", "check", "name"): preset_names,
 }
 # Secrets are not listed: reading their names may ask the keyring to unlock, which a Tab must never do.
-VALUES = {"--kit": kit_names, "--mcp": mcp_names, "--llm": llm_names, "--vpn": vpn_names,
+VALUES = {"--kit": kit_names, "--mcp": mcp_names, "--llm": llm_names, "--vpn": vpn_names, "--preset": preset_names,
           "--session": start_names, "--name": start_names, "--for": start_names, "--host": host_names, "--helper": lambda: list(AGENTS),
           "--with": lambda: list(AGENTS)}
 

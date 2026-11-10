@@ -209,7 +209,7 @@ def test_the_gallery_explains_itself(window):
 def test_the_question_marks_follow_the_language(window):
     i18n.set_language("de")
     try:
-        assert H.say(H.tip("kind.mount").title) == "Einbindung"
+        assert H.say(H.tip("kind.mount").title) == "Zusatzordner"
         button = help_view.HelpButton("board.palette")
         assert button.toolTip() == "Was ist das? Teile"
         popover = button.explain()
@@ -251,3 +251,21 @@ def test_the_question_marks_can_be_switched_off_and_on_live(window, qapp):
     finally:
         help_view.set_shown(True)
         dialog.close()
+
+
+def test_a_question_mark_is_drawn_once_per_look_and_theme(qapp):
+    """Performance round 3: the (?)s (hundreds in the app) are painted from a picture made once per size, state and
+    theme colours; another theme makes new ones."""
+    from sandbox_ai_app import help_view, theme
+    help_view._MARKS.clear()
+    first = help_view.mark_pixmap(18, False)
+    assert help_view.mark_pixmap(18, False) is first and help_view.mark_pixmap(18, True) is not first
+    assert first.width() == 18 and not first.isNull()
+    before = theme.current()
+    try:
+        theme.apply("dark" if before != "dark" else "light")
+        qapp.processEvents()
+        assert help_view.mark_pixmap(18, False) is not first
+    finally:
+        theme.apply(before)
+        qapp.processEvents()

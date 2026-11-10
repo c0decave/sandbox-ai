@@ -1100,6 +1100,7 @@ CHAPTERS = [
             {"kind": "terminal", "heading": T("VPN and Tor profiles", "VPN- und Tor-Profile"),
              "steps": [
                  {"comment": T("once: the VPN container image", "einmal: das Image des VPN-Containers"), "cmd": "sandbox-ai build vpn"},
+                 {"comment": T("once, for Tor profiles: the Tor container image (Tor is no VPN)", "einmal, für Tor-Profile: das Image des Tor-Containers (Tor ist kein VPN)"), "cmd": "sandbox-ai build tor"},
                  {"cmd": "sandbox-ai vpn add home --wireguard ~/Downloads/wg-home.conf"},
                  {"cmd": "sandbox-ai vpn add mv --mullvad --location se-sto"},
                  {"cmd": "sandbox-ai vpn add anon --tor --socks --exit-country de"},

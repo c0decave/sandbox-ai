@@ -455,7 +455,7 @@ def option_items(l, tokens):
         tokens = l.canonical_options(tokens)
     except (ValueError, SystemExit):
         pass
-    actions = l.build_parser()._option_string_actions
+    actions = l.option_actions()
     items, index = [], 0
     while index < len(tokens):
         word = tokens[index]

@@ -15,15 +15,17 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 import time
 
 from PySide6.QtCore import QByteArray, QDir, QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog, QHeaderView
 
-from . import backend
+from . import applog, backend
 
 LIMIT = 4 << 20  # a state file larger than this is not read
 DELAY = 400  # ms: changes within this time are written together
+FLUSH_WAIT = 15  # seconds quitting waits for the file to reach the disk (a network home that hangs: given up)
 _current = None  # the State of the running window (file dialogs remember their folders there)
 
 
@@ -91,9 +93,13 @@ class State(QObject):
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(delay)
-        self.timer.timeout.connect(self.flush)
+        self.timer.timeout.connect(lambda: self.flush(wait=False))
         self.collectors = []  # functions that put their values in before each write
         self.writes = 0
+        # The writer: the file is written (and synced to the disk) in a thread of its own, never on the GUI thread;
+        # the text it writes is made on the GUI thread (a consistent snapshot). Only the newest text waits.
+        self.pending, self.writing, self.last_ok = None, False, True
+        self.written = threading.Condition()
         _current = self
 
     def read(self):
@@ -149,8 +155,10 @@ class State(QObject):
         """FUNCTION() runs before every write: for values that change too often to be set one by one."""
         self.collectors.append(function)
 
-    def flush(self):
-        """Write now (0600, atomic). A failure to write never stops the app."""
+    def flush(self, wait=True):
+        """Write now (0600, atomic, synced to the disk). WAIT (the default: quitting, tests): until it is on the disk;
+        else (the timer, a page left) the writer thread writes it and the GUI thread goes on at once. A failure to
+        write never stops the app. True when the text could be made (and, with WAIT, was written)."""
         self.timer.stop()
         for function in self.collectors:
             try:
@@ -158,11 +166,52 @@ class State(QObject):
             except Exception:  # noqa: BLE001 - a page that is gone: the rest is still written
                 pass
         try:
-            backend.write_private_json(self.path, self.data)
-            self.writes += 1
-        except (OSError, TypeError, ValueError):
+            # Compact: a third of the size of an indented text, and made in a tenth of the time (the C encoder; the
+            # indented one is Python's own) - on the GUI thread, at each write.
+            text = json.dumps(self.data, separators=(",", ":"))
+        except (TypeError, ValueError):
             return False
-        return True
+        with self.written:
+            self.pending = text
+            if not self.writing:
+                self.writing = True
+                threading.Thread(target=self.write_pending, name="state-writer", daemon=True).start()
+            if not wait:
+                return True
+            deadline = time.monotonic() + FLUSH_WAIT
+            while self.writing:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self.written.wait(min(left, 10))
+            return self.last_ok
+
+    def write_pending(self):
+        """The writer thread: the newest text, until none is left (each write atomic and synced)."""
+        while True:
+            with self.written:
+                text, self.pending = self.pending, None
+                if text is None:
+                    self.writing = False
+                    self.written.notify_all()
+                    return
+            try:
+                backend.write_private_text(self.path, text)
+                ok, problem = True, None
+            except Exception as exc:  # noqa: BLE001 - a full disk, a read-only folder, anything: the writer goes on
+                ok, problem = False, exc
+            with self.written:
+                said = self.last_ok != ok  # a failure said once, and when it is written again
+                self.last_ok = ok
+                if ok:
+                    self.writes += 1
+            if said:
+                try:
+                    applog.log("INFO", "state", f"{self.path}: written again") if ok else applog.log(
+                        "WARNING", "state", f"{self.path}: not written ({problem}): the windows' state and the "
+                        "board's changes not applied are not kept until it can be written")
+                except Exception:  # noqa: BLE001 - a log line never ends the writer
+                    pass
 
     # -- widgets --
 
@@ -202,7 +251,8 @@ class State(QObject):
 
     def splitter(self, key, splitter):
         saved = self.section("splitters").get(key)
-        if isinstance(saved, list) and len(saved) == splitter.count() and all(isinstance(s, int) and s >= 0 for s in saved):
+        if isinstance(saved, list) and len(saved) == splitter.count() and \
+                all(isinstance(s, int) and 0 <= s < 1 << 20 for s in saved):
             splitter.setSizes(saved)
         splitter.splitterMoved.connect(lambda *_: self.section("splitters").__setitem__(key, splitter.sizes())
                                        or self.schedule())

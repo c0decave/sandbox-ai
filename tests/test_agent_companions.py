@@ -134,7 +134,7 @@ def test_build_the_team_image(tmp_path):
     for name in ("podman", "npm"):
         (tmp_path / name).chmod(0o700)
     environment = {**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "BUILD_LOG": str(log)}
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "team", "--build-arg", "CODEX_VERSION=1.2.3"],
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "team", "--build-arg", "CODEX_VERSION=1.2.3"],
                             capture_output=True, text=True, env=environment)
     assert result.returncode == 0, result.stderr
     argv = json.loads(log.read_text())
@@ -148,7 +148,7 @@ def test_build_the_team_image(tmp_path):
     recipe = (ROOT / "sandbox" / "Containerfile.team").read_text()
     for package in ("@anthropic-ai/claude-code@", "@openai/codex@", "opencode-ai@"):
         assert package in recipe
-    refused = subprocess.run([str(ROOT / "sandbox-build-image"), "--pin", "1.2.3", "team"], capture_output=True,
+    refused = subprocess.run([str(ROOT / "sandbox-ai"), "build", "--pin", "1.2.3", "team"], capture_output=True,
                              text=True, env=environment)
     assert refused.returncode == 2 and "not team" in refused.stderr and "not all" not in refused.stderr
 

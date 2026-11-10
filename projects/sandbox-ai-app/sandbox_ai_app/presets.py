@@ -243,7 +243,7 @@ PRESETS = (
            "medium",
            ("--vpn", "<vpn:tor>", "--vpn-check", "stop", "--dns"),
            placeholders=(Placeholder("<vpn:tor>", N_("Tor profile"),
-                                     N_("sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks")),),
+                                     N_("sandbox-ai build tor; sandbox-ai vpn add anon --tor --socks")),),
            notes=(N_("Before the agent starts, tor must bootstrap and check.torproject.org must see a Tor exit; a "
                      "failed check stops the start."),
                   N_("TCP over IPv4 only: no UDP (no QUIC, ping or NTP), no IPv6, slower; the agent's provider may "
@@ -290,7 +290,7 @@ PRESETS = (
             "--log-debug", "--allow-pypi", "--allow-github"),
            placeholders=(Placeholder("<folder:logs>", N_("Folder for the logs"), N_("outside the workspace"),
                                      optional=True),),
-           notes=(N_("Start it with Start as session: it keeps running when the window closes."),)),
+           notes=(N_("Start it as a session: it keeps running when the window closes."),)),
     Preset("gpu", N_("GPU workstation"),
            N_("The GPU handed to the agent, generous limits, PyPI and Hugging Face for models."), "teams",
            "advanced",
@@ -559,7 +559,9 @@ def from_document(sai, document):
     lists = {}
     for key in ("options", "agent_args", "mcp", "notes"):
         value = document.get(key, [])
-        _check(isinstance(value, list) and len(value) <= 400 and all(isinstance(v, str) and len(v) <= 1000
+        # agent_args holds a preset's first task: a few paragraphs (sandbox-ai-tests' is ~1400 characters).
+        longest = 8000 if key == "agent_args" else 1000
+        _check(isinstance(value, list) and len(value) <= 400 and all(isinstance(v, str) and len(v) <= longest
                                                                       for v in value),
                N_("{field} must be a list of texts."), field=key)
         lists[key] = value
@@ -736,19 +738,39 @@ def load_mine(sai):
     return found, problems
 
 
-def save_mine(presets):
-    backend.write_private_json(store_path(), {"version": 1, "presets": [to_document(p) for p in presets]})
+def stored_mine():
+    """The store of the user's own presets as it is ({"version": 1, "presets": []} without one), for a change of
+    it: OSError when it cannot be read, ValueError (translated) when it is damaged - a change then writes nothing,
+    as it would replace every preset in it by the one saved."""
+    try:
+        data = store_path().read_bytes()
+    except FileNotFoundError:
+        return {"version": 1, "presets": []}
+    _check(len(data) <= LIMIT * 64, N_("The file is larger than {size} KiB."), size=LIMIT * 64 >> 10)
+    try:
+        stored = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        stored = None
+    _check(isinstance(stored, dict) and isinstance(stored.get("presets", []), list),
+           N_("{path} is not valid JSON."), path=str(store_path()))
+    return {"version": 1, **stored, "presets": list(stored.get("presets", []))}
+
+
+def change_mine(ident, preset=None):
+    """The store with the preset of id IDENT replaced by PRESET (None: removed). Every other entry stays as it was,
+    also one this version refuses (of a newer version, edited by hand): it is the user's, never dropped."""
+    stored = stored_mine()
+    kept = [d for d in stored["presets"] if not (isinstance(d, dict) and d.get("id") == ident)]
+    backend.write_private_json(store_path(), {**stored, "presets": kept + ([to_document(preset)] if preset else [])})
 
 
 def add_mine(sai, preset):
     """Keep PRESET with the user's own (one of the same id is replaced)."""
-    mine, _ = load_mine(sai)
-    save_mine([p for p in mine if p.id != preset.id] + [preset])
+    change_mine(preset.id, preset)
 
 
 def remove_mine(sai, ident):
-    mine, _ = load_mine(sai)
-    save_mine([p for p in mine if p.id != ident])
+    change_mine(ident)
 
 
 def export(sai, preset, path):

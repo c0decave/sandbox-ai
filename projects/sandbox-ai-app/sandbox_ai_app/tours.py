@@ -230,14 +230,6 @@ AREA_TOURS = {
              ("Look through them now and then.", "Sehen Sie sie ab und zu durch.")),
     ),
     "terminals": (
-        step("starts", ("Every running start", "Jeder laufende Start"),
-             ("What runs on this machine (or a host), however it was started: the command line, the app, the web "
-              "interface. A start in tmux opens with one click; the others say why there is nothing to attach.",
-              "Was auf diesem Rechner (oder einem Host) läuft, gleich wie es gestartet wurde: Kommandozeile, App, "
-              "Weboberfläche. Ein Start in tmux öffnet sich mit einem Klick; die anderen sagen, warum es nichts zum "
-              "Verbinden gibt."),
-             ("Open the terminal of a start you began in a terminal.",
-              "Öffnen Sie das Terminal eines Starts, den Sie in einem Terminal begonnen haben.")),
         step("tabs", ("Terminals in the app", "Terminals in der App"),
              ("The sandboxes started in the app, builds and logins, each in a tab. The agent runs in tmux window 0, a "
               "shell in window 1.",
@@ -245,6 +237,15 @@ AREA_TOURS = {
               "tmux-Fenster 0, eine Shell in Fenster 1."),
              ("Ctrl-b d detaches from a session: it keeps running.", "Strg-b d löst sich von einer Sitzung: Sie "
               "läuft weiter.")),
+        step("starts", ("Sessions", "Sitzungen"),
+             ("Below the terminals, folded until you open it: what runs on this machine (or a host), however it was "
+              "started: the command line, the app, the web interface. A start in tmux opens with one click; the "
+              "others say why there is nothing to attach.",
+              "Unter den Terminals, zugeklappt, bis Sie es öffnen: was auf diesem Rechner (oder einem Host) läuft, "
+              "gleich wie es gestartet wurde: Kommandozeile, App, Weboberfläche. Ein Start in tmux öffnet sich mit "
+              "einem Klick; die anderen sagen, warum es nichts zum Verbinden gibt."),
+             ("Open the terminal of a start you began in a terminal.",
+              "Öffnen Sie das Terminal eines Starts, den Sie in einem Terminal begonnen haben.")),
         step("fetch", ("No terminal tabs?", "Keine Terminal-Tabs?"),
              ("The tabs need xterm.js, fetched once and checked against its pinned digest; without it commands open "
               "in a terminal window.",
@@ -610,11 +611,11 @@ TASK_TOURS = {tour.id: tour for tour in (
               "Ein Probelauf fragt den Launcher nach genau diesen Optionen; nichts startet."),
              ("Press Dry run and read the plan.", "Drücken Sie Probelauf und lesen Sie den Plan.")),
         task("launch", "session", ("Start", "Starten"),
-             ("Start in the app opens a terminal tab; Start as session keeps the sandbox running when you close "
-              "the app.",
-              "In der App starten öffnet einen Terminal-Tab; Als Sitzung starten lässt die Sandbox weiterlaufen, wenn"
-              " Sie die App schließen."),
-             ("Press Start in the app.", "Drücken Sie In der App starten.")),
+             ("Start opens a terminal tab (or a terminal window); as a session the sandbox keeps running when you "
+              "close the app.",
+              "Start öffnet einen Terminal-Tab (oder ein Terminalfenster); als Sitzung läuft die Sandbox weiter, wenn "
+              "Sie die App schließen."),
+             ("Press Start.", "Drücken Sie Start.")),
         task("terminals", "tabs", ("The agent works", "Der Agent arbeitet"),
              ("The agent runs in tmux window 0, a shell in window 1. Questions it asks appear on Approvals.",
               "Der Agent läuft in tmux-Fenster 0, eine Shell in Fenster 1. Seine Fragen erscheinen unter "
@@ -692,9 +693,9 @@ TASK_TOURS = {tour.id: tour for tour in (
                                                                   " als Vorlage."), "preset-mine"),
         task("board", "gallery_button", ("Start from your preset", "Von Ihrer Vorlage starten"),
              ("In any project, open the gallery, select your preset under My presets and press Create: the board "
-              "is built from it. Then Start in the app.",
+              "is built from it. Then Start.",
               "Öffnen Sie in einem beliebigen Projekt die Galerie, wählen Sie Ihre Vorlage unter Meine Vorlagen und "
-              "drücken Sie Anlegen: Die Tafel wird daraus gebaut. Dann In der App starten."),
+              "drücken Sie Anlegen: Die Tafel wird daraus gebaut. Dann Start."),
              ("Create a board from your preset and start it.", "Legen Sie eine Tafel aus Ihrer Vorlage an und starten"
                                                                " Sie sie.")),
     )),

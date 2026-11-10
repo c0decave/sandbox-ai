@@ -92,7 +92,8 @@ def findings(view, where):
     room = view.viewport().width() - header.viewportMargins().right()  # less a (?)'s corner (review 6 L2)
     if view.horizontalScrollBar().isVisible():
         least = sum(header.sectionSize(c) for c in range(header.count()) if c != stretch) + tables.STRETCH_MIN
-        if least <= room and stretch is not None:
+        # (a bar still shown while the columns take exactly the room is Qt's update to come, seen under load)
+        if least <= room and stretch is not None and total > room:
             found.append(f"{where}: scrolls sideways ({total} px in {room}) though the columns fit")
     elif stretch is not None and abs(total - room) > 2:
         found.append(f"{where}: the columns take {total} px of {room}: the stretch column does not take the rest")

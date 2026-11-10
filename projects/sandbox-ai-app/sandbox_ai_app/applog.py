@@ -17,6 +17,13 @@ _versions = {}
 _installed = False
 _debug = False
 _file = None  # the app's own log file, when standard error is not it already
+_path = None  # where _file was opened (rotated there again while the app runs: keep_rotated)
+_rotating = threading.Lock()
+# The log window (logview.LogHub) and anything else that wants every entry: called with one dict per entry
+# ({"time", "level", "where", "message"}), from whichever thread logged it (the hub hands it to the GUI thread).
+_listeners = []
+_debug_wanted = False  # the log window shows debug entries: debug() hands them to the listeners, not to the files
+LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "FATAL")
 
 
 def now():
@@ -130,6 +137,69 @@ def open_log(path=None):
     return os.fdopen(fd, "a", buffering=1, encoding="utf-8", errors="replace")
 
 
+def add_listener(function):
+    """FUNCTION(entry) for every later entry (see _listeners); returns FUNCTION (to remove it again)."""
+    if function not in _listeners:
+        _listeners.append(function)
+    return function
+
+
+def remove_listener(function):
+    if function in _listeners:
+        _listeners.remove(function)
+
+
+def want_debug(on):
+    """The log window shows debug entries (ON) or not: debug() is a no-op unless someone wants them."""
+    global _debug_wanted
+    _debug_wanted = bool(on)
+
+
+def notify(level, where, message):
+    """Hand one entry to the listeners; never fails (a log line must never end the app)."""
+    if not _listeners:
+        return
+    entry = {"time": now(), "level": level, "where": where, "message": str(message)}
+    for function in list(_listeners):
+        try:
+            function(entry)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def to_terminal():
+    """Debug lines go to a terminal (standard error a TTY) only with SANDBOX_AI_APP_DEBUG=all: in the terminal they
+    drowned everything else (every background read of every page, twice a second). The log file and the log window
+    always get them in debug mode."""
+    if os.environ.get("SANDBOX_AI_APP_DEBUG") == "all":
+        return True
+    try:
+        return not sys.stderr.isatty()
+    except (AttributeError, ValueError, OSError):
+        return True
+
+
+def log(level, where, message):
+    """One entry of LEVEL (INFO, WARNING, ERROR) from WHERE (a component, e.g. "board"): into the log (standard error
+    and the app's log file) and the log window."""
+    level = level if level in LEVELS else "INFO"
+    text = f"{header(level, where)}\n  " + "\n  ".join(str(message).split("\n")) + "\n"
+    if level == "DEBUG":
+        if debugging():
+            write_debug(text)
+    else:
+        write(text)
+    notify(level, where, message)
+
+
+def write_debug(text):
+    """A debug line: into app.log, and onto standard error only where that is no terminal (or --debug=all)."""
+    if to_terminal():
+        write(text)
+    elif _file is not None:
+        write(text, _file)
+
+
 def write(text, stream=None):
     targets = [stream] if stream is not None else [sys.stderr, _file]
     for target in targets:
@@ -140,15 +210,51 @@ def write(text, stream=None):
             target.flush()
         except Exception:  # noqa: BLE001 - nowhere left to report it
             pass
+    if _file is not None and (stream is None or stream is _file):
+        keep_rotated()
+
+
+def keep_rotated():
+    """app.log rotated again once the file this app writes is larger than LOG_LIMIT, as at a start: an app that runs
+    for weeks (in the tray; debug lines, an error repeated every second) never fills the disk with it. Each app
+    rotates by the size of its own file, so a second app writing the same log is bounded too. Never raises."""
+    global _file
+    stream = _file
+    try:
+        if stream is None or _path is None or os.fstat(stream.fileno()).st_size <= LOG_LIMIT:
+            return
+    except (OSError, ValueError):
+        return
+    with _rotating:
+        if _file is not stream:  # rotated by another thread meanwhile
+            return
+        try:
+            rotate(_path, LOG_LIMIT, LOG_KEEP)
+            fresh = open_log(_path)
+        except Exception:  # noqa: BLE001 - a log must never end the app
+            return
+        if fresh is None:
+            return
+        _file = fresh
+        if _installed:
+            try:
+                faulthandler.enable(file=fresh, all_threads=True)
+            except (ValueError, OSError, AttributeError):
+                pass
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def set_debug(on):
-    """Debug mode: page switches, theme changes, every background command with its time and outcome, Qt's debug
-    messages. Also on with --debug or SANDBOX_AI_APP_DEBUG=1."""
+    """Debug mode: page switches, theme changes, every background command with its time and outcome - into app.log
+    and the log window. Also on with --debug or SANDBOX_AI_APP_DEBUG=1; SANDBOX_AI_APP_DEBUG=all (--debug=all) also
+    on the terminal, with Qt's own debug messages and Chromium's."""
     global _debug
     _debug = bool(on)
     if on:
-        os.environ["SANDBOX_AI_APP_DEBUG"] = "1"
+        os.environ.setdefault("SANDBOX_AI_APP_DEBUG", "1")
 
 
 def debugging():
@@ -157,12 +263,16 @@ def debugging():
 
 def debug(event, **fields):
     """One DEBUG line (only in debug mode): EVENT and its FIELDS, the component that called it."""
-    if not debugging():
+    on = debugging()
+    if not on and not _debug_wanted:
         return
     caller = sys._getframe(1)
     where = f"{os.path.splitext(os.path.basename(caller.f_code.co_filename))[0]}.{caller.f_code.co_name}"
     details = " ".join(f"{key}={value!r}" for key, value in fields.items())
-    write(f"{header('DEBUG', where)}\n  {event}{' ' + details if details else ''}\n")
+    message = f"{event}{' ' + details if details else ''}"
+    if on:
+        write_debug(f"{header('DEBUG', where)}\n  {message}\n")
+    notify("DEBUG", where, message)
 
 
 def delivered_by():
@@ -191,14 +301,29 @@ def excepthook(exc_type, exc, tb):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc, tb)
         return
-    write(entry(exc_type, exc, tb, delivered=delivered_by()))
+    text = entry(exc_type, exc, tb, delivered=delivered_by())
+    write(text)
+    notify("ERROR", component(tb)[0], text.split("\n", 1)[1] if "\n" in text else text)
 
 
 def thread_excepthook(args):
     if args.exc_type is SystemExit:
         return
-    write(entry(args.exc_type, args.exc_value, args.exc_traceback, delivered="a thread",
-                thread=args.thread.name if args.thread else None))
+    text = entry(args.exc_type, args.exc_value, args.exc_traceback, delivered="a thread",
+                 thread=args.thread.name if args.thread else None)
+    write(text)
+    notify("ERROR", component(args.exc_traceback)[0], text.split("\n", 1)[1] if "\n" in text else text)
+
+
+def unraisable_hook(unraisable):
+    try:
+        where = getattr(unraisable, "object", None)
+        text = entry(unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback,
+                     delivered=f"no caller ({unraisable.err_msg or 'unraisable'}: {where!r:.80})")
+        write(text)
+        notify("ERROR", "unraisable", text.split("\n", 1)[1] if "\n" in text else text)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 QT_LEVELS = {"QtDebugMsg": "DEBUG", "QtInfoMsg": "INFO", "QtWarningMsg": "WARNING", "QtCriticalMsg": "ERROR",
@@ -207,30 +332,42 @@ QT_LEVELS = {"QtDebugMsg": "DEBUG", "QtInfoMsg": "INFO", "QtWarningMsg": "WARNIN
 
 def qt_message(mode, context, message):
     level = QT_LEVELS.get(getattr(mode, "name", str(mode)).split(".")[-1], "WARNING")
-    if level == "DEBUG" and not os.environ.get("SANDBOX_AI_APP_DEBUG"):
-        return
+    if level == "DEBUG" and os.environ.get("SANDBOX_AI_APP_DEBUG") != "all":
+        return  # Qt's own debug messages only with SANDBOX_AI_APP_DEBUG=all (--debug=all): they flooded the log
     category = getattr(context, "category", None) or "qt"
     where = f"{category}" + (f" {context.file}:{context.line}" if getattr(context, "file", None) else "")
-    write(f"{header(level, where)}\n  {message}\n")
+    text = f"{header(level, where)}\n  {message}\n"
+    write_debug(text) if level == "DEBUG" else write(text)
+    notify(level, where, message)
 
 
 def install(debug_mode=False):
     """Take over the app's error output: exceptions of slots and threads, Qt's messages, a crash of the process
     itself (faulthandler: the Python stack of every thread on a segfault), and a first line; into the app's own
     log as well when standard error is not it (a start from the desktop menu had no log at all)."""
-    global _installed, _file
+    global _installed, _file, _path
     if _installed:
         return
     _installed = True
     if debug_mode:
         set_debug(True)
     _file = open_log()
+    _path = log_path() if _file is not None else None
     try:
         faulthandler.enable(file=_file if _file is not None else sys.stderr, all_threads=True)
     except (ValueError, OSError, AttributeError):
         pass
+    try:
+        # Chromium (QtWebEngine, in this process) ends it on a failed check with a trap instruction: SIGTRAP, which
+        # enable() does not watch - the app was gone without a line. The stacks are written, then it ends as before.
+        import signal
+        faulthandler.register(signal.SIGTRAP, file=_file if _file is not None else sys.stderr, all_threads=True,
+                              chain=True)
+    except (ValueError, OSError, AttributeError, RuntimeError):
+        pass
     sys.excepthook = excepthook
     threading.excepthook = thread_excepthook
+    sys.unraisablehook = unraisable_hook  # an exception in a destructor or a callback Qt could not raise
     try:
         from PySide6.QtCore import qInstallMessageHandler
         qInstallMessageHandler(qt_message)

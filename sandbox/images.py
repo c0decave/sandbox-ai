@@ -50,7 +50,7 @@ BASE_LABEL = "sandbox-ai.base-id"
 EXTENSION_LABEL = "sandbox-ai.extension"
 AGENT_PACKAGES = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "opencode": "opencode-ai"}
 NAME = r"[a-z0-9][a-z0-9_.-]{0,29}"
-RESERVED = {*AGENTS, "all", "base", "latest", "sandbox", "team", "vpn"}  # team, vpn: sandbox-build-image targets
+RESERVED = {*AGENTS, "all", "base", "latest", "sandbox", "team", "vpn"}  # team, vpn: sandbox-ai build targets
 KINDS = ("apt", "npm", "pip")
 DOCUMENT = "image.json"
 FRAGMENT = "Containerfile.fragment"
@@ -921,7 +921,7 @@ def remove(target, keep_image=False, podman_url=None, run=subprocess.run):
 
 def podman(podman_url=None):
     """The podman command line; without a systemd user session (no user bus) with --cgroup-manager=cgroupfs, as
-    sandbox-build-image builds then (a build's RUN steps would ask systemd for their cgroup and fail)."""
+    sandbox-ai build builds then (a build's RUN steps would ask systemd for their cgroup and fail)."""
     if podman_url:
         return ["podman", "--remote", "--url", podman_url]
     return ["podman", *([] if user_bus() else ["--cgroup-manager=cgroupfs"])]
@@ -929,7 +929,7 @@ def podman(podman_url=None):
 
 def user_bus(uid=None):
     """True if this user's systemd user session has its bus socket (rootless Podman's systemd cgroup manager needs
-    it): doctor's test, which sandbox-build-image's matches."""
+    it): doctor's test, which sandbox-ai build's matches."""
     global _doctor
     if _doctor is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_doctor_for_images", HERE / "doctor.py")
@@ -1034,7 +1034,7 @@ def packages(agent, podman_url=None, run=subprocess.run):
 
 
 def build_plan(target):
-    """(agent, kind, number of variants) for sandbox-build-image: KIND is "variant", "extended" (the agent's
+    """(agent, kind, number of variants) for sandbox-ai build: KIND is "variant", "extended" (the agent's
     image gets an extension layer) or "plain". Errors in the extension stop the build before it starts."""
     agent = agent_of(target)
     document, fragment, files = load(target)
@@ -1064,7 +1064,9 @@ def build_layer(target, base_id, podman_url=None, run=subprocess.run):
         (context / FILES).mkdir()
         for name, data in files.items():
             (context / FILES / name).write_bytes(data)
-        argv = podman(podman_url) + ["build", "--pull=never", "--tag", image_name(target, agent), "--file",
+        # sandbox-ai build found that only the host's network resolves names (build_image.sh): the same here.
+        network = ["--network=host"] if os.environ.get("SANDBOX_AI_BUILD_NETWORK") == "host" else []
+        argv = podman(podman_url) + ["build", *network, "--pull=never", "--tag", image_name(target, agent), "--file",
                                      str(context / "Containerfile"), "--label", f"{EXTENSION_LABEL}={target}",
                                      "--label", f"{HASH_LABEL}={digest}", "--label", f"{BASE_LABEL}={base_id}",
                                      str(context)]
@@ -1186,9 +1188,9 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
     past = sub.add_parser("history", help="changes and builds of the extensions")
     past.add_argument("target", nargs="?", metavar="AGENT|VARIANT")
     past.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    plan = sub.add_parser("build-plan")  # for sandbox-build-image
+    plan = sub.add_parser("build-plan")  # for sandbox-ai build
     plan.add_argument("target")
-    layer = sub.add_parser("layer")  # for sandbox-build-image: the extension layers after the base
+    layer = sub.add_parser("layer")  # for sandbox-ai build: the extension layers after the base
     layer.add_argument("target")
     layer.add_argument("--variants", action="store_true")
     args = parser.parse_args(argv)
@@ -1299,6 +1301,11 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
             print(f"  {format_finding(item)}", file=sys.stderr)
         if as_json:
             out(json.dumps({"error": str(exc), "findings": exc.findings}, indent=2))
+        return 1
+    except FileNotFoundError as exc:
+        missing = exc.filename or str(exc)
+        print(f"sandbox-ai images: {missing} is not installed here" + (
+            "; sandbox-ai doctor says what to install" if "podman" in str(missing) else ""), file=sys.stderr)
         return 1
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         print(f"sandbox-ai images: {exc}", file=sys.stderr)

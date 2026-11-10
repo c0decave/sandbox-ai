@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
-script_dir=$(dirname -- "$script_path")
-# Deprecated since 0.1.30, to be removed in a later version: the same as `sandbox-ai wizard`.
-[[ ${SANDBOX_AI_NO_DEPRECATION:-} == 1 ]] || echo "sandbox-wizard: deprecated, to be removed in a later version; use: sandbox-ai wizard (SANDBOX_AI_NO_DEPRECATION=1 hides this note)" >&2
-exec python3 -I "$script_dir/sandbox/wizard.py" "$@"

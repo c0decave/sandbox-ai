@@ -126,6 +126,8 @@ div.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; mar
 .terminal.hidden { display: none; }
 .canary-links.hidden { display: none; }
 .canary-event td:first-child { border-left: 3px solid var(--bad); }
+.safeguard.warning td:first-child { border-left: 3px solid var(--warn); }
+.safeguard.error td:first-child { border-left: 3px solid var(--bad); }
 .canary-links ul { margin: 0; padding-left: 18px; }
 nav .badge.unknown { background: var(--warn); color: var(--on-warn, var(--base)); }
 td.actions .confirm, .row .confirm { display: inline-block; white-space: normal; max-width: 36em; margin-right: 6px; vertical-align: middle; }
@@ -136,6 +138,15 @@ td.actions .confirm, .row .confirm { display: inline-block; white-space: normal;
   nav button { width: auto; white-space: nowrap; }
   header { grid-column: 1; }
 }
+details.fonts { position: relative; }
+details.fonts summary { cursor: pointer; }
+details.fonts .font-panel {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 50; display: grid; gap: 8px; width: min(24rem, 90vw);
+  padding: 12px; background: var(--base); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius);
+}
+details.fonts label { display: grid; gap: 4px; }
+details.fonts .hint { margin: 0; }
+details.fonts .font-missing { display: block; color: var(--warn); }
 td.countdown { white-space: nowrap; font-variant-numeric: tabular-nums; }
 td.countdown.warn { color: var(--warn); font-weight: 600; }
 td.countdown.bad { color: var(--bad); font-weight: 700; }

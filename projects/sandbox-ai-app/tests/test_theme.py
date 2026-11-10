@@ -9,6 +9,10 @@ pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from sandbox_ai_app import theme  # noqa: E402
 
 NAMES = list(theme.THEMES_DATA)
+# Well-known editor themes, in their upstream palettes; the parametrised tests below check them like the others.
+EDITOR_THEMES = {"solarized_dark": "#002b36", "solarized_light": "#fdf6e3", "dracula": "#282a36", "nord": "#2e3440",
+                 "gruvbox_dark": "#282828", "one_dark": "#282c34", "catppuccin_mocha": "#1e1e2e",
+                 "catppuccin_latte": "#eff1f5", "tokyo_night": "#1a1b26"}
 TEXT = 4.5   # normal text
 LARGE = 3.0  # borders of controls, the canvas grid
 
@@ -50,8 +54,39 @@ def test_every_theme_has_every_token(name):
 
 def test_the_choices_name_every_theme_once():
     keys = [key for key, _ in theme.choices()]
-    assert keys == list(theme.THEMES) and len(set(keys)) == len(keys) == 10
+    assert keys == list(theme.THEMES) and len(set(keys)) == len(keys) == 19
     assert {"light", "dark", "hacker", "cyberpunk", "amber", "unicorn", "win311", "mac", "fallout"} <= set(keys)
+    assert set(EDITOR_THEMES) <= set(keys)
+
+
+@pytest.mark.parametrize("name", sorted(EDITOR_THEMES))
+def test_the_editor_themes_keep_their_upstream_background(name):
+    """The editor's own background is the theme's base and the terminal's background; the parametrised tests
+    above check every colour key and the contrast of each, the status colours included."""
+    t = theme.THEMES_DATA[name]
+    assert t["colors"]["base"] == t["terminal"]["background"] == EDITOR_THEMES[name]
+    assert set(theme.THEMES_DATA["light"]["colors"]) <= set(t["colors"]) and t["font"]["families"]
+
+
+def test_the_chosen_fonts_go_before_the_themes(qapp):
+    """fonts.use() names installed fonts only; the theme puts them first: the app's font (apply()), the title's and
+    the terminal's fontFamily (xterm.js), the theme's families after them as the fallback."""
+    try:
+        theme.set_fonts(ui="IBM Plex Sans", mono="Hack")
+        theme.apply("dracula")
+        assert qapp.font().families()[:2] == ["IBM Plex Sans", theme.SANS[0]]
+        assert theme.title_font().families()[0] == "IBM Plex Sans"
+        family = json.loads(theme.terminal_theme())["fontFamily"]
+        assert family.startswith("Hack, ") and '"JetBrains Mono"' in family
+        theme.apply("fallout")  # its own monospace fonts follow the chosen one
+        assert json.loads(theme.terminal_theme())["fontFamily"].startswith('Hack, "Share Tech Mono"')
+        theme.set_fonts()
+        theme.apply("dracula")
+        assert qapp.font().families()[0] == theme.SANS[0]
+        assert json.loads(theme.terminal_theme())["fontFamily"].startswith('"JetBrains Mono"')
+    finally:
+        theme.set_fonts()
+        theme.apply("system")
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -98,6 +133,14 @@ def test_every_navigation_page_has_a_glyph():
     assert {key for key, _ in PAGES} <= set(theme.GLYPHS)
 
 
+def test_every_project_trust_state_has_a_glyph_in_a_status_colour(qapp):
+    from sandbox_ai_app.ui import PROJECT_STATES
+    assert set(theme.TRUST_GLYPHS) == set(PROJECT_STATES)
+    for state, (name, status) in theme.TRUST_GLYPHS.items():
+        assert name in theme.GLYPHS and status in theme.data()["status"], state
+        assert not theme.trust_glyph(state).isNull()
+
+
 def test_the_web_interface_has_the_same_themes():
     """sandbox-ai's web interface reads its themes from sandbox/web/themes.json: the app's THEMES_DATA, exported.
     After a change here: export it again (see that file's comment)."""
@@ -110,4 +153,7 @@ def test_the_web_interface_has_the_same_themes():
                  if p.is_file()), None) if home else None
     if path is None:
         pytest.skip("SANDBOX_AI_HOME names no sandbox-ai with a web interface")
-    assert json.loads(path.read_text())["themes"] == json.loads(json.dumps(theme.THEMES_DATA))
+    exported = json.loads(path.read_text())
+    assert exported["themes"] == json.loads(json.dumps(theme.THEMES_DATA))
+    from sandbox_ai_app import fonts  # the font lists of the settings, with how to get each
+    assert exported["fonts"] == {kind: [list(entry) for entry in fonts.KINDS[kind]] for kind in ("ui", "mono")}

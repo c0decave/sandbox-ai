@@ -1,0 +1,22 @@
+# The Tor container of sandbox-ai (`sandbox-ai build tor`): Tor in front of a sandbox (a profile of
+# `sandbox-ai vpn add NAME --tor`). Tor is not a VPN and has an image of its own, without VPN software: tor with
+# obfs4proxy for bridges and the GeoIP files for exit countries, nftables for the kill switch, iproute2, and
+# python3 for the runtime (sandbox/vpn_runtime.py, mounted read-only at /vpn at every start, so a new sandbox-ai
+# version needs no rebuild). No agent and no other tools.
+ARG DEBIAN_IMAGE=docker.io/library/debian:bookworm-slim
+
+FROM ${DEBIAN_IMAGE}
+# Tor's user first, with the fixed uid that the kill switch and the agent's firewall know its packets by
+# (vpn_runtime.TOR_UID, meta skuid): Debian's tor package keeps an existing debian-tor with a system uid and the
+# home /var/lib/tor.
+RUN groupadd --system --gid 950 debian-tor \
+    && useradd --system --uid 950 --gid 950 --home-dir /var/lib/tor --no-create-home --shell /bin/false debian-tor
+# Debian's packages of the base image's release, as the other tools (pin the release with DEBIAN_IMAGE).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 ca-certificates iproute2 nftables tor tor-geoipdb obfs4proxy \
+    && rm -rf /var/lib/apt/lists/* \
+    && test "$(id -u debian-tor)" = 950
+RUN tor --version && obfs4proxy -version && nft --version && ip -V && python3 --version
+RUN mkdir -p /vpn
+LABEL sandbox-ai.role=tor
+ENTRYPOINT ["/usr/bin/python3", "-I", "/vpn/vpn_runtime.py"]

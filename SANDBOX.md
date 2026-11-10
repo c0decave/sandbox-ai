@@ -8,14 +8,15 @@
 | Command | Purpose |
 |---|---|
 | `sandbox-ai` | One command for all tools below, plus `doctor`, `logs`, `activity`, `privacy-check`, `update`, `version`, `completion` |
-| `sandbox-ai claude\|codex\|opencode` | Start an agent in the sandbox (older form: `claude-sandbox` …, deprecated) |
+| `sandbox-ai claude\|codex\|opencode` | Start an agent in the sandbox |
 | `sandbox-ai list`, `rename`, `attach\|pause\|resume\|stop\|delete NAME`, `gc` | Every start by its name: what runs and what is kept, detach and come back, rebirth of a kept start |
-| `sandbox-ai build` | Build the agent images from the newest releases, their extensions, the team image and the VPN container (older form: `sandbox-build-image`, deprecated) |
+| `sandbox-ai build` | Build the agent images from the newest releases, their extensions, the team image and the VPN container |
 | `sandbox-ai images` | The agent images, their packages, extensions, recipes and variants |
-| `sandbox-ai wizard` | Create, edit and trust project configurations; list local LLM models (older form: `sandbox-wizard`, deprecated) |
+| `sandbox-ai wizard` | Create, edit and trust project configurations; list local LLM models |
 | `sandbox-ai presets`, `sandbox-ai demo-device` | Ready setups for `--preset`; an emulated serial device to practise on |
 | `sandbox-ai net`, `devices`, `limits` | Change what a running sandbox may reach, its devices and limits; take back its taint; end it |
 | `sandbox-ai approvals`, `canaries` | Answer what running sandboxes ask; the decoy files of the runs |
+| `sandbox-ai rules` | Check rulesets, show a start's rulesets with where each comes from, make a running sandbox read its HTTP rules anew |
 | `sandbox-ai secrets`, `git-logins`, `publish-logins`, `identities` | Keys and tokens in your keyring; Git and publish logins added by the connection proxy; who a start works as |
 | `sandbox-ai llm` | LLM servers (local or remote) for `--llm`; keys stay with the connection proxy |
 | `sandbox-ai vpn` | VPN profiles for `--vpn` (WireGuard, OpenVPN, Mullvad, Tailscale, Tor) |
@@ -23,17 +24,20 @@
 | `sandbox-ai plugins`, `sandbox-ai kits` | Plugin store: install the Claude plugins the kits declare, read-only in every sandbox; see and change kits |
 | `sandbox-ai team` | A team of agents, one sandbox each, with a task board |
 | `sandbox-ai hosts`, `sandbox-ai web`, `sandbox-ai defaults` | Other machines over SSH; the web interface; your defaults for every start |
-| `sandbox-ai session` | The older form of list, attach, pause, resume, stop and delete (`sandbox-session`, deprecated) |
-| `sandbox-ai mcp` | List, start and stop local MCP server sandboxes, add servers from the catalogs (older form: `sandbox-mcp`, deprecated) |
+| `sandbox-ai session` | The older form of list, attach, pause, resume, stop and delete |
+| `sandbox-ai mcp` | List, start and stop local MCP server sandboxes, add servers from the catalogs |
 | `install.sh`, `sandbox-ai-update` | Install or update to the newest release; `--check`, `--uninstall` |
 | `scripts/make_dist.py`, `scripts/publish_release.py` | Build `dist/` and publish a release ([RELEASING.md](RELEASING.md)) |
 | `scripts/make_pyz.py`, `scripts/build_appimage.sh`, `scripts/build_macos_app.sh`, `scripts/e2e_package.sh` | Build `sandbox-ai.pyz`, the AppImage and `sandbox-ai.app`, and check each as a user would start it |
+| `scripts/live_check.py` | Every live suite that needs no login, against this host's Podman and Bubblewrap, with a report |
 
 | Module | Role |
 |---|---|
 | `sandbox/agent_sandbox.py` | Host launcher: options, policy, credentials, Podman/Bubblewrap commands |
 | `sandbox/runtime.py` | Runs inside the sandbox (the only file mounted there): bootstrap, guard, loggers, connection proxy, DNS stub, display, terminal relay, MCP ends |
 | `sandbox/modes.py` | Security modes, from `lax` to `paranoid` |
+| `sandbox/rules_cmd.py` | `sandbox-ai rules` (check, show, reload) |
+| `sandbox/procinfo.py` | Processes of the host: `/proc` on Linux, `sysctl` and `libproc` on macOS |
 | `sandbox/sessions.py`, `sandbox/starts.py`, `sandbox/home_review.py` | Background sessions with tmux and kept starts; the registry of every start (list, names, history, gc); the review of a kept HOME before it comes back |
 | `sandbox/net.py`, `sandbox/devices.py`, `sandbox/workspaces.py`, `sandbox/approvals.py` | Changes to a running sandbox (network, taint, stop; devices and limits; workspaces added and taken back); questions and their answers |
 | `sandbox/privacy.py`, `sandbox/canary.py` | The privacy check of commits and pushes; decoy files with tokens made for each run |

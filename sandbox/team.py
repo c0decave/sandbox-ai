@@ -240,8 +240,25 @@ def show(name, out=print, as_json=False):
     return 0
 
 
-def post(name, agent, task, out=print):
+def post(name, agent, task, out=print, run=subprocess.run):
     data = load(name)
+    mcp = load_module("mcp_for_team", "mcp.py") if sys.platform == "darwin" else None
+    if mcp is not None and mcp.status(server_name(name)) == "running":
+        # macOS: the board's server runs in podman machine's VM, and its lock (flock) does not cross the VM's shared
+        # folders: the task is posted in there, by team_board.py itself, under the lock the server takes.
+        container = f"{mcp.pod_name(server_name(name))}-agent"
+        result = run(["podman", "exec", "--interactive", "--user=0:0", container, "python3", "-I", BOARD_TARGET,
+                      "--members", ",".join(data["members"]), "--dir", "/work", "--post", agent],
+                     input=task, capture_output=True, text=True, timeout=60, check=False)
+        try:
+            ident = json.loads(result.stdout.strip().splitlines()[-1])["id"] if result.returncode == 0 else None
+        except (ValueError, IndexError, KeyError, TypeError):
+            ident = None
+        if not isinstance(ident, int):
+            why = (result.stderr or "").strip().splitlines()[-1:] or [f"status {result.returncode}"]
+            raise ValueError(f"the board in podman machine did not take the task: {printable(why[0][:300])}")
+        out(f"sandbox-ai team: task #{ident} posted for {agent}")
+        return 0
     board = board_module().Board(data["members"], teams_dir() / name / "board")
     ident = board.post(agent, task, sender="human")["id"]
     out(f"sandbox-ai team: task #{ident} posted for {agent}")

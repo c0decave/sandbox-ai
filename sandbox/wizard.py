@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Interactive project setup: writes a trusted .sandbox-ai.json.
 
-Every agent can use an LLM server registered with `sandbox-ai llm add` (local or
-remote, with its key kept by the connection proxy): the wizard lists the
-server's models and writes --llm NAME:MODEL. For OpenCode it can also configure
-a local server (Ollama, LM Studio, llama.cpp or vLLM) directly: it lists the
-server's models with size and load state, writes an OpenCode configuration that
-uses only that server, and allows exactly its IP and port through the sandbox
-firewall.
+"Local models only": every agent can use an LLM server registered with
+`sandbox-ai llm add` (local or remote, with its key kept by the connection
+proxy) instead of its cloud provider. The wizard offers the registered servers,
+adds one by its address (IP:PORT and a name) or finds one on this host and at
+the addresses you name (Ollama, LM Studio, llama.cpp, vLLM: one read-only GET of
+the model list each, short timeouts), lists the server's models with size and
+load state (sorted by name, size or load state), and writes --llm
+NAME:MODEL[,MODEL...] with --no-provider-defaults: the sandbox reaches exactly
+that server's address and port, and OpenCode offers exactly the models chosen.
+
+API keys that stay out of the sandbox (--api-key HOST=NAME[=SECRET]) are asked
+for with the further options.
 """
 import argparse
 import contextlib
@@ -211,7 +216,13 @@ def build_document(answers):
         # An edited configuration keeps its description, agent arguments and MCP definitions.
         document.update(answers["keep"])
     else:
-        document["description"] = "Created by sandbox-wizard"
+        document["description"] = "Created by sandbox-ai wizard"
+    # The starts' names and HOME (ask_start): written only when chosen, so that a file without them keeps the
+    # launcher's defaults (the folder's name, a kept HOME).
+    for key, answer in (("name", "name"), ("keep", "keep_home")):
+        document.pop(key, None)
+        if answers.get(answer) is not None:
+            document[key] = answers[answer]
     return document
 
 
@@ -258,7 +269,7 @@ def parse_options(agent, options):
 def option_groups(options):
     """OPTIONS (a list as on the command line) as [(name, value or None, tokens)] by the launcher's own
     parser: "--x=v" counts as ("--x", "v"); tokens it does not know stay single entries."""
-    actions = launcher().build_parser()._option_string_actions
+    actions = launcher().option_actions()
     options = launcher().canonical_options(list(options))  # short forms as their long names
     groups, index = [], 0
     while index < len(options):
@@ -284,7 +295,7 @@ def flat(name, value):
 
 NETWORK_VALUES = ("--allow-host", "--allow-tcp", "--allow", "--allow-host-port")
 GIT_OPTIONS = ("--git-token-file", "--git-token-env", "--git-token-secret", "--git-credentials", "--token-proxy")
-EXTRA_VALUES = ("--state-dir", "--mount", "--env", "--mcp", "--gui-screen", "--gui-vnc")
+EXTRA_VALUES = ("--state-dir", "--mount", "--env", "--api-key", "--mcp", "--gui-screen", "--gui-vnc")
 KIT_VALUES = ("--kit", "--kit-dir")
 KIT_FLAGS = ("--no-default-kit", "--no-memory", "--no-plugins")
 SUBNET_OPTIONS = ("--subnet", "--subnet6")
@@ -298,7 +309,9 @@ def answers_from_document(document):
                "network": "default", "local": None, "llm": None, "llm_only": False, "danger": False, "gui": False, "tmux": True, "log_dir": None,
                "network_extra": [], "git": [], "kits": [], "extra": [], "subnet": [],
                "mode": document.get("mode") if document.get("mode") in l.MODES.NAMES else None,
-               "keep": {key: document[key] for key in ("description", "agent_args", "mcp_servers") if key in document}}
+               "keep": {key: document[key] for key in ("description", "agent_args", "mcp_servers") if key in document},
+               "name": document["name"] if isinstance(document.get("name"), str) else None,
+               "keep_home": document["keep"] if isinstance(document.get("keep"), bool) else None}
     presets = {f"--allow-{name}" for name in l.PRESETS}
     groups, notes, index = option_groups(document.get("options", [])), [], 0
     while index < len(groups):
@@ -683,8 +696,8 @@ def ask_extra(p, a, project, state, current=None):
     """Everything else: persistent HOME, mounts, variables, MCP, display details, free options.
     CURRENT (options) when editing gives the defaults; what the wizard does not ask about is offered
     as the free options line."""
-    now = {"ro": False, "--state-dir": [], "--mount": [], "--env": [], "--mcp": [], "--gui-screen": [],
-           "--gui-vnc": [], "rest": []}
+    now = {"ro": False, "--state-dir": [], "--mount": [], "--env": [], "--api-key": [], "--mcp": [],
+           "--gui-screen": [], "--gui-vnc": [], "rest": []}
     for name, value, tokens in option_groups(list(current or [])):
         if name == "--workspace-ro":
             now["ro"] = True
@@ -701,7 +714,8 @@ def ask_extra(p, a, project, state, current=None):
     else:
         options = ["--workspace-ro"] if p.yes("Mount the workspaces read-only (--workspace-ro)", now["ro"]) else []
     digest = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:12]
-    if p.yes("Keep the sandbox HOME between runs (--state-dir; cannot be combined with --session)",
+    if p.yes("A HOME of your own in a fixed folder, shared by every start of the project and never discarded "
+             "(--state-dir; without it every start keeps a HOME of its own anyway: sandbox-ai resume NAME)",
              bool(now["--state-dir"])):
         options += ["--state-dir", now["--state-dir"][-1] if now["--state-dir"] else
                     str(state / "sandbox-ai" / "home" / f"{project.name or 'root'}-{digest}")]
@@ -716,6 +730,14 @@ def ask_extra(p, a, project, state, current=None):
     for value in ask_list(p, "Host variables passed to the agent, comma-separated (--env)", check_name,
                           default("--env")):
         options += ["--env", value]
+
+    def check_api_key(value):
+        launcher().api_key_values(argparse.Namespace(api_key=[value]))
+        refused = mode_refusal(a, "--api-key", value)
+        if refused:
+            raise ValueError(refused)
+    for value in ask_list(p, API_KEY_QUESTION, check_api_key, default("--api-key")):
+        options += ["--api-key", value]
     servers = sorted(load_mcp().definitions())
 
     def check_server(value):
@@ -751,6 +773,12 @@ def ask_extra(p, a, project, state, current=None):
             p.out(f"  {launcher().printable(exc)}")
             continue
         return options + values
+
+
+API_KEY_QUESTION = ("API keys that stay out of the sandbox, HOST=NAME[=SECRET], comma-separated (--api-key: the "
+                    "agent gets the variable NAME with a placeholder; the connection proxy puts the secret SECRET "
+                    "(default NAME) of sandbox-ai secrets in its place on the wire, only in a credential header of an "
+                    "HTTPS request to HOST; opens HOST)")
 
 
 def check_free_options(agent, text):
@@ -894,43 +922,6 @@ class Prompter:
             self.out("  Please answer y or n")
 
 
-def ask_local_llm(p, fetch):
-    kind = p.choose("Server type", list(SERVERS))
-    while True:
-        host = p.ask("Server IP address (the sandbox cannot reach this host's localhost)", lan_address())
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            p.out("  Please enter an IP address")
-            continue
-        if address.is_loopback:
-            p.out("  Warning: a loopback address is unreachable from inside the sandbox. Bind the server to the "
-                  "LAN (e.g. OLLAMA_HOST=0.0.0.0, LM Studio 'Serve on Local Network', vllm --host 0.0.0.0) "
-                  "and use this host's LAN IP.")
-            if not p.yes("Use it anyway"):
-                continue
-        port = p.ask("Port", str(SERVERS[kind][1]))
-        if not port.isdigit() or not 1 <= int(port) <= 65535:
-            p.out("  Please enter a port between 1 and 65535")
-            continue
-        try:
-            models = discover(kind, str(address), int(port), fetch=fetch)
-        except ValueError as exc:
-            p.out(f"  {exc}")
-            continue
-        break
-    models = sort_models(models, p.choose("Sort models by", ["name", "size", "loaded"], "loaded"))
-    for line in model_table(models):
-        p.out("  " + line)
-    if not models:
-        raise ValueError("The server offers no models; load or pull one first")
-    while True:
-        number = p.ask("Model number", "1")
-        if number.isdigit() and 1 <= int(number) <= len(models):
-            return kind, str(address), int(port), models[int(number) - 1]["name"]
-        p.out(f"  Please enter a number between 1 and {len(models)}")
-
-
 def make_prompter(prompt, out, secret):
     prefill = None
     if prompt is None and LINE_EDITING:
@@ -962,9 +953,195 @@ def registered_endpoints(agent):
     return found
 
 
+LOCAL_QUESTION = ("Local models only: an LLM server (Ollama, LM Studio, llama.cpp, vLLM or another "
+                  "OpenAI-compatible one) instead of the agent's cloud provider")
+
+
+def pending_endpoint(answers):
+    """The endpoint added in this wizard run and not yet registered (registered when the file is written), or
+    None."""
+    new = answers.get("llm_new")
+    if not new:
+        return None
+    try:
+        return llm().check_record(new["name"], {"kind": new["kind"], "url": new["url"]})
+    except ValueError:
+        return None
+
+
+def taken_names():
+    try:
+        return set(llm().load_store()["endpoints"])
+    except (OSError, ValueError):
+        return set()
+
+
+def ask_found_server(p, answers, fetch):
+    """(kind, host, port, models) of a server found at the addresses the human confirms, or None (none found, or
+    the address is to be typed)."""
+    printable = launcher().printable
+    default = ",".join(llm().detect_addresses())
+    while True:
+        text = p.ask("Look for LLM servers at these addresses (this host's loopback; add LAN addresses, "
+                     "comma-separated; one read-only request per usual port; '-' to type the server's address)",
+                     default)
+        if text.strip() == "-":
+            return None
+        addresses = split_list(text)
+        try:
+            found = llm().detect(addresses, fetch=lambda url: fetch(url, timeout=llm().DETECT_TIMEOUT))
+        except ValueError as exc:
+            p.out(f"  {printable(exc)}")
+            continue
+        break
+    if not found:
+        p.out("  No LLM server answered there (ports " + ", ".join(str(port) for _, port in llm().DETECT_PORTS)
+              + "); type its address instead.")
+        return None
+    for index, entry in enumerate(found, 1):
+        loaded = sum(1 for m in entry["models"] if m["loaded"])
+        p.out(f"  {index}  {llm().KINDS[entry['kind']]['label']}  {printable(entry['url'])}  "
+              f"{len(entry['models'])} models{f', {loaded} loaded' if loaded else ''}")
+    while True:
+        answer = p.ask("Server number, or m to type its address", "1")
+        if answer.lower() == "m":
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(found):
+            entry = found[int(answer) - 1]
+            return entry["kind"], entry["host"], entry["port"], entry["models"]
+        p.out(f"  Please enter a number between 1 and {len(found)}, or m")
+
+
+def ask_server_address(p, answers, fetch):
+    """(kind, host, port, models) of the server at the address the human types (IP:PORT); its kind is found from
+    what it answers."""
+    printable = launcher().printable
+    # Podman reaches this host's loopback (--allow-host-port); Bubblewrap only its LAN address.
+    host = (llm().lan_address() or "127.0.0.1") if answers.get("backend") == "bwrap" else "127.0.0.1"
+    while True:
+        text = p.ask("Server address (IP:PORT)", f"{host}:11434").strip()
+        host, _, port = text.rpartition(":")
+        host = host.strip("[]")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            p.out("  Please enter an IP address and a port, such as 192.168.1.20:11434")
+            continue
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            p.out("  Please enter a port between 1 and 65535")
+            continue
+        if address.is_loopback and answers.get("backend") == "bwrap":
+            p.out("  This host's loopback is reached from a sandbox with the Podman backend only; give this host's "
+                  "LAN address (bind the server to it: OLLAMA_HOST=0.0.0.0, LM Studio 'Serve on Local Network', "
+                  "vllm --host 0.0.0.0)")
+            continue
+        try:
+            kind, models = llm().identify(str(address), int(port), lambda url: fetch(url, timeout=5))
+        except ValueError as exc:
+            p.out(f"  {printable(exc)}")
+            continue
+        return kind, str(address), int(port), models
+
+
+def ask_new_server(p, answers, fetch):
+    """A server added in this run: found or typed, with a name; registered with sandbox-ai llm when the file is
+    written (answers["llm_new"]). Returns (endpoint, models)."""
+    printable = launcher().printable
+    while True:
+        chosen = ask_found_server(p, answers, fetch) or ask_server_address(p, answers, fetch)
+        kind, host, port, models = chosen
+        url = f"http://{llm().host_form(host)}:{port}"
+        taken = taken_names()
+        while True:
+            name = p.ask("Name for this server (sandbox-ai llm)", llm().suggested_name(kind, host, taken)).strip()
+            if name in taken:
+                p.out(f"  There is an LLM server {printable(name)} already; choose another name")
+                continue
+            try:
+                found = llm().check_record(name, {"kind": kind, "url": url})
+            except ValueError as exc:
+                p.out(f"  {printable(exc)}")
+                if llm().NAME.fullmatch(name):
+                    break  # the address itself is refused (plain http outside the local networks)
+                continue
+            problem = llm().agent_problem(found, answers["agent"])
+            if problem:
+                p.out(f"  {printable(problem)}")
+                break
+            answers["llm_new"] = {"name": name, "kind": kind, "url": url, "models": [m["name"] for m in models]}
+            return found, models
+
+
+def ask_server(p, answers, fetch, current=None):
+    """(endpoint, models or None) of the LLM server to use: one registered with sandbox-ai llm, or one added now
+    (models: what it listed just now)."""
+    printable = launcher().printable
+    endpoints = registered_endpoints(answers["agent"])
+    pending = pending_endpoint(answers)
+    if not endpoints:
+        if pending is not None and pending["name"] == (current or "").partition(":")[0] and \
+                p.yes(f"Keep the server {printable(pending['name'])} ({printable(pending['url'])})", True):
+            return pending, None
+        return ask_new_server(p, answers, fetch)
+    for index, endpoint in enumerate(endpoints, 1):
+        p.out(f"  {index}  {printable(endpoint['name'])}  {endpoint['kind']}  {printable(endpoint['url'])}")
+    p.out("  a  add a server (find it on this host and your LAN, or type its address)")
+    name = (current or "").partition(":")[0]
+    default = next((str(i) for i, e in enumerate(endpoints, 1) if e["name"] == name), "1")
+    while True:
+        number = p.ask("Endpoint number, or a to add one", default)
+        if number.lower() == "a":
+            return ask_new_server(p, answers, fetch)
+        if number.isdigit() and 1 <= int(number) <= len(endpoints):
+            answers.pop("llm_new", None)
+            return endpoints[int(number) - 1], None
+        p.out(f"  Please enter a number between 1 and {len(endpoints)}, or a")
+
+
+def ask_llm_models(p, endpoint, models=None, current=None, models_of=None):
+    """NAME:MODEL[,MODEL...] for --llm: the server lists its models (with its key, from the host) when it answers,
+    else the ones it listed last time are offered; several can be chosen (the first is the agent's; OpenCode
+    offers exactly these), a model name can be typed, and name, size or loaded sorts the list."""
+    printable = launcher().printable
+    if models is None:
+        try:
+            models = (models_of or llm().endpoint_models)(endpoint)
+        except (OSError, ValueError) as exc:
+            p.out(f"  {printable(exc)}")
+            models = [{"name": m, "size": None, "loaded": None, "details": "listed earlier"}
+                      for m in endpoint["models"]]
+    order = "loaded"
+    name, _, chosen = (current or "").partition(":")
+    wanted = [m for m in chosen.split(",") if m] if name == endpoint["name"] else []
+    while True:
+        shown = sort_models(models, order)
+        for line in model_table(shown) if shown else []:
+            p.out("  " + line)
+        names = [m["name"] for m in shown]
+        default = ",".join(str(names.index(m) + 1) if m in names else m for m in wanted) or (
+            str(names.index(endpoint["model"]) + 1) if endpoint["model"] in names else endpoint["model"] or
+            ("1" if names else None))
+        answer = p.ask(("Model numbers or names, comma-separated (the first is the agent's; "
+                        "name, size or loaded sorts the list)") if names else "Model names, comma-separated",
+                       default)
+        if answer.strip().lower() in ("name", "size", "loaded"):
+            order = answer.strip().lower()
+            continue
+        picked, problem = [], None
+        for item in split_list(answer):
+            if item.isdigit() and names and 1 <= int(item) <= len(names):
+                picked.append(names[int(item) - 1])
+            elif not item.isdigit() and llm().MODEL_NAME.fullmatch(item):
+                picked.append(item)
+            else:
+                problem = item
+        if picked and problem is None:
+            return f"{endpoint['name']}:{','.join(dict.fromkeys(picked))}"
+        p.out("  Please enter listed numbers or model names, comma-separated")
+
+
 def ask_llm_endpoint(p, endpoints, current=None, models_of=None):
-    """NAME:MODEL for --llm: the server lists its models (with its key, from the host) when it answers, else the
-    ones it listed last time are offered; a model name can be typed as well."""
+    """NAME:MODEL[,MODEL...] for --llm with one of ENDPOINTS (registered with sandbox-ai llm)."""
     printable = launcher().printable
     for index, endpoint in enumerate(endpoints, 1):
         p.out(f"  {index}  {printable(endpoint['name'])}  {endpoint['kind']}  {printable(endpoint['url'])}")
@@ -975,26 +1152,7 @@ def ask_llm_endpoint(p, endpoints, current=None, models_of=None):
         if number.isdigit() and 1 <= int(number) <= len(endpoints):
             break
         p.out(f"  Please enter a number between 1 and {len(endpoints)}")
-    endpoint = endpoints[int(number) - 1]
-    try:
-        models = sort_models((models_of or llm().endpoint_models)(endpoint), "loaded")
-    except (OSError, ValueError) as exc:
-        p.out(f"  {printable(exc)}")
-        models = [{"name": m, "size": None, "loaded": None, "details": "listed earlier"} for m in endpoint["models"]]
-    for line in model_table(models) if models else []:
-        p.out("  " + line)
-    names = [m["name"] for m in models]
-    chosen = (current or "").partition(":")[2] if name == endpoint["name"] else ""
-    default = str(names.index(chosen) + 1) if chosen in names else chosen or (
-        str(names.index(endpoint["model"]) + 1) if endpoint["model"] in names else endpoint["model"] or
-        ("1" if names else None))
-    while True:
-        answer = p.ask("Model number or name" if names else "Model name", default)
-        if answer.isdigit() and names and 1 <= int(answer) <= len(names):
-            return f"{endpoint['name']}:{names[int(answer) - 1]}"
-        if answer and not answer.isdigit() and llm().MODEL_NAME.fullmatch(answer):
-            return f"{endpoint['name']}:{answer}"
-        p.out("  Please enter a listed number or a model name")
+    return ask_llm_models(p, endpoints[int(number) - 1], current=current, models_of=models_of)
 
 
 def ask_network(p, answers, project, fetch, editing=False):
@@ -1040,34 +1198,25 @@ def ask_subnet(p, answers, editing=False):
 
 
 def choose_network(p, answers, project, fetch, editing=False):
-    """An LLM server registered with sandbox-ai llm, a local LLM server (OpenCode) or a network profile; when
-    editing, the current choice is the default."""
+    """Local models only (an LLM server: registered with sandbox-ai llm, or added now) or a network profile; when
+    editing, the current choice is the default. A local OpenCode configuration of an earlier wizard
+    (--local-config) can be kept."""
     strict = mode_of(answers) in launcher().MODES.STRICT  # the provider only: no LLM server, no profile
-    endpoints = [] if strict else registered_endpoints(answers["agent"])
-    current = answers.get("llm")
-    if endpoints and p.yes(f"Use an LLM server registered with sandbox-ai llm "
-                           f"({', '.join(launcher().printable(e['name']) for e in endpoints)})",
-                           bool(current) and editing):
-        answers["llm"] = ask_llm_endpoint(p, endpoints, current)
-        answers["llm_only"] = p.yes("Reach nothing but this server and what you allow below "
-                                    "(--no-provider-defaults)", answers.get("llm_only", True) if editing and current
-                                    else True)
-        answers["local"], answers["network"] = None, "default"
-        return
-    answers["llm"], answers["llm_only"] = None, False
-    local = answers["local"]
-    if answers["agent"] == "opencode" and not strict and p.yes("Use a local LLM server (Ollama, LM Studio, vLLM) instead of the cloud",
-                                                bool(local) and editing):
+    current, local = answers.get("llm"), answers["local"]
+    if not strict and p.yes(LOCAL_QUESTION, bool(current or local) and editing):
         if editing and local and local.get("target") and p.yes(
                 f"Keep the local server {launcher().printable(local['target'])} "
                 f"({launcher().printable(local['config'])})", default=True):
             return
-        kind, host, port, model = ask_local_llm(p, fetch)
-        answers["local"] = {"kind": kind, "host": host, "port": port, "model": model,
-                            "config": str(local_config_path(project))}
-        answers["network"] = "default"
+        endpoint, models = ask_server(p, answers, fetch, current)
+        answers["llm"] = ask_llm_models(p, endpoint, models, current)
+        answers["llm_only"] = p.yes("Reach nothing but this server and what you allow below "
+                                    "(--no-provider-defaults: no cloud provider)",
+                                    answers.get("llm_only", True) if editing and current else True)
+        answers["local"], answers["network"] = None, "default"
         return
-    answers["local"] = None
+    answers["llm"], answers["llm_only"], answers["local"] = None, False, None
+    answers.pop("llm_new", None)
     p.out("  " + network_help(mode_of(answers)))
     choices = [choice for choice in network_choices() if not mode_refusal(answers, *network_options(choice))]
     current = answers["network"] if editing and answers["network"] in choices else "default"
@@ -1103,6 +1252,26 @@ def ask_behaviour(p, answers, project, editing=False):
         answers["log_dir"] = None
 
 
+def ask_start(p, answers):
+    """The project keys of its starts: "name" (the PROJECT part of the automatic names AGENT-PROJECT-xxxx; empty:
+    the folder's name) and "keep" (no: each start's HOME is discarded when it ends)."""
+    l = launcher()
+    while True:
+        name = p.edit("Name for the PROJECT part of its start names (AGENT-PROJECT-xxxx; empty: the folder's name)",
+                      answers.get("name") or "")
+        if not name or re.fullmatch(l.SESSION_NAME, name):
+            break
+        p.out("  1-40 letters, digits, '_', '.' or '-', starting with a letter or digit")
+    answers["name"] = name or None
+    if mode_of(answers) == "paranoid":
+        p.out("  The security mode paranoid discards every start's HOME when it ends")
+        return
+    kept = p.yes("Keep each start's HOME when it ends (sandbox-ai resume NAME brings it back; no: discarded)",
+                 answers.get("keep_home") is not False)
+    # Only a no is written ("keep": false); a file that said true keeps saying so.
+    answers["keep_home"] = False if not kept else (True if answers.get("keep_home") is True else None)
+
+
 def ask_new(p, project, fetch, tokens):
     chosen = {}
     ask_mode(p, chosen)  # first: the questions below offer only what the mode allows
@@ -1123,8 +1292,10 @@ def ask_new(p, project, fetch, tokens):
     if p.yes("Set up Git (commit identity, push tokens for GitHub or your own Git server)"):
         answers["git"] = ask_git(p, answers, project, tokens)
     answers["kits"] = ask_new_kits(p, agent)
-    if p.yes("Further options (read-only workspaces, persistent HOME, mounts, variables, MCP, display, any other)"):
+    if p.yes("Further options (read-only workspaces, a HOME of your own, mounts, variables, API keys, MCP, display, "
+             "any other, start names, keeping the HOME)"):
         answers["extra"] = ask_extra(p, answers, project, state_home())
+        ask_start(p, answers)
     return answers
 
 
@@ -1201,7 +1372,14 @@ def summary(answers):
             ("6", "Network extras", options(answers["network_extra"])), ("7", "Git", options(answers["git"])),
             ("8", "Further options", options(answers["extra"])), ("9", "Agent arguments", options(args)),
             ("k", "Kits and project memory", options(answers.get("kits") or [])),
+            ("n", "Start names and HOME", start_summary(answers)),
             ("0", "All launcher options as one line", "(expert)")]
+
+
+def start_summary(answers):
+    """The starts' names and HOME as the edit menu shows them."""
+    name = launcher().printable(answers.get("name") or "") or "(the folder's name)"
+    return f"name {name}, HOME {'discarded at the end' if answers.get('keep_home') is False else 'kept'}"
 
 
 def edit_menu(p, answers, project, fetch, tokens):
@@ -1237,9 +1415,13 @@ def edit_part(p, choice, answers, project, fetch, tokens):
             p.out("  A local LLM server is for OpenCode only; dropped it (network: default)")
             answers["local"], answers["network"] = None, "default"
         name = (answers.get("llm") or "").partition(":")[0]
-        if name and name not in [e["name"] for e in registered_endpoints(agent)]:
+        pending = pending_endpoint(answers)
+        usable = [e["name"] for e in registered_endpoints(agent)] + \
+            ([pending["name"]] if pending and not llm().agent_problem(pending, agent) else [])
+        if name and name not in usable:
             p.out(f"  The LLM server {launcher().printable(name)} cannot serve {agent}; dropped it (network: default)")
             answers["llm"], answers["llm_only"] = None, False
+            answers.pop("llm_new", None)
         if agent != answers["agent"]:
             p.out("  The options are checked for the new agent before saving.")
         answers["agent"] = agent
@@ -1275,6 +1457,8 @@ def edit_part(p, choice, answers, project, fetch, tokens):
         answers["extra"] = ask_extra(p, answers, project, state_home(), answers["extra"])
     elif choice == "k":
         answers["kits"] = ask_kits(p, answers["agent"], answers.get("kits") or [])
+    elif choice == "n":
+        ask_start(p, answers)
     elif choice == "9":
         text = p.edit("Agent arguments (after --), as on the command line",
                       shlex.join(answers["keep"].get("agent_args", [])))
@@ -1303,6 +1487,7 @@ def edit_part(p, choice, answers, project, fetch, tokens):
         for note in notes:
             p.out(f"  Note: {note}")
         rebuilt["keep"] = answers["keep"]
+        rebuilt["name"], rebuilt["keep_home"] = answers.get("name"), answers.get("keep_home")
         local = answers["local"]
         if local and "kind" in local and rebuilt["local"] and rebuilt["local"]["config"] == local["config"]:
             rebuilt["local"] = local  # chosen in this edit and not written yet
@@ -1313,8 +1498,9 @@ def edit_part(p, choice, answers, project, fetch, tokens):
 def changes(old, new):
     """Lines describing what changes from document OLD to NEW."""
     lines = []
-    for key in ("agent", "workspaces", "agent_args", "description"):
-        if (old.get(key) or None) != (new.get(key) or None):  # missing and empty are the same
+    for key in ("agent", "workspaces", "agent_args", "description", "name", "keep"):
+        if (old.get(key, None if key != "keep" else True) or None) != \
+                (new.get(key, None if key != "keep" else True) or None):  # missing and empty are the same
             lines.append(f"  {key}: {json.dumps(old.get(key), ensure_ascii=True)} -> "
                          f"{json.dumps(new.get(key), ensure_ascii=True)}")
 
@@ -1372,7 +1558,12 @@ def finish(p, project, target, answers, tokens, old=None):
              if name == "--git-token-file" and value}
     tokens = [(path, token) for path, token in tokens if path in named]
     new_local = answers["local"] if answers["local"] and "kind" in answers["local"] else None
+    new_server = answers.get("llm_new") if answers.get("llm") and \
+        answers["llm"].partition(":")[0] == (answers.get("llm_new") or {}).get("name") else None
     checked = list(document["options"])
+    if new_server:  # not registered yet: the launcher would not know it
+        index = checked.index("--llm")
+        del checked[index:index + 2]
     # The local OpenCode configuration and typed tokens are written only after confirmation.
     unwritten = {new_local["config"]} if new_local else set()
     unwritten |= {path for path, _ in tokens}
@@ -1413,6 +1604,15 @@ def finish(p, project, target, answers, tokens, old=None):
                                                    indent=2) + "\n")
         out(f"Wrote {new_local['config']} (OpenCode uses only {new_local['host']}:{new_local['port']}, "
             f"model {new_local['model']})")
+    if new_server:
+        try:
+            llm().register(new_server["name"], new_server["kind"], new_server["url"], out=lambda line: None,
+                           models=[{"name": name} for name in new_server["models"]])
+        except (OSError, ValueError) as exc:
+            out(f"Could not register the LLM server {new_server['name']}: {launcher().printable(exc)}; nothing "
+                "written.")
+            return None
+        out(f"Registered the LLM server {new_server['name']} ({new_server['url']}) with sandbox-ai llm")
     for path, token in tokens:
         write_token(path, token)
         out(f"Wrote the token to {path} (mode 0600; the project configuration names only this file)")

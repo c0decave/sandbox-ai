@@ -6,8 +6,8 @@ follows a symbolic link, not even one in the middle of a path:
 
 - a path is walked one component at a time with openat(O_NOFOLLOW | O_DIRECTORY) relative to the directory
   before it; '..' and absolute paths are refused before anything is opened;
-- the directory reached is checked through /proc/self/fd to still lie below the root (a directory the
-  agent moved away while it was walked is refused);
+- the directory reached is checked through /proc/self/fd (macOS: fcntl F_GETPATH) to still lie below the root
+  (a directory the agent moved away while it was walked is refused);
 - files are opened with O_NOFOLLOW | O_NONBLOCK and must be regular files (a FIFO, device or socket is
   never read, and opening one cannot hang);
 - new files and directories are created relative to an open directory with O_EXCL | O_NOFOLLOW, so a name
@@ -65,6 +65,24 @@ READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | O_NOCTTY | O_CLOEXEC
 CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | O_NOCTTY | O_CLOEXEC
 O_PATH = getattr(os, "O_PATH", 0)
 SPECIAL_BITS = stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX
+F_GETPATH = 50  # macOS's fcntl F_GETPATH (fcntl has the name from Python 3.9 on, there only)
+MAXPATHLEN = 1024
+
+
+def fd_location(fd):
+    """Where the open directory or file FD is now: /proc/self/fd on Linux, fcntl F_GETPATH on macOS; None where
+    neither tells."""
+    if sys.platform == "darwin":
+        import fcntl
+        try:
+            found = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", F_GETPATH), bytes(MAXPATHLEN))
+        except OSError:
+            return None
+        return os.fsdecode(found.split(b"\0", 1)[0]) or None
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
 WALK_ENTRIES = 200_000  # files and folders a delete or chown walks
 OWNERSHIP_TIMEOUT = 600  # seconds podman unshare may take
 TOO_MANY_COPY = N_("More than {count} files and folders; copy a smaller part.")
@@ -95,7 +113,10 @@ def printable(text):
 def printable_text(text):
     """Text of several lines for the screen (a file, a diff): its line breaks and tabs kept, every other control
     character shown escaped as printable() does."""
-    return "".join(c if c in "\n\t" else printable(c) for c in str(text))
+    text = str(text)
+    if text.replace("\n", "").replace("\t", "").isprintable():  # (nearly every text: as it is, no look at each character)
+        return text
+    return "".join(c if c in "\n\t" else printable(c) for c in text)
 
 
 def parts(relative):
@@ -443,16 +464,18 @@ class Root:
         self.label = label or self.path
         self.sandbox = sandbox
         fd = os.open(self.path, DIRECTORY)
+        if sys.platform == "darwin":
+            # As F_GETPATH names it (the case on disk): what _inside compares the folders reached with.
+            self.path = fd_location(fd) or self.path
         os.close(fd)
         self.hook = None  # tests: called between the steps of a walk
 
     # -- walking --
 
     def _inside(self, fd):
-        try:
-            where = os.readlink(f"/proc/self/fd/{fd}")
-        except OSError:
-            return  # no /proc: the walk with O_NOFOLLOW alone keeps to the root
+        where = fd_location(fd)
+        if where is None:
+            return  # neither /proc nor F_GETPATH: the walk with O_NOFOLLOW alone keeps to the root
         if where != self.path and not where.startswith(self.path.rstrip("/") + "/"):
             raise Refused(tr("That folder is no longer below the folder shown (moved while it was opened)."))
 
@@ -891,10 +914,7 @@ def _identity(info):
 
 
 def _where(fd):
-    try:
-        return os.readlink(f"/proc/self/fd/{fd}")
-    except OSError:
-        return None
+    return fd_location(fd)
 
 
 def _refuse_into_itself(source_fd, target_fd):

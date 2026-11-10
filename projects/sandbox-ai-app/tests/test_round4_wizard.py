@@ -205,7 +205,7 @@ def test_the_wizard_says_it_is_for_this_machine_and_leads_to_the_board(env, monk
     assert "another host" in plain.folder_page.where.text()
     page = BoardPage(backend.SandboxAI(), lambda *a, **k: None, lambda: {"board_grid": 20})
     page.board_for_host()
-    assert "host" in page.notice.text() and page.notice.isVisibleTo(page)
+    assert "host" in page.notice.text() and not page.notice.isVisibleTo(page), "in the log window"
     for widget in (wizard, plain, page):
         widget.deleteLater()
 

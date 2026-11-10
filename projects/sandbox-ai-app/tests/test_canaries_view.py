@@ -89,7 +89,7 @@ def test_errors_an_old_sandbox_ai_and_nothing_touched(qapp, wait):
 
 def test_the_activity_page_has_a_canaries_tab_that_counts_them(qapp):
     page = ActivityPage(FakeSai([LOG]))
-    assert [page.tabs.tabText(i) for i in range(page.tabs.count())] == ["Timeline", "Canaries"]
+    assert [page.tabs.tabText(i) for i in range(page.tabs.count())] == ["Timeline", "Canaries", "Safeguards"]
     page.canaries.show_events(canaries_view.events_of([LOG]))
     index = page.tabs.indexOf(page.canaries)
     assert page.tabs.tabText(index) == "Canaries (2)"

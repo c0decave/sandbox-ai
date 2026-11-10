@@ -45,6 +45,8 @@ def test_round_trip_private_atomic_and_debounced(qapp, env, wait):
     assert again.get("page", 0) == 0 and again.get("count", "") == "" and again.get("missing", []) == []
     again.data["flag"] = True
     assert again.get("flag", 1) == 1, "a bool is not a number"
+    # Compact (stability round 3): a third of an indented text's size, made in a tenth of the time on the GUI thread.
+    assert "\n" not in path.read_text() and ": " not in path.read_text()
 
 
 def test_a_damaged_file_is_put_aside_and_defaults_apply(qapp, env):
@@ -73,6 +75,48 @@ def test_a_damaged_file_at_start_says_so_and_the_window_works(qapp, env, monkeyp
         assert "state.json" in text and "settings.json" in text and "defaults" in text
         assert not backend.settings_file().exists() and list(backend.settings_file().parent.glob("settings.json.damaged-*"))
         assert w.current_page() == "launch" and w.tabs.count() == 0
+    finally:
+        close(w)
+
+
+@pytest.mark.parametrize("case", ["values", "draft-kind", "draft-values", "draft-places"])
+def test_a_state_file_of_valid_json_but_foreign_values_never_stops_the_app(case, qapp, env, monkeypatch):
+    """Stability review 2: anyone with the user's rights can edit state.json (another version of the app may have
+    written it). Values of the wrong shape - lists where names belong, numbers too large for Qt, a board draft with
+    parts or settings this app does not know - are left out: the window is made (it was not: a TypeError at every
+    start), and no slot raises when the pages and the board are shown."""
+    import sys
+    import traceback
+    folder = project(env, "p")
+    (folder / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude", "options": []}))
+    p = str(folder)
+    tab = [{"kind": "project", "path": p}]
+    node = {"id": 1, "kind": "agent", "props": {"agent": "claude"}, "x": 0, "y": 0}
+    drafts = {"draft-kind": [{"id": 1, "kind": "from-a-newer-app", "props": "s", "x": "a", "y": None}],
+              "draft-values": [{"id": 1, "kind": "limits", "props": {"--memory": 5}, "x": 0, "y": 0}],
+              "draft-places": [{**node, "x": 1e300}]}
+    if case == "values":
+        data = {"nav_collapsed": [[1], {}, "zz"], "tabs": [5, {"kind": [1]}, *tab], "tab_current": [1],
+                "docks": {"state": "x", "closed": [[1]], "known": [{}], "folded": [[]], "sizes": {"log": []}},
+                "splitters": {"approvals": [10 ** 20, 5], "kits": [1, 10 ** 30], "connections": "x"},
+                "launch": {"agent": ["x"], "profile": 5, "forms": {"claude": "x"}, "projects": {p: {"agent": {}}}},
+                "boards": {p: {"zoom": 1.0, "center": [10 ** 400, 0]}}, "page": "board"}
+    else:
+        data = {"tabs": tab, "page": "board",
+                "boards": {p: {"draft": {"nodes": drafts[case], "edges": [[1, 2]], "extra": [], "document_extra": {}}}}}
+    state.state_file().parent.mkdir(parents=True)
+    state.state_file().write_text(json.dumps(data))
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *a: errors.append("".join(traceback.format_exception(*a))))
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    w = make_window(monkeypatch)
+    try:
+        for key in ("board", "approvals", "kits", "connections", "launch"):
+            w.show_page(key)
+            qapp.processEvents()
+        w.board.grab()
+        assert not errors, "\n".join(errors)
+        assert not w.board.dirty(), "a draft this app cannot show is left out"
     finally:
         close(w)
 
@@ -238,14 +282,16 @@ def test_an_unapplied_board_draft_comes_back_with_undo_and_discard(window, env, 
     try:
         board = again.board
         assert board.directory == str(folder) and board.board.first("limits").props["--memory"] == "6g"
-        assert board.dirty() and board.notice.isVisibleTo(board) and board.discard_button.isVisibleTo(board)
-        assert "Restored the changes not applied" in board.notice.text()
+        from sandbox_ai_app import logview
+        qapp.processEvents()  # (the log window's entries arrive through the event loop)
+        assert board.dirty() and not board.notice.isVisibleTo(board), "said in the log window, not above the board"
+        assert any("Restored the changes not applied" in e["message"] for e in logview.hub().snapshot())
         assert board.view.transform().m11() == pytest.approx(zoom, rel=1e-3)
         board.undo_group.undo()
         assert board.board.first("limits") is None and not board.dirty(), "Undo goes back to the file"
         board.undo_group.redo()
-        board.discard_button.click()
-        assert board.board.first("limits") is None and not board.dirty() and not board.discard_button.isVisibleTo(board)
+        board.discard_changes()  # (the canvas menu's Discard the changes not applied; asked first)
+        assert board.board.first("limits") is None and not board.dirty()
     finally:
         again.shutdown()
     third = make_window(monkeypatch)
@@ -292,3 +338,124 @@ def test_the_selected_sandbox_comes_back(window, env, monkeypatch):
         assert again.sandboxes.current().key == "run:claude-two" and again.sandboxes.only_project.isChecked()
     finally:
         close(again)
+
+
+def test_the_writer_thread_never_blocks_the_gui_and_quitting_waits_for_it(qapp, env, monkeypatch):
+    """Performance round 2: the file is written and synced to the disk in a thread of its own (a slow disk never
+    holds the window); flush() - as quitting calls it - waits until it is on the disk; only the newest text is
+    written when several wait."""
+    import threading
+    s = state.State(delay=10_000)
+    gate, written = threading.Event(), []
+    real = backend.write_private_text
+
+    def slow(path, text):
+        gate.wait(5)
+        written.append(json.loads(text)["n"])
+        real(path, text)
+    monkeypatch.setattr(backend, "write_private_text", slow)
+    begin = time.monotonic()
+    for n in range(5):
+        s.set("n", n)
+        assert s.flush(wait=False)
+    assert time.monotonic() - begin < 1, "the GUI thread went on"
+    gate.set()
+    assert s.flush() and json.loads(s.path.read_text())["n"] == 4
+    # (the first text written is whichever waited when the thread started: on a busy machine any of them)
+    assert written == sorted(written) and written[-1] == 4 and len(written) <= 3, "only the newest text waited"
+    assert stat.S_IMODE(os.stat(s.path).st_mode) == 0o600
+
+
+def test_a_failed_write_is_said_and_stops_nothing(qapp, env, monkeypatch):
+    s = state.State(delay=10_000)
+    real = backend.write_private_text
+
+    def full(path, text):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(backend, "write_private_text", full)
+    s.set("x", 1)
+    assert s.flush() is False
+    monkeypatch.setattr(backend, "write_private_text", real)  # (only this one back: env's variables stay)
+    assert s.flush() is True
+
+
+@pytest.mark.parametrize("kind", ["field", "list"])
+def test_what_is_being_typed_in_the_inspector_is_kept_when_the_app_quits(window, env, qapp, kind):
+    """Stability review 2: a field of the board's inspector is taken when it is left (a list: 600 ms after typing
+    stops). Quitting wrote the draft first - what was typed last, in the field still being edited, was lost."""
+    from sandbox_ai_app.board_view import LinesEdit
+    folder = project(env, "p")
+    (folder / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude", "options": []}))
+    window.set_project(folder)
+    window.show()
+    window.show_page("board")
+    page = window.board
+    if kind == "field":
+        page.add_node("limits")
+    node = page.board.first("limits" if kind == "field" else "network")
+    for _ in range(3):
+        qapp.processEvents()
+    page.inspect(node)
+    qapp.processEvents()
+    if kind == "field":
+        edit = [e for e in page.inspector_holder.findChildren(QtWidgets.QLineEdit) if e.isEnabled()][0]
+        window.activateWindow()
+        edit.setFocus()
+        qapp.processEvents()
+        assert QtWidgets.QApplication.focusWidget() is edit
+        edit.setText("7g")  # typed, the field not left
+    else:
+        page.inspector_holder.findChildren(LinesEdit)[0].setPlainText("pypi.org")  # typed, the pause not over
+    window.shutdown()
+    draft = json.loads(state.state_file().read_text())["boards"][str(folder)]["draft"]
+    props = next(n["props"] for n in draft["nodes"] if n["id"] == node.id)
+    assert ("7g" if kind == "field" else "pypi.org") in json.dumps(props)
+
+
+@pytest.mark.parametrize("ending", ["logout", "sigterm"])
+def test_logout_and_sigterm_write_the_state_before_the_work_is_stopped(window, monkeypatch, ending):
+    """Stability review 2: at a logout (commitDataRequest: the moment to save) and at SIGTERM the state - the
+    board's changes not applied among it - was written only at the very end, after up to a grace period and
+    QUIT_WAIT seconds of stopping the work: a session manager that kills the app meanwhile lost what changed in
+    the last moments. Now it is on the disk before the work is stopped."""
+    seen = []
+    monkeypatch.setattr(QtWidgets.QApplication, "quit", staticmethod(lambda: None))
+    monkeypatch.setattr(window, "stop_work", lambda timeout=None: seen.append(
+        json.loads(state.state_file().read_text()).get("marker") if state.state_file().exists() else None) or [])
+    window.state.set("marker", ending)  # (debounced: not written yet)
+    window.end_of_session(None) if ending == "logout" else window.terminate()
+    assert seen == [ending]
+    window.session_goes_on()
+
+
+def test_the_writer_survives_any_error_says_a_failure_once_and_quitting_never_waits_forever(qapp, env, monkeypatch):
+    """Stability review 2: an error other than OSError ended the writer thread with `writing` left set - no later
+    change was written again, and quitting (flush) waited for it for ever. A failed write was said nowhere (the
+    board's unapplied changes were silently not kept); a write that hangs (a network home gone) held quitting for
+    ever."""
+    import threading
+    from sandbox_ai_app import applog
+    said = []
+    monkeypatch.setattr(applog, "log", lambda level, where, message: said.append((level, message)))
+    s = state.State(delay=10_000)
+    real = backend.write_private_text
+
+    def broken(path, text):
+        raise RuntimeError("something unforeseen")
+    monkeypatch.setattr(backend, "write_private_text", broken)
+    s.set("x", 1)
+    assert s.flush() is False
+    s.set("x", 2)
+    assert s.flush() is False
+    assert [level for level, _ in said] == ["WARNING"], "said once, not at every write"
+    assert "state.json" in said[0][1] and "something unforeseen" in said[0][1]
+    monkeypatch.setattr(backend, "write_private_text", real)
+    assert s.flush() is True and json.loads(s.path.read_text())["x"] == 2, "the writer goes on"
+    assert said[-1][0] == "INFO", "written again: said too"
+    gate = threading.Event()
+    monkeypatch.setattr(backend, "write_private_text", lambda path, text: gate.wait(30))
+    monkeypatch.setattr(state, "FLUSH_WAIT", 0.3)
+    s.set("x", 3)
+    begin = time.monotonic()
+    assert s.flush() is False and time.monotonic() - begin < 5, "quitting gives up on a write that hangs"
+    gate.set()

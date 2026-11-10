@@ -30,6 +30,15 @@ try:  # noqa: SIM105 - must happen before a QApplication is created
 except ImportError:
     pass
 
+# No test opens a real browser or file manager (see home_guard.no_browser): what the app asks Qt to open is recorded.
+OPENED_URLS = []
+try:
+    from PySide6.QtGui import QDesktopServices
+
+    QDesktopServices.openUrl = staticmethod(lambda url: OPENED_URLS.append(url) or True)
+except (ImportError, TypeError, AttributeError):
+    pass
+
 
 # CI sets SANDBOX_AI_APP_REQUIRE_QT=1: a test skipped because Qt, QtWebEngine or the sandbox-ai checkout is
 # missing then fails, so a broken Qt installation cannot turn the Qt tests into silent skips.

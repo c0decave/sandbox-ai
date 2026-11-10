@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import ssl
@@ -376,7 +377,7 @@ class FakeAPI:
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
-            do_GET = do_POST = do_DELETE = handle_one
+            do_GET = do_POST = do_DELETE = do_PUT = handle_one
 
             def log_message(self, *args):
                 pass
@@ -480,6 +481,49 @@ def test_mullvad_profile_end_to_end(home, api, capsys):
     no_v6 = v.add_mullvad(add_args("mv4", mullvad=True, no_ipv6=True), out.append, client, prompt=lambda _: ACCOUNT)
     assert no_v6["wireguard"]["addresses"] == ["10.68.1.2/32"] and no_v6["dns"] == ["10.64.0.1"]
     assert no_v6["wireguard"]["peers"][0]["allowed_ips"] == ["0.0.0.0/0"]
+
+
+def test_mullvad_key_rotation(home, api, capsys):
+    client = v.Mullvad(api.url, api.client_context)
+    profile = v.add_mullvad(add_args("mv", mullvad=True, no_ipv6=True), lambda text: None, client,
+                            prompt=lambda _: ACCOUNT)
+    v.save_profile(profile)
+    old = (secrets_dir(home) / "VPN_MV_KEY").read_text()
+
+    def pubkey(body, headers):
+        if headers.get("Authorization") != "Bearer tok-1":
+            return 401, {"code": "INVALID_ACCESS_TOKEN"}
+        return 200, {"id": "dev-1", "name": "happy otter", "pubkey": json.loads(body)["pubkey"],
+                     "ipv4_address": "10.68.9.9/32", "ipv6_address": "fc00:bbbb:bbbb:bb01::9:9/128"}
+    api.routes[("PUT", "/accounts/v1/devices/dev-1/pubkey")] = pubkey
+    out = []
+    with pytest.raises(ValueError, match="in use by brisk-otter"):
+        v.rotate("mv", out=out.append, client=client, prompt=lambda _: ACCOUNT, in_use=lambda name: ["brisk-otter"])
+    assert v.rotate("mv", out=out.append, client=client, prompt=lambda _: ACCOUNT, in_use=lambda name: []) == 0
+    new = (secrets_dir(home) / "VPN_MV_KEY").read_text()
+    rotated = v.load_profile("mv")
+    sent = json.loads(next(r for r in api.requests if r["method"] == "PUT")["body"])["pubkey"]
+    assert new != old and sent == v.public_key(new) == rotated["public_key"]
+    assert rotated["wireguard"]["addresses"] == ["10.68.9.9/32"], "a profile without IPv6 keeps none"
+    assert "rotated" in rotated and "new WireGuard key" in out[-1]
+    assert ACCOUNT not in json.dumps(rotated) + "".join(out) and new not in "".join(out) + capsys.readouterr().out
+    # Mullvad refusing leaves the key as it was.
+    api.routes[("PUT", "/accounts/v1/devices/dev-1/pubkey")] = (400, {"code": "PUBKEY_IN_USE"})
+    with pytest.raises(ValueError, match="could not replace the key: PUBKEY_IN_USE"):
+        v.rotate("mv", client=client, prompt=lambda _: ACCOUNT, in_use=lambda name: [])
+    assert (secrets_dir(home) / "VPN_MV_KEY").read_text() == new
+    # Taken, but an answer without readable addresses: the new key is kept (the old one is void), the addresses too.
+    api.routes[("PUT", "/accounts/v1/devices/dev-1/pubkey")] = (200, {"id": "dev-1", "ipv4_address": "nonsense"})
+    said = []
+    assert v.rotate("mv", out=said.append, client=client, prompt=lambda _: ACCOUNT, in_use=lambda name: []) == 0
+    assert (secrets_dir(home) / "VPN_MV_KEY").read_text() != new
+    assert v.load_profile("mv")["wireguard"]["addresses"] == ["10.68.9.9/32"] and "keeps its addresses" in said[0]
+    # Another provider's profile: said where its key comes from.
+    source = home / "corp.conf"
+    source.write_text(WIREGUARD)
+    v.main(["add", "corp", "--wireguard", str(source)])
+    with pytest.raises(ValueError, match="not a Mullvad profile"):
+        v.rotate("corp", client=client, prompt=lambda _: ACCOUNT, in_use=lambda name: [])
 
 
 # --- the kill switch -------------------------------------------------------------------------------------------------
@@ -628,6 +672,7 @@ class FakeRunner:
 @pytest.mark.parametrize("kernel", [True, False])
 def test_wireguard_comes_up_behind_the_kill_switch(kernel, tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "RUN", tmp_path)
+    monkeypatch.setattr(rt, "wireguard_go", lambda: "/usr/local/bin/wireguard-go")
     wireguard, secrets, _ = v.parse_wireguard(WIREGUARD)
     lookups = []
 
@@ -654,6 +699,30 @@ def test_wireguard_comes_up_behind_the_kill_switch(kernel, tmp_path, monkeypatch
     assert (["wireguard-go", "--foreground", "wg0"] in commands) != kernel
     assert tunnel["full4"] and tunnel["full6"] and tunnel["endpoints"] == ["198.51.100.7:51820"]
     assert tunnel["dns"] == ["10.66.0.1", "fd00:66::1"]
+
+
+@pytest.mark.parametrize("status", ["NOT BUILT: go install golang.zx2c4.com/wireguard@v0.0.20231211 failed", None])
+def test_wireguard_without_the_module_or_wireguard_go_says_why(status, tmp_path, monkeypatch):
+    """wireguard-go is optional in the image (no network for Go's proxy at build time): on a host without the
+    wireguard module such a profile fails at once, saying why and what helps, after the kill switch was loaded."""
+    monkeypatch.setattr(rt, "RUN", tmp_path)
+    monkeypatch.setattr(rt, "wireguard_go", lambda: None)
+    status_file = tmp_path / "wireguard-go.status"
+    if status:
+        status_file.write_text(status + "\n")
+    monkeypatch.setattr(rt, "WIREGUARD_GO_STATUS", status_file)
+    wireguard, secrets, _ = v.parse_wireguard(WIREGUARD)
+    runner = FakeRunner(kernel=False)
+    with pytest.raises(RuntimeError) as caught:
+        rt.up_wireguard({"profile": {"type": "wireguard", "wireguard": wireguard, "dns": wireguard["dns"]},
+                         "secrets": secrets}, runner, lambda name, family: ["198.51.100.7"] if family == 4 else [])
+    message = str(caught.value)
+    assert "no WireGuard kernel module" in message and "no wireguard-go" in message
+    assert "sudo modprobe wireguard" in message and "sandbox-ai build vpn" in message
+    assert (status in message) if status else "()" not in message
+    commands = [c for c, _ in runner.commands]
+    assert ["nft", "-f", "-"] in commands and not any(c[0] == "wireguard-go" for c in commands)
+    assert not runner.children
 
 
 def test_wg_setconf_defaults_the_keepalive_for_peers_with_an_endpoint():
@@ -865,7 +934,7 @@ def test_split_tunnels_and_the_tailnet():
     dns = {"servers": [rt.QUAD100], "configured": True, "routes": {rt.QUAD100: "tailscale0"},
            "answers": {rt.QUAD100: True}}
     verdict = v.evaluate(tailnet, {"interface": "tailscale0"}, {"dns": dns}, {})
-    assert verdict == {"failures": [], "warnings": [], "notes": []}
+    assert verdict == {"failures": [], "warnings": [], "notes": [], "leaks": []}
 
 
 # --- the container -----------------------------------------------------------------------------------------------------
@@ -922,6 +991,9 @@ if mode == "broken":
 if mode == "gone":
     print("Error: localhost/sandbox-ai-vpn:latest: image not known", file=sys.stderr)
     sys.exit(125)
+if mode == "gone-tor":
+    print("Error: localhost/sandbox-ai-tor:latest: image not known", file=sys.stderr)
+    sys.exit(125)
 say(event="ready", tunnel={"interface": "wg0"}, checks={}, hosts={},
     got=sorted(data["secrets"]))
 sys.stdin.readline()
@@ -938,8 +1010,12 @@ def test_tunnel_protocol(home):
     assert tunnel.process.poll() is None  # the tunnel lives as long as its standard input is open
     tunnel.close()
     assert tunnel.process.returncode == 0
-    for name, message in (("broken", "Operation not permitted"), ("gone", "build the image: sandbox-ai build vpn")):
-        tunnel = v.Tunnel([sys.executable, "-c", FAKE_CONTAINER], {"profile": {"name": name}, "secrets": {}}, said.append)
+    for name, message in (("broken", "Operation not permitted"), ("gone", "build the image: sandbox-ai build vpn"),
+                          ("gone-tor", "build the image: sandbox-ai build tor")):
+        # The image is named last in the container's command (container_command); the hint names its build.
+        image = v.TOR_IMAGE if name == "gone-tor" else v.VPN_IMAGE
+        tunnel = v.Tunnel([sys.executable, "-c", FAKE_CONTAINER, image], {"profile": {"name": name}, "secrets": {}},
+                          said.append)
         with pytest.raises(ValueError, match=message):
             tunnel.wait_ready(timeout=20)
         tunnel.close()
@@ -963,29 +1039,93 @@ def test_the_runtime_reports_errors_without_secrets(tmp_path, monkeypatch):
 
 # --- the build ------------------------------------------------------------------------------------------------------
 
-def test_build_vpn_image(tmp_path, monkeypatch):
+FAKE_BUILD_PODMAN = """#!/usr/bin/python3
+import json, os, sys
+with open(os.environ["BUILD_LOG"], "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+if "run" in sys.argv and os.environ.get("WIREGUARD_GO_STATUS"):
+    print(os.environ["WIREGUARD_GO_STATUS"])
+"""
+
+
+def build_calls(log):
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("status", ["built v0.0.1", "NOT BUILT: go install failed", ""])
+def test_build_vpn_image(status, tmp_path, monkeypatch):
     log = tmp_path / "build.json"
-    (tmp_path / "podman").write_text("#!/usr/bin/python3\nimport json,os,sys\nfrom pathlib import Path\n"
-                                     "Path(os.environ['BUILD_LOG']).write_text(json.dumps(sys.argv[1:]))\n")
+    (tmp_path / "podman").write_text(FAKE_BUILD_PODMAN)
     (tmp_path / "podman").chmod(0o700)
-    environment = {**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "BUILD_LOG": str(log)}
-    result = subprocess.run([str(ROOT / "sandbox-build-image"), "vpn", "--build-arg", "WIREGUARD_GO_VERSION=v0.0.1"],
+    environment = {**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "BUILD_LOG": str(log),
+                   "SANDBOX_AI_BUILD_NO_DNS_CHECK": "1",  # (test_images.py: the check of names)
+                   "WIREGUARD_GO_STATUS": status}
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "vpn", "--build-arg", "WIREGUARD_GO_VERSION=v0.0.1"],
                             capture_output=True, text=True, env=environment)
     assert result.returncode == 0, result.stderr
-    # Without a systemd user session the build uses cgroupfs (sandbox-build-image); on a desktop login it does not.
+    # Without a systemd user session the build uses cgroupfs (sandbox-ai build); on a desktop login it does not.
     cgroups = [] if os.path.exists(f"/run/user/{os.getuid()}/bus") else ["--cgroup-manager=cgroupfs"]
-    assert json.loads(log.read_text()) == [*cgroups, "build", "--pull=newer", "--tag", "localhost/sandbox-ai-vpn:latest", "--label",
-                                           "sandbox-ai.role=vpn", "--file", str(ROOT / "sandbox" / "Containerfile.vpn"),
-                                           "--build-arg", "WIREGUARD_GO_VERSION=v0.0.1", str(ROOT / "sandbox")]
+    build, read = build_calls(log)
+    assert build == [*cgroups, "build", "--pull=newer", "--tag", "localhost/sandbox-ai-vpn:latest", "--label",
+                     "sandbox-ai.role=vpn", "--file", str(ROOT / "sandbox" / "Containerfile.vpn"),
+                     "--build-arg", "WIREGUARD_GO_VERSION=v0.0.1", str(ROOT / "sandbox")]
+    # Then the build says whether the optional wireguard-go is in the image (read from it, nothing pulled).
+    assert read == [*cgroups, "run", "--rm", "--pull=never", "--network=none", "--entrypoint=/bin/cat",
+                    "localhost/sandbox-ai-vpn:latest", "/usr/local/share/sandbox-ai/wireguard-go"]
+    if status.startswith("built"):
+        assert "wireguard-go built v0.0.1" in result.stderr and "WARNING" not in result.stderr
+    elif status:
+        assert "WARNING" in result.stderr and "has no wireguard-go (NOT BUILT" in result.stderr
+        assert "sudo modprobe wireguard" in result.stderr and "GOPROXY" in result.stderr
+    else:
+        assert "could not be read" in result.stderr and "WARNING" not in result.stderr
     log.unlink()
-    for options in (["--pin", "1.2.3"], ["--extension-only"]):  # agent image options
-        refused = subprocess.run([str(ROOT / "sandbox-build-image"), *options, "vpn"], capture_output=True, text=True,
-                                 env=environment)
-        assert refused.returncode == 2 and "not vpn" in refused.stderr and not log.exists()
+    for target in ("vpn", "tor"):
+        for options in (["--pin", "1.2.3"], ["--extension-only"]):  # agent image options
+            refused = subprocess.run([str(ROOT / "sandbox-ai"), "build", *options, target], capture_output=True,
+                                     text=True, env=environment)
+            assert refused.returncode == 2 and f"not {target}" in refused.stderr and not log.exists()
     recipe = (ROOT / "sandbox" / "Containerfile.vpn").read_text()
     for part in ("wireguard-tools", "openvpn", "nftables", "iproute2", "python3", "golang.zx2c4.com/wireguard",
-                 "/usr/local/bin/tailscaled"):
+                 "/usr/local/bin/tailscaled", "/usr/local/share/sandbox-ai/wireguard-go"):
         assert part in recipe, part
+
+
+def test_build_tor_image(tmp_path):
+    log = tmp_path / "build.json"
+    (tmp_path / "podman").write_text(FAKE_BUILD_PODMAN)
+    (tmp_path / "podman").chmod(0o700)
+    environment = {**os.environ, "PATH": f"{tmp_path}:/usr/bin:/bin", "BUILD_LOG": str(log),
+                   "SANDBOX_AI_BUILD_NO_DNS_CHECK": "1"}  # (test_images.py: the check of names)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "tor", "--build-arg", "DEBIAN_IMAGE=debian:12"],
+                            capture_output=True, text=True, env=environment)
+    assert result.returncode == 0, result.stderr
+    cgroups = [] if os.path.exists(f"/run/user/{os.getuid()}/bus") else ["--cgroup-manager=cgroupfs"]
+    # One build, nothing read back: the Tor image has no wireguard-go to report.
+    assert build_calls(log) == [[*cgroups, "build", "--pull=newer", "--tag", "localhost/sandbox-ai-tor:latest",
+                                 "--label", "sandbox-ai.role=tor", "--file", str(ROOT / "sandbox" / "Containerfile.tor"),
+                                 "--build-arg", "DEBIAN_IMAGE=debian:12", str(ROOT / "sandbox")]]
+    usage = subprocess.run([str(ROOT / "sandbox-ai"), "build", "--help"], capture_output=True, text=True,
+                           env=environment).stdout
+    assert "vpn|tor" in usage and "localhost/sandbox-ai-tor:latest" in usage and "Tor is" in usage
+
+
+def test_the_wireguard_go_stage_is_pinned_and_optional():
+    """The user's rule: third-party releases pinned (at least 14 days old). wireguard-go is only the fallback
+    without the host's module: a build that cannot fetch it goes on without it."""
+    recipe = (ROOT / "sandbox" / "Containerfile.vpn").read_text()
+    assert re.search(r"^ARG GO_IMAGE=docker\.io/library/golang:1\.\d+-bookworm$", recipe, re.M)
+    assert re.search(r"^ARG WIREGUARD_GO_VERSION=v0\.0\.\d{8}$", recipe, re.M)
+    assert "@latest" not in recipe and "WIREGUARD_GO_VERSION=latest" not in recipe
+    stage = recipe[recipe.index("AS wireguard-go"):recipe.index("AS tailscale")]
+    # go install's failure is caught (if ...; then ...; else <warning>; fi), and the final stage copies a directory
+    # that always exists (with its status), installing wireguard-go only when it is there.
+    assert "elif CGO_ENABLED=0" in stage and "else" in stage and "WARNING" in stage and "> /out/status" in stage
+    assert "COPY --from=wireguard-go /out/ /opt/wireguard-go/" in recipe
+    assert "if [ -f /opt/wireguard-go/wireguard-go ]" in recipe
+    final = recipe[recipe.rindex("FROM "):]
+    checks = [line for line in final.splitlines() if line.startswith("RUN wg --version")]
+    assert checks and "wireguard-go" not in checks[0]  # a build without it must not fail its last check
 
 
 def test_main_knows_the_vpn_command():
@@ -1072,6 +1212,10 @@ def test_doctor_checks_the_vpn_once_there_is_a_profile(home, tmp_path, monkeypat
     monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(doctor, "run", lambda command, timeout=30: (1, ""))
     assert doctor.check_vpn()[1:] == ("VPN", f"{v.VPN_IMAGE} missing", "sandbox-ai build vpn")
+    asked = []
+    monkeypatch.setattr(doctor, "run", lambda command, timeout=30: (asked.append(command[-1]), (1, ""))[1])
+    doctor.check_vpn()
+    assert asked == [v.VPN_IMAGE]  # a WireGuard profile needs the VPN image only, not Tor's
     monkeypatch.setattr(doctor, "run", lambda command, timeout=30: (0, ""))
     assert doctor.check_vpn(tun=tmp_path / "no-tun")[:3] == ("fail", "VPN", "/dev/net/tun is missing")
     (tmp_path / "tun").touch()

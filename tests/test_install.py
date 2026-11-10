@@ -23,10 +23,43 @@ import home_guard  # noqa: E402
 
 home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPOSITORY = Path(__file__).resolve().parents[1]
 VERSION = re.search(r'^__version__ = "([^"]+)"$', (ROOT / "sandbox/agent_sandbox.py").read_text(), re.M)[1]
-COMMANDS = ["sandbox-ai", "claude-sandbox", "codex-sandbox", "opencode-sandbox", "sandbox-session", "sandbox-mcp",
-            "sandbox-wizard", "sandbox-build-image", "sandbox-ai-update"]
+
+
+def unsigned_copy(target):
+    """The files make_dist.py would take from the repository (tracked and new, as --allow-dirty), in a Git
+    repository of their own at TARGET, with sandbox/release-signers listing no key."""
+    names = subprocess.run(["git", "-C", str(REPOSITORY), "ls-files", "-z", "--cached", "--others",
+                            "--exclude-standard"], capture_output=True, text=True, check=True).stdout.split("\0")
+    for name in filter(None, names):
+        source = REPOSITORY / name
+        if source.is_file() or source.is_symlink():
+            (target / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target / name, follow_symlinks=False)
+    signers = target / "sandbox/release-signers"
+    signers.write_text("".join(line for line in signers.read_text().splitlines(True) if line.startswith("#")))
+    git = ["git", "-C", str(target), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    subprocess.run(git + ["init", "-q"], check=True)
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "copy"], check=True)
+    return target
+
+
+@pytest.fixture(scope="module", autouse=True)
+def unsigned_tree(tmp_path_factory):
+    """The tests release, install and update a tree that trusts only their own keys: the repository's
+    sandbox/release-signers names the real release key, so a tree with it would refuse every test release."""
+    global ROOT
+    ROOT = unsigned_copy(tmp_path_factory.mktemp("tree"))
+    yield ROOT
+    ROOT = REPOSITORY
+
+
+COMMANDS = ["sandbox-ai", "sandbox-ai-update"]
+# The single commands of versions before 0.1.92: an update removes their links into the installation.
+OLD_COMMANDS = ["claude-sandbox", "codex-sandbox", "opencode-sandbox", "sandbox-session", "sandbox-mcp",
+                "sandbox-wizard", "sandbox-build-image"]
 TOKEN = "0123456789abcdef0123456789abcdef01234567"
 
 
@@ -167,7 +200,9 @@ def test_install_from_checkout(scenario, tmp_path):
             link = directory / command
             assert link.is_symlink() and str(os.readlink(link)).startswith(str(data)), link
     assert (data / "current").resolve() == data / "versions" / VERSION
-    version = subprocess.run([str(bins[0] / "claude-sandbox"), "--version"], capture_output=True, text=True)
+    version = subprocess.run([str(bins[0] / "sandbox-ai"), "--version"], capture_output=True, text=True)
+    assert not any((directory / command).exists() or (directory / command).is_symlink()
+                   for directory in bins for command in OLD_COMMANDS)
     assert version.stdout.strip() == f"sandbox-ai {VERSION}"
     # No local tool state or VCS data travels along.
     assert not (data / "current/.git").exists() and not (data / "current/.claude").exists()
@@ -290,16 +325,35 @@ def test_install_latest_release_with_checksum(scenario, tmp_path, gitea):
     assert f"installed: {VERSION}" in check.stdout and f"available: {VERSION}" in check.stdout
 
 
+def test_an_update_removes_the_links_of_the_old_single_commands(tmp_path):
+    """claude-sandbox, sandbox-session, ... were removed: an update (or a new install) takes away their links into
+    the installation, made by an earlier version, and says so; a file of that name that is not ours stays, and
+    --uninstall takes the links away too."""
+    assert install(tmp_path, "--from", str(ROOT)).returncode == 0
+    data, bin_dir = installed(tmp_path), tmp_path / "home/.local/bin"
+    for command in OLD_COMMANDS[:-1]:
+        (bin_dir / command).symlink_to(data / "current" / command)  # as an earlier version linked them
+    (bin_dir / OLD_COMMANDS[-1]).write_text("#!/bin/sh\necho mine\n")
+    result = install(tmp_path, "--from", str(ROOT), "--force")
+    assert result.returncode == 0, result.stderr
+    assert not any((bin_dir / command).is_symlink() for command in OLD_COMMANDS)
+    assert f"removed {bin_dir / 'claude-sandbox'}: use sandbox-ai instead" in result.stderr
+    assert (bin_dir / OLD_COMMANDS[-1]).read_text() == "#!/bin/sh\necho mine\n"
+    (bin_dir / "sandbox-wizard").symlink_to(data / "current" / "sandbox-wizard")
+    assert install(tmp_path, "--uninstall").returncode == 0
+    assert not (bin_dir / "sandbox-wizard").is_symlink() and (bin_dir / OLD_COMMANDS[-1]).exists()
+
+
 def test_install_protects_foreign_files_and_refuses_bad_input(scenario, tmp_path, gitea):
     bin_dir = tmp_path / "home/.local/bin"
     bin_dir.mkdir(parents=True)
     if scenario == "happy":
-        (bin_dir / "claude-sandbox").write_text("#!/bin/sh\necho mine\n")
+        (bin_dir / "sandbox-ai").write_text("#!/bin/sh\necho mine\n")
         result = install(tmp_path, "--from", str(ROOT))
         assert result.returncode == 0 and "does not belong to sandbox-ai" in result.stderr
-        assert (bin_dir / "claude-sandbox").read_text() == "#!/bin/sh\necho mine\n"
+        assert (bin_dir / "sandbox-ai").read_text() == "#!/bin/sh\necho mine\n"
         forced = install(tmp_path, "--from", str(ROOT), "--force")
-        assert forced.returncode == 0 and (bin_dir / "claude-sandbox").is_symlink()
+        assert forced.returncode == 0 and (bin_dir / "sandbox-ai").is_symlink()
     elif scenario == "sad":
         # The token never goes over plain http to anything but localhost.
         result = install(tmp_path, "--source", "http://git.example.invalid/o/r", SANDBOX_AI_TOKEN=TOKEN)
@@ -701,7 +755,11 @@ def test_install_sh_checks_keys_like_release_keys():
     copied = re.search(r"\nKEY_LINE = re\.compile\((.*?)\)\n", text, re.S)[1]
     assert ast.literal_eval(f"({copied})") == rk.KEY_LINE.pattern
     assert f'NAMESPACE, PRINCIPAL = "{rk.NAMESPACE}", "{rk.PRINCIPAL}"' in text
-    assert rk.load() == []  # the repository ships no key until the maintainer adds one
+    # The repository lists the release key (no test key, every line in the one allowed form); install.sh in
+    # the repository embeds none: make_dist.py writes them into the published copy.
+    listed = rk.load(REPOSITORY / "sandbox/release-signers")
+    assert listed and all(line.startswith(f"{rk.PRINCIPAL} ") for line in (REPOSITORY / "sandbox/release-signers")
+                          .read_text().splitlines() if line.strip() and not line.startswith("#"))
     assert re.search(r"# BEGIN EMBEDDED RELEASE SIGNERS\nEMBEDDED_SIGNERS=''\n# END EMBEDDED RELEASE SIGNERS\n", text)
 
 

@@ -73,7 +73,7 @@ def test_discover(scenario):
         assert [(m["name"], m["loaded"]) for m in lm] == [("qwen2.5-7b-instruct", True), ("gemma-3-12b", False)]
         vl = w.discover("vllm", "10.0.0.9", 8000, fetch=fake_fetch(VLLM))
         assert vl == [{"name": "meta-llama/Llama-3.1-8B-Instruct", "size": None, "loaded": True,
-                       "details": "max_model_len 32768"}]
+                       "details": "max_model_len 32768", "context": 32768}]
     else:
         # Ollama without /api/ps: loaded unknown. Old LM Studio: OpenAI listing only. IPv6 hosts are bracketed.
         seen = []
@@ -137,7 +137,7 @@ def test_build_document(scenario, tmp_path):
         assert doc["options"] == ["--local-config", str(tmp_path / "oc.json"), "--allow-tcp", "192.168.1.20:11434"]
     elif scenario == "sad":
         assert w.build_document(answers) == {"version": 1, "agent": "opencode", "options": [], "workspaces": [],
-                                             "description": "Created by sandbox-wizard"}
+                                             "description": "Created by sandbox-ai wizard"}
     else:
         answers.update(agent="claude", backend="bwrap", workspaces=["/x"], network="frontier", danger=True, gui=True,
                        tmux=False, log_dir="/logs")
@@ -155,59 +155,90 @@ def scripted(answers):
     return prompt
 
 
-def test_run_writes_trusted_local_llm_project(tmp_path):
+def servers_fetch(servers, seen=None):
+    """A fetch that answers as the servers at "HOST:PORT" do (routes by path); every other address refuses. SEEN
+    records each URL asked for."""
+    def fetch(url, timeout=5):
+        if seen is not None:
+            seen.append(url)
+        where, path = url.split("/", 3)[2], "/" + url.split("/", 3)[3]
+        routes = servers.get(where)
+        if routes is None or path not in routes:
+            raise OSError(f"connection refused: {where}{path}")
+        return routes[path]
+    return fetch
+
+
+def test_run_local_models_only_finds_a_server_and_offers_exactly_the_chosen_models(tmp_path):
     project = tmp_path / "proj"
-    out = []
-    path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "ollama", "192.168.1.20", "", "size", "2", "",
-                                  "n", "n", "", "n", "n", "n", "n", "y"]),
-                 out=out.append, fetch=fake_fetch(OLLAMA))
+    out, seen = [], []
+    # Local models only -> look at 127.0.0.1 and one LAN address -> the server found there -> its name -> sorted by
+    # size, models 2 and 1 -> nothing but this server.
+    path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "127.0.0.1,192.168.1.20", "", "",
+                                  "size", "2,1", "", "", "n", "n", "", "n", "n", "n", "n", "y"]),
+                 out=out.append, fetch=servers_fetch({"192.168.1.20:11434": OLLAMA}, seen))
     assert path == project / ".sandbox-ai.json"
     document = json.loads(path.read_text())
-    local = w.local_config_path(project)
-    assert project not in local.parents  # outside the workspace, so the agent cannot swap it
-    assert document["options"] == ["--local-config", str(local), "--allow-tcp", "192.168.1.20:11434"]
-    # Sorted by size, entry 2 is llama3.2:3b.
-    assert json.loads(local.read_text())["model"] == "ollama/llama3.2:3b"
+    # Sorted by size: qwen2.5-coder:14b, llama3.2:3b; the first chosen is the agent's.
+    assert document["options"] == ["--llm", "ollama-20:llama3.2:3b,qwen2.5-coder:14b", "--no-provider-defaults"]
+    # Only the addresses named, only the model listings, each on the usual ports.
+    assert {url.split("/")[2].split(":")[0] for url in seen} == {"127.0.0.1", "192.168.1.20"}
+    assert {"/" + url.split("/", 3)[3] for url in seen} <= {"/api/tags", "/api/ps", "/v1/models", "/api/v0/models"}
+    # Registered with sandbox-ai llm once written, with the models it listed.
+    endpoint = w.llm().endpoint("ollama-20")
+    assert endpoint["url"] == "http://192.168.1.20:11434" and endpoint["kind"] == "ollama"
+    assert "qwen2.5-coder:14b" in endpoint["models"] and any("Registered the LLM server ollama-20" in l for l in out)
+    assert not any("would refuse" in line for line in out)
     launcher = w.launcher()
-    args = launcher.parse_args(["opencode", "--workspace", str(project)])
-    assert launcher.load_project_config(args)[1] == document
-    assert any("Start with: sandbox-ai opencode --workspace" in line for line in out)
+    a = launcher.parse_args(["opencode", "--workspace", str(project)])
+    assert launcher.load_project_config(a)[1] == document
+    # OpenCode offers exactly the two models, and no other provider.
+    config = w.llm().opencode_config(endpoint, "llama3.2:3b", only=True,
+                                     allowed=w.llm().parse_models(document["options"][1])[1])
+    assert list(config["provider"]["llm-ollama-20"]["models"]) == ["llama3.2:3b", "qwen2.5-coder:14b"]
+    assert config["enabled_providers"] == ["llm-ollama-20"] and config["model"] == "llm-ollama-20/llama3.2:3b"
+    answers, notes = w.answers_from_document(document)
+    assert answers["llm"] == "ollama-20:llama3.2:3b,qwen2.5-coder:14b" and answers["llm_only"] and notes == []
 
 
-def test_run_handles_loopback_unreachable_and_overwrite(scenario, tmp_path):
+def test_run_local_models_typed_address_loopback_and_errors(scenario, tmp_path):
     project = tmp_path / "proj"
     project.mkdir()
     out = []
     if scenario == "sad":
         (project / ".sandbox-ai.json").write_text("{}")
-        assert w.run(prompt=scripted([str(project), "cancel"]), out=out.append, fetch=fake_fetch({})) is None
+        assert w.run(prompt=scripted([str(project), "cancel"]), out=out.append, fetch=servers_fetch({})) is None
         assert (project / ".sandbox-ai.json").read_text() == "{}"
     elif scenario == "edge":
-        # Loopback is unreachable from the sandbox: warned, then replaced by a LAN address.
-        path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "vllm", "127.0.0.1", "n",
-                                      "10.1.1.1", "", "name", "1", "", "n", "n", "", "n", "n", "n", "n", "y"]),
-                     out=out.append, fetch=fake_fetch(VLLM))
-        assert any("loopback" in line for line in out)
-        assert "10.1.1.1:8000" in json.loads(path.read_text())["options"]
+        # Bubblewrap does not reach this host's loopback: refused, then a LAN address; nothing found by the search.
+        path = w.run(prompt=scripted([str(project), "", "", "opencode", "bwrap", "y", "127.0.0.1", "127.0.0.1:8000",
+                                      "10.1.1.1:8000", "gpu", "1", "", "", "n", "n", "", "n", "n", "n", "n", "y"]),
+                     out=out.append, fetch=servers_fetch({"10.1.1.1:8000": VLLM}))
+        assert any("No LLM server answered" in line for line in out)
+        assert any("Podman backend only" in line for line in out)
+        assert json.loads(path.read_text())["options"][:3] == ["--backend", "bwrap", "--llm"]
+        assert w.llm().endpoint("gpu")["kind"] == "vllm"
     else:
         # Unreachable server: the error is shown and the address asked again.
-        calls = []
-        def fetch(url, timeout=5):
-            calls.append(url)
-            if "10.9.9.9" in url:
-                raise OSError("timed out")
-            return fake_fetch(VLLM)(url)
-        path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "vllm", "10.9.9.9", "", "10.1.1.1", "",
-                                      "loaded", "1", "", "n", "n", "", "n", "n", "n", "n", "y"]), out=out.append, fetch=fetch)
-        assert any("Cannot reach vllm" in line for line in out)
-        assert path.is_file()
-        # The local OpenCode configuration is written after the check: no false warning about it.
+        path = w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "-", "10.9.9.9:8000",
+                                      "10.1.1.1:8000", "", "1", "", "", "n", "n", "", "n", "n", "n", "n", "y"]),
+                     out=out.append, fetch=servers_fetch({"10.1.1.1:8000": VLLM}))
+        assert any("no LLM server answers at 10.9.9.9:8000" in line for line in out)
+        assert json.loads(path.read_text())["options"][:2] == ["--llm", "vllm-1:meta-llama/Llama-3.1-8B-Instruct"]
         assert not any("would refuse" in line for line in out)
+
+
+def test_cancelled_wizard_registers_no_server(tmp_path):
+    project = tmp_path / "proj"
+    w.run(prompt=scripted([str(project), "", "", "opencode", "podman", "y", "-", "10.1.1.1:8000", "", "1", "", "",
+                           "n", "n", "", "n", "n", "n", "n", "n"]), out=lambda line: None,
+          fetch=servers_fetch({"10.1.1.1:8000": VLLM}))
+    assert not (project / ".sandbox-ai.json").exists() and w.taken_names() == set()
 
 
 def test_run_cloud_agent_without_local_llm(tmp_path):
     project = tmp_path / "p"
-    path = w.run(prompt=scripted([str(project), "", f"{tmp_path}/lib", "claude", "bwrap", "frontier", "", "y", "y", "y", "y", "n", "n", "n", "y"]),
+    path = w.run(prompt=scripted([str(project), "", f"{tmp_path}/lib", "claude", "bwrap", "n", "frontier", "", "y", "y", "y", "y", "n", "n", "n", "y"]),
                  out=lambda line: None, fetch=fake_fetch({}))
     document = json.loads(path.read_text())
     assert document["agent"] == "claude" and document["workspaces"] == [f"{tmp_path}/lib"]
@@ -421,26 +452,30 @@ def test_ask_extra(scenario, tmp_path):
     source = tmp_path / "data"
     source.mkdir()
     if scenario == "happy":
-        prompts = Prompts(["y", "y", f"{source}:/mnt/data:ro", "FOO, BAR", "demo", "1280x720x24", "y",
+        prompts = Prompts(["y", "y", f"{source}:/mnt/data:ro", "FOO, BAR", "api.example.org=EX_KEY=EX_SECRET",
+                           "demo", "1280x720x24", "y",
                            "--allow-gitlab --gui-wayland"])
         options = w.ask_extra(prompts.p, {"agent": "claude", "gui": True}, project, state)
         home, vnc = options[2], options[-3]
         assert options[:2] == ["--workspace-ro", "--state-dir"] and home.startswith(str(state / "sandbox-ai/home"))
-        assert options[3:] == ["--mount", f"{source}:/mnt/data:ro", "--env", "FOO", "--env", "BAR", "--mcp", "demo",
+        assert options[3:] == ["--mount", f"{source}:/mnt/data:ro", "--env", "FOO", "--env", "BAR",
+                               "--api-key", "api.example.org=EX_KEY=EX_SECRET", "--mcp", "demo",
                                "--gui-screen", "1280x720x24", "--gui-vnc", vnc, "--allow-gitlab", "--gui-wayland"]
         assert vnc.startswith(str(state / "sandbox-ai/vnc"))
     elif scenario == "sad":
         # Missing sources, bad names, unknown servers and options a project file may not set are asked again.
-        prompts = Prompts(["n", "n", "/missing:/mnt/x:ro", "", "1BAD", "", "nope", "", "--session s", "--unknown",
+        prompts = Prompts(["n", "n", "/missing:/mnt/x:ro", "", "1BAD", "", "10.0.0.1=KEY", "", "nope", "",
+                           "--session s", "--unknown",
                            "'unclosed", ""])
         assert w.ask_extra(prompts.p, {"agent": "codex", "gui": False}, project, state) == []
         shown = "\n".join(prompts.lines)
         assert "Mount source unavailable" in shown and "Not a variable name" in shown
+        assert "--api-key expects HOST=NAME" in shown
         assert "Unknown MCP server" in shown and "Not allowed in a project configuration: --session" in shown
         assert "does not accept" in shown and "quotation" in shown
     else:
         # The default screen size adds nothing; a bad size is asked again.
-        prompts = Prompts(["n", "n", "", "", "", "big", "", "n", ""])
+        prompts = Prompts(["n", "n", "", "", "", "", "big", "", "n", ""])
         assert w.ask_extra(prompts.p, {"agent": "codex", "gui": True}, project, state) == []
 
 
@@ -448,7 +483,7 @@ def test_run_with_optional_blocks_then_launcher_plan(tmp_path, monkeypatch, caps
     project = tmp_path / "proj"
     git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
     out = []
-    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "", "n", "n", "", "n",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "default", "", "n", "n", "", "n",
                                   "y", "pypi", "", "", "", "",
                                   "y", "n", "", "y", "variable", "SANDBOX_GITEA_TOKEN", "",
                                   "n", "y"]), out=out.append, fetch=fake_fetch({}))
@@ -501,19 +536,20 @@ def test_end_to_end_wizard_script_then_launcher_plan(tmp_path):
     try:
         port = server.server_address[1]
         project = tmp_path / "proj"
-        answers = "\n".join([str(project), "", "", "opencode", "podman", "y", "ollama", "127.0.0.1", "y", str(port),
-                             "name", "1", "n", "n", "n", "n", "n", "n", "n", "n", "y"]) + "\n"
+        answers = "\n".join([str(project), "", "", "opencode", "podman", "y", "-", f"127.0.0.1:{port}", "", "1,2",
+                             "", "n", "n", "n", "n", "n", "n", "n", "n", "y"]) + "\n"
         env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "cfg")}
-        result = subprocess.run([str(ROOT / "sandbox-wizard")], input=answers, capture_output=True, text=True, env=env,
+        result = subprocess.run([str(ROOT / "sandbox-ai"), "wizard"], input=answers, capture_output=True, text=True, env=env,
                                 timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "qwen2.5-coder:14b" in result.stdout
-        plan = subprocess.run([str(ROOT / "opencode-sandbox"), "--workspace", str(project), "--dry-run"],
+        plan = subprocess.run([str(ROOT / "sandbox-ai"), "opencode", "--workspace", str(project), "--dry-run"],
                               capture_output=True, text=True, env=env, timeout=60)
         assert plan.returncode == 0, plan.stderr
         plan = json.loads(plan.stdout)
-        assert plan["allow_tcp"] == [f"127.0.0.1:{port}"]
-        assert plan["https_hosts"] == [] and plan["local_config"].startswith(str(tmp_path / "cfg" / "sandbox-ai" / "opencode"))
+        # Loaded first: qwen2.5-coder:14b, then by name: all-minilm. Only this server's port, no provider.
+        assert plan["llm"]["models"] == ["qwen2.5-coder:14b", "all-minilm"] and plan["llm"]["name"] == "ollama"
+        assert plan["host_ports"] == [port] and plan["https_hosts"] == []
         assert plan["project_config"] == str(project / ".sandbox-ai.json")
     finally:
         server.shutdown()
@@ -540,12 +576,21 @@ def test_review_wizard_never_writes_through_symlinks(scenario, tmp_path):
     project.mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("keep")
-    link = w.local_config_path(project) if scenario != "sad" else project / ".sandbox-ai.json"
+    link = w.llm().store_path() if scenario != "sad" else project / ".sandbox-ai.json"
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(outside)
-    answers = [str(project), "", "", "opencode", "podman", "y", "ollama", "192.168.1.20", "", "size", "1", "", "n", "n", "", "n", "n", "n", "n", "y"]
-    with pytest.raises(ValueError, match="symlink"):
-        w.run(prompt=scripted(answers), out=lambda line: None, fetch=fake_fetch(OLLAMA))
+    answers = [str(project), "", "", "opencode", "podman", "y", "-", "192.168.1.20:11434", "", "1", "", "", "n",
+               "n", "", "n", "n", "n", "n", "y"]
+    out = []
+    if scenario == "sad":
+        with pytest.raises(ValueError, match="symlink"):
+            w.run(prompt=scripted(answers), out=out.append, fetch=servers_fetch({"192.168.1.20:11434": OLLAMA}))
+    else:
+        # The endpoints file is a symlink: the server is not registered through it, and nothing is written.
+        assert w.run(prompt=scripted(answers), out=out.append,
+                     fetch=servers_fetch({"192.168.1.20:11434": OLLAMA})) is None
+        assert any("Could not register" in line and "symlink" in line for line in out)
+        assert not (project / ".sandbox-ai.json").exists()
     assert outside.read_text() == "keep"
     assert str(outside) not in w.launcher().trusted_configs()
 
@@ -675,7 +720,7 @@ def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
     project = tmp_path / "proj"
     git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
     out = []
-    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "development", "", "n", "n", "", "n",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "development", "", "n", "n", "", "n",
                                   "n", "y", "n", "none", "y", "enter", "", "n", "y"]),
                  out=out.append, fetch=fake_fetch({}), secret=scripted([GITEA]))
     text = path.read_text()
@@ -696,7 +741,7 @@ def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
 
 def test_run_cancel_writes_no_token(tmp_path):
     project = tmp_path / "proj"
-    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "", "n", "n", "", "n",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "default", "", "n", "n", "", "n",
                                   "n", "y", "n", "enter", "", "n", "n", "n"]),
                  out=lambda line: None, fetch=fake_fetch({}), secret=scripted([GH]))
     assert path is None and not w.token_store().exists()
@@ -785,7 +830,7 @@ def test_edit_changes_parts_and_shows_the_difference(tmp_path, monkeypatch):
                                                "--git-token-env", "https://github.com=SANDBOX_GH", "--copy", "/a:.b"],
                                    "workspaces": []})
     out = []
-    answers = ["4", "development", "",                   # network, no own addresses
+    answers = ["4", "n", "development", "",              # network: no LLM server, a profile, no own addresses
                "5", "y", "n", "n", "y",                  # behaviour: no prompts, no display, no tmux, logging
                "6", "-", "", "", "", "",                 # network extras: drop pypi, keep the rest empty
                "7", "", "y", "", "n",                    # git: identity, keep the GitHub token, no own server, no proxy
@@ -800,6 +845,37 @@ def test_edit_changes_parts_and_shows_the_difference(tmp_path, monkeypatch):
     # Written and trusted: the launcher accepts it as it is.
     args = w.launcher().parse_args(["claude", "--workspace", str(project)])
     assert w.launcher().load_project_config(args)[1] == document
+
+
+def test_the_start_names_and_the_kept_home_are_asked_and_kept(scenario, tmp_path):
+    """The project keys "name" and "keep": asked with the further options and in the edit menu (n); an edit of
+    other parts keeps them (they were dropped before), a bad name is asked again."""
+    project = tmp_path / "proj"
+    if scenario == "happy":
+        path = write_trusted(project, {"version": 1, "agent": "codex", "options": ["--dns"]})
+        out = []
+        assert w.run(prompt=scripted(["n", "web-app", "n", "s", "y"]), out=out.append, project=project,
+                     mode="edit") == path
+        document = json.loads(path.read_text())
+        assert document["name"] == "web-app" and document["keep"] is False
+        assert any('name: null -> "web-app"' in line for line in out) and any("keep" in line for line in out)
+        assert w.launcher().load_project_config(w.launcher().parse_args(["codex", "--workspace", str(project)]))[1] \
+            == document
+    elif scenario == "sad":
+        answers = {"name": None, "keep_home": None, "agent": "codex"}
+        prompts = Prompts(["-bad", "a" * 41, "ok.name", "y"])
+        w.ask_start(prompts.p, answers)
+        assert answers["name"] == "ok.name" and answers["keep_home"] is None
+        assert sum("1-40 letters" in line for line in prompts.lines) == 2
+    else:
+        # Another part edited: the keys stay as the file had them, "keep": true included.
+        path = write_trusted(project, {"version": 1, "agent": "codex", "options": [], "name": "api", "keep": True})
+        assert w.run(prompt=scripted(["2", "bwrap", "s", "y"]), out=lambda line: None, project=project,
+                     mode="edit") == path
+        document = json.loads(path.read_text())
+        assert document["name"] == "api" and document["keep"] is True and "--backend" in document["options"]
+        answers, _ = w.answers_from_document(document)
+        assert dict((key, text) for key, _, text in w.summary(answers))["n"] == "name api, HOME kept"
 
 
 def test_edit_quit_or_untrusted_writes_nothing(scenario, tmp_path):
@@ -934,7 +1010,7 @@ def test_ask_subnet(scenario, no_routes):
 
 def test_subnet_in_new_and_edited_configurations(tmp_path, no_routes):
     project = tmp_path / "proj"
-    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "default", "y", "10.20.0.0/24", "",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "default", "y", "10.20.0.0/24", "",
                                   "n", "n", "", "n", "n", "n", "n", "y"]), out=lambda line: None, fetch=fake_fetch({}))
     document = json.loads(path.read_text())
     assert document["options"][:2] == ["--subnet", "10.20.0.0/24"]
@@ -943,7 +1019,8 @@ def test_subnet_in_new_and_edited_configurations(tmp_path, no_routes):
     assert "--subnet 10.20.0.0/24" in dict((key, text) for key, _, text in w.summary(answers))["4"]
     # Offline: the addresses go with the network.
     out = []
-    assert w.run(prompt=scripted(["4", "offline", "s", "y"]), out=out.append, project=project, mode="edit") == path
+    assert w.run(prompt=scripted(["4", "n", "offline", "s", "y"]), out=out.append, project=project,
+                 mode="edit") == path
     assert "--subnet" not in json.loads(path.read_text())["options"]
     assert any("Dropped --subnet/--subnet6" in line for line in out)
     # Switching to bwrap drops only --subnet6.
@@ -1054,7 +1131,7 @@ def test_mode_first_and_the_questions_respect_it(tmp_path):
     assert any("without permission prompts" in q for q in asked)  # high keeps -D
     project, asked, out = tmp_path / "paranoid", [], []
     path = w.run(prompt=recorded([str(project), "paranoid", "", "claude", "podman", "default", "", "", "n", "n", "y",
-                                  "n", f"{tmp_path}:/mnt/x:rw", "", "", "", "", "y"], asked),
+                                  "n", f"{tmp_path}:/mnt/x:rw", "", "", "", "", "", "", "y"], asked),
                  out=out.append, fetch=fake_fetch({}))
     document = json.loads(path.read_text())
     assert document["mode"] == "paranoid" and "--workspace-ro" not in document["options"]
@@ -1066,7 +1143,7 @@ def test_mode_first_and_the_questions_respect_it(tmp_path):
 
 def test_mode_enter_inherits_and_the_floor(tmp_path, monkeypatch):
     project = tmp_path / "p"
-    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "", "", "n", "n", "", "n", "n", "n",
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "", "", "n", "n", "", "n", "n", "n",
                                   "n", "y"]), out=lambda line: None, fetch=fake_fetch({}))
     assert "mode" not in json.loads(path.read_text())  # Enter: the inherited mode, nothing written
     monkeypatch.setattr(w.launcher(), "load_policy", lambda path=None: {"version": 1, "min_mode": "high"})

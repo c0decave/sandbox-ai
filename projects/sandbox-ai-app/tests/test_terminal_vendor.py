@@ -23,7 +23,7 @@ def test_download_button_fetches_xterm_and_the_page_follows(qapp, tmp_path, monk
     page.vendor()
     assert wait(lambda: page.command is not None and not page.command.running, 30)
     assert terminal.available(web) == (True, "") and page.fetch.isHidden()
-    assert "opens here as a tab" in page.hint.text()
+    assert page.hint.text() == "" and page.hint.isHidden(), "it works: nothing to say"
 
 
 def test_a_failed_download_says_why_and_can_be_retried(qapp, tmp_path, monkeypatch, wait):

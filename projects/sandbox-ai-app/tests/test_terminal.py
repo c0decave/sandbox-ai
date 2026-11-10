@@ -106,6 +106,28 @@ def test_terminal_page_with_a_stand_in_for_xterm(terminal, stub_web, wait, tmp_p
     run_terminal(terminal, stub_web, wait, tmp_path)
 
 
+def test_the_terminal_takes_the_monospace_font_of_the_settings(terminal, stub_web, wait, monkeypatch):
+    """A new terminal tab: xterm.js's fontFamily is the chosen font, then the theme's, then monospace; a chosen font
+    that is not installed is left out (the theme's fonts)."""
+    from sandbox_ai_app import fonts, theme
+    try:
+        for families, setting, first in ((["Hack"], "Hack", "Hack, "), ([], "Hack", '"JetBrains Mono", ')):
+            monkeypatch.setattr(fonts, "_families", families)
+            fonts.use({"mono_font": setting})
+            view = terminal.TerminalView(["sh", "-c", "sleep 30"], web=stub_web)
+            view.show()
+            try:
+                assert wait(lambda: view.bridge.ready_seen, 30)
+                family = js(view, wait, "window.sandboxTerminal.fontFamily()")
+                assert family.startswith(first) and family.endswith(", monospace"), family
+            finally:
+                view.close_terminal()
+    finally:
+        monkeypatch.setattr(fonts, "_families", None)
+        fonts.use({})
+        theme.apply("system")
+
+
 def test_the_page_reaches_nothing_remote(terminal, stub_web, wait):
     hits = []
 
@@ -157,6 +179,30 @@ def test_terminals_page_tabs_and_close(terminal, stub_web, wait, monkeypatch):
             return True
         return False
     assert wait(lambda: gone() or terminal._ending == set(), 10)
+    page.deleteLater()
+
+
+def test_a_closed_tab_leaves_nothing_once_its_command_ended(terminal, stub_web, wait, monkeypatch):
+    """Soak (stability round 3): the bridge of a closed tab whose command still ran stayed for the rest of the run,
+    with its Pty, notifiers and timers (its signal's connection held it alive inside Qt): one more for every tab."""
+    import gc
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from sandbox_ai_app.pty_bridge import PtyBridge
+    monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
+
+    def bridges():
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        gc.collect()
+        return len([o for o in gc.get_objects() if isinstance(o, PtyBridge)])
+    page = terminal.TerminalsPage(stub_web)
+    before = bridges()
+    for index in range(3):
+        view = open_tab(page, ["sh", "-c", "sleep 60"], f"t{index}")
+        view.bridge.kill_after = 300
+        page.close_tab(0, ask=False)
+        assert wait(lambda: not terminal._ending, 10), "the command ended"
+    del view
+    assert wait(lambda: bridges() == before, 5), "every bridge went"
     page.deleteLater()
 
 

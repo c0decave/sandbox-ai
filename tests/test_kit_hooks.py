@@ -439,8 +439,26 @@ def test_an_answer_the_rules_cannot_check_is_refused(output, why):
 
 
 def test_a_kit_hook_that_runs_too_long_is_stopped():
-    status, out, err, _ = wrapped("sleep 5", timeout=0.2)
+    """Bug hunt: only the shell was killed at the timeout; what it had started (here a sleep) ran on, holding the
+    agent's pipes of the hook (and, in the tests, outliving its test). The hook's whole process group goes."""
+    import time
+    marker = f"9.{time.time_ns() % 10 ** 6:06d}"  # a sleep of its own (under 10 s), found again in /proc below
+    status, out, err, _ = wrapped(f"sleep {marker}; true", timeout=0.2)
     assert status == 1 and out == b"" and "longer than 0.2 s" in err
+
+    def left():
+        found = []
+        for entry in Path("/proc").iterdir():
+            try:
+                if entry.name.isdigit() and (entry / "cmdline").read_bytes() == f"sleep\0{marker}\0".encode():
+                    found.append(entry.name)
+            except OSError:
+                pass
+        return found
+    deadline = time.monotonic() + 3
+    while left() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert left() == [], "the hook's child outlived it"
 
 
 def test_a_rewrite_into_a_refused_command_is_refused_by_the_real_rules(tmp_path):

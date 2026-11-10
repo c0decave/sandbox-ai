@@ -54,8 +54,9 @@ SECTIONS = (
          "to start the same sandbox there.\n"
          "- Dry run lets the launcher of the chosen host check everything and show its plan, without starting "
          "anything.\n"
-         "- Start in the app opens a terminal tab, Start in a terminal window uses your terminal program, Start as "
-         "session starts a session that keeps running when you close the app.\n\n"
+         "- Start starts it in a terminal tab of the app or in your terminal program (beside it); as a session (on by "
+         "default, named by a codename unless you type a name) it keeps running when its terminal or the app "
+         "closes, and is attached again from Sandboxes & sessions or Terminals.\n\n"
          "Save as project configuration… writes `.sandbox-ai.json` into the first workspace and trusts it, after "
          "showing it and asking first (Cancel is the default: a trusted file gives every later start of the "
          "project its options). On another host it is off: a project's file there is written with `sandbox-ai "
@@ -92,9 +93,10 @@ SECTIONS = (
          "Sie sie in ein Terminal, um dort dieselbe Sandbox zu starten.\n"
          "- Probelauf lässt den Launcher des gewählten Hosts alles prüfen und seinen Plan zeigen, ohne etwas zu "
          "starten.\n"
-         "- In der App starten öffnet einen Terminal-Tab, In einem Terminalfenster starten nutzt Ihr "
-         "Terminalprogramm, Als Sitzung starten startet eine Sitzung, die weiterläuft, wenn Sie die App "
-         "schließen.\n\n"
+         "- Start startet in einem Terminal-Tab der App oder in Ihrem Terminalprogramm (daneben wählbar); als "
+         "Sitzung (vorgegeben, mit einem Codenamen, außer Sie tippen einen Namen) läuft sie weiter, wenn ihr "
+         "Terminal oder die App geschlossen wird, und wird über Sandboxen & Sitzungen oder Terminals wieder "
+         "angehängt.\n\n"
          "Als Projektkonfiguration speichern… schreibt `.sandbox-ai.json` in den ersten Arbeitsordner und vertraut "
          "ihr, nachdem es sie gezeigt und zuerst gefragt hat (Abbrechen ist die Vorgabe: Eine vertraute Datei gibt "
          "jedem späteren Start des Projekts ihre Optionen). Auf einem anderen Host ist es aus: Die Datei eines "
@@ -184,7 +186,14 @@ SECTIONS = (
          "The buttons act on the selected start row and follow its kind; a tooltip says why one does not apply.\n\n"
          "- Session: Attach (in a window), Attach in the app, Pause, Resume, Delete. Resume with… starts a kept "
          "start again with workspaces, mounts or MCP servers added (kept for its later starts), or restarts a "
-         "running one now (`sandbox-ai resume`); a restart and every widening are asked first.\n"
+         "running one now (`sandbox-ai resume`); a restart and every widening are asked first. Other launcher options go there too (one value "
+         "replaces, a list adds), and options to take out (`sandbox-ai resume NAME OPTIONS --drop-option`). Reload "
+         "rules makes a running sandbox read its rulesets anew (`sandbox-ai rules reload`); a stopped kept start whose "
+         "HOME review you did not resume offers Restore HOME (`--restore-home`). Copy to host… "
+         "starts a session of this machine again on a host of `sandbox-ai hosts` as a session of its own, checked "
+         "there first; folders that lie elsewhere there are changed in the dialog (`--map`), Check only checks "
+         "without starting. Move to host… then stops it here (asked first; its HOME stays until it is deleted). "
+         "Logins and HOME are not copied (`sandbox-ai session copy|move`).\n"
          "- While it runs: Allow… and Revoke… change what the sandbox may reach, Allowed during the run shows "
          "what was added (Untaint… there lifts the run's taint), Connection log opens its log, Add device…, Remove "
          "device and Limits… change hardware and limits until it ends.\n"
@@ -230,7 +239,15 @@ SECTIONS = (
          "- Sitzung: Verbinden (in einem Fenster), In der App verbinden, Pausieren, Fortsetzen, Löschen. "
          "Fortsetzen mit … startet einen aufbewahrten Start erneut mit hinzugefügten Arbeitsordnern, Mounts oder "
          "MCP-Servern (für seine späteren Starts behalten) oder startet einen laufenden sofort neu (`sandbox-ai "
-         "resume`); ein Neustart und jede Erweiterung werden zuerst gefragt.\n"
+         "resume`); ein Neustart und jede Erweiterung werden zuerst gefragt. Auch weitere Starter-Optionen gehen dort (ein "
+         "Einzelwert ersetzt, eine Liste ergänzt), und herauszunehmende Optionen (`sandbox-ai resume NAME OPTIONEN "
+         "--drop-option`). Regeln neu laden lässt eine laufende Sandbox ihre Regelwerke neu lesen (`sandbox-ai rules "
+         "reload`); ein gestoppter aufbewahrter Start, dessen HOME-Prüfung Sie nicht fortgesetzt haben, bietet HOME "
+         "wiederherstellen an (`--restore-home`). Auf Host kopieren… startet eine "
+         "Sitzung dieses Rechners auf einem Host von `sandbox-ai hosts` erneut als eigene Sitzung, dort zuerst "
+         "geprüft; Ordner, die dort anderswo liegen, ändern Sie im Dialog (`--map`), Nur prüfen prüft ohne Start. "
+         "Auf Host verschieben… stoppt sie danach hier (zuerst gefragt; ihr HOME bleibt, bis sie gelöscht wird). "
+         "Logins und HOME werden nicht kopiert (`sandbox-ai session copy|move`).\n"
          "- Während sie läuft: Erlauben… und Zurücknehmen… ändern, was die Sandbox erreichen darf, Während des "
          "Laufs erlaubt zeigt das Hinzugefügte (Taint aufheben… dort hebt den Taint des Laufs auf), Verbindungslog "
          "öffnet ihr Protokoll, Gerät hinzufügen…, Gerät entfernen und Grenzen… ändern Hardware und Limits, bis sie "
@@ -256,6 +273,7 @@ SECTIONS = (
          "Ein nicht angemeldeter Launcher lässt sich nur in seinem eigenen Terminal beenden. Schon offene "
          "Verbindungen bleiben nach dem Zurücknehmen offen."),
         cli=("sandbox-ai list", "sandbox-ai list --all", "sandbox-ai list --history NAME", "sandbox-ai rename OLD NEW",
+             "sandbox-ai rules reload NAME", "sandbox-ai resume NAME --restore-home",
              "sandbox-ai gc --dry-run", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
              "sandbox-ai net untaint RUN", "sandbox-ai net stop RUN", "sandbox-ai session stop NAME",
              "sandbox-ai mcp stop NAME", "sandbox-ai devices", "sandbox-ai limits", "sandbox-ai workspace add",
@@ -336,24 +354,29 @@ SECTIONS = (
         tours=("approvals-network", "area:approvals")),
     section(
         "page-terminals", "app", ("Terminals", "Terminals"),
-        ("Terminals shows terminal tabs inside the app: agents started with Start in the app, sessions attached "
+        ("Terminals shows terminal tabs inside the app: agents started with Start (in the app), sessions attached "
          "in the app, and commands such as builds and logins when Settings say they run in the app. In a session "
          "the agent runs in the tmux window `agent`, a shell in the window `shell`.\n\n"
          "- Ctrl-b d detaches from a session: it keeps running, and Attach on Sandboxes & sessions brings it "
          "back.\n"
-         "- On this page Ctrl+W and Ctrl+Tab go to the terminal, not to the app's tabs.\n\n"
+         "- On this page Ctrl+W and Ctrl+Tab go to the terminal, not to the app's tabs.\n"
+         "- Sessions, below the tabs (folded until you open it), lists every start that runs on this machine or a "
+         "host, however it was started; one in tmux opens in a tab with one click.\n\n"
          "The tabs use xterm.js in QtWebEngine. xterm.js is not part of the app: it is downloaded once and "
          "checked against its pinned digest (Download xterm.js now, when the page offers it). The page loads "
          "only local files and reaches nothing remote. Without QtWebEngine or xterm.js, commands open in a "
          "terminal window instead, which stays open after the end. The AppImage and the macOS app come without "
          "QtWebEngine.",
-         "Terminals zeigt Terminal-Tabs in der App: Agenten, die mit In der App starten gestartet wurden, in der "
+         "Terminals zeigt Terminal-Tabs in der App: Agenten, die mit Start (in der App) gestartet wurden, in der "
          "App verbundene Sitzungen und Befehle wie Builds und Anmeldungen, wenn die Einstellungen sie in der App "
          "laufen lassen. In einer Sitzung läuft der Agent im tmux-Fenster `agent`, eine Shell im Fenster "
          "`shell`.\n\n"
          "- Strg-b d löst sich von einer Sitzung: Sie läuft weiter, und Verbinden auf Sandboxen & Sitzungen holt "
          "sie zurück.\n"
-         "- Auf dieser Seite gehen Strg+W und Strg+Tab an das Terminal, nicht an die Tabs der App.\n\n"
+         "- Auf dieser Seite gehen Strg+W und Strg+Tab an das Terminal, nicht an die Tabs der App.\n"
+         "- Sitzungen, unter den Tabs (zugeklappt, bis Sie es öffnen), zeigt jeden Start, der auf diesem Rechner "
+         "oder einem Host läuft, gleich wie er gestartet wurde; einer in tmux öffnet sich mit einem Klick in einem "
+         "Tab.\n\n"
          "Die Tabs nutzen xterm.js in QtWebEngine. xterm.js gehört nicht zur App: Es wird einmal geladen und "
          "gegen seinen festgelegten Digest geprüft (xterm.js jetzt herunterladen, wenn die Seite es anbietet). Die "
          "Seite lädt nur lokale Dateien und erreicht nichts im Netz. Ohne QtWebEngine oder xterm.js öffnen Befehle "
@@ -403,7 +426,13 @@ SECTIONS = (
          "- The Canaries tab lists every opened decoy file and every canary token that left, in red: when, which "
          "canary and path, the process found holding the file (or unknown, with why), and, unfolded, the agent's "
          "tool call and prompt turn at that moment and the model requests around it (`sandbox-ai canaries "
-         "log`).\n\n"
+         "log`).\n"
+         "- The Safeguards tab lists everything a safeguard refused or ended in a run: the firewall, name lookups, "
+         "the proxy, rules, questions nobody answered, the privacy check of pushes, the security mode, the "
+         "administrator's policy, the taint, devices, memory, canaries. Each with why, the process, and the command "
+         "that would allow it (Copy the fix) or that it stays refused (`sandbox-ai safeguards`). While sandboxes "
+         "run, new ones pop up as warnings (errors for a canary or an out-of-memory kill), grouped: twelve equal "
+         "refusals within a minute are one popup and one summary. Settings > Window chooses which kinds pop up.\n\n"
          "Everything here may quote the agent, so it is shown as plain text with control characters escaped. "
          "The timeline needs a log directory, which every run with the connection proxy has.",
          "Aktivität zeigt, was die Agenten in einem Lauf, einer Sitzung oder allen Läufen eines Projekts taten, "
@@ -421,11 +450,19 @@ SECTIONS = (
          "- Der Reiter Canaries listet jede geöffnete Köderdatei und jedes Canary-Token, das hinausging, in Rot: "
          "wann, welcher Canary und Pfad, der Prozess, der die Datei offen hielt (oder unbekannt, mit Grund), und "
          "aufgeklappt den Werkzeugaufruf und die Prompt-Runde des Agenten in diesem Moment und die Anfragen an "
-         "das Modell darum herum (`sandbox-ai canaries log`).\n\n"
+         "das Modell darum herum (`sandbox-ai canaries log`).\n"
+         "- Der Reiter Schutzmaßnahmen listet alles, was eine Schutzmaßnahme in einem Lauf abgelehnt oder beendet "
+         "hat: die Firewall, Namensauflösungen, den Proxy, Regeln, unbeantwortete Fragen, die Datenschutzprüfung "
+         "von Pushes, den Sicherheitsmodus, die Richtlinie des Administrators, den Taint, Geräte, Speicher, "
+         "Canaries. Jeweils mit Grund, Prozess und dem Befehl, der es erlauben würde (Abhilfe kopieren), oder dass "
+         "es abgelehnt bleibt (`sandbox-ai safeguards`). Während Sandboxen laufen, erscheinen neue als Warnungen "
+         "(Fehler bei einem Canary oder einem Out-of-Memory-Kill), gebündelt: zwölf gleiche Ablehnungen in einer "
+         "Minute sind ein Hinweis und eine Zusammenfassung. Einstellungen > Fenster wählt, welche Arten "
+         "erscheinen.\n\n"
          "Alles hier kann den Agenten zitieren und wird daher als reiner Text mit maskierten Steuerzeichen "
          "gezeigt. Die Zeitleiste braucht ein Protokollverzeichnis; jeder Lauf mit Verbindungs-Proxy hat eines."),
         cli=("sandbox-ai activity --follow", "sandbox-ai activity --project PATH", "sandbox-ai activity --json",
-             "sandbox-ai canaries log [RUN] [--json]"),
+             "sandbox-ai canaries log [RUN] [--json]", "sandbox-ai safeguards [RUN|--all] [--follow] [--json]"),
         see=("logs", "taint", "page-connections", "page-files"),
         tours=("area:activity",)),
     section(
@@ -725,7 +762,8 @@ SECTIONS = (
          "expired. Log in… and Log out… run in a terminal. A sandbox gets the login when it starts.\n"
          "- Secrets: API keys and tokens by name, kept for good in your keyring or private files. Add keeps the "
          "value typed under its name and passes it on standard input, never as an argument; a name kept already is "
-         "replaced only after a yes. Remove… asks first. Every field where a value is typed (a secret, an LLM "
+         "replaced only after a yes. Remove… asks first. A secret's menu (or Give to a running sandbox…) "
+         "gives it to a running sandbox as an API key (`sandbox-ai net allow RUN --api-key HOST=NAME=SECRET`). Every field where a value is typed (a secret, an LLM "
          "server's key, a VPN key, a typed Git token) has Show value beside it: on by default, so you see what you "
          "type; turned off, the field shows dots, and the choice is kept for every such field.\n"
          "- VPN profiles: Add… for WireGuard, OpenVPN, Mullvad or Tailscale/Headscale, Check, Remove…. Keys and "
@@ -742,7 +780,8 @@ SECTIONS = (
          "- Geheimnisse: API-Schlüssel und Tokens unter Namen, dauerhaft in Ihrem Schlüsselbund oder privaten "
          "Dateien. Hinzufügen speichert den eingegebenen Wert unter seinem Namen und übergibt ihn über die "
          "Standardeingabe, nie als Argument; ein schon gespeicherter Name wird erst nach einem Ja ersetzt. "
-         "Entfernen… fragt zuerst. Jedes Feld, in das ein Wert eingegeben wird (ein Geheimnis, der Schlüssel eines "
+         "Entfernen… fragt zuerst. Das Menü eines Geheimnisses (oder An laufende Sandbox übergeben…) gibt es "
+         "einer laufenden Sandbox als API-Schlüssel (`sandbox-ai net allow LAUF --api-key HOST=NAME=GEHEIMNIS`). Jedes Feld, in das ein Wert eingegeben wird (ein Geheimnis, der Schlüssel eines "
          "LLM-Servers, ein VPN-Schlüssel, ein eingegebenes Git-Token), hat daneben Wert anzeigen: standardmäßig an, "
          "damit Sie sehen, was Sie eingeben; ausgeschaltet zeigt das Feld Punkte, und die Wahl gilt für jedes "
          "solche Feld.\n"
@@ -884,11 +923,13 @@ SECTIONS = (
     # -- features of the app --
     section(
         "app-projects-tabs", "app", ("Projects, tabs and the window", "Projekte, Tabs und das Fenster"),
-        ("The current project is shown large at the top, with the state of its `.sandbox-ai.json` (none, "
-         "trusted, changed since trusted, not trusted) and how many of its sandboxes run and ask. The switcher "
-         "lists the projects sandbox-ai and the app know; Open folder… and New project (wizard)… add one. Start, "
-         "Board, Connections, Statistics, Files, Approvals, Sandboxes & sessions, Kits & plugins and Teams follow "
-         "the project.\n\n"
+        ("The current project's name is shown large at the top, and it is the switcher: it lists the projects "
+         "sandbox-ai and the app know; Open folder… and New project (wizard)… add one. Beside it a shield shows the "
+         "state of its `.sandbox-ai.json` (none, trusted, changed since trusted, not trusted, unreadable; hover it "
+         "for what that means), below it how many of its sandboxes run and ask, and its folder. Start, Board, "
+         "Connections, Statistics, Files, Approvals, Sandboxes & sessions, Kits & plugins and Teams follow the "
+         "project; the Start page shows each project's own values: what you entered there last, else its trusted "
+         "`.sandbox-ai.json` or the options its running session was started with.\n\n"
          "- Tabs: open projects, sessions and sandboxes are tabs above the pages - shown only on the pages that "
          "follow the project (those above); on the others they are hidden, their place kept. A session tab shows "
          "its state as a dot; its context menu attaches, pauses, resumes or stops. Close with the button, a middle "
@@ -901,11 +942,14 @@ SECTIONS = (
          "View > Panels brings them back, Reset the panels restores the start.\n\n"
          "Tabs, panels, sizes and the last project come back at the next start. Secrets never go into that "
          "file.",
-         "Oben steht groß das aktuelle Projekt mit dem Zustand seiner `.sandbox-ai.json` (keine, vertraut, seit "
-         "dem Vertrauen geändert, nicht vertraut) und wie viele seiner Sandboxen laufen und fragen. Die Auswahl "
-         "listet die Projekte, die sandbox-ai und die App kennen; Ordner öffnen… und Neues Projekt (Assistent)… "
-         "fügen eines hinzu. Start, Tafel, Verbindungen, Statistik, Dateien, Freigaben, Sandboxen & Sitzungen, "
-         "Kits & Plugins und Teams folgen dem Projekt.\n\n"
+         "Oben steht groß der Name des aktuellen Projekts, und er ist die Auswahl: Sie listet die Projekte, die "
+         "sandbox-ai und die App kennen; Ordner öffnen… und Neues Projekt (Assistent)… fügen eines hinzu. Daneben "
+         "zeigt ein Schild den Zustand seiner `.sandbox-ai.json` (keine, vertraut, seit dem Vertrauen geändert, "
+         "nicht vertraut, nicht lesbar; mit der Maus darüber steht, was das bedeutet), darunter, wie viele seiner "
+         "Sandboxen laufen und fragen, und sein Ordner. Start, Tafel, Verbindungen, Statistik, Dateien, Freigaben, "
+         "Sandboxen & Sitzungen, Kits & Plugins und Teams folgen dem Projekt; die Startseite zeigt die eigenen "
+         "Werte jedes Projekts: was Sie dort zuletzt eingegeben haben, sonst seine vertraute `.sandbox-ai.json` "
+         "oder die Optionen, mit denen seine laufende Sitzung gestartet wurde.\n\n"
          "- Tabs: Offene Projekte, Sitzungen und Sandboxen sind Tabs über den Seiten - nur auf den Seiten, die dem "
          "Projekt folgen (die oben genannten); auf den anderen sind sie ausgeblendet, ihr Platz bleibt. Ein "
          "Sitzungs-Tab zeigt seinen "
@@ -1213,8 +1257,9 @@ SECTIONS = (
          "removes a stopped start with its HOME.\n\n"
          "Tasks (`-p`, `codex exec`, `opencode run`, a start without a terminal) run in the foreground and cannot "
          "be attached. Running processes are not saved: only HOME and the workspaces survive a stop. Before a "
-         "kept HOME is reborn, the launcher names every change in its start files; look before you go on. "
-         "`--no-keep` discards the HOME at the end.",
+         "kept HOME is reborn, the launcher names every change in its start files; look before you go on "
+         "(`resume NAME --restore-home` puts back their recorded text). `resume NAME --gui --cpus 4` brings it "
+         "back with other options, checked as a new start and kept. `--no-keep` discards the HOME at the end.",
          "Jeder Start eines Agenten hat einen Namen: was `--name` angibt, sonst einen Codenamen aus drei Wörtern "
          "wie `brisk-otter-lantern` (`--name-style project` oder die Vorgabe `name_style` `project` nennt ihn "
          "stattdessen `AGENT-PROJEKT-xxxx`). `sandbox-ai list` listet ihn mit seinem Arbeitsordner. Ein "
@@ -1230,11 +1275,13 @@ SECTIONS = (
          "Aufgaben (`-p`, `codex exec`, `opencode run`, ein Start ohne Terminal) laufen im Vordergrund und lassen "
          "sich nicht verbinden. Laufende Prozesse werden nicht gesichert: Nur HOME und die Arbeitsordner überstehen "
          "einen Stopp. Bevor ein aufbewahrtes HOME wiedergeboren wird, nennt der Launcher jede Änderung seiner "
-         "Startdateien; sehen Sie hin, bevor Sie weitermachen. `--no-keep` verwirft das HOME am Ende."),
+         "Startdateien; sehen Sie hin, bevor Sie weitermachen (`resume NAME --restore-home` legt ihren "
+         "aufgezeichneten Text zurück). `resume NAME --gui --cpus 4` holt ihn mit anderen Optionen zurück, geprüft "
+         "wie ein neuer Start und behalten. `--no-keep` verwirft das HOME am Ende."),
         cli=("sandbox-ai list", "sandbox-ai attach NAME", "sandbox-ai pause NAME", "sandbox-ai resume NAME",
              "sandbox-ai stop NAME", "sandbox-ai rename OLD NEW", "sandbox-ai rename OLD --codename",
-             "sandbox-ai delete NAME", "sandbox-ai resume NAME --review-home", "sandbox-ai gc", "--name",
-             "--name-style", "--no-keep"),
+             "sandbox-ai delete NAME", "sandbox-ai resume NAME --review-home", "sandbox-ai resume NAME --restore-home",
+             "sandbox-ai gc", "--name", "--name-style", "--no-keep"),
         see=("page-sandboxes", "page-terminals", "sandbox"),
         tours=()),
     section(
@@ -1535,7 +1582,10 @@ SECTIONS = (
          "```\n\n"
          "In the app, the ruleset files field (the Approvals and rules part on the Board, Ruleset file on the Start "
          "page) has New from example…, which writes this starter (and an MCP example) to a file you choose outside "
-         "every workspace, and Check, which asks the launcher whether it reads the files.",
+         "every workspace, and Check, which asks the launcher whether it reads the files.\n\n"
+         "`sandbox-ai rules check` checks files, `rules show` lists a start's rulesets with where each comes from, "
+         "`rules reload NAME` makes a running start read its HTTP rules anew (the policy's and the mode's stay); in "
+         "the app All rules… and Reload rules.",
          "Die Netzwerkoptionen entscheiden, welche Hosts der Agent erreicht. Regelwerke entscheiden, was er dort "
          "darf: Sie erlauben, erfragen oder verbieten jede HTTP-Anfrage (nach Host, Methode, Pfad, Query, Headern "
          "und Body), jeden MCP-Aufruf (nach Werkzeug und Argumenten), jedes Gerät und die eigenen Werkzeuge des "
@@ -1564,8 +1614,12 @@ SECTIONS = (
          "In der App hat das Feld der Regelwerk-Dateien (das Teil Freigaben und Regeln auf der Tafel, "
          "Regelwerk-Datei auf der Seite Start) Neu aus Beispiel…, das diesen Anfang (und ein MCP-Beispiel) in eine "
          "Datei schreibt, die Sie außerhalb jedes Arbeitsordners wählen, und Prüfen, das den Launcher fragt, ob er "
-         "die Dateien liest."),
-        cli=("--rules FILE", "--allow-http", "--dry-run"),
+         "die Dateien liest.\n\n"
+         "`sandbox-ai rules check` prüft Dateien, `rules show` listet die Regelwerke eines Starts mit ihrer Herkunft, "
+         "`rules reload NAME` lässt einen laufenden Start seine HTTP-Regeln neu lesen (die der Richtlinie und des "
+         "Modus bleiben); in der App Alle Regeln… und Regeln neu laden."),
+        cli=("--rules FILE", "--allow-http", "--dry-run", "sandbox-ai rules check", "sandbox-ai rules show",
+             "sandbox-ai rules reload NAME"),
         see=("taint", "approvals", "proxy", "mcp", "policy"),
         tours=()),
     section(
@@ -1669,7 +1723,8 @@ SECTIONS = (
         "vpn-tor", "concepts", ("VPN profiles and Tor", "VPN-Profile und Tor"),
         ("A VPN can sit in front of a sandbox (Podman backend). The tunnel runs in a container of its own in the "
          "sandbox's network, a kill switch lets nothing else out (IPv4 and IPv6), and before the agent starts the "
-         "addresses and DNS seen from outside are checked.\n\n"
+         "addresses and DNS seen from outside are checked, and again during the run (a leak ends it); "
+         "`sandbox-ai vpn rotate NAME` gives a Mullvad profile a new key.\n\n"
          "- Profiles: WireGuard (any wg-quick file), OpenVPN, Mullvad, Tailscale or Headscale, and Tor. Add them "
          "with `sandbox-ai vpn add` or on the Credentials page (WireGuard, OpenVPN, Mullvad, Tailscale); Tor "
          "profiles with `sandbox-ai vpn add NAME --tor`.\n"
@@ -1677,11 +1732,13 @@ SECTIONS = (
          "down. A failed check stops the start; `--vpn-check warn` only warns.\n"
          "- Keys and passwords live in `sandbox-ai secrets`; only the VPN container gets them.\n\n"
          "Tor sends every TCP connection through Tor, the agent's own API calls included; it is TCP and IPv4 "
-         "only, slower, and many sites refuse Tor exits. Build the VPN image once with `sandbox-ai build vpn`. "
-         "Bubblewrap is not supported. An MCP server has a network of its own and needs its own `--vpn`.",
+         "only, slower, and many sites refuse Tor exits. Tor is not a VPN and runs in a container of its own: "
+         "build the VPN image once with `sandbox-ai build vpn` (WireGuard, OpenVPN, Mullvad, Tailscale), the Tor "
+         "image with `sandbox-ai build tor`. Bubblewrap is not supported. An MCP server has a network of its own and needs its own `--vpn`.",
          "Ein VPN kann vor einer Sandbox sitzen (Podman-Backend). Der Tunnel läuft in einem eigenen Container im "
          "Netzwerk der Sandbox, ein Kill-Switch lässt nichts anderes hinaus (IPv4 und IPv6), und bevor der Agent "
-         "startet, werden die von außen gesehenen Adressen und das DNS geprüft.\n\n"
+         "startet, werden die von außen gesehenen Adressen und das DNS geprüft, und während des Laufs erneut (ein Leck "
+         "beendet ihn); `sandbox-ai vpn rotate NAME` gibt einem Mullvad-Profil einen neuen Schlüssel.\n\n"
          "- Profile: WireGuard (jede wg-quick-Datei), OpenVPN, Mullvad, Tailscale oder Headscale und Tor. Legen "
          "Sie sie mit `sandbox-ai vpn add` oder auf der Seite Zugangsdaten an (WireGuard, OpenVPN, Mullvad, "
          "Tailscale); Tor-Profile mit `sandbox-ai vpn add NAME --tor`.\n"
@@ -1689,10 +1746,11 @@ SECTIONS = (
          "baut es wieder ab. Eine fehlgeschlagene Prüfung stoppt den Start; `--vpn-check warn` warnt nur.\n"
          "- Schlüssel und Passwörter liegen in `sandbox-ai secrets`; nur der VPN-Container bekommt sie.\n\n"
          "Tor leitet jede TCP-Verbindung durch Tor, auch die API-Aufrufe des Agenten; nur TCP und IPv4, "
-         "langsamer, und viele Seiten weisen Tor-Ausgänge ab. Bauen Sie das VPN-Image einmal mit `sandbox-ai "
-         "build vpn`. Bubblewrap wird nicht unterstützt. Ein MCP-Server hat ein eigenes Netzwerk und braucht ein "
+         "langsamer, und viele Seiten weisen Tor-Ausgänge ab. Tor ist kein VPN und läuft in einem eigenen "
+         "Container: Bauen Sie das VPN-Image einmal mit `sandbox-ai build vpn` (WireGuard, OpenVPN, Mullvad, "
+         "Tailscale), das Tor-Image mit `sandbox-ai build tor`. Bubblewrap wird nicht unterstützt. Ein MCP-Server hat ein eigenes Netzwerk und braucht ein "
          "eigenes `--vpn`."),
-        cli=("sandbox-ai build vpn", "sandbox-ai vpn add", "sandbox-ai vpn list", "sandbox-ai vpn check NAME",
+        cli=("sandbox-ai build vpn", "sandbox-ai build tor", "sandbox-ai vpn add", "sandbox-ai vpn list", "sandbox-ai vpn check NAME", "sandbox-ai vpn rotate NAME",
              "sandbox-ai vpn remove NAME", "--vpn", "--vpn-check"),
         see=("network", "page-credentials", "secrets", "mcp", "llm"),
         tours=()),
@@ -2020,7 +2078,11 @@ SECTIONS = (
          "--verbose` shows the trusted keys' fingerprints. The `.pyz`, the AppImage and the macOS app do not "
          "update themselves: download the new file.\n\n"
          "In the app, System > Check for updates runs `sandbox-ai update --check`, and Update sandbox-ai runs "
-         "`sandbox-ai update`. Never install sandbox-ai into a project folder: an agent could rewrite it.",
+         "`sandbox-ai update`. When a newer release is found, the status line offers Update now… (also Help > "
+         "Update sandbox-ai…): asked first, it runs `sandbox-ai update` in a terminal - for an installation for "
+         "every user `sudo sandbox-ai update`, sudo asking for the password there, never the app - and afterwards "
+         "Restart the app starts the new version. Never install sandbox-ai into a project folder: an agent could "
+         "rewrite it.",
          "sandbox-ai lässt sich auf vier Wegen installieren:\n\n"
          "- `install.sh`: Kommandozeile und App, aktuell gehalten (empfohlen). Aktualisieren mit `sandbox-ai "
          "update`.\n"
@@ -2033,8 +2095,11 @@ SECTIONS = (
          "Version bleibt für ein Zurück. `sandbox-ai version --verbose` zeigt die Fingerabdrücke der vertrauten "
          "Schlüssel. `.pyz`, AppImage und macOS-App aktualisieren sich nicht selbst: Laden Sie die neue Datei.\n\n"
          "In der App führt System > Auf Updates prüfen `sandbox-ai update --check` aus und sandbox-ai "
-         "aktualisieren `sandbox-ai update`. Installieren Sie sandbox-ai nie in einen Projektordner: Ein Agent "
-         "könnte es umschreiben."),
+         "aktualisieren `sandbox-ai update`. Findet die Prüfung ein neueres Release, bietet die Statuszeile Jetzt "
+         "aktualisieren… an (auch Hilfe > sandbox-ai aktualisieren…): Nach einer Rückfrage läuft `sandbox-ai "
+         "update` in einem Terminal - bei einer Installation für alle Benutzer `sudo sandbox-ai update`, wobei sudo "
+         "dort nach dem Passwort fragt, nie die App - und danach startet App neu starten die neue Version. "
+         "Installieren Sie sandbox-ai nie in einen Projektordner: Ein Agent könnte es umschreiben."),
         cli=("sandbox-ai update --check", "sandbox-ai update", "sandbox-ai update --version X.Y.Z",
              "sandbox-ai version --verbose", "sandbox-ai doctor"),
         see=("page-system", "policy", "page-images"),

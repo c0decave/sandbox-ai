@@ -166,3 +166,83 @@ def test_launcher_exit_code_after_signal(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         real_exec(code, {"__name__": "__main__", "__file__": str(SOURCE)})
     assert exc.value.code == 128 + 15
+
+
+def test_an_attach_ends_quietly_when_the_relay_goes_while_keys_are_sent(tmp_path, monkeypatch):
+    """Bug hunt: the relay closed (the agent ended) while typed keys were still on their way; the client's send
+    failed with BrokenPipeError, which went up as "agent-sandbox: [Errno 32] Broken pipe" instead of ending the
+    attach (sessions.after_attach then never reported the agent's exit status)."""
+    import select
+    import socket
+    import threading
+    from types import SimpleNamespace
+    path = tmp_path / "attach.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(1)
+
+    def serve():
+        connection, _ = server.accept()
+        connection.recv(64)  # the window size; then the relay goes
+        connection.close()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    def after_the_relay_went(*args):
+        thread.join(5)  # keys are waiting (stdin) when the client looks next, and the relay is gone
+        return select.select(*args)
+    monkeypatch.setattr(s, "select", SimpleNamespace(select=after_the_relay_went))
+    stdin_r, stdin_w = os.pipe()
+    out_r, out_w = os.pipe()
+    os.write(stdin_w, b"typed while it ended")
+    try:
+        assert s.attach_client(str(path), stdin_r, out_w) == 0
+        assert not thread.is_alive()
+    finally:
+        server.close()
+        for fd in (stdin_r, stdin_w, out_r, out_w):
+            os.close(fd)
+
+
+def test_a_pod_removal_that_hangs_does_not_hold_the_launcher(tmp_path, monkeypatch, capsys):
+    """Bug hunt: the removal of the run's pod at its end ran without a time limit while Ctrl-C and SIGTERM are held
+    (signals_deferred, and podman inherits the mask): a podman that hangs held the launcher until a kill -9. It is
+    stopped after POD_REMOVE_SECONDS; the run's own exit status stays, and the user is told how to remove it."""
+    args = s.parse_args(["codex", "--offline"])
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[1:3] == ["pod", "rm"]:
+            raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+        return Mock(returncode=0)
+    monkeypatch.setattr(s.subprocess, "run", run)
+    monkeypatch.setattr(s.subprocess, "Popen", Mock())
+    monkeypatch.setattr(s, "wait_child", Mock(return_value=3))
+    assert s.run_pod(args, tmp_path, tmp_path) == 3
+    command, kwargs = calls[-1]
+    assert command[1:4] == ["pod", "rm", "--force"] and kwargs["timeout"] == s.POD_REMOVE_SECONDS
+    assert f"remove it with: podman pod rm --force {command[-1]}" in capsys.readouterr().err
+
+
+def test_a_signal_ends_the_wait_for_a_frozen_child():
+    """Bug hunt: with the sandbox frozen (a canary's pause stops the bwrap process tree with SIGSTOP), Ctrl-C or
+    sandbox-ai net stop was forwarded to the child and stayed pending there: the launcher waited for good. The child
+    is thawed after each forwarded signal, so it ends."""
+    import threading
+    import time
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    safety = threading.Timer(10, lambda: child.poll() is None and child.kill())  # never a hanging test
+    try:
+        os.kill(child.pid, signal.SIGSTOP)
+        safety.start()
+        threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM)).start()  # sandbox-ai net stop
+        started = time.monotonic()
+        assert s.wait_child(child) == -signal.SIGTERM
+        assert time.monotonic() - started < 9
+    finally:
+        safety.cancel()
+        if child.poll() is None:
+            child.kill()
+            child.wait()

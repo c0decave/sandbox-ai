@@ -216,6 +216,40 @@ def test_the_add_dialog_prefills_this_machine_with_the_kinds_port(qapp, wizard, 
     dialog.deleteLater()
 
 
+def test_the_add_dialog_finds_servers_and_takes_the_one_chosen(qapp, wizard, wait, monkeypatch):
+    """Find servers: `sandbox-ai llm detect --json` at this machine's loopback and the addresses typed (in the
+    background); the one chosen fills the kind, the URL and a name not taken; a typed name stays."""
+    from sandbox_ai_app.wizard import ServerDialog
+    monkeypatch.setattr(wizard.sai, "vpn_profiles", lambda: [])
+    found = [{"kind": "ollama", "host": "127.0.0.1", "port": 11434, "url": "http://127.0.0.1:11434",
+              "models": [{"name": "qwen2.5-coder:7b"}]},
+             {"kind": "vllm", "host": "192.168.1.20", "port": 8000, "url": "http://192.168.1.20:8000", "models": []}]
+    wizard.calls.replies[("llm", "detect")] = (0, json.dumps(found), "")
+    dialog = ServerDialog(wizard.sai, ["ollama"])
+    assert not dialog.found.isVisibleTo(dialog)
+    dialog.addresses.setText("127.0.0.1, llm.example.org")
+    dialog.find()
+    assert dialog.note.isVisibleTo(dialog) and "IP address" in dialog.note.text()
+    assert not [c for c in wizard.calls.log if c[:2] == ("llm", "detect")], "nothing runs for a name"
+    dialog.addresses.setText("127.0.0.1, 192.168.1.20")
+    dialog.find()
+    assert wait(lambda: dialog.found.count() == 2, 10)
+    assert ("llm", "detect", "--json", "--address", "192.168.1.20") in wizard.calls.log
+    assert dialog.kind.currentData() == "ollama" and dialog.url.text() == "http://127.0.0.1:11434"
+    assert dialog.name.text() == "ollama-2", "a name not taken"
+    dialog.name.setText("lan-gpu")
+    dialog.name_typed = True
+    dialog.found.setCurrentIndex(1)
+    dialog.take_found()
+    assert dialog.kind.currentData() == "vllm" and dialog.url.text() == "http://192.168.1.20:8000"
+    assert dialog.name.text() == "lan-gpu"
+    wizard.calls.replies[("llm", "detect")] = (0, "[]", "")
+    dialog.find()
+    assert wait(lambda: "No LLM server answered" in dialog.note.text(), 10)
+    assert not dialog.found.isVisibleTo(dialog)
+    dialog.deleteLater()
+
+
 def test_a_preset_takes_the_server_of_the_model_page(wizard, wait):
     """local-llm with the Model page's server: nothing left to ask, --llm NAME:MODEL; with the agent's provider
     chosen instead, the placeholder stays and no cloud model is passed along with it."""

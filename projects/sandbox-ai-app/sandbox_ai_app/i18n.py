@@ -1961,9 +1961,6 @@ TEXTS = {
     'Resume {name} on {host} with…': {
         'en': 'Resume {name} on {host} with…',
         'de': '{name} auf {host} fortsetzen mit…'},
-    'What is added here is kept for its later starts.': {
-        'en': 'What is added here is kept for its later starts.',
-        'de': 'Was hier hinzukommt, bleibt für seine späteren Starts.'},
     'Only for kept starts (sessions).': {
         'en': 'Only for kept starts (sessions).',
         'de': 'Nur für behaltene Starts (Sitzungen).'},
@@ -2152,9 +2149,9 @@ TEXTS = {
     'Tor profile': {
         'en': 'Tor profile',
         'de': 'Tor-Profil'},
-    'sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks': {
-        'en': 'sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks',
-        'de': 'sandbox-ai build vpn; sandbox-ai vpn add anon --tor --socks'},
+    'sandbox-ai build tor; sandbox-ai vpn add anon --tor --socks': {
+        'en': 'sandbox-ai build tor; sandbox-ai vpn add anon --tor --socks',
+        'de': 'sandbox-ai build tor; sandbox-ai vpn add anon --tor --socks'},
     "The agent's own provider and login (no --llm)": {
         'en': "The agent's own provider and login (no --llm)",
         'de': 'Der eigene Anbieter und die Anmeldung des Agenten (kein --llm)'},
@@ -2806,6 +2803,160 @@ TEXTS = {
     'Canaries ({count})': {
         'en': 'Canaries ({count})',
         'de': 'Canaries ({count})'},
+    # safeguards (sandbox-ai safeguards): the Safeguards tab, its popups, which kinds are announced
+    'Safeguards': {
+        'en': 'Safeguards',
+        'de': 'Schutzmaßnahmen'},
+    'Safeguards ({count})': {
+        'en': 'Safeguards ({count})',
+        'de': 'Schutzmaßnahmen ({count})'},
+    'Why': {
+        'en': 'Why',
+        'de': 'Warum'},
+    'To allow it': {
+        'en': 'To allow it',
+        'de': 'Zum Erlauben'},
+    'connection dropped by the firewall': {
+        'en': 'connection dropped by the firewall',
+        'de': 'Verbindung von der Firewall verworfen'},
+    'name lookup refused': {
+        'en': 'name lookup refused',
+        'de': 'Namensauflösung abgelehnt'},
+    'connection refused by the proxy': {
+        'en': 'connection refused by the proxy',
+        'de': 'Verbindung vom Proxy abgelehnt'},
+    'refused by a rule': {
+        'en': 'refused by a rule',
+        'de': 'von einer Regel abgelehnt'},
+    'refused without an answer': {
+        'en': 'refused without an answer',
+        'de': 'ohne Antwort abgelehnt'},
+    'push refused by the privacy check': {
+        'en': 'push refused by the privacy check',
+        'de': 'Push von der Datenschutzprüfung abgelehnt'},
+    'publishing refused': {
+        'en': 'publishing refused',
+        'de': 'Veröffentlichen abgelehnt'},
+    'refused by the security mode': {
+        'en': 'refused by the security mode',
+        'de': 'vom Sicherheitsmodus abgelehnt'},
+    "refused by the administrator's policy": {
+        'en': "refused by the administrator's policy",
+        'de': 'von der Richtlinie des Administrators abgelehnt'},
+    'held: the run is tainted': {
+        'en': 'held: the run is tainted',
+        'de': 'angehalten: der Lauf ist markiert (tainted)'},
+    'device refused': {
+        'en': 'device refused',
+        'de': 'Gerät abgelehnt'},
+    'process ended: memory nearly full': {
+        'en': 'process ended: memory nearly full',
+        'de': 'Prozess beendet: Speicher fast voll'},
+    'the supervisor dropped its caches': {
+        'en': 'the supervisor dropped its caches',
+        'de': 'der Supervisor hat seine Zwischenspeicher verworfen'},
+    'a safety check failed': {
+        'en': 'a safety check failed',
+        'de': 'eine Sicherheitsprüfung ist fehlgeschlagen'},
+    'a canary went off': {
+        'en': 'a canary went off',
+        'de': 'ein Canary hat angeschlagen'},
+    'out of memory: the kernel ended a process': {
+        'en': 'out of memory: the kernel ended a process',
+        'de': 'Speicher erschöpft: der Kernel hat einen Prozess beendet'},
+    '{count} connections to {target} dropped by the firewall in the last minute': {
+        'en': '{count} connections to {target} dropped by the firewall in the last minute',
+        'de': '{count} Verbindungen zu {target} in der letzten Minute von der Firewall verworfen'},
+    '{count} lookups of {target} refused in the last minute': {
+        'en': '{count} lookups of {target} refused in the last minute',
+        'de': '{count} Auflösungen von {target} in der letzten Minute abgelehnt'},
+    '{count} connections to {target} refused in the last minute': {
+        'en': '{count} connections to {target} refused in the last minute',
+        'de': '{count} Verbindungen zu {target} in der letzten Minute abgelehnt'},
+    '{count} actions refused by {target} in the last minute': {
+        'en': '{count} actions refused by {target} in the last minute',
+        'de': '{count} Aktionen in der letzten Minute abgelehnt von {target}'},
+    '{count} questions about {target} refused without an answer in the last minute': {
+        'en': '{count} questions about {target} refused without an answer in the last minute',
+        'de': '{count} Fragen zu {target} in der letzten Minute ohne Antwort abgelehnt'},
+    '{count} pushes to {target} refused in the last minute': {
+        'en': '{count} pushes to {target} refused in the last minute',
+        'de': '{count} Pushes zu {target} in der letzten Minute abgelehnt'},
+    '{count} publishing requests to {target} refused in the last minute': {
+        'en': '{count} publishing requests to {target} refused in the last minute',
+        'de': '{count} Veröffentlichungen bei {target} in der letzten Minute abgelehnt'},
+    'Stays refused': {
+        'en': 'Stays refused',
+        'de': 'Bleibt abgelehnt'},
+    'Count': {
+        'en': 'Count',
+        'de': 'Anzahl'},
+    'Seen by': {
+        'en': 'Seen by',
+        'de': 'Bemerkt von'},
+    '{run}: {count} more safeguard events': {
+        'en': '{run}: {count} more safeguard events',
+        'de': '{run}: {count} weitere Schutzmaßnahmen'},
+    'Kinds: {kinds}. All of them: Activity > Safeguards': {
+        'en': 'Kinds: {kinds}. All of them: Activity > Safeguards',
+        'de': 'Arten: {kinds}. Alle: Aktivität > Schutzmaßnahmen'},
+    '{title} ({count} times in the last minute)': {
+        'en': '{title} ({count} times in the last minute)',
+        'de': '{title} ({count}-mal in der letzten Minute)'},
+    'Why: {why}': {
+        'en': 'Why: {why}',
+        'de': 'Warum: {why}'},
+    'Every kind': {
+        'en': 'Every kind',
+        'de': 'Jede Art'},
+    'Choose a record to see what was refused or ended, why, and what to do.': {
+        'en': 'Choose a record to see what was refused or ended, why, and what to do.',
+        'de': 'Wählen Sie einen Eintrag: was abgelehnt oder beendet wurde, warum, und was zu tun ist.'},
+    'Copy the fix': {
+        'en': 'Copy the fix',
+        'de': 'Abhilfe kopieren'},
+    'The command or option that would allow it, for a terminal': {
+        'en': 'The command or option that would allow it, for a terminal',
+        'de': 'Der Befehl oder die Option, die es erlauben würde, für ein Terminal'},
+    'Reading the safeguard records…': {
+        'en': 'Reading the safeguard records…',
+        'de': 'Die Einträge der Schutzmaßnahmen werden gelesen…'},
+    '{count} record(s) in {runs} run(s)': {
+        'en': '{count} record(s) in {runs} run(s)',
+        'de': '{count} Eintrag/Einträge in {runs} Lauf/Läufen'},
+    'No safeguard refused or ended anything.': {
+        'en': 'No safeguard refused or ended anything.',
+        'de': 'Keine Schutzmaßnahme hat etwas abgelehnt oder beendet.'},
+    'Mute kinds: Settings > Window (they are still listed here).': {
+        'en': 'Mute kinds: Settings > Window (they are still listed here).',
+        'de': 'Arten stummschalten: Einstellungen > Fenster (sie werden hier weiter aufgeführt).'},
+    'This sandbox-ai records no safeguards yet; update it with: sandbox-ai update': {
+        'en': 'This sandbox-ai records no safeguards yet; update it with: sandbox-ai update',
+        'de': 'Dieses sandbox-ai zeichnet noch keine Schutzmaßnahmen auf; aktualisieren Sie es mit: sandbox-ai update'},
+    'Cannot read the safeguard records: {error}': {
+        'en': 'Cannot read the safeguard records: {error}',
+        'de': 'Die Einträge der Schutzmaßnahmen lassen sich nicht lesen: {error}'},
+    '{count} error(s)': {
+        'en': '{count} error(s)',
+        'de': '{count} Fehler'},
+    'This sandbox-ai records no safeguards yet; update it.': {
+        'en': 'This sandbox-ai records no safeguards yet; update it.',
+        'de': 'Dieses sandbox-ai zeichnet noch keine Schutzmaßnahmen auf; aktualisieren Sie es.'},
+    'stays refused': {
+        'en': 'stays refused',
+        'de': 'bleibt abgelehnt'},
+    'A popup when a safeguard refuses or ends something in a running sandbox': {
+        'en': 'A popup when a safeguard refuses or ends something in a running sandbox',
+        'de': 'Ein Hinweis, wenn eine Schutzmaßnahme in einer laufenden Sandbox etwas ablehnt oder beendet'},
+    'Safeguards announced': {
+        'en': 'Safeguards announced',
+        'de': 'Gemeldete Schutzmaßnahmen'},
+    'Unticked kinds are never announced, here or on the desktop, for every start (safeguard_mute in {path}); they are still recorded: Activity > Safeguards, sandbox-ai safeguards.': {
+        'en': 'Unticked kinds are never announced, here or on the desktop, for every start (safeguard_mute in {path}); they are still recorded: Activity > Safeguards, sandbox-ai safeguards.',
+        'de': 'Nicht angehakte Arten werden nie gemeldet, weder hier noch auf dem Desktop, bei jedem Start (safeguard_mute in {path}); aufgezeichnet werden sie trotzdem: Aktivität > Schutzmaßnahmen, sandbox-ai safeguards.'},
+    'Show safeguards': {
+        'en': 'Show safeguards',
+        'de': 'Schutzmaßnahmen zeigen'},
     # <<< canary log <<<
     'ct101': {
         'en': 'ct101',
@@ -3360,6 +3511,9 @@ TEXTS = {
     'denied': {
         'en': 'denied',
         'de': 'abgelehnt'},
+    'the macOS Keychain': {
+        'en': 'the macOS Keychain',
+        'de': 'der macOS-Schlüsselbund'},
     'your system keyring (Secret Service)': {
         'en': 'your system keyring (Secret Service)',
         'de': 'Ihr System-Schlüsselbund (Secret Service)'},
@@ -3378,9 +3532,6 @@ TEXTS = {
     '[sandbox-ai: exit status {status}; close the tab with ×]': {
         'en': '[sandbox-ai: exit status {status}; close the tab with ×]',
         'de': '[sandbox-ai: Exit-Status {status}; schließen Sie den Tab mit ×]'},
-    'Every terminal of the app opens here as a tab: starts in the app, sessions you attach, builds and logins. Any start that runs in tmux, wherever it was started, can be attached from the list.': {
-        'en': 'Every terminal of the app opens here as a tab: starts in the app, sessions you attach, builds and logins. Any start that runs in tmux, wherever it was started, can be attached from the list.',
-        'de': 'Jedes Terminal der App öffnet sich hier als Tab: Starts in der App, Sitzungen, mit denen Sie sich verbinden, Builds und Logins. Mit jedem Start, der in tmux läuft, gleich wo er gestartet wurde, können Sie sich über die Liste verbinden.'},
     'Runs in the foreground of its own terminal (started with --no-tmux, as a task or without a terminal): nothing to attach. Start it with tmux (the default for interactive starts) to attach from here.': {
         'en': 'Runs in the foreground of its own terminal (started with --no-tmux, as a task or without a terminal): nothing to attach. Start it with tmux (the default for interactive starts) to attach from here.',
         'de': 'Läuft im Vordergrund seines eigenen Terminals (gestartet mit --no-tmux, als Aufgabe oder ohne Terminal): nichts zum Verbinden. Starten Sie ihn mit tmux (Standard für interaktive Starts), um sich von hier aus zu verbinden.'},
@@ -3393,9 +3544,9 @@ TEXTS = {
     'Damaged: see sandbox-ai list.': {
         'en': 'Damaged: see sandbox-ai list.',
         'de': 'Beschädigt: siehe sandbox-ai list.'},
-    'Running starts': {
-        'en': 'Running starts',
-        'de': 'Laufende Starts'},
+    'Every start that runs on this machine or the host chosen beside it, however it was started; one in tmux opens in a tab with one click': {
+        'en': 'Every start that runs on this machine or the host chosen beside it, however it was started; one in tmux opens in a tab with one click',
+        'de': 'Jeder Start, der auf diesem Rechner oder dem daneben gewählten Host läuft, gleich wie er gestartet wurde; einer in tmux öffnet sich mit einem Klick in einem Tab'},
     'This machine, or a host of sandbox-ai hosts (over SSH)': {
         'en': 'This machine, or a host of sandbox-ai hosts (over SSH)',
         'de': 'Dieser Rechner oder ein Host von sandbox-ai hosts (über SSH)'},
@@ -3531,27 +3682,12 @@ TEXTS = {
     'Check the options and show the plan; nothing is started': {
         'en': 'Check the options and show the plan; nothing is started',
         'de': 'Optionen prüfen und den Plan zeigen; nichts wird gestartet'},
-    'Start in the app': {
-        'en': 'Start in the app',
-        'de': 'In der App starten'},
-    'In a terminal tab of this window (Terminals)': {
-        'en': 'In a terminal tab of this window (Terminals)',
-        'de': 'In einem Terminal-Tab dieses Fensters (Terminals)'},
-    'Start in a terminal window': {
-        'en': 'Start in a terminal window',
-        'de': 'In einem Terminalfenster starten'},
     'session name': {
         'en': 'session name',
         'de': 'Sitzungsname'},
     'empty: a codename like brisk-otter-lantern': {
         'en': 'empty: a codename like brisk-otter-lantern',
         'de': 'leer: ein Codename wie brisk-otter-lantern'},
-    'Start as session': {
-        'en': 'Start as session',
-        'de': 'Als Sitzung starten'},
-    'A detachable session: attach and detach from the Sandboxes page': {
-        'en': 'A detachable session: attach and detach from the Sandboxes page',
-        'de': 'Eine abtrennbare Sitzung: auf der Seite Sandboxen verbinden und trennen'},
     'Save as project configuration…': {
         'en': 'Save as project configuration…',
         'de': 'Als Projektkonfiguration speichern…'},
@@ -3807,6 +3943,58 @@ TEXTS = {
     'Fallout': {
         'en': 'Fallout',
         'de': 'Fallout'},
+    # editor themes and the fonts of the settings
+    'Solarized Dark': {
+        'en': 'Solarized Dark',
+        'de': 'Solarized Dark'},
+    'Solarized Light': {
+        'en': 'Solarized Light',
+        'de': 'Solarized Light'},
+    'Dracula': {
+        'en': 'Dracula',
+        'de': 'Dracula'},
+    'Nord': {
+        'en': 'Nord',
+        'de': 'Nord'},
+    'Gruvbox Dark': {
+        'en': 'Gruvbox Dark',
+        'de': 'Gruvbox Dark'},
+    'One Dark': {
+        'en': 'One Dark',
+        'de': 'One Dark'},
+    'Catppuccin Mocha': {
+        'en': 'Catppuccin Mocha',
+        'de': 'Catppuccin Mocha'},
+    'Catppuccin Latte': {
+        'en': 'Catppuccin Latte',
+        'de': 'Catppuccin Latte'},
+    'Tokyo Night': {
+        'en': 'Tokyo Night',
+        'de': 'Tokyo Night'},
+    'Interface font': {
+        'en': 'Interface font',
+        'de': 'Schrift der Oberfläche'},
+    'Monospace font (terminal, code, logs)': {
+        'en': 'Monospace font (terminal, code, logs)',
+        'de': 'Festbreitenschrift (Terminal, Code, Protokolle)'},
+    "the theme's": {
+        'en': "the theme's",
+        'de': 'die des Farbschemas'},
+    '{font} (not installed)': {
+        'en': '{font} (not installed)',
+        'de': '{font} (nicht installiert)'},
+    'Not installed. To get it: {how}': {
+        'en': 'Not installed. To get it: {how}',
+        'de': 'Nicht installiert. So bekommen Sie sie: {how}'},
+    "{font} is not installed: the theme's font is used until it is. The app downloads no fonts; install it, then start the app again. To get it: {how}": {
+        'en': "{font} is not installed: the theme's font is used until it is. The app downloads no fonts; install it, then start the app again. To get it: {how}",
+        'de': '{font} ist nicht installiert: Bis dahin gilt die Schrift des Farbschemas. Die App lädt keine Schriften herunter; installieren Sie sie und starten Sie die App dann neu. So bekommen Sie sie: {how}'},
+    'The app downloads no fonts: one marked not installed says how to get it (point at it in the list). Terminal tabs opened from now on use the monospace font.': {
+        'en': 'The app downloads no fonts: one marked not installed says how to get it (point at it in the list). Terminal tabs opened from now on use the monospace font.',
+        'de': 'Die App lädt keine Schriften herunter: Bei einer als nicht installiert markierten steht, wie Sie sie bekommen (in der Liste darauf zeigen). Terminal-Tabs, die ab jetzt geöffnet werden, nutzen die Festbreitenschrift.'},
+    'comes with macOS': {
+        'en': 'comes with macOS',
+        'de': 'gehört zu macOS'},
     'in a tab of the app (when available)': {
         'en': 'in a tab of the app (when available)',
         'de': 'in einem Tab der App (wenn verfügbar)'},
@@ -4090,6 +4278,9 @@ TEXTS = {
     'Start at login, in the tray': {
         'en': 'Start at login, in the tray',
         'de': 'Bei der Anmeldung starten, im Infobereich'},
+    'Writes ~/Library/LaunchAgents/org.sandbox-ai.app.plist (a login item); unticked, it is removed': {
+        'en': 'Writes ~/Library/LaunchAgents/org.sandbox-ai.app.plist (a login item); unticked, it is removed',
+        'de': 'Schreibt ~/Library/LaunchAgents/org.sandbox-ai.app.plist (ein Anmeldeobjekt); abgewählt wird es entfernt'},
     'Writes ~/.config/autostart/sandbox-ai-app.desktop; unticked, it is removed': {
         'en': 'Writes ~/.config/autostart/sandbox-ai-app.desktop; unticked, it is removed',
         'de': 'Schreibt ~/.config/autostart/sandbox-ai-app.desktop; abgewählt wird sie entfernt'},
@@ -4204,12 +4395,6 @@ TEXTS = {
     '--no-inspect has no effect without the connection proxy.': {
         'en': '--no-inspect has no effect without the connection proxy.',
         'de': '--no-inspect wirkt ohne Verbindungs-Proxy nicht.'},
-    'A folder the agent works in: the first at /work, further ones at /workspaces/NAME': {
-        'en': 'A folder the agent works in: the first at /work, further ones at /workspaces/NAME',
-        'de': 'Ein Ordner, in dem der Agent arbeitet: der erste unter /work, weitere unter /workspaces/NAME'},
-    'A further host folder or file at /work, /mnt or /opt, read-only or writable': {
-        'en': 'A further host folder or file at /work, /mnt or /opt, read-only or writable',
-        'de': 'Ein weiterer Ordner oder eine Datei des Hosts unter /work, /mnt oder /opt, nur lesbar oder beschreibbar'},
     'A local MCP server in its own sandbox, with its own network and folders': {
         'en': 'A local MCP server in its own sandbox, with its own network and folders',
         'de': 'Ein lokaler MCP-Server in eigener Sandbox, mit eigenem Netzwerk und eigenen Ordnern'},
@@ -4455,7 +4640,7 @@ TEXTS = {
         'de': 'Von hier zu einem Eingang ziehen, um zu verbinden'},
     'Fit': {
         'en': 'Fit',
-        'de': 'Einpassen'},
+        'de': 'Zentrieren'},
     'Host folder or file': {
         'en': 'Host folder or file',
         'de': 'Ordner oder Datei des Hosts'},
@@ -4498,9 +4683,6 @@ TEXTS = {
     'Security score: {score} of 100': {
         'en': 'Security score: {score} of 100',
         'de': 'Sicherheitswert: {score} von 100'},
-    'Select a part to change it': {
-        'en': 'Select a part to change it',
-        'de': 'Einen Teil auswählen, um ihn zu ändern'},
     'Select and press Delete to disconnect': {
         'en': 'Select and press Delete to disconnect',
         'de': 'Auswählen und Entf drücken, um zu trennen'},
@@ -5450,9 +5632,6 @@ TEXTS = {
     'No project': {
         'en': 'No project',
         'de': 'Kein Projekt'},
-    'No project chosen': {
-        'en': 'No project chosen',
-        'de': 'Kein Projekt gewählt'},
     'Not for {agent}: only for {agents}': {
         'en': 'Not for {agent}: only for {agents}',
         'de': 'Nicht für {agent}: nur für {agents}'},
@@ -5591,9 +5770,6 @@ TEXTS = {
     "The project's .sandbox-ai.json is not trusted yet: the launcher refuses to start until you review it.": {
         'en': "The project's .sandbox-ai.json is not trusted yet: the launcher refuses to start until you review it.",
         'de': 'Der .sandbox-ai.json des Projekts wird noch nicht vertraut: der Launcher startet erst, wenn Sie sie geprüft haben.'},
-    "The project's trusted .sandbox-ai.json is applied by the launcher on top of these options.": {
-        'en': "The project's trusted .sandbox-ai.json is applied by the launcher on top of these options.",
-        'de': 'Die vertraute .sandbox-ai.json des Projekts wendet der Launcher zusätzlich zu diesen Optionen an.'},
     'The session does not run.': {
         'en': 'The session does not run.',
         'de': 'Die Sitzung läuft nicht.'},
@@ -5815,7 +5991,223 @@ TEXTS = {
         'de': 'Tab schließen'},
     'Fit the board': {
         'en': 'Fit the board',
-        'de': 'Tafel einpassen'},
+        'de': 'Tafel zentrieren'},
+    'A terminal tab of this window (Terminals), or your terminal program': {
+        'en': 'A terminal tab of this window (Terminals), or your terminal program',
+        'de': 'Ein Terminal-Tab dieses Fensters (Terminals) oder Ihr Terminalprogramm'},
+    'Keeps running when its terminal or the app closes; attach it again from Sandboxes & sessions or Terminals. Off: it ends with its terminal.': {
+        'en': 'Keeps running when its terminal or the app closes; attach it again from Sandboxes & sessions or Terminals. Off: it ends with its terminal.',
+        'de': 'Läuft weiter, wenn sein Terminal oder die App geschlossen wird; hängen Sie es über Sandboxen & Sitzungen oder Terminals wieder an. Aus: Es endet mit seinem Terminal.'},
+    'Where it starts': {
+        'en': 'Where it starts',
+        'de': 'Wo es startet'},
+    'as session': {
+        'en': 'as session',
+        'de': 'als Sitzung'},
+    'in the app': {
+        'en': 'in the app',
+        'de': 'in der App'},
+    'A sandbox started before this login was added gets it now (sandbox-ai net allow RUN --git-token-secret); every sandbox started later has it anyway': {
+        'en': 'A sandbox started before this login was added gets it now (sandbox-ai net allow RUN --git-token-secret); every sandbox started later has it anyway',
+        'de': 'Eine Sandbox, die vor diesem Login gestartet wurde, bekommt ihn jetzt (sandbox-ai net allow RUN --git-token-secret); jede später gestartete hat ihn ohnehin'},
+    'Also for the later starts of its project': {
+        'en': 'Also for the later starts of its project',
+        'de': 'Auch für die späteren Starts ihres Projekts'},
+    'Choose a login in the list first.': {
+        'en': 'Choose a login in the list first.',
+        'de': 'Wählen Sie zuerst einen Login in der Liste.'},
+    'Give': {
+        'en': 'Give',
+        'de': 'Übergeben'},
+    'Give the Git login for {url} (secret {secret}) to {run} until it ends, at once? Its Git logs in with it from now on (the token stays outside the sandbox: its proxy uses it).': {
+        'en': 'Give the Git login for {url} (secret {secret}) to {run} until it ends, at once? Its Git logs in with it from now on (the token stays outside the sandbox: its proxy uses it).',
+        'de': 'Den Git-Login für {url} (Secret {secret}) {run} sofort bis zu seinem Ende übergeben? Sein Git meldet sich ab jetzt damit an (das Token bleibt außerhalb der Sandbox: ihr Proxy verwendet es).'},
+    'Give the login': {
+        'en': 'Give the login',
+        'de': 'Login übergeben'},
+    'Give to a running sandbox': {
+        'en': 'Give to a running sandbox',
+        'de': 'An eine laufende Sandbox übergeben'},
+    'Give to a running sandbox…': {
+        'en': 'Give to a running sandbox…',
+        'de': 'An laufende Sandbox übergeben…'},
+    'api.example.com': {
+        'en': 'api.example.com',
+        'de': 'api.example.com'},
+    'The sandbox that gets the key:': {
+        'en': 'The sandbox that gets the key:',
+        'de': 'Die Sandbox, die den Schlüssel bekommt:'},
+    "The HTTPS server the key is for: the sandbox's proxy puts it in on the wire for requests there only, and the sandbox may reach it from now on": {
+        'en': "The HTTPS server the key is for: the sandbox's proxy puts it in on the wire for requests there only, and the sandbox may reach it from now on",
+        'de': 'Der HTTPS-Server, für den der Schlüssel gilt: Der Proxy der Sandbox setzt ihn nur bei Anfragen dorthin auf der Leitung ein, und die Sandbox darf ihn ab jetzt erreichen'},
+    'The variable whose placeholder the agent sends (export NAME=… in the sandbox: the app says the line)': {
+        'en': 'The variable whose placeholder the agent sends (export NAME=… in the sandbox: the app says the line)',
+        'de': 'Die Variable, deren Platzhalter der Agent sendet (export NAME=… in der Sandbox: die App nennt die Zeile)'},
+    'Variable': {
+        'en': 'Variable',
+        'de': 'Variable'},
+    'Name the server as a host name, such as api.example.com (no address, no https://).': {
+        'en': 'Name the server as a host name, such as api.example.com (no address, no https://).',
+        'de': 'Nennen Sie den Server als Hostnamen, etwa api.example.com (keine Adresse, kein https://).'},
+    'The variable: letters, digits and _, not starting with a digit.': {
+        'en': 'The variable: letters, digits and _, not starting with a digit.',
+        'de': 'Die Variable: Buchstaben, Ziffern und _, nicht mit einer Ziffer am Anfang.'},
+    'The selected secret as an API key of a sandbox that runs (sandbox-ai net allow RUN --api-key HOST=NAME=SECRET): its proxy puts the key in on the wire, the agent only sees a placeholder': {
+        'en': 'The selected secret as an API key of a sandbox that runs (sandbox-ai net allow RUN --api-key HOST=NAME=SECRET): its proxy puts the key in on the wire, the agent only sees a placeholder',
+        'de': 'Das gewählte Geheimnis als API-Schlüssel einer laufenden Sandbox (sandbox-ai net allow LAUF --api-key HOST=NAME=GEHEIMNIS): Ihr Proxy setzt den Schlüssel auf der Leitung ein, der Agent sieht nur einen Platzhalter'},
+    'Only a secret of this machine is given to a sandbox from here.': {
+        'en': 'Only a secret of this machine is given to a sandbox from here.',
+        'de': 'Von hier aus wird nur ein Geheimnis dieses Rechners an eine Sandbox gegeben.'},
+    'Choose a secret in the list first.': {
+        'en': 'Choose a secret in the list first.',
+        'de': 'Wählen Sie zuerst ein Geheimnis in der Liste.'},
+    'Give the secret {secret} to {run} as the API key {name} for {host}, until it ends? Its proxy puts the key in on the wire for HTTPS requests to {host}; the agent sends the placeholder and never sees the key. {host} is allowed too.': {
+        'en': 'Give the secret {secret} to {run} as the API key {name} for {host}, until it ends? Its proxy puts the key in on the wire for HTTPS requests to {host}; the agent sends the placeholder and never sees the key. {host} is allowed too.',
+        'de': 'Das Geheimnis {secret} an {run} als API-Schlüssel {name} für {host} geben, bis der Lauf endet? Sein Proxy setzt den Schlüssel bei HTTPS-Anfragen an {host} auf der Leitung ein; der Agent sendet den Platzhalter und sieht den Schlüssel nie. {host} wird ebenfalls erlaubt.'},
+    'Give the key': {
+        'en': 'Give the key',
+        'de': 'Schlüssel geben'},
+    'Giving the key…': {
+        'en': 'Giving the key…',
+        'de': 'Der Schlüssel wird übergeben…'},
+    '{run} has the key now: in the sandbox, export {name}={placeholder}': {
+        'en': '{run} has the key now: in the sandbox, export {name}={placeholder}',
+        'de': '{run} hat den Schlüssel jetzt: in der Sandbox export {name}={placeholder}'},
+    'Giving the login…': {
+        'en': 'Giving the login…',
+        'de': 'Der Login wird übergeben…'},
+    'No sandbox runs on this machine now.': {
+        'en': 'No sandbox runs on this machine now.',
+        'de': 'Auf diesem Rechner läuft gerade keine Sandbox.'},
+    'Not given': {
+        'en': 'Not given',
+        'de': 'Nicht übergeben'},
+    'Only a login of this machine is given to a sandbox from here.': {
+        'en': 'Only a login of this machine is given to a sandbox from here.',
+        'de': 'Von hier wird nur ein Login dieses Rechners an eine Sandbox übergeben.'},
+    'The sandbox that gets the login:': {
+        'en': 'The sandbox that gets the login:',
+        'de': 'Die Sandbox, die den Login bekommt:'},
+    'This login names no secret: only a login with its token in a secret can be given.': {
+        'en': 'This login names no secret: only a login with its token in a secret can be given.',
+        'de': 'Dieser Login nennt kein Secret: Nur ein Login mit seinem Token in einem Secret lässt sich übergeben.'},
+    '{run} has the login now.': {
+        'en': '{run} has the login now.',
+        'de': '{run} hat den Login jetzt.'},
+    "The sandbox-ai in {path} cannot be told that this app shows the questions (it is older than 0.1.86, or its state folder cannot be written): each question also comes as the launcher's own desktop notification. Update sandbox-ai; runs started before stay so until they are restarted.": {
+        'en': "The sandbox-ai in {path} cannot be told that this app shows the questions (it is older than 0.1.86, or its state folder cannot be written): each question also comes as the launcher's own desktop notification. Update sandbox-ai; runs started before stay so until they are restarted.",
+        'de': 'Dem sandbox-ai in {path} lässt sich nicht mitteilen, dass diese App die Fragen zeigt (es ist älter als 0.1.86, oder sein Zustandsordner ist nicht beschreibbar): Jede Frage kommt zusätzlich als eigene Desktop-Benachrichtigung des Launchers. Aktualisieren Sie sandbox-ai; vorher gestartete Läufe bleiben so, bis sie neu gestartet werden.'},
+    'The app ended unexpectedly last time': {
+        'en': 'The app ended unexpectedly last time',
+        'de': 'Die App wurde beim letzten Mal unerwartet beendet'},
+    'What is known of it is in the log window (and app.log).': {
+        'en': 'What is known of it is in the log window (and app.log).',
+        'de': 'Was darüber bekannt ist, steht im Protokollfenster (und in app.log).'},
+    'Allow always': {
+        'en': 'Allow always',
+        'de': 'Immer erlauben'},
+    'Block': {
+        'en': 'Block',
+        'de': 'Blockieren'},
+    'The question is not open any more.': {
+        'en': 'The question is not open any more.',
+        'de': 'Die Frage ist nicht mehr offen.'},
+    'Extra folder': {
+        'en': 'Extra folder',
+        'de': 'Zusatzordner'},
+    'Your project: the agent works in it (the first at /work, more at /workspaces/NAME); git and the push check see it': {
+        'en': 'Your project: the agent works in it (the first at /work, more at /workspaces/NAME); git and the push check see it',
+        'de': 'Ihr Projekt: Der Agent arbeitet darin (der erste unter /work, weitere unter /workspaces/NAME); Git und die Push-Prüfung sehen ihn'},
+    'Another folder or file of this machine at a path you choose (e.g. /mnt/data), read-only or writable: data, models, caches - not where the agent works': {
+        'en': 'Another folder or file of this machine at a path you choose (e.g. /mnt/data), read-only or writable: data, models, caches - not where the agent works',
+        'de': 'Ein weiterer Ordner oder eine Datei dieses Rechners an einem Pfad Ihrer Wahl (z. B. /mnt/data), nur lesend oder beschreibbar: Daten, Modelle, Caches – nicht der Ort, an dem der Agent arbeitet'},
+    'CLI command': {
+        'en': 'CLI command',
+        'de': 'Cli-Befehl'},
+    'Show the sandbox-ai command this board starts (to copy it into a terminal)': {
+        'en': 'Show the sandbox-ai command this board starts (to copy it into a terminal)',
+        'de': 'Den sandbox-ai-Befehl zeigen, den diese Tafel startet (zum Kopieren in ein Terminal)'},
+    'Choose a server…': {
+        'en': 'Choose a server…',
+        'de': 'Server wählen…'},
+    'Discard the changes not applied': {
+        'en': 'Discard the changes not applied',
+        'de': 'Nicht übernommene Änderungen verwerfen'},
+    'Double-click a part to change it': {
+        'en': 'Double-click a part to change it',
+        'de': 'Doppelklicken Sie auf ein Teil, um es zu ändern'},
+    'Empty: the session is called {name}': {
+        'en': 'Empty: the session is called {name}',
+        'de': 'Leer: Die Sitzung heißt {name}'},
+    'The name of the session': {
+        'en': 'The name of the session',
+        'de': 'Der Name der Sitzung'},
+    'Keep the changes and close the properties': {
+        'en': 'Keep the changes and close the properties',
+        'de': 'Die Änderungen behalten und die Eigenschaften schließen'},
+    'Undo the changes made since the properties were opened': {
+        'en': 'Undo the changes made since the properties were opened',
+        'de': 'Die Änderungen seit dem Öffnen der Eigenschaften rückgängig machen'},
+    'Not added yet: the MCP page adds it from its catalog': {
+        'en': 'Not added yet: the MCP page adds it from its catalog',
+        'de': 'Noch nicht hinzugefügt: Die Seite MCP fügt ihn aus seinem Katalog hinzu'},
+    '{name} (catalog: add it on the MCP page first)': {
+        'en': '{name} (catalog: add it on the MCP page first)',
+        'de': '{name} (Katalog: zuerst auf der Seite MCP hinzufügen)'},
+    "{name} (the project's own)": {
+        'en': "{name} (the project's own)",
+        'de': '{name} (des Projekts)'},
+    'Remove the part': {
+        'en': 'Remove the part',
+        'de': 'Teil entfernen'},
+    'Remove this part': {
+        'en': 'Remove this part',
+        'de': 'Dieses Teil entfernen'},
+    'Remove this part from the board (Undo brings it back)': {
+        'en': 'Remove this part from the board (Undo brings it back)',
+        'de': 'Dieses Teil von der Tafel entfernen (Rückgängig holt es zurück)'},
+    'Remove {title} from the board? Undo brings it back.': {
+        'en': 'Remove {title} from the board? Undo brings it back.',
+        'de': '{title} von der Tafel entfernen? Rückgängig holt es zurück.'},
+    'Ask before the [x] of a part removes it': {
+        'en': 'Ask before the [x] of a part removes it',
+        'de': 'Fragen, bevor das [x] eines Teils es entfernt'},
+    'Log': {
+        'en': 'Log',
+        'de': 'Protokoll'},
+    'Log ({count} new)': {
+        'en': 'Log ({count} new)',
+        'de': 'Protokoll ({count} neu)'},
+    'Clear': {
+        'en': 'Clear',
+        'de': 'Leeren'},
+    'Copy the entries shown': {
+        'en': 'Copy the entries shown',
+        'de': 'Die angezeigten Einträge kopieren'},
+    'Debug': {
+        'en': 'Debug',
+        'de': 'Debug'},
+    'Info': {
+        'en': 'Info',
+        'de': 'Info'},
+    'Errors': {
+        'en': 'Errors',
+        'de': 'Fehler'},
+    'Warnings': {
+        'en': 'Warnings',
+        'de': 'Warnungen'},
+    'Empty the log window (app.log keeps everything)': {
+        'en': 'Empty the log window (app.log keeps everything)',
+        'de': 'Das Protokollfenster leeren (app.log behält alles)'},
+    'Everything the app reports: messages, warnings, errors and, at Debug, what it does': {
+        'en': 'Everything the app reports: messages, warnings, errors and, at Debug, what it does',
+        'de': 'Alles, was die App meldet: Meldungen, Warnungen, Fehler und bei Debug, was sie tut'},
+    'Filter the log': {
+        'en': 'Filter the log',
+        'de': 'Das Protokoll filtern'},
+    'Show from level': {
+        'en': 'Show from level',
+        'de': 'Ab Stufe zeigen'},
     'Full screen': {
         'en': 'Full screen',
         'de': 'Vollbild'},
@@ -5900,9 +6292,6 @@ TEXTS = {
     'sandbox-ai-app {app}\nsandbox-ai {sai} from {path}\nPySide6 {pyside}, Qt {qt}\nPython {python}': {
         'en': 'sandbox-ai-app {app}\nsandbox-ai {sai} from {path}\nPySide6 {pyside}, Qt {qt}\nPython {python}',
         'de': 'sandbox-ai-app {app}\nsandbox-ai {sai} aus {path}\nPySide6 {pyside}, Qt {qt}\nPython {python}'},
-    "Drop the restored changes: the board as the project's file says": {
-        'en': "Drop the restored changes: the board as the project's file says",
-        'de': 'Die wiederhergestellten Änderungen verwerfen: die Tafel, wie die Datei des Projekts sie beschreibt'},
     'Restore the changes not applied': {
         'en': 'Restore the changes not applied',
         'de': 'Nicht übernommene Änderungen wiederherstellen'},
@@ -6456,9 +6845,9 @@ TEXTS = {
     "The ruleset is written into the project file; a ruleset of yours or the administrator's can only narrow it further.": {
         'en': "The ruleset is written into the project file; a ruleset of yours or the administrator's can only narrow it further.",
         'de': 'Der Regelsatz wird in die Projektdatei geschrieben; ein Regelsatz von Ihnen oder vom Administrator kann ihn nur weiter einschränken.'},
-    'Start it with Start as session: it keeps running when the window closes.': {
-        'en': 'Start it with Start as session: it keeps running when the window closes.',
-        'de': 'Starten Sie es mit „Als Sitzung starten“: es läuft weiter, wenn das Fenster geschlossen wird.'},
+    'Start it as a session: it keeps running when the window closes.': {
+        'en': 'Start it as a session: it keeps running when the window closes.',
+        'de': 'Starten Sie es als Sitzung: Es läuft weiter, wenn das Fenster geschlossen wird.'},
     'A GPU weakens the isolation; CUDA or ROCm libraries come from an image variant of yours.': {
         'en': 'A GPU weakens the isolation; CUDA or ROCm libraries come from an image variant of yours.',
         'de': 'Eine GPU schwächt die Isolation; CUDA- oder ROCm-Bibliotheken kommen aus einer eigenen Image-Variante.'},
@@ -9326,9 +9715,6 @@ TEXTS = {
     'Write a starter ruleset (GitHub without gists and issue writes) to a file outside every workspace and add it': {
         'en': 'Write a starter ruleset (GitHub without gists and issue writes) to a file outside every workspace and add it',
         'de': 'Ein Start-Regelwerk (GitHub ohne Gists und ohne Schreiben in Issues) in eine Datei außerhalb jedes Arbeitsordners schreiben und hinzufügen'},
-    'Ask the launcher (a dry run) whether it reads these ruleset files': {
-        'en': 'Ask the launcher (a dry run) whether it reads these ruleset files',
-        'de': 'Den Launcher fragen (ein Probelauf), ob er diese Regelwerk-Dateien liest'},
     'Written: {path}. Change it to your needs; Check reads it.': {
         'en': 'Written: {path}. Change it to your needs; Check reads it.',
         'de': 'Geschrieben: {path}. Passen Sie es an Ihre Bedürfnisse an; Prüfen liest es.'},
@@ -9362,9 +9748,6 @@ TEXTS = {
     'Not checked: {error}': {
         'en': 'Not checked: {error}',
         'de': 'Nicht geprüft: {error}'},
-    'The launcher refused them, without saying why.': {
-        'en': 'The launcher refused them, without saying why.',
-        'de': 'Der Launcher hat sie abgelehnt, ohne zu sagen, warum.'},
     'The launcher reads them:': {
         'en': 'The launcher reads them:',
         'de': 'Der Launcher liest sie:'},
@@ -9434,4 +9817,364 @@ TEXTS = {
     "Not an LLM server's name: {name}": {
         'en': "Not an LLM server's name: {name}",
         'de': 'Kein Name eines LLM-Servers: {name}'},
+    'This folder has no project configuration: a start here takes only the options you give it. Save as project configuration… on the Start page writes one.': {
+        'en': 'This folder has no project configuration: a start here takes only the options you give it. Save as project configuration… on the Start page writes one.',
+        'de': 'Dieser Ordner hat keine Projektkonfiguration: Ein Start hier nimmt nur die Optionen, die Sie ihm geben. Als Projektkonfiguration speichern… auf der Startseite legt eine an.'},
+    'You reviewed this file and trusted exactly its content: every start in this folder applies its options. If it changes, it is not used until you trust it again.': {
+        'en': 'You reviewed this file and trusted exactly its content: every start in this folder applies its options. If it changes, it is not used until you trust it again.',
+        'de': 'Sie haben diese Datei geprüft und genau ihrem Inhalt vertraut: Jeder Start in diesem Ordner wendet ihre Optionen an. Ändert sie sich, wird sie erst wieder verwendet, wenn Sie ihr erneut vertrauen.'},
+    'The file changed since you trusted it: the launcher refuses to start here until you review and trust it again (Review and trust… on the Start page).': {
+        'en': 'The file changed since you trusted it: the launcher refuses to start here until you review and trust it again (Review and trust… on the Start page).',
+        'de': 'Die Datei hat sich geändert, seit Sie ihr vertraut haben: Der Launcher startet hier erst, wenn Sie sie erneut prüfen und ihr vertrauen (Prüfen und vertrauen… auf der Startseite).'},
+    'Nobody has trusted this file yet: the launcher refuses to start here until you review and trust it (Review and trust… on the Start page).': {
+        'en': 'Nobody has trusted this file yet: the launcher refuses to start here until you review and trust it (Review and trust… on the Start page).',
+        'de': 'Dieser Datei hat noch niemand vertraut: Der Launcher startet hier erst, wenn Sie sie prüfen und ihr vertrauen (Prüfen und vertrauen… auf der Startseite).'},
+    'The file is there but cannot be read: the launcher cannot use it.': {
+        'en': 'The file is there but cannot be read: the launcher cannot use it.',
+        'de': 'Die Datei ist da, lässt sich aber nicht lesen: Der Launcher kann sie nicht verwenden.'},
+    "The launcher applies the project's trusted .sandbox-ai.json: the form shows its options, the command line carries only what you add or change. To drop one of its options, save the form as the project configuration.": {
+        'en': "The launcher applies the project's trusted .sandbox-ai.json: the form shows its options, the command line carries only what you add or change. To drop one of its options, save the form as the project configuration.",
+        'de': 'Der Launcher wendet die vertraute .sandbox-ai.json des Projekts an: Das Formular zeigt ihre Optionen, die Befehlszeile enthält nur, was Sie hinzufügen oder ändern. Um eine ihrer Optionen wegzulassen, speichern Sie das Formular als Projektkonfiguration.'},
+    # == the add-a-server dialog's search (wizard.py ServerDialog: sandbox-ai llm detect) ==
+    'Addresses to look at': {
+        'en': 'Addresses to look at',
+        'de': 'Adressen, an denen gesucht wird'},
+    "Comma-separated IP addresses (this machine's loopback, LAN addresses): one read-only request for the model list per usual port (Ollama 11434, LM Studio 1234, llama.cpp 8080, vLLM 8000), short timeouts; no range is scanned": {
+        'en': "Comma-separated IP addresses (this machine's loopback, LAN addresses): one read-only request for the model list per usual port (Ollama 11434, LM Studio 1234, llama.cpp 8080, vLLM 8000), short timeouts; no range is scanned",
+        'de': 'Kommagetrennte IP-Adressen (das Loopback dieses Rechners, LAN-Adressen): je üblichem Port eine lesende Anfrage nach der Modellliste (Ollama 11434, LM Studio 1234, llama.cpp 8080, vLLM 8000), kurze Timeouts; kein Bereich wird abgesucht'},
+    'Find servers': {
+        'en': 'Find servers',
+        'de': 'Server suchen'},
+    'Look for LLM servers at these addresses (sandbox-ai llm detect)': {
+        'en': 'Look for LLM servers at these addresses (sandbox-ai llm detect)',
+        'de': 'An diesen Adressen nach LLM-Servern suchen (sandbox-ai llm detect)'},
+    'Servers found': {
+        'en': 'Servers found',
+        'de': 'Gefundene Server'},
+    'Look at': {
+        'en': 'Look at',
+        'de': 'Suchen an'},
+    'Found': {
+        'en': 'Found',
+        'de': 'Gefunden'},
+    'No LLM server answered there: give its kind and URL.': {
+        'en': 'No LLM server answered there: give its kind and URL.',
+        'de': 'Dort hat kein LLM-Server geantwortet: Geben Sie seine Art und URL an.'},
+    '{kind} at {url}, {count} models': {
+        'en': '{kind} at {url}, {count} models',
+        'de': '{kind} unter {url}, {count} Modelle'},
+    # == Copy to host… and Move to host… (the Sandboxes page; session_transfer.py: sandbox-ai session copy|move) ==
+    'Copy to host…': {
+        'en': 'Copy to host…',
+        'de': 'Auf Host kopieren…'},
+    'Move to host…': {
+        'en': 'Move to host…',
+        'de': 'Auf Host verschieben…'},
+    'Copy to host': {
+        'en': 'Copy to host',
+        'de': 'Auf Host kopieren'},
+    'Move to host': {
+        'en': 'Move to host',
+        'de': 'Auf Host verschieben'},
+    "Start the selected session's configuration again on a host as a session of its own, checked there first; logins and HOME are not copied ({command})": {
+        'en': "Start the selected session's configuration again on a host as a session of its own, checked there first; logins and HOME are not copied ({command})",
+        'de': 'Die Konfiguration der gewählten Sitzung auf einem Host als eigene Sitzung erneut starten, dort zuerst geprüft; Logins und HOME werden nicht kopiert ({command})'},
+    'As Copy to host…, then stop the session here; its HOME stays until it is deleted ({command})': {
+        'en': 'As Copy to host…, then stop the session here; its HOME stays until it is deleted ({command})',
+        'de': 'Wie Auf Host kopieren…, dann wird die Sitzung hier gestoppt; ihr HOME bleibt, bis sie gelöscht wird ({command})'},
+    'Select a session of this machine first.': {
+        'en': 'Select a session of this machine first.',
+        'de': 'Wählen Sie zuerst eine Sitzung dieses Rechners.'},
+    'This sandbox-ai cannot copy a session to another host yet ({command}): update it.': {
+        'en': 'This sandbox-ai cannot copy a session to another host yet ({command}): update it.',
+        'de': 'Dieses sandbox-ai kann noch keine Sitzung auf einen anderen Host kopieren ({command}): Aktualisieren Sie es.'},
+    'A session of {host}: only a session of this machine is copied or moved from here ({command} runs where the session is).': {
+        'en': 'A session of {host}: only a session of this machine is copied or moved from here ({command} runs where the session is).',
+        'de': 'Eine Sitzung von {host}: Von hier wird nur eine Sitzung dieses Rechners kopiert oder verschoben ({command} läuft dort, wo die Sitzung ist).'},
+    'Only for sessions: a run without a kept start has no configuration to start again elsewhere.': {
+        'en': 'Only for sessions: a run without a kept start has no configuration to start again elsewhere.',
+        'de': 'Nur für Sitzungen: Ein Lauf ohne aufbewahrten Start hat keine Konfiguration, die anderswo erneut starten könnte.'},
+    'The host it starts on (sandbox-ai hosts; this machine is not offered)': {
+        'en': 'The host it starts on (sandbox-ai hosts; this machine is not offered)',
+        'de': 'Der Host, auf dem sie startet (sandbox-ai hosts; dieser Rechner wird nicht angeboten)'},
+    'No host yet: add one on the Hosts page (sandbox-ai hosts add).': {
+        'en': 'No host yet: add one on the Hosts page (sandbox-ai hosts add).',
+        'de': 'Noch kein Host: Fügen Sie einen auf der Seite Hosts hinzu (sandbox-ai hosts add).'},
+    'Name there': {
+        'en': 'Name there',
+        'de': 'Name dort'},
+    'Folders of the session': {
+        'en': 'Folders of the session',
+        'de': 'Ordner der Sitzung'},
+    "Reading the session's folders…": {
+        'en': "Reading the session's folders…",
+        'de': 'Die Ordner der Sitzung werden gelesen…'},
+    'What sandbox-ai said': {
+        'en': 'What sandbox-ai said',
+        'de': 'Was sandbox-ai gemeldet hat'},
+    'Check only': {
+        'en': 'Check only',
+        'de': 'Nur prüfen'},
+    'Cannot go along: {problem}': {
+        'en': 'Cannot go along: {problem}',
+        'de': 'Kann nicht mit: {problem}'},
+    'Move session {name} to a host': {
+        'en': 'Move session {name} to a host',
+        'de': 'Sitzung {name} auf einen Host verschieben'},
+    'Copy session {name} to a host': {
+        'en': 'Copy session {name} to a host',
+        'de': 'Sitzung {name} auf einen Host kopieren'},
+    "Logins and the session's HOME are not copied: the host uses its own.": {
+        'en': "Logins and the session's HOME are not copied: the host uses its own.",
+        'de': 'Logins und das HOME der Sitzung werden nicht kopiert: Der Host verwendet seine eigenen.'},
+    "The session's name on the host (--as; the same unless changed)": {
+        'en': "The session's name on the host (--as; the same unless changed)",
+        'de': 'Der Name der Sitzung auf dem Host (--as; derselbe, wenn nicht geändert)'},
+    'Folders and files of the session: where each one lies on the host. One that lies elsewhere there is changed here (--map); the others stay the same.': {
+        'en': 'Folders and files of the session: where each one lies on the host. One that lies elsewhere there is changed here (--map); the others stay the same.',
+        'de': 'Ordner und Dateien der Sitzung: wo jeder Eintrag auf dem Host liegt. Was dort anderswo liegt, ändern Sie hier (--map); der Rest bleibt gleich.'},
+    'Only check that it can start on the host as it is: a dry run there, nothing starts (--check)': {
+        'en': 'Only check that it can start on the host as it is: a dry run there, nothing starts (--check)',
+        'de': 'Nur prüfen, ob sie auf dem Host so starten kann: ein Probelauf dort, nichts startet (--check)'},
+    'Move to the host': {
+        'en': 'Move to the host',
+        'de': 'Auf den Host verschieben'},
+    'Copy to the host': {
+        'en': 'Copy to the host',
+        'de': 'Auf den Host kopieren'},
+    "The session's folders could not be read: {error}": {
+        'en': "The session's folders could not be read: {error}",
+        'de': 'Die Ordner der Sitzung ließen sich nicht lesen: {error}'},
+    '{path} on the host': {
+        'en': '{path} on the host',
+        'de': '{path} auf dem Host'},
+    'No folder or file of this machine is named.': {
+        'en': 'No folder or file of this machine is named.',
+        'de': 'Kein Ordner und keine Datei dieses Rechners wird genannt.'},
+    'Folders and files: {count}': {
+        'en': 'Folders and files: {count}',
+        'de': 'Ordner und Dateien: {count}'},
+    'Choose a host first.': {
+        'en': 'Choose a host first.',
+        'de': 'Wählen Sie zuerst einen Host.'},
+    'Done: it runs on {host}.': {
+        'en': 'Done: it runs on {host}.',
+        'de': 'Erledigt: Sie läuft auf {host}.'},
+    'Checking on {host}…': {
+        'en': 'Checking on {host}…',
+        'de': 'Prüfung auf {host}…'},
+    'Checking and starting on {host}… (this can take minutes)': {
+        'en': 'Checking and starting on {host}… (this can take minutes)',
+        'de': 'Prüfung und Start auf {host}… (das kann Minuten dauern)'},
+    'It can start on {host}.': {
+        'en': 'It can start on {host}.',
+        'de': 'Sie kann auf {host} starten.'},
+    'Its configuration starts again there as a session of its own, checked there first; then it is stopped here (its HOME stays until it is deleted).': {
+        'en': 'Its configuration starts again there as a session of its own, checked there first; then it is stopped here (its HOME stays until it is deleted).',
+        'de': 'Ihre Konfiguration startet dort erneut als eigene Sitzung, dort zuerst geprüft; dann wird sie hier gestoppt (ihr HOME bleibt, bis sie gelöscht wird).'},
+    'Its configuration starts again there as a session of its own, checked there first; this one stays as it is.': {
+        'en': 'Its configuration starts again there as a session of its own, checked there first; this one stays as it is.',
+        'de': 'Ihre Konfiguration startet dort erneut als eigene Sitzung, dort zuerst geprüft; diese hier bleibt, wie sie ist.'},
+    'Check it on the host, start it there, then stop it here ({command})': {
+        'en': 'Check it on the host, start it there, then stop it here ({command})',
+        'de': 'Auf dem Host prüfen, dort starten, dann hier stoppen ({command})'},
+    'Check it on the host and start it there ({command})': {
+        'en': 'Check it on the host and start it there ({command})',
+        'de': 'Auf dem Host prüfen und dort starten ({command})'},
+    'Where {path} lies on the host (the same unless changed)': {
+        'en': 'Where {path} lies on the host (the same unless changed)',
+        'de': 'Wo {path} auf dem Host liegt (derselbe Pfad, wenn nicht geändert)'},
+    'Not started: {error}': {
+        'en': 'Not started: {error}',
+        'de': 'Nicht gestartet: {error}'},
+    'Start session {name} on {host} as {new}, then stop it here? Its HOME stays here until it is deleted; logins and HOME are not copied.': {
+        'en': 'Start session {name} on {host} as {new}, then stop it here? Its HOME stays here until it is deleted; logins and HOME are not copied.',
+        'de': 'Sitzung {name} auf {host} als {new} starten und dann hier stoppen? Ihr HOME bleibt hier, bis sie gelöscht wird; Logins und HOME werden nicht kopiert.'},
+    'Done.': {
+        'en': 'Done.',
+        'de': 'Erledigt.'},
+    'It failed (exit {status}).': {
+        'en': 'It failed (exit {status}).',
+        'de': 'Fehlgeschlagen (Exit {status}).'},
+    'It failed (exit {status}): see what sandbox-ai said below.': {
+        'en': 'It failed (exit {status}): see what sandbox-ai said below.',
+        'de': 'Fehlgeschlagen (Exit {status}): Was sandbox-ai gemeldet hat, steht unten.'},
+    # == sandbox-ai updated from the app: Update now… in the status line, sudo for a system installation ==
+    'Update sandbox-ai…': {
+        'en': 'Update sandbox-ai…',
+        'de': 'sandbox-ai aktualisieren…'},
+    'Update of sandbox-ai': {
+        'en': 'Update of sandbox-ai',
+        'de': 'Update von sandbox-ai'},
+    'Update now…': {
+        'en': 'Update now…',
+        'de': 'Jetzt aktualisieren…'},
+    'Update sandbox-ai now': {
+        'en': 'Update sandbox-ai now',
+        'de': 'sandbox-ai jetzt aktualisieren'},
+    'Restart the app': {
+        'en': 'Restart the app',
+        'de': 'App neu starten'},
+    'Quit the app the usual way and start it again: the new version': {
+        'en': 'Quit the app the usual way and start it again: the new version',
+        'de': 'Die App wie gewohnt beenden und wieder starten: die neue Version'},
+    'sandbox-ai {available} is available (installed: {installed})': {
+        'en': 'sandbox-ai {available} is available (installed: {installed})',
+        'de': 'sandbox-ai {available} ist verfügbar (installiert: {installed})'},
+    'Installed for every user in {path}: sudo sandbox-ai update runs in a terminal, where sudo asks for your password (the app never sees it)': {
+        'en': 'Installed for every user in {path}: sudo sandbox-ai update runs in a terminal, where sudo asks for your password (the app never sees it)',
+        'de': 'Für alle Benutzer in {path} installiert: sudo sandbox-ai update läuft in einem Terminal, wo sudo nach Ihrem Passwort fragt (die App sieht es nie)'},
+    'sandbox-ai update in a terminal: the newest signed release; the version before is kept': {
+        'en': 'sandbox-ai update in a terminal: the newest signed release; the version before is kept',
+        'de': 'sandbox-ai update in einem Terminal: das neueste signierte Release; die vorige Version bleibt erhalten'},
+    'This sandbox-ai runs from a package (the AppImage, the macOS app or the .pyz): it does not update itself. Download the new one from the release page.': {
+        'en': 'This sandbox-ai runs from a package (the AppImage, the macOS app or the .pyz): it does not update itself. Download the new one from the release page.',
+        'de': 'Dieses sandbox-ai läuft aus einem Paket (dem AppImage, der macOS-App oder der .pyz): Es aktualisiert sich nicht selbst. Laden Sie das neue von der Release-Seite herunter.'},
+    'This sandbox-ai is a git checkout ({path}): update it with git pull.': {
+        'en': 'This sandbox-ai is a git checkout ({path}): update it with git pull.',
+        'de': 'Dieses sandbox-ai ist ein Git-Checkout ({path}): Aktualisieren Sie es mit git pull.'},
+    'This sandbox-ai was not installed with install.sh: a pip installation updates with pip install -U sandbox-ai.': {
+        'en': 'This sandbox-ai was not installed with install.sh: a pip installation updates with pip install -U sandbox-ai.',
+        'de': 'Dieses sandbox-ai wurde nicht mit install.sh installiert: Eine pip-Installation aktualisieren Sie mit pip install -U sandbox-ai.'},
+    'sandbox-ai updated to {version}: restart the app to use it': {
+        'en': 'sandbox-ai updated to {version}: restart the app to use it',
+        'de': 'sandbox-ai auf {version} aktualisiert: Starten Sie die App neu, um es zu nutzen'},
+    'sandbox-ai is installed for every user ({path}): only root can update it, and there is no sudo here. Run as root (e.g. after su -):\n\n{command}': {
+        'en': 'sandbox-ai is installed for every user ({path}): only root can update it, and there is no sudo here. Run as root (e.g. after su -):\n\n{command}',
+        'de': 'sandbox-ai ist für alle Benutzer installiert ({path}): Nur root kann es aktualisieren, und hier gibt es kein sudo. Führen Sie als root aus (z. B. nach su -):\n\n{command}'},
+    'Update sandbox-ai from {installed} to {available}?': {
+        'en': 'Update sandbox-ai from {installed} to {available}?',
+        'de': 'sandbox-ai von {installed} auf {available} aktualisieren?'},
+    'It is installed for every user: the update runs as root, sudo asks for your password in the terminal.': {
+        'en': 'It is installed for every user: the update runs as root, sudo asks for your password in the terminal.',
+        'de': 'Es ist für alle Benutzer installiert: Das Update läuft als root, sudo fragt im Terminal nach Ihrem Passwort.'},
+    'It runs in a terminal.': {
+        'en': 'It runs in a terminal.',
+        'de': 'Es läuft in einem Terminal.'},
+    'The app keeps running; restart it afterwards to use the new version.': {
+        'en': 'The app keeps running; restart it afterwards to use the new version.',
+        'de': 'Die App läuft weiter; starten Sie sie danach neu, um die neue Version zu nutzen.'},
+    'Update sandbox-ai to {version}': {
+        'en': 'Update sandbox-ai to {version}',
+        'de': 'sandbox-ai auf {version} aktualisieren'},
+    'sandbox-ai updated': {
+        'en': 'sandbox-ai updated',
+        'de': 'sandbox-ai aktualisiert'},
+    'The update to {version} failed (exit status {status}): its terminal shows why.': {
+        'en': 'The update to {version} failed (exit status {status}): its terminal shows why.',
+        'de': 'Das Update auf {version} ist fehlgeschlagen (Exit-Status {status}): Sein Terminal zeigt, warum.'},
+    '(kept from its start)': {
+        'en': '(kept from its start)',
+        'de': '(vom Start behalten)'},
+    'All rules of this start': {
+        'en': 'All rules of this start',
+        'de': 'Alle Regeln dieses Starts'},
+    'All rules…': {
+        'en': 'All rules…',
+        'de': 'Alle Regeln…'},
+    'An option with one value (--cpus, --memory, --gui, --mode …) replaces the saved one, a list option (--allow-host, --env, --rules …) adds its value; checked as a new start (sandbox-ai resume NAME OPTIONS)': {
+        'en': 'An option with one value (--cpus, --memory, --gui, --mode …) replaces the saved one, a list option (--allow-host, --env, --rules …) adds its value; checked as a new start (sandbox-ai resume NAME OPTIONS)',
+        'de': 'Eine Option mit einem Wert (--cpus, --memory, --gui, --mode …) ersetzt die gespeicherte, eine Listen-Option (--allow-host, --env, --rules …) fügt ihren Wert hinzu; geprüft wie ein neuer Start (sandbox-ai resume NAME OPTIONEN)'},
+    "Change the options of {name}, from now on at every start: {options}? They are checked as a new start (the administrator's policy and the security mode still hold).": {
+        'en': "Change the options of {name}, from now on at every start: {options}? They are checked as a new start (the administrator's policy and the security mode still hold).",
+        'de': 'Die Optionen von {name} ändern, ab jetzt bei jedem Start: {options}? Sie werden wie bei einem neuen Start geprüft (die Richtlinie des Administrators und der Sicherheitsmodus gelten weiter).'},
+    'Check these ruleset files: their rules, or why one is refused (sandbox-ai rules check)': {
+        'en': 'Check these ruleset files: their rules, or why one is refused (sandbox-ai rules check)',
+        'de': 'Diese Regelwerk-Dateien prüfen: ihre Regeln, oder warum eine abgelehnt wird (sandbox-ai rules check)'},
+    'Each ruleset decides on its own; the strictest decision of all of them wins.': {
+        'en': 'Each ruleset decides on its own; the strictest decision of all of them wins.',
+        'de': 'Jedes Regelwerk entscheidet für sich; die strengste Entscheidung aller gewinnt.'},
+    "Every ruleset this start would have, in order, with where each comes from: the administrator's policy, the security mode, yours, these files, the project's (sandbox-ai rules show)": {
+        'en': "Every ruleset this start would have, in order, with where each comes from: the administrator's policy, the security mode, yours, these files, the project's (sandbox-ai rules show)",
+        'de': 'Jedes Regelwerk, das dieser Start hätte, der Reihe nach, mit seiner Herkunft: die Richtlinie des Administrators, der Sicherheitsmodus, Ihres, diese Dateien, das des Projekts (sandbox-ai rules show)'},
+    'Every value of an option, or one with =VALUE, taken out of its saved options (--drop-option)': {
+        'en': 'Every value of an option, or one with =VALUE, taken out of its saved options (--drop-option)',
+        'de': 'Alle Werte einer Option, oder einer mit =WERT, aus seinen gespeicherten Optionen genommen (--drop-option)'},
+    'Its connection proxy holds these rulesets now:': {
+        'en': 'Its connection proxy holds these rulesets now:',
+        'de': 'Sein Verbindungs-Proxy hält jetzt diese Regelwerke:'},
+    'Left as it is: {path} ({reason})': {
+        'en': 'Left as it is: {path} ({reason})',
+        'de': 'Unverändert gelassen: {path} ({reason})'},
+    "Let {run} read its HTTP rules anew, as your rulesets and its project's are now? What you loosened in them applies at once; the administrator's and the security mode's rules stay as they were.": {
+        'en': "Let {run} read its HTTP rules anew, as your rulesets and its project's are now? What you loosened in them applies at once; the administrator's and the security mode's rules stay as they were.",
+        'de': '{run} seine HTTP-Regeln neu lesen lassen, wie Ihre Regelwerke und das seines Projekts jetzt sind? Was Sie darin gelockert haben, gilt sofort; die Regeln des Administrators und des Sicherheitsmodus bleiben, wie sie waren.'},
+    'MCP, tool and device rules of {list} apply from its next start.': {
+        'en': 'MCP, tool and device rules of {list} apply from its next start.',
+        'de': 'MCP-, Werkzeug- und Geräteregeln von {list} gelten ab seinem nächsten Start.'},
+    'Not every file can be used:': {
+        'en': 'Not every file can be used:',
+        'de': 'Nicht jede Datei ist verwendbar:'},
+    'Not read: {error}': {
+        'en': 'Not read: {error}',
+        'de': 'Nicht gelesen: {error}'},
+    'Not reloaded: {error}': {
+        'en': 'Not reloaded: {error}',
+        'de': 'Nicht neu geladen: {error}'},
+    'Nothing was put back: {error}': {
+        'en': 'Nothing was put back: {error}',
+        'de': 'Nichts wurde zurückgelegt: {error}'},
+    'Other options': {
+        'en': 'Other options',
+        'de': 'Weitere Optionen'},
+    'Other options: {error}': {
+        'en': 'Other options: {error}',
+        'de': 'Weitere Optionen: {error}'},
+    'Put back the text these files had at its last start, as recorded? {list}\nFiles added since, links and files without recorded text stay as they are. It does not start.': {
+        'en': 'Put back the text these files had at its last start, as recorded? {list}\nFiles added since, links and files without recorded text stay as they are. It does not start.',
+        'de': 'Den Text, den diese Dateien beim letzten Start hatten, wie aufgezeichnet zurücklegen? {list}\nSeitdem hinzugekommene Dateien, Links und Dateien ohne aufgezeichneten Text bleiben, wie sie sind. Es startet nicht.'},
+    'Put back: {list}': {
+        'en': 'Put back: {list}',
+        'de': 'Zurückgelegt: {list}'},
+    'Reload': {
+        'en': 'Reload',
+        'de': 'Neu laden'},
+    'Reload rules': {
+        'en': 'Reload rules',
+        'de': 'Regeln neu laden'},
+    'Reload the rules of {run}': {
+        'en': 'Reload the rules of {run}',
+        'de': 'Die Regeln von {run} neu laden'},
+    'Reload the rules of {run} on {host}': {
+        'en': 'Reload the rules of {run} on {host}',
+        'de': 'Die Regeln von {run} auf {host} neu laden'},
+    'Restore HOME': {
+        'en': 'Restore HOME',
+        'de': 'HOME wiederherstellen'},
+    'Restore the HOME of {name}': {
+        'en': 'Restore the HOME of {name}',
+        'de': 'Das HOME von {name} wiederherstellen'},
+    'Take out': {
+        'en': 'Take out',
+        'de': 'Herausnehmen'},
+    "The selected sandbox reads its HTTP rules anew: your rules.json, its ruleset files and its project's rules as they are now; the administrator's and the security mode's stay (sandbox-ai rules reload)": {
+        'en': "The selected sandbox reads its HTTP rules anew: your rules.json, its ruleset files and its project's rules as they are now; the administrator's and the security mode's stay (sandbox-ai rules reload)",
+        'de': 'Die gewählte Sandbox liest ihre HTTP-Regeln neu: Ihre rules.json, ihre Regelwerk-Dateien und die Regeln ihres Projekts, wie sie jetzt sind; die des Administrators und des Sicherheitsmodus bleiben (sandbox-ai rules reload)'},
+    'The start is on another host: sandbox-ai rules show there lists its rulesets.': {
+        'en': 'The start is on another host: sandbox-ai rules show there lists its rulesets.',
+        'de': 'Der Start ist auf einem anderen Host: sandbox-ai rules show dort listet seine Regelwerke.'},
+    'This start has no rulesets: its options alone decide what it may do.': {
+        'en': 'This start has no rulesets: its options alone decide what it may do.',
+        'de': 'Dieser Start hat keine Regelwerke: Allein seine Optionen entscheiden, was er darf.'},
+    'What is added or changed here is kept for its later starts.': {
+        'en': 'What is added or changed here is kept for its later starts.',
+        'de': 'Was hier hinzugefügt oder geändert wird, bleibt für seine späteren Starts.'},
+    'defaults: {defaults}': {
+        'en': 'defaults: {defaults}',
+        'de': 'Vorgaben: {defaults}'},
+    'from': {
+        'en': 'from',
+        'de': 'aus'},
+    'launcher options, e.g. --gui --cpus 4 --allow-host docs.example.org': {
+        'en': 'launcher options, e.g. --gui --cpus 4 --allow-host docs.example.org',
+        'de': 'Launcher-Optionen, z. B. --gui --cpus 4 --allow-host docs.example.org'},
+    'options to take out, e.g. gui allow-host=example.org': {
+        'en': 'options to take out, e.g. gui allow-host=example.org',
+        'de': 'herauszunehmende Optionen, z. B. gui allow-host=example.org'},
+    '{count} HTTP rules': {
+        'en': '{count} HTTP rules',
+        'de': '{count} HTTP-Regeln'},
+    '{path}: inside the workspace {workspace}; the start refuses it (the agent could change its own rules there)': {
+        'en': '{path}: inside the workspace {workspace}; the start refuses it (the agent could change its own rules there)',
+        'de': '{path}: im Workspace {workspace}; der Start lehnt sie ab (der Agent könnte dort seine eigenen Regeln ändern)'},
 }

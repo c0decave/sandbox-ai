@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import backend, help_texts, help_view, notifications, presets as PR, project_trust as PT, theme
+from . import backend, fonts, help_texts, help_view, notifications, presets as PR, project_trust as PT, theme
 from .board_view import PathEdit
 from .files import printable
 from .i18n import tr
@@ -431,10 +431,16 @@ class SettingsDialog(QDialog):
             help_texts.SETTINGS_TABS[max(0, min(index, len(help_texts.SETTINGS_TABS) - 1))]))
         current = sai.settings()
         self.fields = {}
+        self.font_hints = {}
 
         # appearance
         page, form = self.tab(tr("Appearance"))
         self.combo(form, "theme", tr("Theme"), [(key, tr(text)) for key, text in theme.choices()], current)
+        self.font_combo(form, "ui", tr("Interface font"), current)
+        self.font_combo(form, "mono", tr("Monospace font (terminal, code, logs)"), current)
+        form.addRow(plain_label(tr("The app downloads no fonts: one marked not installed says how to get it (point at it "
+                                   "in the list). Terminal tabs opened from now on use the monospace font."),
+                                role="secondary"))
         self.combo(form, "language", tr("Language"), (("system", tr("as the system")), ("en", "English"),
                                                       ("de", "Deutsch")), current)
         form.addRow(plain_label(tr("A new language applies when the app is started again."), role="secondary"))
@@ -475,6 +481,17 @@ class SettingsDialog(QDialog):
                                    "(warnings in its warning colour, errors in its error colour; errors stay until "
                                    "closed). Where a window cannot place itself (Wayland), the desktop's notification "
                                    "is used."), role="secondary"))
+        # Safeguards that refuse or end something in a running sandbox (sandbox-ai safeguards)
+        self.check(form, "notify_safeguards", tr("A popup when a safeguard refuses or ends something in a running "
+                                                 "sandbox"), current)
+        from .safeguards_view import SafeguardMute
+        self.safeguard_mute = SafeguardMute(sai, problem=lambda text: warn(self, tr("Safeguards"), text))
+        self.safeguard_mute.changed.connect(lambda: self.changed.emit("safeguard_mute"))
+        form.addRow(tr("Safeguards announced"), self.safeguard_mute)
+        form.addRow(plain_label(tr("Unticked kinds are never announced, here or on the desktop, for every start ("
+                                   "safeguard_mute in {path}); they are still recorded: Activity > Safeguards, "
+                                   "sandbox-ai safeguards.", path=printable(str(sai.sandbox_defaults_file()))),
+                                role="secondary"))
         self.check(form, "debug", tr("Debug mode: log every step (pages, commands, their times and results)"), current)
         from . import applog
         form.addRow(plain_label(tr("The log: {path} (Help > Show the log)", path=breakable(applog.log_path())),
@@ -522,6 +539,7 @@ class SettingsDialog(QDialog):
         except ValueError:
             pass
         self.spin(form, "board_grid", tr("Board grid (0: no snapping)"), 0, 200, current)
+        self.check(form, "board_confirm_remove", tr("Ask before the [x] of a part removes it"), current)
 
         # privacy: sandbox-ai's own defaults, for every start (the app's and the command line's)
         page, form = self.tab(tr("Privacy"))
@@ -628,7 +646,11 @@ class SettingsDialog(QDialog):
         return page, form
 
     def save(self, key, value):
-        self.sai.save_setting(key, value)
+        try:
+            self.sai.save_setting(key, value)
+        except (OSError, ValueError) as exc:  # a full disk, a read-only or unreadable settings file: said, not kept
+            warn(self, tr("Not saved"), printable(exc), modal=False)
+            return
         if key == "debug":
             from . import applog
             applog.set_debug(bool(value))
@@ -637,6 +659,9 @@ class SettingsDialog(QDialog):
         if key == "theme":
             theme.apply_soon(value, after=lambda _mode: self.changed.emit(key))  # after the combo box's event
             return
+        if key in fonts.SETTING.values():  # at once: the app's font, its monospace font, new terminal tabs
+            fonts.use(self.sai.settings())
+            theme.apply_font()
         self.changed.emit(key)
 
     def combo(self, form, key, label, items, current):
@@ -648,6 +673,36 @@ class SettingsDialog(QDialog):
         form.addRow(label, widget)
         self.fields[key] = widget
         return widget
+
+    def font_combo(self, form, kind, label, current):
+        """The font of KIND ("ui" or "mono"): the theme's own, or one of fonts.KINDS[kind]. Installed fonts are
+        listed as they are; the others are marked not installed, with how to get them (they can be chosen ahead:
+        the theme's font is used until they are installed)."""
+        key = fonts.SETTING[kind]
+        offered = fonts.choices(kind)
+        items = [("", tr("the theme's"))] + [
+            (family, family if have else tr("{font} (not installed)", font=family)) for family, have, _ in offered]
+        widget = self.combo(form, key, label, items, current)
+        for index, (family, have, how) in enumerate(offered, start=1):
+            if not have:
+                widget.setItemData(index, tr("Not installed. To get it: {how}", how=tr(how)),
+                                   Qt.ItemDataRole.ToolTipRole)
+        hint = plain_label(role="secondary")
+        form.addRow("", hint)
+        self.font_hints[kind] = hint
+        widget.currentIndexChanged.connect(lambda _: self.show_font_hint(kind))
+        self.show_font_hint(kind)
+        return widget
+
+    def show_font_hint(self, kind):
+        """Under a font that is chosen but not installed: that the theme's font is used, and how to get it."""
+        choice = self.fields[fonts.SETTING[kind]].currentData()
+        hint = self.font_hints[kind]
+        missing = bool(choice) and fonts.pick(kind, choice) is None
+        hint.setText(tr("{font} is not installed: the theme's font is used until it is. The app downloads no fonts; "
+                        "install it, then start the app again. To get it: {how}",
+                        font=choice, how=tr(fonts.how_to_get(kind, choice))) if missing else "")
+        hint.setVisible(missing)
 
     def check(self, form, key, label, current):
         widget = WrapCheckBox(label)

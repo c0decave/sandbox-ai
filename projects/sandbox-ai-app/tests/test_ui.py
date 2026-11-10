@@ -1137,10 +1137,10 @@ def test_canonical_options_build_the_launchers_parser_once(monkeypatch):
     monkeypatch.setattr(launcher, "build_parser", lambda: built.append(1) or real())
     first, second = ["-w", "/srv/a", "--allow-github"], ["--allow-pypi", "--workspace=/srv/b"]
     found = [sai.canonical_options(first), sai.canonical_options(second), sai.canonical_options(first)]
-    assert len(built) == 1, "the parser is built once"
+    assert len(built) <= 1, "the parser is built once at most (the launcher keeps its options by name since 0.1.92)"
     assert found == [launcher.canonical_options(first), launcher.canonical_options(second),
                      launcher.canonical_options(first)], "the same as the launcher's own"
-    assert launcher.build_parser is not real and len(built) == 4, "the launcher's own is left as it was"
+    assert launcher.build_parser is not real and len(built) <= 1, "the launcher's own builds no parser again"
 
 
 def test_a_worker_that_exits_reports_back(qapp, wait):
@@ -1692,9 +1692,10 @@ def test_open_project_folder_reviews_before_it_trusts(window, env, monkeypatch):
 
 def test_update_notice(window, wait):
     window.update_checked(0, "installed: 0.9.0 (/x)\navailable: 0.10.1 (https://example.org)\n", "")
-    assert "0.10.1 is available" in window.system.update_text.text() and "0.10.1" in window.statusBar().currentMessage()
+    assert "0.10.1 is available" in window.system.update_text.text() and "0.10.1" in window.update_label.text()
+    assert not window.update_notice.isHidden()  # in the status line (Update now… where the copy can: test_self_update)
     window.update_checked(0, "installed: 0.10.1 (/x)\navailable: 0.10.1 (https://example.org)\n", "")
-    assert "up to date" in window.system.update_text.text()
+    assert "up to date" in window.system.update_text.text() and window.update_notice.isHidden()
     window.update_checked(1, "", "sandbox-ai update: this copy was not installed by install.sh")
     assert "No update information" in window.system.update_text.text()
     # The real command, asynchronously: the window is not blocked while it runs.
@@ -2692,7 +2693,7 @@ def test_a_notification_selects_its_question(window, env, wait):
     window.notify = lambda title, text, action=None, **_: actions.append(action)
     window.approvals.poll()
     assert actions and window.approvals.current() is None, "two questions: nothing chosen for you"
-    label, callback = actions[-1]
+    label, callback = actions[-1][-1] if isinstance(actions[-1], list) else actions[-1]  # (its page: the last)
     callback()
     assert window.current_page() == "approvals"
     assert window.approvals.current() is not None and window.approvals.current()[1]["name"] in ("a.example", "b.example")
@@ -3119,3 +3120,70 @@ def test_the_version_shows_at_the_bottom_right(window):
     assert label is not None and label.isVisibleTo(window)
     assert __version__ in label.text() and label.toolTip()
     assert window.statusBar().layout() is not None
+
+
+def test_a_git_login_is_given_to_a_running_sandbox(window, env, wait, monkeypatch):
+    """Credentials: a Git login given to a sandbox that runs (started before the login was added) - its row's menu or
+    the button, a sandbox chosen, asked first, then `sandbox-ai net allow RUN --git-token-secret URL=SECRET`
+    (--keep: for its project's later starts too). The token never enters the sandbox: its proxy uses it."""
+    from sandbox_ai_app import credentials_page as C
+    from sandbox_ai_app.backend import Instance
+    page = window.credentials
+    box = next(b for b in page.findChildren(C.GitLoginsBox))
+    box.entries = [{"url": "https://git.example", "user": "me", "secret": "GIT_TOKEN"}]
+    widgets.fill(box.list, [box.row(e) for e in box.entries])
+    box.list.selectRow(0)
+    assert C.git_login_url(box.entries[0]) == "https://me@git.example"
+    running = Instance("run", "run:claude-1", "brisk-otter", run="claude-1", agent="claude", state="running")
+    stopped = Instance("session", "session:old", "old", run=None, state="stopped")
+    monkeypatch.setattr(window.sai, "instances", lambda: ([running, stopped], []))
+    sent = []
+    monkeypatch.setattr(window.sai, "host_run", lambda host, *args, timeout=None: sent.append((host, *args)) or (0, "", ""))
+    monkeypatch.setattr(C.GiveDialog, "exec", lambda self: (self.keep.setChecked(True), QtWidgets.QDialog.DialogCode.Accepted)[1])
+    box.give()
+    assert wait(lambda: sent, 10)
+    assert sent[-1] == ("local", "net", "allow", "claude-1", "--git-token-secret", "https://me@git.example=GIT_TOKEN",
+                        "--keep")
+    assert wait(lambda: "has the login now" in box.message.text(), 10)
+    box.entries[0]["secret"] = ""
+    box.give()
+    assert "names no secret" in box.message.text()
+
+
+def test_a_secret_is_given_to_a_running_sandbox_as_an_api_key(window, env, wait, monkeypatch):
+    """Credentials, Secrets: a secret given to a sandbox that runs as an API key - its row's menu or the button, the
+    sandbox, the server and the variable chosen, asked first, then `sandbox-ai net allow RUN --api-key
+    HOST=NAME=SECRET`. The key stays with the sandbox's proxy; the message says the placeholder line."""
+    from sandbox_ai_app import credentials_page as C
+    from sandbox_ai_app.backend import Instance
+    page = window.credentials
+    widgets.fill(page.secrets, [["OPENROUTER", "keyring", ""]])
+    page.secrets.selectRow(0)
+    running = Instance("run", "run:claude-1", "brisk-otter", run="claude-1", agent="claude", state="running")
+    monkeypatch.setattr(window.sai, "instances", lambda: ([running], []))
+    sent = []
+    monkeypatch.setattr(window.sai, "host_run", lambda host, *args, timeout=None: sent.append((host, *args)) or (0, "", ""))
+    typed = {"host": "OpenRouter.ai", "variable": "OPENROUTER_API_KEY"}
+
+    def accept(dialog):
+        dialog.host.setText(typed["host"])
+        dialog.variable.setText(typed["variable"])
+        assert dialog.problem() is None
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(C.GiveDialog, "exec", accept)
+    page.give_secret()
+    assert wait(lambda: sent, 10)
+    assert sent[-1] == ("local", "net", "allow", "claude-1", "--api-key", "openrouter.ai=OPENROUTER_API_KEY=OPENROUTER")
+    assert wait(lambda: "export OPENROUTER_API_KEY=sandbox-ai-api-key-placeholder-OPENROUTER_API_KEY"
+                in page.message.text(), 10)
+    # What the dialog refuses: an address or URL as the server, a variable that is no name.
+    dialog = C.GiveDialog(page, [running], secret="OPENROUTER")
+    assert dialog.variable.text() == "OPENROUTER"
+    for host, variable in (("https://openrouter.ai", "K"), ("192.0.2.1", "K"), ("openrouter.ai", "1K")):
+        dialog.host.setText(host)
+        dialog.variable.setText(variable)
+        assert dialog.problem()
+    dialog.deleteLater()
+    page.secrets.clearSelection()
+    page.give_secret()
+    assert "Choose a secret in the list first" in page.message.text()

@@ -1,8 +1,10 @@
-"""The app's looks: the system's own, and nine of the app's (light, dark, hacker, cyberpunk, amber, unicorn,
-Windows 3.11, Mac, Fallout). Each is a set of tokens - colours, font, corner radius, bevelled or flat
-controls, the board's canvas and the terminal's colours - from which a QPalette (with the Fusion style,
-which follows it), an application stylesheet and the app's own icons are made (painted: no files, no
-network).
+"""The app's looks: the system's own, nine of the app's (light, dark, hacker, cyberpunk, amber, unicorn,
+Windows 3.11, Mac, Fallout) and well-known editor themes in their upstream palettes (Solarized Dark and Light,
+Dracula, Nord, Gruvbox Dark, One Dark, Catppuccin Mocha and Latte, Tokyo Night). Each is a set of tokens -
+colours, font, corner radius, bevelled or flat controls, the board's canvas and the terminal's colours - from
+which a QPalette (with the Fusion style, which follows it), an application stylesheet and the app's own icons
+are made (painted: no files, no network). The fonts chosen in the settings (fonts.py) take the place of the
+theme's: the interface font of the app's, the monospace font of the terminal's and of code and logs.
 
 Text colours are chosen for a contrast of at least 4.5:1 against every background they are drawn on, borders
 of controls and the canvas grid at least 3:1 (WCAG 2.1); tests/test_theme.py checks every theme."""
@@ -20,6 +22,7 @@ from .i18n import N_
 
 _system = None  # (style name, palette, font) the application started with
 _current = "system"
+_fonts = {"ui": None, "mono": None}  # the fonts chosen in the settings, when installed (fonts.use sets them)
 
 MONO = ["JetBrains Mono", "Fira Code", "Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono", "monospace"]
 SANS = ["Inter", "Cantarell", "Noto Sans", "Segoe UI", "Ubuntu", "DejaVu Sans", "sans-serif"]
@@ -162,6 +165,169 @@ THEMES_DATA = {
         "terminal": {"background": "#081408", "foreground": "#4dff88", "cursor": "#4dff88",
                      "selectionBackground": "#1c5a32"},
     },
+    # Well-known editor themes, in their upstream palettes. Where an upstream colour is below 4.5:1 for text
+    # (WCAG 2.1) on the theme's background, the nearest shade of the same hue that reaches it is used instead
+    # and named in a comment beside it; every other colour is the palette's own.
+    # Solarized (Ethan Schoonover): base03 #002b36 base02 #073642 base01 #586e75 base00 #657b83 base0 #839496
+    # base1 #93a1a1 base2 #eee8d5 base3 #fdf6e3; yellow #b58900 orange #cb4b16 red #dc322f magenta #d33682
+    # violet #6c71c4 blue #268bd2 cyan #2aa198 green #859900.
+    "solarized_dark": {
+        "label": N_("Solarized Dark"), "dark": True,
+        "colors": {"window": "#002b36", "base": "#002b36", "alternate": "#073642", "text": "#93a1a1",
+                   "secondary": "#839496", "placeholder": "#839496", "button": "#002b36", "border": "#657b83",
+                   "highlight": "#586e75", "highlight_text": "#fdf6e3", "accent": "#2aa198", "accent_text": "#002b36",
+                   "danger": "#e56462", "tooltip": "#073642", "disabled": "#586e75", "nav": "#073642",
+                   "nav_text": "#93a1a1", "nav_selected": "#586e75", "nav_selected_text": "#fdf6e3",
+                   "title": "#eee8d5", "canvas": "#002b36", "grid": "#657b83", "node": "#073642",
+                   "node_header": "#586e75", "node_title": "#fdf6e3"},
+        # bad, danger: red #dc322f lightened (3.3:1 on base03)
+        "status": {"ok": "#859900", "warn": "#b58900", "bad": "#e56462", "muted": "#839496"},
+        "font": {"families": SANS, "size": 10}, "radius": 4, "bevel": False,
+        "terminal": {"background": "#002b36", "foreground": "#839496", "cursor": "#93a1a1",
+                     "selectionBackground": "#073642"},
+    },
+    "solarized_light": {
+        "label": N_("Solarized Light"), "dark": False,
+        # accent, highlight: blue #268bd2 darkened (base3 on it: 3.4:1); danger: red #dc322f darkened (4.3:1)
+        "colors": {"window": "#fdf6e3", "base": "#fdf6e3", "alternate": "#eee8d5", "text": "#073642",
+                   "secondary": "#586e75", "placeholder": "#586e75", "button": "#fdf6e3", "border": "#657b83",
+                   "highlight": "#2076b3", "highlight_text": "#fdf6e3", "accent": "#2076b3", "accent_text": "#fdf6e3",
+                   "danger": "#da2925", "tooltip": "#eee8d5", "disabled": "#93a1a1", "nav": "#eee8d5",
+                   "nav_text": "#073642", "nav_selected": "#93a1a1", "nav_selected_text": "#002b36",
+                   "title": "#002b36", "canvas": "#eee8d5", "grid": "#657b83", "node": "#fdf6e3",
+                   "node_header": "#eee8d5"},
+        # ok: green #859900 darkened (3.0:1 on base3), warn: yellow #b58900 darkened (3.0:1), bad: red darkened
+        "status": {"ok": "#697800", "warn": "#8f6c00", "bad": "#da2925", "muted": "#586e75"},
+        "font": {"families": SANS, "size": 10}, "radius": 4, "bevel": False,
+        "terminal": {"background": "#fdf6e3", "foreground": "#657b83", "cursor": "#586e75",
+                     "selectionBackground": "#eee8d5"},
+    },
+    # Dracula (draculatheme.com): background #282a36, current line #44475a, foreground #f8f8f2, comment #6272a4,
+    # cyan #8be9fd, green #50fa7b, orange #ffb86c, pink #ff79c6, purple #bd93f9, red #ff5555, yellow #f1fa8c;
+    # its darker backgrounds #21222c and #191a21, lighter #343746.
+    "dracula": {
+        "label": N_("Dracula"), "dark": True,
+        # secondary, placeholder, muted: comment #6272a4 lightened (3.0:1 on the background)
+        "colors": {"window": "#21222c", "base": "#282a36", "alternate": "#343746", "text": "#f8f8f2",
+                   "secondary": "#8390b7", "placeholder": "#8390b7", "button": "#282a36", "border": "#6272a4",
+                   "highlight": "#44475a", "highlight_text": "#f8f8f2", "accent": "#bd93f9", "accent_text": "#282a36",
+                   "danger": "#ff5555", "tooltip": "#343746", "disabled": "#6272a4", "nav": "#191a21",
+                   "nav_text": "#f8f8f2", "nav_selected": "#44475a", "nav_selected_text": "#f8f8f2",
+                   "title": "#f8f8f2", "canvas": "#21222c", "grid": "#6272a4", "node": "#282a36",
+                   "node_header": "#44475a"},
+        "status": {"ok": "#50fa7b", "warn": "#ffb86c", "bad": "#ff5555", "muted": "#8390b7"},
+        "font": {"families": SANS, "size": 10}, "radius": 6, "bevel": False,
+        "terminal": {"background": "#282a36", "foreground": "#f8f8f2", "cursor": "#f8f8f2",
+                     "selectionBackground": "#44475a"},
+    },
+    # Nord (nordtheme.com): Polar Night nord0 #2e3440 nord1 #3b4252 nord2 #434c5e nord3 #4c566a (comments
+    # #616e88), Snow Storm nord4 #d8dee9 nord5 #e5e9f0 nord6 #eceff4, Frost nord7 #8fbcbb nord8 #88c0d0
+    # nord9 #81a1c1 nord10 #5e81ac, Aurora nord11 #bf616a nord12 #d08770 nord13 #ebcb8b nord14 #a3be8c
+    # nord15 #b48ead.
+    "nord": {
+        "label": N_("Nord"), "dark": True,
+        # secondary, placeholder, muted: the comment grey #616e88 lightened (2.4:1 on nord0)
+        "colors": {"window": "#2e3440", "base": "#2e3440", "alternate": "#3b4252", "text": "#d8dee9",
+                   "secondary": "#919cb1", "placeholder": "#919cb1", "button": "#2e3440", "border": "#5e81ac",
+                   "highlight": "#434c5e", "highlight_text": "#eceff4", "accent": "#88c0d0", "accent_text": "#2e3440",
+                   "danger": "#cf888f", "tooltip": "#3b4252", "disabled": "#616e88", "nav": "#3b4252",
+                   "nav_text": "#d8dee9", "nav_selected": "#4c566a", "nav_selected_text": "#eceff4",
+                   "title": "#eceff4", "canvas": "#2e3440", "grid": "#5e81ac", "node": "#3b4252",
+                   "node_header": "#434c5e"},
+        # bad, danger: nord11 #bf616a lightened (3.0:1 on nord0)
+        "status": {"ok": "#a3be8c", "warn": "#ebcb8b", "bad": "#cf888f", "muted": "#919cb1"},
+        "font": {"families": SANS, "size": 10}, "radius": 4, "bevel": False,
+        "terminal": {"background": "#2e3440", "foreground": "#d8dee9", "cursor": "#d8dee9",
+                     "selectionBackground": "#434c5e"},
+    },
+    # Gruvbox dark, medium contrast (morhetz/gruvbox): bg0 #282828 bg0_h #1d2021 bg0_s #32302f bg1 #3c3836
+    # bg2 #504945 bg4 #7c6f64 gray #928374 fg #ebdbb2 fg0 #fbf1c7 fg2 #d5c4a1 fg4 #a89984; bright red #fb4934
+    # green #b8bb26 yellow #fabd2f blue #83a598 purple #d3869b aqua #8ec07c orange #fe8019.
+    "gruvbox_dark": {
+        "label": N_("Gruvbox Dark"), "dark": True,
+        "colors": {"window": "#282828", "base": "#282828", "alternate": "#32302f", "text": "#ebdbb2",
+                   "secondary": "#a89984", "placeholder": "#a89984", "button": "#282828", "border": "#928374",
+                   "highlight": "#504945", "highlight_text": "#fbf1c7", "accent": "#83a598", "accent_text": "#282828",
+                   "danger": "#fb533f", "tooltip": "#3c3836", "disabled": "#7c6f64", "nav": "#3c3836",
+                   "nav_text": "#ebdbb2", "nav_selected": "#504945", "nav_selected_text": "#fbf1c7",
+                   "title": "#fbf1c7", "canvas": "#1d2021", "grid": "#7c6f64", "node": "#282828",
+                   "node_header": "#3c3836"},
+        # bad, danger: bright red #fb4934 a little lighter (4.3:1 on bg0)
+        "status": {"ok": "#b8bb26", "warn": "#fabd2f", "bad": "#fb533f", "muted": "#a89984"},
+        "font": {"families": SANS, "size": 10}, "radius": 4, "bevel": False,
+        "terminal": {"background": "#282828", "foreground": "#ebdbb2", "cursor": "#ebdbb2",
+                     "selectionBackground": "#504945"},
+    },
+    # One Dark (Atom): background #282c34, panels #21252b, #2c313a, selection #3e4451, foreground #abb2bf,
+    # mono-2 #828997, mono-3 #5c6370, UI text #9da5b4 and #d7dae0, red #e06c75, green #98c379, yellow #e5c07b,
+    # orange #d19a66, blue #61afef, purple #c678dd, cyan #56b6c2, cursor #528bff.
+    "one_dark": {
+        "label": N_("One Dark"), "dark": True,
+        "colors": {"window": "#21252b", "base": "#282c34", "alternate": "#2c313a", "text": "#abb2bf",
+                   "secondary": "#9da5b4", "placeholder": "#9da5b4", "button": "#282c34", "border": "#828997",
+                   "highlight": "#3e4451", "highlight_text": "#d7dae0", "accent": "#61afef", "accent_text": "#282c34",
+                   "danger": "#e17079", "tooltip": "#21252b", "disabled": "#5c6370", "nav": "#21252b",
+                   "nav_text": "#abb2bf", "nav_selected": "#2c313a", "nav_selected_text": "#d7dae0",
+                   "title": "#d7dae0", "canvas": "#21252b", "grid": "#828997", "node": "#282c34",
+                   "node_header": "#3e4451"},
+        # bad, danger: red #e06c75 a little lighter (4.4:1 on the background)
+        "status": {"ok": "#98c379", "warn": "#e5c07b", "bad": "#e17079", "muted": "#9da5b4"},
+        "font": {"families": SANS, "size": 10}, "radius": 4, "bevel": False,
+        "terminal": {"background": "#282c34", "foreground": "#abb2bf", "cursor": "#528bff",
+                     "selectionBackground": "#3e4451"},
+    },
+    # Catppuccin (catppuccin.com/palette), Mocha: crust #11111b mantle #181825 base #1e1e2e surface0 #313244
+    # surface1 #45475a overlay0 #6c7086 overlay2 #9399b2 subtext0 #a6adc8 subtext1 #bac2de text #cdd6f4,
+    # red #f38ba8 yellow #f9e2af green #a6e3a1 mauve #cba6f7 rosewater #f5e0dc.
+    "catppuccin_mocha": {
+        "label": N_("Catppuccin Mocha"), "dark": True,
+        "colors": {"window": "#181825", "base": "#1e1e2e", "alternate": "#181825", "text": "#cdd6f4",
+                   "secondary": "#a6adc8", "placeholder": "#9399b2", "button": "#313244", "border": "#6c7086",
+                   "highlight": "#45475a", "highlight_text": "#cdd6f4", "accent": "#cba6f7", "accent_text": "#11111b",
+                   "danger": "#f38ba8", "tooltip": "#313244", "disabled": "#6c7086", "nav": "#11111b",
+                   "nav_text": "#bac2de", "nav_selected": "#313244", "nav_selected_text": "#cdd6f4",
+                   "title": "#cdd6f4", "canvas": "#11111b", "grid": "#6c7086", "node": "#1e1e2e",
+                   "node_header": "#313244"},
+        "status": {"ok": "#a6e3a1", "warn": "#f9e2af", "bad": "#f38ba8", "muted": "#a6adc8"},
+        "font": {"families": SANS, "size": 10}, "radius": 8, "bevel": False,
+        "terminal": {"background": "#1e1e2e", "foreground": "#cdd6f4", "cursor": "#f5e0dc",
+                     "selectionBackground": "#45475a"},
+    },
+    # Catppuccin Latte: base #eff1f5 mantle #e6e9ef crust #dce0e8 surface0 #ccd0da overlay1 #8c8fa1
+    # overlay2 #7c7f93 subtext1 #5c5f77 text #4c4f69, red #d20f39 yellow #df8e1d green #40a02b mauve #8839ef
+    # rosewater #dc8a78.
+    "catppuccin_latte": {
+        "label": N_("Catppuccin Latte"), "dark": False,
+        "colors": {"window": "#eff1f5", "base": "#eff1f5", "alternate": "#e6e9ef", "text": "#4c4f69",
+                   "secondary": "#5c5f77", "placeholder": "#5c5f77", "button": "#eff1f5", "border": "#7c7f93",
+                   "highlight": "#ccd0da", "highlight_text": "#4c4f69", "accent": "#8839ef", "accent_text": "#eff1f5",
+                   "danger": "#d20f39", "tooltip": "#e6e9ef", "disabled": "#8c8fa1", "nav": "#e6e9ef",
+                   "nav_text": "#4c4f69", "nav_selected": "#ccd0da", "nav_selected_text": "#4c4f69",
+                   "title": "#4c4f69", "canvas": "#e6e9ef", "grid": "#7c7f93", "node": "#eff1f5",
+                   "node_header": "#dce0e8"},
+        # ok: green #40a02b darkened (3.0:1 on base), warn: yellow #df8e1d darkened (2.3:1)
+        "status": {"ok": "#327d22", "warn": "#996214", "bad": "#d20f39", "muted": "#5c5f77"},
+        "font": {"families": SANS, "size": 10}, "radius": 8, "bevel": False,
+        "terminal": {"background": "#eff1f5", "foreground": "#4c4f69", "cursor": "#dc8a78",
+                     "selectionBackground": "#ccd0da"},
+    },
+    # Tokyo Night, night (folke/tokyonight.nvim): bg_dark #16161e bg #1a1b26 bg_highlight #292e42
+    # bg_visual #283457 fg #c0caf5 fg_dark #a9b1d6 dark3 #545c7e dark5 #737aa2 blue #7aa2f7 red #f7768e
+    # yellow #e0af68 green #9ece6a.
+    "tokyo_night": {
+        "label": N_("Tokyo Night"), "dark": True,
+        "colors": {"window": "#16161e", "base": "#1a1b26", "alternate": "#16161e", "text": "#c0caf5",
+                   "secondary": "#a9b1d6", "placeholder": "#a9b1d6", "button": "#292e42", "border": "#737aa2",
+                   "highlight": "#283457", "highlight_text": "#c0caf5", "accent": "#7aa2f7", "accent_text": "#16161e",
+                   "danger": "#f7768e", "tooltip": "#16161e", "disabled": "#545c7e", "nav": "#16161e",
+                   "nav_text": "#a9b1d6", "nav_selected": "#292e42", "nav_selected_text": "#c0caf5",
+                   "title": "#c0caf5", "canvas": "#16161e", "grid": "#737aa2", "node": "#1a1b26",
+                   "node_header": "#292e42"},
+        "status": {"ok": "#9ece6a", "warn": "#e0af68", "bad": "#f7768e", "muted": "#a9b1d6"},
+        "font": {"families": SANS, "size": 10}, "radius": 6, "bevel": False,
+        "terminal": {"background": "#1a1b26", "foreground": "#c0caf5", "cursor": "#c0caf5",
+                     "selectionBackground": "#283457"},
+    },
 }
 
 THEMES = ("system", *THEMES_DATA)
@@ -219,11 +385,21 @@ def data():
         return THEMES_DATA[_current]
     app = QApplication.instance()
     p = app.palette() if app else QPalette()
+    # Made once per palette (its cacheKey changes with every change of it): this is asked for at every paint of a
+    # board part and every colour of a page - thousands of times a second while the board moves.
+    key = (_current, p.cacheKey())
+    if _system_data[0] == key:
+        return _system_data[1]
     base = dict(THEMES_DATA[mode_of(p)])
     colors_ = dict(base["colors"])
     colors_.update(window=p.color(QPalette.ColorRole.Window).name(), base=p.color(QPalette.ColorRole.Base).name(),
                    text=p.color(QPalette.ColorRole.WindowText).name(), button=p.color(QPalette.ColorRole.Button).name())
-    return {**base, "colors": colors_, "font": None}
+    made = {**base, "colors": colors_, "font": None}
+    _system_data[0], _system_data[1] = key, made
+    return made
+
+
+_system_data = [None, None]  # (key, data()) of the system theme for the palette in use
 
 
 def colors():
@@ -661,7 +837,7 @@ QToolButton#tabClose {{ padding: 0; border: none; }}
 QToolButton#tabClose:hover {{ background: {c['alternate']}; border-radius: {small}px; }}
 QDockWidget {{ color: {c['title']}; }}
 QDockWidget::title {{ background: {c['alternate']}; padding: 5px 8px; border: 1px solid {c['border']}; }}
-QLabel#projectName {{ font-size: 14pt; font-weight: 700; color: {c['title']}; }}
+QLabel#projectName, QComboBox#projectName {{ font-size: 14pt; font-weight: 700; color: {c['title']}; }}
 QCheckBox, QRadioButton {{ spacing: 7px; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: 14px; height: 14px; border: 1px solid {c['border']};
                                                  background: {c['base']}; border-radius: {min(3, r)}px; }}
@@ -702,6 +878,34 @@ def font(name=None):
     return result
 
 
+def set_fonts(ui=None, mono=None):
+    """Use the font family UI for the app's text and MONO for the terminal (None: the theme's own); apply() then
+    applies them. fonts.use() calls it with installed families only."""
+    _fonts.update(ui=ui or None, mono=mono or None)
+
+
+def chosen_fonts():
+    return dict(_fonts)
+
+
+def with_ui_font(base):
+    """BASE (a QFont) with the interface font chosen in the settings first, the theme's families after it."""
+    if not _fonts["ui"]:
+        return base
+    result = QFont(base)
+    result.setFamilies([_fonts["ui"], *[f for f in base.families() if f != _fonts["ui"]]])
+    return result
+
+
+def apply_font(app=None):
+    """The app's font again, with the interface font chosen in the settings (fonts.use): only the font, not the
+    whole theme (its style sheet stays as it is)."""
+    app = app or QApplication.instance()
+    if app is None or _system is None:
+        return
+    app.setFont(with_ui_font(_system[2] if _current == "system" else font(_current) or _system[2]))
+
+
 _style_name = None  # the base style apply() set last ("Fusion", or the system's)
 
 
@@ -724,10 +928,10 @@ def apply(mode, app=None):
     _style_name = str(wanted)
     if mode == "system":
         app.setPalette(_system[1])
-        app.setFont(_system[2])
+        app.setFont(with_ui_font(_system[2]))
     else:
         app.setPalette(palette(mode))
-        app.setFont(font(mode) or _system[2])
+        app.setFont(with_ui_font(font(mode) or _system[2]))
     _current = mode
     sheet = stylesheet()
     if app.styleSheet() != sheet:  # the same sheet again would re-polish every widget for nothing
@@ -779,8 +983,11 @@ def terminal_theme():
     t = data()
     spec = THEMES_DATA.get(_current, {}).get("font")
     families = [f for f in (spec["families"] if spec else []) if f in MONO + ["Share Tech Mono", "VT323"]]
+    families = families or MONO
+    if _fonts["mono"]:  # the settings' monospace font first, the theme's after it
+        families = [_fonts["mono"], *[f for f in families if f != _fonts["mono"]]]
     return json.dumps({**t["terminal"], "light": not t["dark"],
-                       "fontFamily": ", ".join(f'"{f}"' if " " in f else f for f in (families or MONO))})
+                       "fontFamily": ", ".join(f'"{f}"' if " " in f else f for f in families)})
 
 
 def dot(name, size=10):
@@ -796,13 +1003,15 @@ def dot(name, size=10):
     return QIcon(pixmap)
 
 
+# A shield's outline on the 24 x 24 grid (the Approvals page's icon and the project's trust states).
+SHIELD = [(12, 3), (20, 6), (20, 12), (12, 21), (4, 12), (4, 6)]
 # The navigation's icons: simple line drawings on a 24 x 24 grid, painted in the navigation's text colour.
 GLYPHS = {
     "launch": [("poly", [(8, 5), (19, 12), (8, 19)], True)],
     "board": [("rect", (3, 4, 7, 6)), ("rect", (14, 14, 7, 6)), ("rect", (14, 4, 7, 6)),
               ("line", (10, 7, 14, 7)), ("line", (17.5, 10, 17.5, 14))],
     "sandboxes": [("rect", (3, 5, 18, 14)), ("line", (3, 9, 21, 9)), ("dot", (6, 7))],
-    "approvals": [("poly", [(12, 3), (20, 6), (20, 12), (12, 21), (4, 12), (4, 6)], True),
+    "approvals": [("poly", SHIELD, True),
                   ("poly", [(8, 12), (11, 15), (16, 9)], False)],
     "connections": [("dot", (5, 12)), ("dot", (19, 6)), ("dot", (19, 18)), ("line", (5, 12, 19, 6)),
                     ("line", (5, 12, 19, 18))],
@@ -838,7 +1047,19 @@ GLYPHS = {
               ("line", (10, 14, 14, 14))],
     "help": [("circle", (12, 12, 9)), ("poly", [(9, 9.5), (9.6, 7.4), (12, 6.6), (14.4, 7.4), (15, 9.5), (12, 12),
                                                  (12, 14)], False), ("dot", (12, 17.3))],
+    # The state of a project's .sandbox-ai.json (the project bar; TRUST_GLYPHS): a shield, and in it what it means.
+    "trust-none": [("poly", SHIELD, True)],  # empty: nothing to trust
+    "trust-trusted": [("poly", SHIELD, True), ("poly", [(8.5, 12), (11, 14.5), (15.5, 9.5)], False)],
+    "trust-untrusted": [("poly", SHIELD, True), ("line", (12, 7.5, 12, 12.5)), ("dot", (12, 15.5))],
+    # changed since it was trusted: not equal to what you trusted (an equals sign struck through)
+    "trust-changed": [("poly", SHIELD, True), ("line", (8.5, 10, 15.5, 10)), ("line", (8.5, 13.5, 15.5, 13.5)),
+                      ("line", (13.5, 7.5, 10.5, 16))],
+    "trust-unreadable": [("poly", SHIELD, True), ("line", (9.5, 8.5, 14.5, 13.5)), ("line", (14.5, 8.5, 9.5, 13.5))],
 }
+# Each state of SandboxAI.project_state: its glyph and the status colour it is drawn in.
+TRUST_GLYPHS = {"none": ("trust-none", "muted"), "trusted": ("trust-trusted", "ok"),
+                "untrusted": ("trust-untrusted", "warn"), "changed": ("trust-changed", "warn"),
+                "unreadable": ("trust-unreadable", "bad")}
 
 
 def _glyph_pixmap(name, color_, size):
@@ -901,6 +1122,13 @@ def glyph(name, color_=None, size=20):
     return QIcon(icon)
 
 
+def trust_glyph(state, size=20):
+    """The icon of a project's .sandbox-ai.json in STATE (a key of TRUST_GLYPHS), in its status colour (readable on
+    the theme's background)."""
+    name, status = TRUST_GLYPHS.get(state, TRUST_GLYPHS["none"])
+    return glyph(name, color(status), size)
+
+
 def counted_glyph(name, count, size=24):
     """The navigation icon NAME with COUNT on a badge in its corner (the strip of icons shows no text): in the
     navigation's colours, the badge in the "bad" status colour."""
@@ -961,7 +1189,7 @@ def app_icon(attention=False):
 
 
 def title_font():
-    result = font() or QFont()
+    result = with_ui_font(font() or QFont())
     result.setPointSize(17)
     result.setWeight(QFont.Weight.Bold)
     return result

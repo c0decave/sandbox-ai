@@ -32,7 +32,7 @@ def backend(request):
 
 
 def launch(config, backend, agent, workspace, options=(), args=(), timeout=60):
-    command = [str(ROOT / (agent + "-sandbox")), "--backend", backend, "--workspace", str(workspace)]
+    command = [str(ROOT / "sandbox-ai"), agent, "--backend", backend, "--workspace", str(workspace)]
     if backend == "podman":
         if config.getoption("--agent-image"):
             command += ["--image", config.getoption("--agent-image")]
@@ -551,7 +551,7 @@ def test_real_gui_vnc_unix_socket_serves_rfb(request, backend, tmp_path):
         pytest.skip("bwrap VNC test needs x11vnc on the host")
     import socket, time
     vnc = tmp_path / "vnc"
-    command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(tmp_path / "work"),
+    command = [str(ROOT / "sandbox-ai"), "codex", "--backend", backend, "--workspace", str(tmp_path / "work"),
                "--offline", "--no-auth", "--gui-vnc", str(vnc), "--binary", "/usr/bin/python3",
                "--", "-I", "-c", "import os,time; assert not os.access('/sandbox/vnc', os.R_OK); time.sleep(20)"]
     if backend == "podman" and request.config.getoption("--agent-image"):
@@ -621,7 +621,7 @@ def test_real_playwright_headed_chromium_screenshot(request, backend, tmp_path):
 
 
 def session_cli(*args, env):
-    return subprocess.run([str(ROOT / "sandbox-session"), *args], capture_output=True, text=True, env=env, timeout=120)
+    return subprocess.run([str(ROOT / "sandbox-ai"), "session", *args], capture_output=True, text=True, env=env, timeout=120)
 
 
 def test_real_session_pause_resume_stop_restart(request, backend, tmp_path):
@@ -633,7 +633,7 @@ def test_real_session_pause_resume_stop_restart(request, backend, tmp_path):
     counter = ("import pathlib,time\np=pathlib.Path('/work/count')\n"
                "n=int(p.read_text()) if p.exists() else 0\n"
                "while True:\n n+=1; p.write_text(str(n)); time.sleep(0.2)\n")
-    command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(work), "--offline", "--no-auth",
+    command = [str(ROOT / "sandbox-ai"), "codex", "--backend", backend, "--workspace", str(work), "--offline", "--no-auth",
                "--session", name, "--binary", "/usr/bin/python3", "--", "-I", "-c", counter]
     if backend == "podman" and request.config.getoption("--agent-image"):
         command[1:1] = ["--image", request.config.getoption("--agent-image")]
@@ -679,7 +679,7 @@ def test_real_session_restarts_after_supervisor_was_killed(request, tmp_path):
     counter = ("import pathlib,time\np=pathlib.Path('/work/count')\n"
                "n=int(p.read_text()) if p.exists() else 0\n"
                "while True:\n n+=1; p.write_text(str(n)); time.sleep(0.2)\n")
-    command = [str(ROOT / "codex-sandbox"), "--workspace", str(work), "--offline", "--no-auth",
+    command = [str(ROOT / "sandbox-ai"), "codex", "--workspace", str(work), "--offline", "--no-auth",
                "--session", name, "--binary", "/usr/bin/python3", "--", "-I", "-c", counter]
     if request.config.getoption("--agent-image"):
         command[1:1] = ["--image", request.config.getoption("--agent-image")]
@@ -716,7 +716,7 @@ def test_real_tmux_mode_has_agent_and_shell_windows(request, backend, tmp_path, 
               "    time.sleep(1)\n"
               "else:\n"
               "    pathlib.Path('/work/no-tmux.txt').write_text('direct')\n")
-    command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(tmp_path), "--offline", "--no-auth",
+    command = [str(ROOT / "sandbox-ai"), "codex", "--backend", backend, "--workspace", str(tmp_path), "--offline", "--no-auth",
                *flag, "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
     if backend == "podman" and request.config.getoption("--agent-image"):
         command[1:1] = ["--image", request.config.getoption("--agent-image")]
@@ -811,10 +811,10 @@ def test_real_mcp_demo_server_in_its_own_sandbox(request, backend, tmp_path, mon
         assert result["version"]["version"] == "1.0.0" and result["version"]["seccomp"] == "2"
         assert result["version"]["pid_namespace"] != result["own_pid_namespace"]
         assert "MCP server demo started" in results[0][1] and "MCP server demo started" not in results[1][1]
-        listed = subprocess.run([str(ROOT / "sandbox-mcp"), "list"], capture_output=True, text=True, env=env, timeout=30)
+        listed = subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "list"], capture_output=True, text=True, env=env, timeout=30)
         assert any(line.split()[:2] == ["demo", "running"] for line in listed.stdout.splitlines())
     finally:
-        subprocess.run([str(ROOT / "sandbox-mcp"), "stop", "demo"], capture_output=True, env=env, timeout=60)
+        subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "stop", "demo"], capture_output=True, env=env, timeout=60)
 
 
 @pytest.mark.agent_provider
@@ -833,5 +833,5 @@ def test_practical_agent_calls_demo_mcp_tool(request, backend, agent, tmp_path, 
         stdout, _ = launch(request.config, backend, agent, tmp_path / "work", options, args, timeout=240)
         assert "1.0.0" in stdout
     finally:
-        subprocess.run([str(ROOT / "sandbox-mcp"), "stop", "demo"], capture_output=True,
+        subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "stop", "demo"], capture_output=True,
                        env={**os.environ}, timeout=60)

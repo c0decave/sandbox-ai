@@ -8,7 +8,10 @@ set -euo pipefail
 
 # Where releases come from: a Gitea/Forgejo or GitHub repository URL.
 DEFAULT_SOURCE="https://github.com/c0decave/sandbox-ai"
-COMMANDS=(sandbox-ai claude-sandbox codex-sandbox opencode-sandbox sandbox-session sandbox-mcp sandbox-wizard sandbox-build-image)
+COMMANDS=(sandbox-ai)
+# The single commands of versions before 0.1.92 (deprecated since 0.1.30; each is a command of sandbox-ai now): their
+# links into this installation go at every install, update and uninstall.
+OLD_COMMANDS=(claude-sandbox codex-sandbox opencode-sandbox sandbox-session sandbox-mcp sandbox-wizard sandbox-build-image)
 # The graphical front end (projects/sandbox-ai-app); linked when the tree contains it.
 APP_COMMAND=sandbox-ai-app
 # PySide6 6.12.0 crashes below Python 3.12 (it releases None once too often).
@@ -656,6 +659,13 @@ link_commands() {
   local dir cmd target link
   for dir in "${bin_dirs[@]}"; do
     mkdir -p "$dir"
+    for cmd in "${OLD_COMMANDS[@]}"; do
+      link="$dir/$cmd"
+      if [[ -L "$link" && $(readlink "$link") == "$data_dir"/* ]]; then
+        rm -f "$link"
+        note "removed $link: use sandbox-ai instead (see sandbox-ai --help)"
+      fi
+    done
     for cmd in "${COMMANDS[@]}" sandbox-ai-update $(app_linked && echo "$APP_COMMAND"); do
       link="$dir/$cmd"
       if [[ $cmd == sandbox-ai-update ]]; then target="$data_dir/current/install.sh"; else target="$data_dir/current/$cmd"; fi
@@ -881,8 +891,12 @@ case "$action" in
     fi
     exit 0 ;;
   uninstall)
+    if [[ ! -d "$data_dir/versions" && ! -e "$data_dir/current" ]]; then
+      note "no installation in $data_dir: nothing removed (a user's own installation: --user; a system one: as root)"
+      exit 0
+    fi
     for dir in "${bin_dirs[@]}"; do
-      for cmd in "${COMMANDS[@]}" sandbox-ai-update "$APP_COMMAND"; do
+      for cmd in "${COMMANDS[@]}" "${OLD_COMMANDS[@]}" sandbox-ai-update "$APP_COMMAND"; do
         if [[ -L "$dir/$cmd" && $(readlink "$dir/$cmd") == "$data_dir"/* ]]; then rm -f "$dir/$cmd"; fi
       done
     done

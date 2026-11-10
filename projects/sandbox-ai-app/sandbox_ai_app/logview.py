@@ -1,0 +1,231 @@
+"""The log window: one place for everything the app reports - its own messages (a board's notes, what a page could not
+read), warnings and errors, exceptions, Qt's warnings and, on request, the debug entries - instead of a line of notes
+on each page. A panel at the bottom of the window (on every page; it can be undocked, folded and closed like the
+others), with a level to show from, a filter and Copy / Clear.
+
+Entries come from applog (any thread) through LogHub, which keeps the last MAX_ENTRIES and hands each new one to the
+GUI thread. The panel shows them as plain text (paths and names may be the agent's)."""
+from __future__ import annotations
+
+from collections import deque
+import threading
+
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QHBoxLayout, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+)
+
+from . import applog, theme
+from .i18n import N_, tr
+from .files import printable_text
+from .widgets import MONO
+
+MAX_ENTRIES = 5000
+# The levels to show from (the panel's chooser): each shows its level and the ones above it.
+SHOW_FROM = (("ERROR", N_("Errors")), ("WARNING", N_("Warnings")), ("INFO", N_("Info")), ("DEBUG", N_("Debug")))
+RANK = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "FATAL": 4}
+DEFAULT_LEVEL = "INFO"
+
+
+class LogHub(QObject):
+    """Every entry of applog, kept (the last MAX_ENTRIES) and announced in the GUI thread (added)."""
+    added = Signal(dict)
+    _from_thread = Signal(dict)
+
+    def __init__(self):
+        super().__init__()
+        self.entries = deque(maxlen=MAX_ENTRIES)
+        self.lock = threading.Lock()
+        # Queued: an entry logged in a worker thread reaches the panel in the GUI thread.
+        self._from_thread.connect(self._arrived, Qt.ConnectionType.QueuedConnection)
+        applog.add_listener(self.receive)
+
+    def receive(self, entry):
+        """Always through the event loop, also from the GUI thread: an entry may come from inside Qt (its message
+        handler during a layout or a paint, an exception hook) - changing a widget right there could re-enter Qt."""
+        self._from_thread.emit(entry)
+
+    def _arrived(self, entry):
+        with self.lock:
+            self.entries.append(entry)
+        self.added.emit(entry)
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.entries)
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear()
+
+
+_hub = None
+
+
+def hub():
+    """The app's one LogHub (made on first use, in the GUI thread)."""
+    global _hub
+    if _hub is None:
+        _hub = LogHub()
+    return _hub
+
+
+def line_of(entry):
+    """One entry as text: its time (hh:mm:ss), level, where, and the message (further lines indented); made once
+    per entry (kept in it as "line": the filter and every redraw read it again)."""
+    line = entry.get("line")
+    if line is not None:
+        return line
+    time = entry.get("time", "")
+    clock = time[11:19] if len(time) >= 19 else time
+    message = printable_text(str(entry.get("message", "")).rstrip("\n"))
+    line = f"{clock} {entry.get('level', 'INFO'):<7} {printable_text(entry.get('where', ''))}: " + \
+        message.replace("\n", "\n    ")
+    entry["line"] = line
+    return line
+
+
+class LogPanel(QWidget):
+    """The log window's content: level chooser, filter, Copy, Clear, and the entries."""
+    unread = Signal(int)  # warnings and errors that arrived while the panel was folded or hidden
+
+    def __init__(self, level=DEFAULT_LEVEL):
+        super().__init__()
+        self.setToolTip(tr("Everything the app reports: messages, warnings, errors and, at Debug, what it does"))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(2)
+        bar = QHBoxLayout()
+        self.level = QComboBox()
+        self.level.setAccessibleName(tr("Show from level"))
+        for key, title in SHOW_FROM:
+            self.level.addItem(tr(title), key)
+        self.level.setCurrentIndex(max(0, self.level.findData(level)))
+        self.level.currentIndexChanged.connect(lambda _i: self.level_changed())
+        self.filter = QLineEdit()
+        self.filter.setPlaceholderText(tr("Filter"))
+        self.filter.setAccessibleName(tr("Filter the log"))
+        self.filter.setClearButtonEnabled(True)
+        self.filter.textChanged.connect(lambda _t: self.show_all())
+        copy = QPushButton(tr("Copy"))
+        copy.setToolTip(tr("Copy the entries shown"))
+        copy.clicked.connect(lambda _=False: QApplication.clipboard().setText(self.text.toPlainText()))
+        clear = QPushButton(tr("Clear"))
+        clear.setToolTip(tr("Empty the log window (app.log keeps everything)"))
+        clear.clicked.connect(lambda _=False: self.clear())
+        bar.addWidget(self.level)
+        bar.addWidget(self.filter, 1)
+        bar.addWidget(copy)
+        bar.addWidget(clear)
+        layout.addLayout(bar)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setFont(MONO)
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.text.setMaximumBlockCount(MAX_ENTRIES * 2)
+        self.text.setAccessibleName(tr("Log"))
+        layout.addWidget(self.text, 1)
+        self.unread_count = 0
+        self.watching = False  # the panel is unfolded and visible: nothing counts as unread
+        self.hub = hub()
+        self.hub.added.connect(self.add)
+        self.level_changed()
+
+    def chosen(self):
+        return self.level.currentData() or DEFAULT_LEVEL
+
+    def level_changed(self):
+        applog.want_debug(self.chosen() == "DEBUG")
+        self.show_all()
+
+    def shows(self, entry):
+        if RANK.get(entry.get("level"), 1) < RANK[self.chosen()]:
+            return False
+        needle = self.filter.text().strip().lower()
+        return not needle or needle in line_of(entry).lower()
+
+    def formats(self):
+        """The colours of the levels in the theme now (made again only when the theme changed)."""
+        key = theme.current() if hasattr(theme, "current") else None
+        cached = getattr(self, "_formats", None)
+        if cached is not None and cached[0] == key and key is not None:
+            return cached[1]
+        colors = theme.colors()
+        result = {}
+        for level, key in (("ERROR", "bad"), ("FATAL", "bad"), ("WARNING", "warn"), ("DEBUG", "secondary")):
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(theme.color(key) if key in ("bad", "warn") else colors.get(key, colors["text"])))
+            result[level] = fmt
+        self._formats = (theme.current() if hasattr(theme, "current") else None, result)
+        return result
+
+    def append(self, entry, formats):
+        cursor = self.text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if not self.text.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertText(line_of(entry), formats.get(entry.get("level"), QTextCharFormat()))
+
+    def insert_lines(self, cursor, lines, fmt):
+        if not self.text.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertText("\n".join(lines), fmt)
+
+    def show_all(self):
+        """The entries again, after the level or the filter changed."""
+        formats = self.formats()
+        self.text.setUpdatesEnabled(False)
+        try:
+            self.text.clear()
+            # The entries of one level that follow each other go in as one text, in one edit: one insertion per entry
+            # took half a second for the MAX_ENTRIES at Debug - at every new theme and every key typed into the filter.
+            cursor = self.text.textCursor()
+            cursor.beginEditBlock()
+            lines, level = [], None
+            for entry in self.hub.snapshot():
+                if not self.shows(entry):
+                    continue
+                if lines and entry.get("level") != level:
+                    self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
+                    lines = []
+                level = entry.get("level")
+                lines.append(line_of(entry))
+            if lines:
+                self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
+            cursor.endEditBlock()
+        finally:
+            self.text.setUpdatesEnabled(True)
+        self.text.moveCursor(QTextCursor.MoveOperation.End)
+
+    def add(self, entry):
+        if not self.shows(entry):
+            return
+        bar = self.text.verticalScrollBar()
+        at_end = bar.value() >= bar.maximum() - 2
+        self.append(entry, self.formats())
+        if at_end:  # following the end; someone reading further up keeps their place
+            bar.setValue(bar.maximum())
+        if not self.watching and RANK.get(entry.get("level"), 1) >= RANK["WARNING"]:
+            self.unread_count += 1
+            self.unread.emit(self.unread_count)
+
+    def changeEvent(self, event):  # noqa: N802
+        """A new theme (or the system's colours): the levels' colours made again, the entries drawn in them."""
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Type.PaletteChange and getattr(self, "_formats", None) is not None:
+            self._formats = None
+            self.show_all()
+        super().changeEvent(event)
+
+    def set_watching(self, on):
+        self.watching = bool(on)
+        if on and self.unread_count:
+            self.unread_count = 0
+            self.unread.emit(0)
+
+    def clear(self):
+        self.hub.clear()
+        self.text.clear()
+        self.unread_count = 0
+        self.unread.emit(0)

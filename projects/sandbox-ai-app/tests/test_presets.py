@@ -243,3 +243,29 @@ def test_a_preset_asks_for_no_more_cpus_than_the_machine_has():
     assert PR.fitted_options(["--cpus", "2"], cpus=4) == ["--cpus", "2"]
     assert PR.fitted_options(["--cpus", "none", "--cpus"], cpus=4) == ["--cpus", "none", "--cpus"]
     assert PR.fitted_options(("--cpus", "<cpus>"), cpus=1) == ["--cpus", "<cpus>"]
+
+
+def test_own_presets_this_version_cannot_read_are_never_dropped(tmp_path, monkeypatch):
+    """Stability review 2: saving or deleting one of the user's presets rewrites the store. Presets this version
+    refuses (one of a newer version, one edited by hand) stay in it as they were; a store that cannot be read or is
+    damaged is not replaced by the one preset saved (all the others would be lost): nothing is written then."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    sai = backend.SandboxAI()
+    preset = PR.from_board(sai, PR.build(sai, PR.find("vpn-mcp"), tmp_path / "project", values={"<vpn:search>": "mv"}),
+                           "Search", "mine", "privacy")
+    newer = {"format": PR.FORMAT, "version": 2, "id": "from-a-newer-app", "title": "Newer"}
+    PR.store_path().parent.mkdir(parents=True)
+    PR.store_path().write_text(json.dumps({"version": 1, "presets": [newer], "later": True}))
+    PR.add_mine(sai, preset)
+    stored = json.loads(PR.store_path().read_text())
+    assert stored["presets"][0] == newer and stored["later"] is True, "kept as it was"
+    assert [p.id for p in PR.load_mine(sai)[0]] == [preset.id]
+    PR.remove_mine(sai, preset.id)
+    assert json.loads(PR.store_path().read_text())["presets"] == [newer]
+    for damaged in ('{"version": 1, "presets": [', '["a list"]', '{"presets": 5}'):
+        PR.store_path().write_text(damaged)
+        with pytest.raises(ValueError):
+            PR.add_mine(sai, preset)
+        with pytest.raises(ValueError):
+            PR.remove_mine(sai, "from-a-newer-app")
+        assert PR.store_path().read_text() == damaged, "a store that cannot be read is never replaced"

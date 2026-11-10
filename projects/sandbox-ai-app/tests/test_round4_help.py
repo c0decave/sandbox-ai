@@ -145,7 +145,7 @@ def test_every_button_of_the_start_page_is_in_the_help(qapp, sai):
     page = ui.LaunchPage(sai, lambda *a, **k: None)
     try:
         labels = own_buttons(page, skip=page.form)
-        assert {"Dry run", "Start in the app", "Save as project configuration…"} <= set(labels)
+        assert {"Dry run", "Start", "Save as project configuration…"} <= set(labels)
         assert not missing(labels), "Start page buttons the help does not mention:\n" + "\n".join(missing(labels))
     finally:
         page.close()

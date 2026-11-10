@@ -22,6 +22,12 @@ one the agent sends: what is allowed is the address, and "always" keeps the name
 proved it (its own pin, or the real server's certificate on the approved connection); the question says
 which it will be.
 
+One question, one prompt: while the desktop app or the web interface (`sandbox-ai web`, with a page open) watches
+the questions, it says so with a heartbeat in ~/.local/state/sandbox-ai/approvals-watchers/PID.json, and the
+launcher shows no notification of its own for a question or a browser request (no buttons, no plain notification
+either): the watcher's prompt is the only one. A canary's alarm is always shown. A heartbeat older than 15 seconds,
+or of a process that is gone, counts no more.
+
 A sandbox started with --ask allow asks nobody: every question is answered "allow" at once, for the run (or the
 narrower scope the administrator's policy and the run's security mode allow; never "always"), by the launcher on
 the host (auto_answer), and recorded like your answer ("allowed automatically (--ask allow)" in approvals history,
@@ -97,12 +103,165 @@ def net():
 SCOPES = ("once", "run", "always")
 
 
+POLICY_FILE = Path("/etc/sandbox-ai/policy.json")  # agent_sandbox.POLICY_FILE (a test keeps them the same)
+
+
 def policy_scope():
-    """The widest scope the administrator's policy allows (always without a policy)."""
+    """The widest scope the administrator's policy allows (always without a policy). Without a policy file (most
+    machines) the launcher is not loaded for it: that took a third of every `sandbox-ai approvals` command (each
+    answer, each listing of the app and the web interface); with one, the launcher reads and checks it."""
+    if not os.path.lexists(POLICY_FILE):
+        return "always"
     spec = importlib.util.spec_from_file_location("agent_sandbox_for_approvals", HERE / "agent_sandbox.py")
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
-    return launcher.load_policy().get("max_approval_scope", "always")
+    return launcher.load_policy(POLICY_FILE).get("max_approval_scope", "always")
+
+
+WATCHER_STALE = 15  # seconds: a watcher's heartbeat older than this counts no more
+WATCHER_REFRESH = 5  # seconds between the refreshes of a watcher's heartbeat (the app, the web interface)
+WATCHER_KINDS = ("app", "web")
+
+
+def watchers_dir():
+    """Where the watchers of the questions (the desktop app, the web interface) keep their heartbeats."""
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "approvals-watchers"
+
+
+def heartbeat(kind, pid=None):
+    """Write (or refresh) the heartbeat of the watcher KIND ("app", "web") of process PID (this one): while it is
+    fresh, the launcher leaves the questions to that watcher's prompt (watched). Refresh it every WATCHER_REFRESH
+    seconds, remove it with end_heartbeat when the watcher quits."""
+    if kind not in WATCHER_KINDS:
+        raise ValueError(f"a watcher is one of {', '.join(WATCHER_KINDS)}")
+    pid = int(pid or os.getpid())
+    directory = watchers_dir()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = directory / f".{pid}.{threading.get_ident()}.json"
+    with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as file:
+        json.dump({"pid": pid, "kind": kind, "time": time.time()}, file)
+    path = directory / f"{pid}.json"
+    os.replace(temporary, path)
+    return path
+
+
+def end_heartbeat(pid=None):
+    """Remove the heartbeat of process PID (this one): the watcher quits."""
+    with contextlib.suppress(OSError):
+        (watchers_dir() / f"{int(pid or os.getpid())}.json").unlink()
+
+
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except PermissionError:  # another user's process: there
+        return True
+    except (OSError, OverflowError):
+        return False
+    return True
+
+
+def watchers(now=None):
+    """[{"pid", "kind", "time"}] of the watchers whose heartbeat is fresh (at most WATCHER_STALE seconds old) and
+    whose process is still there."""
+    now = time.time() if now is None else now
+    try:
+        files = sorted(watchers_dir().glob("*.json"))
+    except OSError:
+        return []
+    found = []
+    for path in files:
+        if not path.stem.isascii() or not path.stem.isdigit() or len(path.stem) > 10:
+            continue
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError, RecursionError):
+            continue
+        if not isinstance(record, dict) or record.get("pid") != int(path.stem) or \
+                record.get("kind") not in WATCHER_KINDS or not isinstance(record.get("time"), (int, float)):
+            continue
+        if abs(now - record["time"]) <= WATCHER_STALE and process_alive(record["pid"]):
+            found.append(record)
+    return found
+
+
+def watched(now=None):
+    """The desktop app or the web interface watches the questions now: they ask, the launcher does not."""
+    return bool(watchers(now))
+
+
+# The answers a prompt offers (choices): (decision, scope, label). Browser requests and canaries have their own.
+CHOICES = (("allow", "once", "Allow once"), ("allow", "run", "Allow for this run"), ("allow", "always", "Allow always"),
+           ("deny", "run", "Block"), ("deny", "always", "Block always"))
+OWN_CHOICES = {"browser": (("allow", "once", "Open"), ("deny", "once", "Ignore")),
+               "canary": (("allow", "once", "Continue"), ("deny", "run", "Stop the sandbox"))}
+SCOPE_WORDS = {"once": "once", "run": "for the run", "always": "always"}
+
+
+def choices(question, record=None, widest=None):
+    """The answers to QUESTION, as the buttons of a prompt: [{"decision", "scope", "label", "enabled", "why",
+    "reason"}], every one of CHOICES, with the caps answer() applies: the administrator's policy (WIDEST, default
+    policy_scope()), the run's security mode (RECORD, its run.json: "mode" -> "approval_scope") and the kind of
+    question (pushes, requests, tool calls and devices at most for the run; only names and addresses are blocked
+    always; a name is pinned for the run, so a run that approves only once cannot allow one). A choice that is not
+    possible is not left out: "enabled" is false and "why" says why. An enabled one may carry a note in "why" too
+    (what "always" remembers; a looked-up name stays pinned for the run). "reason" names the why: policy, mode,
+    push, request, device, dns-once, block-kind, dns-pinned, remembers."""
+    question = question if isinstance(question, dict) else {}
+    kind = question.get("kind")
+    if kind in OWN_CHOICES:
+        return [{"decision": decision, "scope": scope, "label": label, "enabled": True, "why": "", "reason": ""}
+                for decision, scope, label in OWN_CHOICES[kind]]
+    if widest not in SCOPES:
+        try:
+            widest = policy_scope()
+        except (OSError, ValueError):
+            widest = "once"  # an unreadable policy: the narrowest (answer() checks it itself)
+        widest = widest if widest in SCOPES else "once"
+    mode = record.get("mode") if isinstance(record, dict) and isinstance(record.get("mode"), dict) else {}
+    cap = mode.get("approval_scope") if mode.get("approval_scope") in SCOPES else "always"
+    by_policy = ("policy", f"capped by the administrator's policy (at most {SCOPE_WORDS[widest]})")
+    by_mode = ("mode", f"capped by the security mode {shown(mode.get('name') or '?', 20)}")
+    no_name = kind == "dns" and widest_answer(question, record if isinstance(record, dict) else {}, widest) is None
+    found = []
+    for decision, scope, label in CHOICES:
+        reason, why = "", ""
+        if decision == "allow":
+            if no_name:
+                reason, why = "dns-once", DNS_ONCE
+            elif scope == "always" and kind == "push":
+                reason, why = "push", "pushes are approved at most for the run"
+            elif scope == "always" and kind in ("http", "mcp", "tool"):
+                reason, why = "request", "requests and tool calls are approved at most for the run; to allow them " \
+                                         "always, write a rule"
+            elif scope == "always" and kind == "device":
+                reason, why = "device", "a device is approved at most for the run; to allow it always, write a " \
+                                        "device rule"
+            elif SCOPES.index(scope) > SCOPES.index(widest):
+                reason, why = by_policy
+            elif SCOPES.index(scope) > SCOPES.index(cap):
+                reason, why = by_mode
+        elif scope == "always":
+            if kind not in ("connect", "dns"):
+                reason, why = "block-kind", "only names and addresses are blocked always"
+            elif widest != "always":
+                reason, why = by_policy
+            elif cap != "always":
+                reason, why = by_mode
+        enabled = not reason
+        if enabled and decision == "allow" and scope == "once" and kind == "dns":
+            reason, why = "dns-pinned", "a name stays pinned for the run"
+        elif enabled and decision == "allow" and scope == "always" and kind == "connect":
+            text = always(question).removeprefix("; Allow always: ")
+            if not text:  # a question of an older sandbox: the address is what is remembered
+                address, port = str(question.get("address", "?")), question.get("port", "?")
+                text = f"{shown(f'[{address}]' if ':' in address else address, 60)}:{shown(port, 6)} (address only)"
+            reason, why = "remembers", f"remembers {text}"
+        elif enabled and decision == "allow" and scope == "always" and kind == "dns":
+            reason, why = "remembers", f"remembers the name {shown(question.get('name'), 253)}"
+        found.append({"decision": decision, "scope": scope, "label": label, "enabled": enabled, "why": why,
+                      "reason": reason})
+    return found
 
 
 def approved_file():
@@ -596,7 +755,8 @@ def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None,
                 raise ValueError(f"not a host name: {shown(host)}")
             if canary_in_name(record, host):  # looked up here, the token would leave through this host's DNS
                 raise ValueError(f"{shown(host)} carries a canary token of the run: it is never looked up")
-            resolved = (resolver or resolve)(host)
+            # A run with --vpn: through the VPN's resolvers (its container), never past it.
+            resolved = (resolver or net().vpn_resolver(record) or resolve)(host)
             addresses = public_addresses(host, resolved)
             if len(addresses) < len(resolved):
                 notes.append("not opened (not public): " + ", ".join(a for a in resolved if a not in addresses))
@@ -728,7 +888,9 @@ def policy_allows_host(name):
 
 def open_browser(url):
     """Open URL in the host's browser, never through a shell."""
-    for program in ("xdg-open", "sensible-browser"):  # not "open": that is openvt on Debian
+    # macOS: open(1) (on Debian "open" is openvt: only on a Mac, and only its own).
+    programs = ("/usr/bin/open",) if sys.platform == "darwin" else ("xdg-open", "sensible-browser")
+    for program in programs:
         if shutil.which(program):
             subprocess.Popen([program, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
@@ -755,17 +917,37 @@ def notify_actions():
     return _actions_supported
 
 
-def desktop_question(title, text, ident, actions=QUESTION_ACTIONS, answer_with=None, seconds=60, runner=None):
-    """A notification with buttons; the button clicked answers question IDENT as `sandbox-ai approvals` would
-    (Allow, Allow always, Block, Block always). "Allow always" is left out when the administrator's policy caps
-    the scope. Runs until clicked or expired (one thread per question)."""
+QUESTION_NAMES = {("allow", "once"): "once", ("allow", "run"): "run", ("allow", "always"): "always",
+                  ("deny", "run"): "deny", ("deny", "always"): "never"}
+
+
+def desktop_question(title, text, ident, actions=QUESTION_ACTIONS, answer_with=None, seconds=60, runner=None,
+                     question=None, record=None):
+    """A notification with buttons; the button clicked answers question IDENT as `sandbox-ai approvals` would.
+    With QUESTION (and its run's RECORD) the buttons are its choices: Allow once, Allow for this run, Allow always,
+    Block, Block always, those not possible named with why in the text; without, ACTIONS, "Allow always" left out
+    when the administrator's policy caps the scope. A question or a browser request is not shown while the desktop
+    app or the web interface watches the questions (watched): they ask, one prompt per question (a canary's alarm
+    is shown all the same). Runs until clicked or expired (one thread per question)."""
     import html
-    if not any(scope == "always" for _, decision, scope, _ in actions if decision == "allow") or \
+    if actions in (QUESTION_ACTIONS, BROWSER_ACTIONS) and watched():
+        return None
+    notes = []
+    if question is not None and actions is QUESTION_ACTIONS:
+        offered = []
+        for choice in choices(question, record):
+            if choice["enabled"]:
+                offered.append((QUESTION_NAMES[choice["decision"], choice["scope"]], choice["decision"],
+                                choice["scope"], choice["label"]))
+            elif choice["why"]:
+                notes.append(f"{choice['label']}: {choice['why']}")
+    elif not any(scope == "always" for _, decision, scope, _ in actions if decision == "allow") or \
             policy_scope() == "always":
         offered = actions
     else:
         offered = [action for action in actions if not (action[1] == "allow" and action[2] == "always")]
-    text = html.escape("".join(c if c == "\n" or c.isprintable() else "?" for c in text[:1000]), quote=False)
+    text = text[:1000] + "".join(f"\n{note[:300]}" for note in notes)
+    text = html.escape("".join(c if c == "\n" or c.isprintable() else "?" for c in text), quote=False)
     command = ["notify-send", "--app-name=sandbox-ai", "--urgency=critical", "--wait",
                f"--expire-time={seconds * 1000}", *[f"--action={name}={label}" for name, _, _, label in offered],
                title, text]
@@ -869,7 +1051,9 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
     while its sandbox runs: the agent's terminal is busy with the agent). More than BURST new questions at
     once give one notification; browser requests are announced by serve_browser. AUTO (--ask allow, from the
     launcher's own options: nothing in the sandbox can set it): every question is answered by AUTOS (auto_answer)
-    instead, and nobody is notified; a canary's alarm is left to the human (it notifies itself)."""
+    instead, and nobody is notified; a canary's alarm is left to the human (it notifies itself). Questions seen
+    while the desktop app or the web interface watches (watched) get no notification here: their prompt is the
+    one."""
     autos = autos or auto_answer
     if buttons is None and notify is None and notify_actions():
         buttons = desktop_question  # buttons in the notification answer it
@@ -907,25 +1091,51 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
             if question.get("kind") not in ("browser", "canary"):  # they notify themselves
                 fresh.append(question)
         seen &= {path.name for path in files}
+        if fresh and watched():
+            continue  # the app or the web interface asks: one prompt per question
         if len(fresh) > burst:
             notify(title, f"{len(fresh)} new questions\nsandbox-ai approvals list")
             continue
         for item in fresh:
             if buttons is not None:
-                threading.Thread(target=buttons, args=(title, describe(item), item.get("id")), daemon=True).start()
+                threading.Thread(target=buttons, args=(title, describe(item), item.get("id")), daemon=True,
+                                 kwargs={"question": item, "record": run_record(directory)}).start()
             else:
                 notify(title, f"{describe(item)}\nsandbox-ai approvals allow {shown(item.get('id'))}")
 
 
-def desktop_notification(title, text):
+def desktop_notification(title, text, urgency="critical"):
     """notify-send; TEXT names what the agent asked for, so markup in it is escaped (some notification
-    daemons render <b>, <a> or <img> in the body) and control characters are dropped."""
+    daemons render <b>, <a> or <img> in the body) and control characters are dropped. URGENCY: critical (a
+    question, an error) or normal (a warning, e.g. a safeguard that refused something)."""
     import html
+    if sys.platform == "darwin":
+        return mac_notification(title, text)
     text = html.escape("".join(c if c == "\n" or c.isprintable() else "?" for c in text[:1000]), quote=False)
+    urgency = urgency if urgency in ("low", "normal", "critical") else "critical"
     if shutil.which("notify-send"):
-        subprocess.run(["notify-send", "--app-name=sandbox-ai", "--urgency=critical", title, text],
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
-                       check=False)
+        # Never an error: a notify-send that hangs (a session bus without a notification daemon) would otherwise
+        # end the thread that called it, the watch of the questions or the browser listener, for the whole run.
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["notify-send", "--app-name=sandbox-ai", f"--urgency={urgency}", title, text],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                           check=False)
+
+
+# macOS: a notification through AppleScript. The title and text are the script's arguments (on run argv), never put
+# into its source: what an agent asked for cannot end the string and run AppleScript of its own.
+OSASCRIPT_NOTIFICATION = ("on run argv", "display notification (item 2 of argv) with title (item 1 of argv)", "end run")
+
+
+def mac_notification(title, text, runner=None):
+    """macOS: TITLE and TEXT as a notification of the Notification Center (osascript), control characters dropped."""
+    def clean(value, limit):
+        return "".join(c if c == "\n" or c.isprintable() else "?" for c in str(value)[:limit])
+    command = ["/usr/bin/osascript", *(part for line in OSASCRIPT_NOTIFICATION for part in ("-e", line)),
+               "--", clean(title, 200), clean(text, 1000)]
+    with contextlib.suppress(OSError, subprocess.SubprocessError):  # never an error, as desktop_notification
+        (runner or subprocess.run)(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=10, check=False)
 
 
 def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, listen=None, auto=False, autos=None):
@@ -954,45 +1164,87 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
         with connection:
             try:
                 line = read_line(connection, REQUEST_LIMIT, deadline=3.0)
-                request = json.loads(line or "{}")
-                url = request.get("url", "") if isinstance(request, dict) else ""
-                if not isinstance(url, str) or not URL.fullmatch(url):
-                    reply = {"ok": False, "message": "sandbox-ai: only http(s) URLs can be opened"}
-                elif len([p for p in Path(approvals_dir).glob("*.json") if not p.with_suffix(".done").exists()]) >= limit:
-                    reply = {"ok": False, "message": "sandbox-ai: too many open questions; open the URL yourself"}
-                else:
-                    ident = f"{int(time.time())}-{os.getpid()}-{next(counter)}"
-                    question = {"id": ident, "kind": "browser", "url": url,
-                                "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-                    path = Path(approvals_dir) / f"{ident}.json"
-                    path.parent.mkdir(mode=0o700, exist_ok=True)
-                    path.with_name(f".{ident}.json").write_text(json.dumps(question))
-                    os.replace(path.with_name(f".{ident}.json"), path)
-                    asker = origin(run_record(approvals_dir))
-                    done = None
-                    if auto:
-                        record = {**run_record(approvals_dir), "directory": str(Path(approvals_dir).parent)}
-                        done = (autos or auto_answer)(question, record)
-                    if done is not None:
-                        reply = {"ok": done.get("decision") == "allow",
-                                 "message": f"sandbox-ai: opened in the human's browser without a question (--ask "
-                                            f"allow; question {ident})" if done.get("decision") == "allow" else
-                                            f"sandbox-ai: not opened ({shown(done.get('reason', 'refused'), 300)})"}
-                    elif notify is desktop_notification and notify_actions():
-                        threading.Thread(target=desktop_question, daemon=True, args=(
-                            f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
-                            url[:300], ident, BROWSER_ACTIONS)).start()
-                    else:
-                        notify(f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
-                               f"{url[:300]}\nsandbox-ai approvals allow {ident}")
-                    if done is None:
-                        reply = {"ok": True, "message": "sandbox-ai: asked the human to open it in their browser "
-                                                        f"(question {ident}); nothing opens without their answer"}
-            except (OSError, ValueError, RecursionError) as exc:
+            except (OSError, ValueError) as exc:
                 reply = {"ok": False, "message": f"sandbox-ai: {str(exc)[:200]}"}
+            else:
+                reply = browser_reply(line, approvals_dir, counter, notify, limit, auto, autos)
             with contextlib.suppress(OSError):
                 connection.sendall((json.dumps(reply) + "\n").encode())
     server.close()
+
+
+def serve_browser_files(directory, approvals_dir, stop, notify=None, limit=20, auto=False, autos=None, interval=0.3):
+    """macOS: the sandbox's requests to open a URL as files (DIRECTORY/ID.request, written by its supervisor in podman
+    machine's VM: a Unix socket does not cross the VM's shared folders), each answered as serve_browser answers one
+    (DIRECTORY/ID.reply). DIRECTORY lies in the run's control directory, which the agent cannot see."""
+    import itertools
+    notify = notify or desktop_notification
+    directory = Path(directory)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    counter = itertools.count(1)
+    while not stop.is_set():
+        for path in sorted(directory.glob("*.request"))[:limit]:
+            ident = path.name[:-len(".request")]
+            try:
+                with open(path, "rb") as stream:
+                    data = stream.read(REQUEST_LIMIT + 1)
+                path.unlink()
+            except OSError:
+                continue
+            if len(data) > REQUEST_LIMIT:
+                reply = {"ok": False, "message": "sandbox-ai: request too long"}
+            else:
+                reply = browser_reply(data.split(b"\n", 1)[0].decode("utf-8", "replace"), approvals_dir, counter,
+                                      notify, limit, auto, autos)
+            target = directory / f"{ident}.reply"
+            with contextlib.suppress(OSError):
+                temporary = directory / f".{ident}.reply"
+                temporary.write_text(json.dumps(reply) + "\n")
+                os.replace(temporary, target)
+        stop.wait(interval)
+
+
+def browser_reply(line, approvals_dir, counter, notify, limit=20, auto=False, autos=None):
+    """The answer to one request LINE ({"url": ...}) of the sandbox's xdg-open: the question it became in
+    APPROVALS_DIR (announced with NOTIFY), or why not."""
+    try:
+        request = json.loads(line or "{}")
+        url = request.get("url", "") if isinstance(request, dict) else ""
+        if not isinstance(url, str) or not URL.fullmatch(url):
+            reply = {"ok": False, "message": "sandbox-ai: only http(s) URLs can be opened"}
+        elif len([p for p in Path(approvals_dir).glob("*.json") if not p.with_suffix(".done").exists()]) >= limit:
+            reply = {"ok": False, "message": "sandbox-ai: too many open questions; open the URL yourself"}
+        else:
+            ident = f"{int(time.time())}-{os.getpid()}-{next(counter)}"
+            question = {"id": ident, "kind": "browser", "url": url,
+                        "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            path = Path(approvals_dir) / f"{ident}.json"
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            path.with_name(f".{ident}.json").write_text(json.dumps(question))
+            os.replace(path.with_name(f".{ident}.json"), path)
+            asker = origin(run_record(approvals_dir))
+            done = None
+            if auto:
+                record = {**run_record(approvals_dir), "directory": str(Path(approvals_dir).parent)}
+                done = (autos or auto_answer)(question, record)
+            if done is not None:
+                reply = {"ok": done.get("decision") == "allow",
+                         "message": f"sandbox-ai: opened in the human's browser without a question (--ask "
+                                    f"allow; question {ident})" if done.get("decision") == "allow" else
+                                    f"sandbox-ai: not opened ({shown(done.get('reason', 'refused'), 300)})"}
+            elif notify is desktop_notification and notify_actions():
+                threading.Thread(target=desktop_question, daemon=True, args=(
+                    f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
+                    url[:300], ident, BROWSER_ACTIONS)).start()
+            else:
+                notify(f"sandbox-ai: open a URL? ({asker})" if asker else "sandbox-ai: open a URL?",
+                       f"{url[:300]}\nsandbox-ai approvals allow {ident}")
+            if done is None:
+                reply = {"ok": True, "message": "sandbox-ai: asked the human to open it in their browser "
+                                                f"(question {ident}); nothing opens without their answer"}
+    except (OSError, ValueError, RecursionError) as exc:
+        reply = {"ok": False, "message": f"sandbox-ai: {str(exc)[:200]}"}
+    return reply
 
 
 def browser_fields(url):

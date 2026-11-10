@@ -492,3 +492,78 @@ def test_a_start_on_another_host_detaches_like_one_here(qapp):
     assert detaches(["ssh", "-tt", "h", "exec /opt/sai claude --session api"])
     assert not detaches(["ssh", "-tt", "h", "exec /opt/sai claude --dry-run"])
     assert not detaches(["ssh", "-tt", "h", "exec /opt/sai doctor"]) and remote_words("echo hi") is None
+
+
+# -- a rebirth's options, Restore HOME and Reload rules (sandbox-ai resume NAME OPTIONS, --restore-home, rules reload) --
+
+
+def test_resume_takes_other_options_after_the_name_and_options_to_take_out():
+    assert backend.resume_args("api", True, options=["--gui", "--cpus", "4"], dropped=["allow-host=a.example"]) == [
+        "resume", "--drop-option=allow-host=a.example", "--restart", "api", "--gui", "--cpus", "4"]
+    for bad in ({"options": ["4", "--cpus"]}, {"options": ["--env", "A\nB"]}, {"dropped": ["--gui\n"]},
+                {"dropped": ["Not An Option"]}):
+        with pytest.raises(ValueError):
+            backend.resume_args("api", **bad)
+
+
+@needs_sai
+def test_resume_with_other_options_asks_first_and_passes_them_on(ui, sai, monkeypatch):
+    page = ui.SandboxesPage(sai, lambda *a, **k: None)
+    instance = backend.Instance("session", "remote:ct1:api", "api", host="ct1", state="running", agent="claude")
+
+    def fill(dialog):
+        dialog.options.setText("--gui --memory 4g")
+        dialog.dropped.setText("allow-pypi")
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ui.ResumeDialog, "exec", fill)
+    page.resume_with(instance)
+    assert ran(sai, "ct1", "resume") == ("ct1", "resume", "--drop-option=allow-pypi", "--restart", "api", "--gui",
+                                         "--memory", "4g")
+    assert [action for action, _ in ui.asked] == ["start-restart", "start-options"]
+    assert "--gui --memory 4g --drop-option=allow-pypi" in ui.asked[-1][1]
+
+
+@needs_sai
+def test_restore_home_is_offered_when_a_reviewed_start_is_not_resumed(ui, sai, monkeypatch):
+    asked = []
+    monkeypatch.setattr(ui, "ask_first", lambda parent, action, *a, **k: asked.append(action) or
+                        action != "home-review-skip")
+    page = ui.SandboxesPage(sai, lambda *a, **k: None)
+    review = {"name": "api", "state": "stopped", "review": {"since": "2026-11-10T08:00:00Z", "complete": True, "changes": [
+        {"path": ".bashrc", "change": "changed", "kind": "file", "before": {"type": "file"}, "after": {"type": "file"},
+         "diff": "-a\n+b"},
+        {"path": ".zshrc", "change": "added", "kind": "file", "before": None, "after": {"type": "file"}}]}}
+    assert ui.restorable_paths(review) == [".bashrc"]
+    sai.answers[("resume", "api")] = (0, json.dumps({"restored": [".bashrc"], "skipped": [
+        {"path": ".zshrc", "reason": "added since its last start"}]}), "")
+    went = []
+    page.home_reviewed("ct1", "api", review, None, lambda: went.append(True))
+    assert not went and asked == ["home-review-skip", "home-restore"]
+    # Exactly the files the question named (--path): the CLI would restore more otherwise.
+    assert ran(sai, "ct1", "resume") == ("ct1", "resume", "api", "--restore-home", "--yes", "--json", "--path",
+                                          ".bashrc")
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "Restore the HOME of api" and "Put back: .bashrc" in text and ".zshrc (added since" in text
+    # Nothing that could be put back: not offered.
+    asked.clear()
+    page.home_reviewed("ct1", "api", {**review, "review": {**review["review"], "changes": review["review"]["changes"][1:]}},
+                       None, lambda: went.append(True))
+    assert asked == ["home-review-skip"]
+
+
+@needs_sai
+def test_reload_rules_of_a_running_sandbox(ui, sai, monkeypatch):
+    page = ui.SandboxesPage(sai, lambda *a, **k: None)
+    monkeypatch.setattr(page, "target", lambda: ("ct1", "api"))
+    sai.answers[("rules", "reload")] = (0, json.dumps({"rules": [
+        {"name": "policy", "http": ["no-paste"], "kept": True}, {"name": "rules.json", "http": ["a", "b"], "kept": False}],
+        "reloaded": "2026-11-10T09:00:00Z", "not_reloaded": ["rules.json"]}), "")
+    assert page.run_named["rules"].text() == "Reload rules"
+    page.reload_rules()
+    assert ran(sai, "ct1", "rules") == ("ct1", "rules", "reload", "api", "--json") and ui.asked[-1][0] == "rules-reload"
+    title, text, _ = widgets.SHOWN[-1]
+    assert "policy: 1 HTTP rules (kept from its start)" in text and "rules.json: 2 HTTP rules" in text
+    assert "apply from its next start" in text
+    sai.answers[("rules", "reload")] = (1, "", "sandbox-ai rules reload: the sandbox refused: --no-inspect x\n")
+    page.reload_rules()
+    assert widgets.SHOWN[-1][1].startswith("Not reloaded:") and "--no-inspect" in widgets.SHOWN[-1][1]

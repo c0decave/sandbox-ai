@@ -39,6 +39,13 @@ def painted(monkeypatch):
         found.append(type(caller.frame.f_locals.get("self")).__name__)
         return real(painter, rect, lit, font)
     monkeypatch.setattr(help_view, "paint_mark", spy)
+    real_pixmap = help_view.mark_pixmap
+
+    def spy_pixmap(size, lit=False, font=None, ratio=1.0):  # (the widgets draw a cached picture of it)
+        caller = inspect.stack()[1]
+        found.append(type(caller.frame.f_locals.get("self")).__name__)
+        return real_pixmap(size, lit, font, ratio)
+    monkeypatch.setattr(help_view, "mark_pixmap", spy_pixmap)
     return found
 
 

@@ -59,8 +59,18 @@ jobs:
       - name: Build the images
         if: matrix.backend == 'podman'
         run: |
-          ./sandbox-build-image all 2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
+          # Every image sandbox-ai builds: the agents' and the tunnels' (VPN, Tor). The build checks first that names
+          # resolve in a build container (else it uses the host's network, or stops and says why).
+          status=0
+          for target in all vpn tor; do
+            ./sandbox-ai build "$target" 2>&1 | tee -a build.log
+            step=${PIPESTATUS[0]}
+            [ "$step" = 0 ] || status=$step
+          done
+          for image in localhost/claude-sandbox:latest localhost/codex-sandbox:latest localhost/opencode-sandbox:latest \
+                       localhost/sandbox-ai-vpn:latest localhost/sandbox-ai-tor:latest; do
+            podman image exists "$image" || { echo "::error title=image build::$image was not built"; status=1; }
+          done
           if [ "$status" != 0 ]; then printf '::error title=image build::%s\n' "$(tail -c 3000 build.log | sed ':a;N;$!ba;s/\n/%0A/g')"; fi
           exit "$status"
       - name: Live tests

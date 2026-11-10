@@ -189,6 +189,21 @@ def test_the_remote_sandbox_ai_is_found_without_bashrc(remote):
     assert h.run("ct1", ["--version"])[1].strip() == "custom --version"
 
 
+def test_a_host_s_own_command_in_its_home(remote):
+    """--command ~/opt/sandbox-ai (the check allows ~) was quoted whole, '~/opt/sandbox-ai', which the remote shell
+    does not expand: the host never answered. A leading ~/ is "$HOME"/ now, with sudo too."""
+    (remote["home"] / "opt").mkdir()
+    other = remote["home"] / "opt" / "sandbox-ai"
+    other.write_text("#!/bin/sh\necho custom \"$@\"\n")
+    other.chmod(0o755)
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1", "command": "~/opt/sandbox-ai"})})
+    assert h.run("ct1", ["--version"])[1].strip() == "custom --version"
+    assert h.run("ct1", ["--version"], sudo="batch")[1].strip() == "custom --version"
+    for command in ("-x", "~other/bin/sandbox-ai", "/opt/~/x"):
+        with pytest.raises(ValueError, match="command"):
+            h.check("ct1", {"ssh": "user@ct1", "command": command})
+
+
 def test_ssh_never_prompts_and_learns_the_host_key_once(remote):
     h.save({"ct1": h.check("ct1", {"ssh": "user@ct1", "port": 2222, "identity": "~/.ssh/id_ct"})})
     h.run("ct1", ["list"])
@@ -485,7 +500,10 @@ def test_sandbox_ai_update_keeps_the_kind_of_installation():
     assert main.installation_mode([], system, euid=0) == ["--system", "--prefix", "/usr/local"]
     with pytest.raises(ValueError, match="sudo sandbox-ai update"):
         main.installation_mode([], system, euid=1000, writable=lambda path: False)
-    assert main.installation_mode(["--check"], system, euid=1000) == ["--check"]
+    # --check and --uninstall act on this copy's own installation (as root on a user's own too).
+    assert main.installation_mode(["--check"], system, euid=1000) == ["--system", "--prefix", "/usr/local", "--check"]
+    assert main.installation_mode(["--uninstall"], user, euid=0) == ["--user", "--uninstall"]
+    assert main.installation_mode(["--check"], user, euid=0) == ["--user", "--check"]
     assert main.installation_mode(["--user"], system, euid=1000) == ["--user"], "what was given wins"
     assert main.installation_mode([], user, euid=0) == ["--user"]
     assert main.installation_mode(["--version", "0.1.67"], user, euid=1000) == ["--version", "0.1.67"]

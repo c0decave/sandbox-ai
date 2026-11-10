@@ -5,7 +5,7 @@ script_dir=$(dirname -- "$script_path")
 usage='Usage: sandbox-ai build [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
                         [-e|--extension-only] codex|claude|opencode|all|VARIANT [podman build options]
        sandbox-ai build [-pu|--podman-url URL] [-u|--uv VERSION] [-n|--node IMAGE] team [podman build options]
-       sandbox-ai build [-pu|--podman-url URL] vpn [podman build options]
+       sandbox-ai build [-pu|--podman-url URL] vpn|tor [podman build options]
 
 Every build uses the newest releases unless you pin them: the newest npm release
 of the agent (looked up first, so the cached install layer is rebuilt), the
@@ -31,9 +31,17 @@ team builds localhost/team-sandbox:latest with Claude Code, Codex and OpenCode, 
 image of a start with --with AGENT (each agent at its newest release, or
 --build-arg CLAUDE_VERSION=X.Y.Z and so on; no extensions).
 
-vpn builds localhost/sandbox-ai-vpn:latest, the container of --vpn (WireGuard,
-wireguard-go, OpenVPN, Tailscale, nftables); pin its parts with --build-arg
-WIREGUARD_GO_VERSION=v0.0.YYYYMMDD or TAILSCALE_IMAGE=docker.io/tailscale/tailscale:vX.Y.Z.'
+vpn builds localhost/sandbox-ai-vpn:latest, the container of --vpn with a
+WireGuard, OpenVPN, Mullvad or Tailscale profile (WireGuard, wireguard-go,
+OpenVPN, Tailscale, nftables); pin its parts with --build-arg
+WIREGUARD_GO_VERSION=v0.0.YYYYMMDD (or none) or
+TAILSCALE_IMAGE=docker.io/tailscale/tailscale:vX.Y.Z. wireguard-go is only the
+fallback for a host without the wireguard module: when Go'"'"'s module proxy cannot
+be reached the image is built without it, and the build says so at the end.
+
+tor builds localhost/sandbox-ai-tor:latest, the container of --vpn with a Tor
+profile (vpn add NAME --tor): tor, obfs4proxy, the GeoIP files, nftables. Tor is
+not a VPN; the two images share no software.'
 die_usage() { echo "$usage" >&2; exit 2; }
 
 podman_cmd=(podman) podman_url="" pin="" uv="" node="" agents=() variant="" extension_only="" vpn="" team=""
@@ -52,7 +60,8 @@ while [[ $# -gt 0 ]]; do
     -n|--node) [[ $# -ge 2 && -n "$2" ]] || die_usage; node=$2; shift 2 ;;
     codex|claude|opencode) agents=("$1"); shift; break ;;
     all) agents=(codex claude opencode); shift; break ;;
-    vpn) vpn=1; shift; break ;;
+    vpn) vpn=vpn; shift; break ;;
+    tor) vpn=tor; shift; break ;;
     team) team=1; shift; break ;;
     [a-z0-9]*)
       # A variant (sandbox-ai images new NAME --from AGENT): its agent's base, then the variant only.
@@ -60,7 +69,7 @@ while [[ $# -gt 0 ]]; do
       # images.py's own refusal (no such variant, a damaged one) is said once, in this command's name
       plan=$("${images[@]}" build-plan "$1" 2>/dev/null) || {
         why=$("${images[@]}" build-plan "$1" 2>&1 >/dev/null | tail -n 1) || true
-        echo "sandbox-ai build: $1 is neither codex, claude, opencode, all, team, vpn nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
+        echo "sandbox-ai build: $1 is neither codex, claude, opencode, all, team, vpn, tor nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
         exit 2; }
       agents=("${plan%% *}") variant=$1; shift; break ;;
     *) die_usage ;;
@@ -76,11 +85,65 @@ if [[ -z "$podman_url" && "$(uname -s)" == Linux && ! -S "/run/user/$(id -u)/bus
   echo "sandbox-ai build: no systemd user session: building with --cgroup-manager=cgroupfs" \
        "(sudo loginctl enable-linger $(id -un) gives one)" >&2
 fi
+# Names during the build: its RUN steps (apt-get, npm, go) resolve through Podman's own network, which on some hosts
+# answers no name at all (a local resolver such as systemd-resolved's 127.0.0.53 or dnsmasq that the build's
+# network does not reach): every image then fails with "Temporary failure resolving deb.debian.org". Checked first,
+# in a container of the base image (pulled by Podman itself, on the host's network); when only the host's network
+# resolves, the build uses it (the RUN steps are this repository's own Containerfiles, never an agent's code) and
+# says so; when neither does, it stops before anything is built and says what to look at. --network or --dns given
+# to the build: left as given. SANDBOX_AI_BUILD_NO_DNS_CHECK=1 skips the check.
+build_net=()
+given_network() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in --network|--network=*|--net|--net=*|--dns|--dns=*) return 0 ;; esac
+  done
+  return 1
+}
+probe_image=${SANDBOX_AI_BUILD_PROBE_IMAGE:-docker.io/library/debian:bookworm-slim}
+dns_works() {
+  timeout 60 "${podman_cmd[@]}" run --rm --pull=never "$@" "$probe_image" getent hosts deb.debian.org >/dev/null 2>&1
+}
+if [[ -z "${SANDBOX_AI_BUILD_NO_DNS_CHECK:-}" ]] && ! given_network "$@"; then
+  if "${podman_cmd[@]}" image exists "$probe_image" >/dev/null 2>&1 \
+      || "${podman_cmd[@]}" pull -q "$probe_image" >/dev/null 2>&1; then
+    if ! dns_works; then
+      if dns_works --network=host; then
+        build_net=(--network=host)
+        export SANDBOX_AI_BUILD_NETWORK=host  # the extension layers (images.py) build the same way
+        echo "sandbox-ai build: Podman's build network resolves no names here (deb.debian.org); building with the" \
+             "host's network (--network=host): the RUN steps are sandbox-ai's own Containerfiles" >&2
+      else
+        echo "sandbox-ai build: no name resolves in a container, not even on the host's network (deb.debian.org)." >&2
+        echo "  Look at: /etc/resolv.conf (a resolver only on 127.0.0.x?), podman info (networkBackend, pasta or" >&2
+        echo "  slirp4netns), a firewall or VPN on this machine. Give a resolver: sandbox-ai build ... --dns IP" >&2
+        echo "  (SANDBOX_AI_BUILD_NO_DNS_CHECK=1 builds without this check)" >&2
+        exit 1
+      fi
+    fi
+  else
+    echo "sandbox-ai build: $probe_image could not be pulled to check the build's name resolution; building anyway" >&2
+  fi
+fi
 if [[ -n "$vpn" ]]; then
   [[ -z "$pin$uv$node$extension_only" ]] || {
-    echo "sandbox-ai build: --pin, --uv, --node and --extension-only apply to the agent images, not vpn" >&2; exit 2; }
-  exec "${podman_cmd[@]}" build --pull=newer --tag localhost/sandbox-ai-vpn:latest --label sandbox-ai.role=vpn \
-    --file "$script_dir/Containerfile.vpn" "$@" "$script_dir"
+    echo "sandbox-ai build: --pin, --uv, --node and --extension-only apply to the agent images, not $vpn" >&2; exit 2; }
+  image=localhost/sandbox-ai-$vpn:latest
+  [[ "$vpn" == vpn ]] || exec "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=newer --tag "$image" --label "sandbox-ai.role=$vpn" \
+    --file "$script_dir/Containerfile.$vpn" "$@" "$script_dir"
+  "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=newer --tag "$image" --label "sandbox-ai.role=$vpn" \
+    --file "$script_dir/Containerfile.$vpn" "$@" "$script_dir"
+  # wireguard-go is optional (the fallback without the host's wireguard module): say at the end whether it is in.
+  wireguard_go=$("${podman_cmd[@]}" run --rm --pull=never --network=none --entrypoint=/bin/cat "$image" \
+    /usr/local/share/sandbox-ai/wireguard-go 2>/dev/null) || wireguard_go=""
+  case "$wireguard_go" in
+    built*) echo "sandbox-ai build: $image: wireguard-go $wireguard_go" >&2 ;;
+    "") echo "sandbox-ai build: $image built; whether it has wireguard-go could not be read" >&2 ;;
+    *) echo "sandbox-ai build: WARNING: $image has no wireguard-go ($wireguard_go). WireGuard profiles then need" \
+            "the host's kernel module (sudo modprobe wireguard; check with sandbox-ai doctor), or rebuild with" \
+            "network for Go's module proxy (or --build-arg GOPROXY=URL)." >&2 ;;
+  esac
+  exit 0
 fi
 semver='^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$'
 if [[ -n "$pin" ]]; then
@@ -117,7 +180,7 @@ team_build() {
   done
   [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
   [[ -z "$node" ]] || extra+=(--build-arg "NODE_IMAGE=$node")
-  exec "${podman_cmd[@]}" build --tag localhost/team-sandbox:latest --label sandbox-ai.role=team "${labels[@]}" \
+  exec "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/team-sandbox:latest --label sandbox-ai.role=team "${labels[@]}" \
     --file "$script_dir/Containerfile.team" "${extra[@]}" "$@" "$script_dir"
 }
 
@@ -193,7 +256,7 @@ for agent in "${agents[@]}"; do
     # Without an extension the base is the agent's image; with one, the layer below it.
     tags=(--tag "localhost/${agent}-sandbox:base")
     [[ "${kinds[$agent]}" != plain ]] || tags=(--tag "localhost/${agent}-sandbox:latest" "${tags[@]}")
-    "${podman_cmd[@]}" build "${tags[@]}" --file "$script_dir/Containerfile.$agent" \
+    "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} "${tags[@]}" --file "$script_dir/Containerfile.$agent" \
       "${extra[@]}" "$@" "$script_dir"
   fi
   layer=(layer "$agent" --variants)

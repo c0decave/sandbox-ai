@@ -284,7 +284,7 @@ def test_a_lifted_limit_lifts_the_throttle(tmp_path, processes):
     w.tick()
     assert int((group / "memory.high").read_text()) == int(8 * GIB * s.MEMORY_HIGH)
     (group / "memory.max").write_text("max\n")  # sandbox-ai limits --memory none
-    assert w.tick() is None
+    assert w.tick()["limit"] == 0, "watched on (its CPU and processes), without a memory limit"
     assert (group / "memory.high").read_text().strip() == "max"
 
 
@@ -378,8 +378,8 @@ def test_the_walk_stops_at_the_sandboxs_own_cgroup(tmp_path, processes):
     assert s.memory_state(group)["limit"] == 2 * GIB
     (group / "memory.max").write_text("max\n")
     (group.parent / "memory.max").write_text("max\n")
-    with pytest.raises(ValueError, match="no memory limit"):
-        s.memory_state(group)  # only the user's slice has one: not the sandbox's
+    state = s.memory_state(group)  # only the user's slice has one: not the sandbox's
+    assert (state["limit"], state["current"]) == (0, 1 * GIB)
 
 
 def test_bubblewrap_scope_is_its_own_top(tmp_path):
@@ -400,3 +400,106 @@ def test_bubblewrap_scope_is_its_own_top(tmp_path):
     assert s.cgroup_dir(42, proc=proc, root=root) == scope
     (scope / "memory.max").write_text("max\n")
     assert s.cgroup_dir(42, proc=proc, root=root) is None, "app.slice's limit is not the sandbox's"
+
+
+# --- CPU and processes ---------------------------------------------------------------------------------------------
+
+
+def cpu_files(group, usage_usec, periods=0, throttled=0, throttled_usec=0, quota="200000 100000", pids=None,
+              pids_max="4096"):
+    """cpu.stat, cpu.max and pids.* as the kernel shows them."""
+    (group / "cpu.stat").write_text(f"usage_usec {usage_usec}\nuser_usec {usage_usec}\nsystem_usec 0\n"
+                                    f"nr_periods {periods}\nnr_throttled {throttled}\nthrottled_usec {throttled_usec}\n")
+    (group / "cpu.max").write_text(quota + "\n")
+    if pids is not None:
+        (group / "pids.current").write_text(f"{pids}\n")
+        (group / "pids.max").write_text(f"{pids_max}\n")
+
+
+def test_cpu_and_pids_state_from_the_cgroup_files(tmp_path):
+    group = cgroup(tmp_path, [], current=GIB)
+    assert s.cpu_state(group) is None and s.pids_state(group) is None  # no cpu/pids controller
+    cpu_files(group, 5_000_000, periods=10, throttled=4, throttled_usec=900, pids=12)
+    assert s.cpu_state(group) == {"usage_usec": 5_000_000, "nr_periods": 10, "nr_throttled": 4,
+                                  "throttled_usec": 900, "limit": 2.0}
+    assert s.pids_state(group) == {"current": 12, "limit": 4096}
+    cpu_files(group, 1, quota="max 100000", pids=3, pids_max="max")
+    assert s.cpu_state(group)["limit"] == 0.0 and s.pids_state(group)["limit"] == 0
+    # 1.5 CPUs over 2 s, half the periods held back; against the limit, or the host's CPUs without one.
+    before = {"usage_usec": 0, "nr_periods": 0, "nr_throttled": 0, "throttled_usec": 0, "limit": 2.0}
+    after = {"usage_usec": 3_000_000, "nr_periods": 20, "nr_throttled": 10, "throttled_usec": 5, "limit": 2.0}
+    assert s.cpu_usage(before, after, 2.0, host_cpus=8) == {"cpus": 1.5, "percent": 75.0, "limit": 2.0,
+                                                            "host_cpus": 8, "throttled_percent": 50.0,
+                                                            "throttled_usec": 5}
+    assert s.cpu_usage(before, {**after, "limit": 0.0}, 2.0, host_cpus=8)["percent"] == 18.8
+    assert s.cpu_usage(None, after, 2.0) is None and s.cpu_usage(before, after, 0) is None
+
+
+def test_a_cgroup_with_only_a_cpu_or_process_limit_is_found(tmp_path):
+    proc, root = tmp_path / "proc", tmp_path / "cg"
+    group = root / "user.slice" / "run-1.scope"
+    (group / "leaf").mkdir(parents=True)
+    (proc / "7").mkdir(parents=True)
+    (proc / "7" / "cgroup").write_text("0::/user.slice/run-1.scope/leaf\n")
+    (group / "memory.max").write_text("max\n")
+    assert s.cgroup_dir(7, proc, root) is None
+    (group / "pids.max").write_text("4096\n")
+    assert s.cgroup_dir(7, proc, root) == group
+    (group / "pids.max").write_text("max\n")
+    (group / "cpu.max").write_text("150000 100000\n")
+    assert s.cgroup_dir(7, proc, root) == group
+
+
+def test_sustained_cpu_throttling_and_processes_near_the_limit_are_told_and_shared(tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "CPU_THROTTLE_SUSTAIN", 60.0)
+    group = cgroup(tmp_path, [], current=GIB)
+    cpu_files(group, 0, pids=100)
+    clock, notes, log = [0.0], [], tmp_path / "memory.jsonl"
+    w = watch(group, session=tmp_path, log=log, notify=lambda *a: notes.append(a), clock=lambda: clock[0],
+              host_cpus=8)
+    w.tick()
+    shared = json.loads((tmp_path / "resources.json").read_text())
+    assert shared["memory"]["used_bytes"] == GIB and shared["pids"] == {"current": 100, "limit": 4096, "percent": 2.4}
+    assert shared["warnings"] == [] and shared["cpu"]["host_cpus"] == 8
+    # Held back in 80 % of the periods: told only once it lasted CPU_THROTTLE_SUSTAIN.
+    usage, periods, throttled = 0, 0, 0
+    for second in (10, 40, 70, 80):
+        usage, periods, throttled = usage + 2_000_000 * (second - clock[0]), periods + 100, throttled + 80
+        clock[0] = float(second)
+        cpu_files(group, int(usage), periods, throttled, pids=100)
+        w.tick()
+        if second < 70:
+            assert notes == []
+    assert len(notes) == 1 and "CPU limit" in notes[0][0] and "--cpus" in notes[0][1] and "2 CPUs" in notes[0][1]
+    shared = json.loads((tmp_path / "resources.json").read_text())
+    assert shared["warnings"] == ["cpu"] and shared["cpu"]["used_cpus"] == 2.0 and shared["cpu"]["percent"] == 100.0
+    assert shared["cpu"]["throttled_percent"] == 80.0 and "parallel" in shared["advice"][0]
+    # Calm again, then processes near --pids.
+    clock[0] = 90.0
+    cpu_files(group, int(usage) + 1_000_000, periods + 100, throttled, pids=3700)
+    w.tick()
+    assert not w.cpu_warned and len(notes) == 2 and "3700 of 4096" in notes[1][1]
+    assert json.loads((tmp_path / "resources.json").read_text())["warnings"] == ["pids"]
+    events = [json.loads(line)["event"] for line in log.read_text().splitlines()]
+    assert events == ["cpu-throttled", "sample", "pids-warning"]  # a sample a minute (from the first look on)
+    sample = json.loads(log.read_text().splitlines()[1])
+    assert sample["cpus"] == 2.0 and sample["pids"] == 100 and sample["used"] == GIB
+    lines = w.stop()
+    assert any("CPU limit (2 CPUs) held the sandbox back 1 time " in line for line in lines)
+    assert any("peak 3700" in line for line in lines)
+
+
+def test_without_a_memory_limit_only_resources_json_is_written(tmp_path):
+    group = cgroup(tmp_path, [], current=GIB)
+    (group / "memory.max").write_text("max\n")
+    cpu_files(group, 0, quota="max 100000", pids=5, pids_max="max")
+    w = watch(group, session=tmp_path)
+    assert w.tick()["limit"] == 0
+    shared = json.loads((tmp_path / "resources.json").read_text())
+    assert shared["memory"]["limit_bytes"] is None and shared["memory"]["percent"] is None
+    assert shared["pids"]["limit"] is None and not (tmp_path / "memory.json").exists()
+    assert w.stop() == []
+
+
+def test_the_older_name_is_the_resource_watch():
+    assert s.MemoryWatch is s.ResourceWatch

@@ -121,15 +121,19 @@ def listen_file():
     return config_dir() / "listen.json"
 
 
-_modules = {}
+_modules, _modules_lock = {}, threading.RLock()
 
 
 def module(name):
+    """sandbox-ai's module NAME, loaded once, under a lock: the handlers' threads ask for it at the same time, and
+    each loaded a copy of its own (with its own locks and caches; the last one won)."""
     if name not in _modules:
-        spec = importlib.util.spec_from_file_location(f"{name}_for_web", HERE / f"{name}.py")
-        loaded = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(loaded)
-        _modules[name] = loaded
+        with _modules_lock:
+            if name not in _modules:
+                spec = importlib.util.spec_from_file_location(f"{name}_for_web", HERE / f"{name}.py")
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _modules[name] = loaded
     return _modules[name]
 
 
@@ -327,6 +331,10 @@ class Sessions:
     def new(self, user, address, fingerprint=None):
         token, now = secrets.token_urlsafe(32), self.clock()
         with self.lock:
+            # Sessions past their limits are dropped here too: one that is never used again would stay for good.
+            for key in [k for k, s in self.items.items()
+                        if now - s["seen"] > self.idle or now - s["created"] > self.lifetime]:
+                del self.items[key]
             self.items[self.key(token)] = {"user": user, "csrf": secrets.token_urlsafe(32), "created": now,
                                            "seen": now, "address": address, "terminals": 0, "user_record": fingerprint}
         return token
@@ -592,6 +600,7 @@ STARTS_HOST_SECONDS = 20  # the same for the starts of every host (GET /api/star
 
 
 CANARY_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
+SAFEGUARDS_TAIL = 500  # safeguard records a page asks a host for at most (the newest)
 # What `approvals remembered` lists for a project: a host name (or *.wildcard), IP:PORT, [IPv6]:PORT; never "-...".
 REMEMBERED_ENTRY = re.compile(r"(?:\*\.)?[A-Za-z0-9_][A-Za-z0-9_.-]{0,252}(?::[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\]:[0-9]{1,5}")
 VPN_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -714,7 +723,7 @@ MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot
 SIZE_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
 NET_PRESETS = ("pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm")  # agent_sandbox.PRESETS (a test agrees)
 NETWORK = re.compile(r"[0-9A-Fa-f:.]{2,45}(?:/[0-9]{1,3})?")
-BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}")  # codex, claude, opencode, all, team, vpn or a variant
+BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}")  # codex, claude, opencode, all, team, vpn, tor or a variant
 HOOK_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 HOOK_EVENT = re.compile(r"[A-Z][A-Za-z]{1,40}")
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
@@ -892,7 +901,8 @@ TELEMETRY_ORDER = ("on", "off", "strict")
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
 # The keys of defaults.json (agent_sandbox.DEFAULTS_KEYS but "version"; tests/test_web.py checks they agree): any
 # other key is refused before anything reaches a host.
-DEFAULT_KEYS = ("canaries", "keep_days", "mode", "name_style", "preset_dirs", "subnet", "subnet6", "telemetry")
+DEFAULT_KEYS = ("canaries", "keep_days", "mode", "name_style", "preset_dirs", "safeguard_mute", "subnet", "subnet6",
+                "telemetry")
 NAME_STYLES = ("codename", "project")  # agent_sandbox.NAME_STYLES: name_style's values
 
 
@@ -1141,6 +1151,8 @@ class Api:
             ("DELETE", H + r"/kits/(?P<name>[^/]+)", self.kit_delete, ("kit-delete",)),
             ("GET", H + r"/canaries", self.canaries, ()),
             ("GET", H + r"/canaries/(?P<run>[^/]+)", self.canaries, ()),
+            ("GET", H + r"/safeguards", self.safeguards, ()),
+            ("GET", H + r"/safeguards/(?P<run>[^/]+)", self.safeguards, ()),
             ("GET", H + r"/secrets", self.secrets, ()),
             ("POST", H + r"/secrets/(?P<name>[^/]+)", self.secret_set, ("secret-replace",)),
             ("DELETE", H + r"/secrets/(?P<name>[^/]+)", self.secret_delete, ("secret-delete",)),
@@ -1961,6 +1973,8 @@ class Api:
         else:
             args.append(f"--{kind}")
         secret = body.get("secret")
+        if kind == "mullvad" and secret is None:  # without it the command asks for the account number with getpass
+            raise Refused(400, "a Mullvad profile names the secret with its account number")
         if secret is not None:
             option = {"openvpn": "--auth-secret", "mullvad": "--account-secret", "tailscale": "--auth-key-secret"}.get(kind)
             if option is None or not (isinstance(secret, str) and NET_REF.fullmatch(secret)):
@@ -2046,6 +2060,27 @@ class Api:
             raise Refused(400, "a run is 1-81 letters, digits, '_', '.' or '-'")
         document = self.json_of(params["host"], ["canaries", "log", *([run] if run else []), "--json"], 60)
         return [document] if run else document
+
+    # what the safeguards refused or ended (sandbox-ai safeguards): why, the process, the command that would allow
+    # it; redacted there (no secret values), the newest SAFEGUARDS_TAIL of every run or of one
+    def safeguards(self, params, body):
+        run = params.get("run")
+        if run is not None and not CANARY_RUN.fullmatch(run):
+            raise Refused(400, "a run is 1-81 letters, digits, '_', '.' or '-'")
+        args = ["safeguards", "--json", "--tail", str(SAFEGUARDS_TAIL), *(["--", run] if run else ["--all"])]
+        status, out, err = self.run(params["host"], args, 60)
+        if status != 0:
+            raise Refused(502, f"sandbox-ai safeguards on {params['host']}: exit status {status}: "
+                               f"{printable((err or out).strip()[-600:])}")
+        records = []
+        for line in out.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
 
     def presets(self, params, body):
         return self.json_of(params["host"], ["presets", "list", "--json"], 30)
@@ -2197,7 +2232,17 @@ class Api:
         return self.done(params["host"], ["kits", "delete", "--yes", "--", name], 60)
 
     # approvals
+    @staticmethod
+    def watching(names):
+        """A page asks for the questions of NAMES (every 5 s): when this machine is one of them, the service keeps
+        the heartbeat of a watcher meanwhile (approvals.heartbeat), so the launcher leaves its questions to the
+        page (one prompt per question); it goes stale 15 s after the last page stopped asking."""
+        if module("hosts").LOCAL in names:
+            with contextlib.suppress(OSError):  # a state directory that cannot be written: the launcher asks too
+                module("approvals").heartbeat("web")
+
     def approvals(self, params, body):
+        self.watching([params["host"]])
         return self.json_of(params["host"], ["approvals", "list", "--json"], 30)
 
     def host_questions(self, name):
@@ -2223,6 +2268,7 @@ class Api:
         were counted then (the page subtracts the age, so a slow host does not make the others' countdowns late).
         A damaged hosts.json is named in errors ("hosts.json"); this machine is asked all the same."""
         names, errors = host_names()
+        self.watching(names)
         found = self.approvals_fanout.gather(names, APPROVALS_HOST_SECONDS)
         questions, age, seen = [], {}, {}
         for name in names:
@@ -2422,7 +2468,12 @@ class Api:
             raise Refused(400, "canaries is false, a list of categories, all or none")
         if key == "name_style" and value is not None and value not in NAME_STYLES:
             raise Refused(400, f"name_style is {' or '.join(NAME_STYLES)}")
-        if body.get("confirm") is not True and key != "name_style":  # how starts are named protects nothing
+        if key == "safeguard_mute" and value is not None and not (
+                isinstance(value, list) and all(isinstance(item, str) for item in value)):
+            raise Refused(400, "safeguard_mute is a list of kinds (sandbox-ai safeguards kinds)")
+        # How starts are named and which safeguard warnings pop up protect nothing (the safeguards still refuse,
+        # and every record stays listed): no step down to confirm.
+        if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute"):
             weakest = {"mode": MODE_ORDER[0], "telemetry": TELEMETRY_ORDER[0]}.get(key)
             if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
@@ -3343,10 +3394,10 @@ def tool_command(kind, query, runner=None):
     if kind == "build":
         target = query.get("target")
         if not (isinstance(target, str) and BUILD_TARGET.fullmatch(target)):
-            raise Refused(400, "target is codex, claude, opencode, all, team, vpn or a variant's name")
+            raise Refused(400, "target is codex, claude, opencode, all, team, vpn, tor or a variant's name")
         only = {"1": True, "0": False, None: False, "": False}.get(query.get("extension_only"), "bad")
-        if only == "bad" or only and target in ("team", "vpn"):
-            raise Refused(400, "extension_only is 1 or 0, and not for team or vpn")
+        if only == "bad" or only and target in ("team", "vpn", "tor"):
+            raise Refused(400, "extension_only is 1 or 0, and not for team, vpn or tor")
         # --pin VERSION (one agent's own version), --uv TAG, --node IMAGE (the base images): as build checks them
         pin, uv, node = (query.get(key) or "" for key in ("pin", "uv", "node"))
         if pin and not (re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pin) and target in AGENTS):
@@ -3354,8 +3405,8 @@ def tool_command(kind, query, runner=None):
         if uv and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}", uv) or \
                 node and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./:@_-]{0,255}", node):
             raise Refused(400, "uv is an image tag, node an image name (with a tag or an @sha256 digest)")
-        if (uv or node) and target == "vpn":
-            raise Refused(400, "uv and node are for the agents' images, not vpn")
+        if (uv or node) and target in ("vpn", "tor"):
+            raise Refused(400, "uv and node are for the agents' images, not vpn or tor")
         more = [*(["--pin", pin] if pin else []), *(["--uv", uv] if uv else []), *(["--node", node] if node else [])]
         return ["build", *more, *(["--extension-only"] if only else []), target]
     if kind == "trust-hooks":
@@ -3470,8 +3521,8 @@ class WebSocket:
                 return kind, message
 
     def send(self, payload, opcode=2):
-        if self.closed and opcode != 8:
-            return
+        """One frame; nothing after the close frame (opcode 8, sent once) or a failed write. Checked under the send
+        lock: checked before it, another thread's frame could follow the close frame, or a second close frame."""
         header = bytes([0x80 | opcode])
         length = len(payload)
         if length < 126:
@@ -3481,6 +3532,10 @@ class WebSocket:
         else:
             header += bytes([127]) + struct.pack(">Q", length)
         with self.send_lock:
+            if self.closed:
+                return
+            if opcode == 8:
+                self.closed = True
             try:
                 self.stream.write(header + payload)
                 self.stream.flush()
@@ -3488,11 +3543,18 @@ class WebSocket:
                 self.closed = True
 
     def close(self, code=1000, reason=""):
-        """A close frame with CODE and REASON, which the page shows (UTF-8, cut to the 123 bytes a frame has)."""
-        if not self.closed:
-            text = reason.encode()[:123].decode(errors="ignore").encode()
-            self.send(struct.pack(">H", code) + text, 8)
-            self.closed = True
+        """A close frame with CODE and REASON, which the page shows (UTF-8, cut to the 123 bytes a frame has); only
+        the first one is sent."""
+        text = reason.encode()[:123].decode(errors="ignore").encode()
+        self.send(struct.pack(">H", code) + text, 8)
+
+
+def terminal_size(query):
+    """(cols, rows) of a terminal's WebSocket URL parameters: 1-1000 each, else 100 and 30."""
+    def one(key, default):
+        value = query.get(key) or ""
+        return min(1000, max(1, int(value))) if re.fullmatch(r"[0-9]{1,6}", value) else default
+    return one("cols", 100), one("rows", 30)
 
 
 def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monotonic, used=None):
@@ -3506,7 +3568,18 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
             os.execvp(argv[0], argv)
         finally:
             os._exit(127)
-    set_size(master, cols, rows)
+    # From here on the child is always ended and reaped. MASTER is closed by the last of the two threads that use
+    # it: closed earlier, its number could be another connection's by the time the other thread reads or writes.
+    users, users_lock, ending, reader = [2], threading.Lock(), threading.Event(), None
+
+    def let_go():
+        with users_lock:
+            users[0] -= 1
+            last = users[0] == 0
+        if last:
+            with contextlib.suppress(OSError):
+                os.close(master)
+
     checked, pinged, typed = [clock()], [clock()], [None]
 
     def gone():
@@ -3517,33 +3590,59 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
         checked[0] = clock()
         return not alive()
 
-    def output():
-        while True:
+    def write(data):
+        """DATA to the command's input, False when that cannot be: it ended, or it takes nothing for WS_DEADLINE
+        seconds (a blocking write would hold this thread, and so the terminal, for as long as it reads nothing)."""
+        view, since = memoryview(data), clock()
+        while view:
+            if ws.closed:
+                return False
             try:
-                ready, _, _ = select.select([master], [], [], 0.5)
-                if ws.closed:
-                    break
-                if gone():
-                    ws.close(1008, SESSION_ENDED)
-                    break
-                if clock() - pinged[0] >= WS_PING:  # a browser that is still there answers (the read deadline)
-                    pinged[0] = clock()
-                    ws.send(b"", 9)
-                if not ready:
-                    continue
-                data = os.read(master, 65536)
+                view = view[os.write(master, view):]
+                since = clock()
+            except BlockingIOError:
+                if clock() - since > WS_DEADLINE:
+                    return False
+                select.select([], [master], [], 0.5)
             except OSError:
-                break
-            if not data:
-                break
-            ws.send(data, 2)
-        ws.close(1000)
-        if ws.hang_up:  # the browser answers the close at once; if not, the connection ends anyway
-            threading.Timer(3, ws.hang_up).start()
+                return False
+        return True
 
-    reader = threading.Thread(target=output, daemon=True)
-    reader.start()
+    def output():
+        try:
+            while True:
+                try:
+                    ready, _, _ = select.select([master], [], [], 0.5)
+                    if ws.closed or ending.is_set():
+                        break
+                    if gone():
+                        ws.close(1008, SESSION_ENDED)
+                        break
+                    if clock() - pinged[0] >= WS_PING:  # a browser that is still there answers (the read deadline)
+                        pinged[0] = clock()
+                        ws.send(b"", 9)
+                    if not ready:
+                        continue
+                    try:
+                        data = os.read(master, 65536)
+                    except BlockingIOError:
+                        continue
+                except (OSError, ValueError):
+                    break
+                if not data:
+                    break
+                ws.send(data, 2)
+            ws.close(1000)
+            if ws.hang_up:  # the browser answers the close at once; if not, the connection ends anyway
+                threading.Timer(3, ws.hang_up).start()
+        finally:
+            let_go()
+
     try:
+        os.set_blocking(master, False)
+        set_size(master, min(1000, max(1, int(cols))), min(1000, max(1, int(rows))))
+        reader = threading.Thread(target=output, daemon=True)
+        reader.start()
         while not ws.closed:
             try:
                 kind, payload = ws.receive()
@@ -3555,29 +3654,34 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
                 ws.close(1008, SESSION_ENDED)
                 break
             if kind == 2:
-                os.write(master, payload)
+                if not write(payload):
+                    break
                 if used is not None and payload and (typed[0] is None or clock() - typed[0] >= 1):
                     typed[0] = clock()
                     used()
             elif kind == 1:
-                with contextlib.suppress(ValueError, TypeError, KeyError):
+                with contextlib.suppress(ValueError, TypeError, KeyError, OverflowError, RecursionError):
                     message = json.loads(payload)
                     cols, rows = (int(v) for v in message["resize"])
                     if 1 <= cols <= 1000 and 1 <= rows <= 1000:
                         set_size(master, cols, rows)
     finally:
+        ending.set()
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(pid, signal.SIGHUP)
-        reader.join(5)
-        with contextlib.suppress(OSError):
-            os.close(master)
+        if reader is None:
+            let_go()  # the output thread's share: it never started
+        else:
+            reader.join(5)
+        let_go()
         with contextlib.suppress(ChildProcessError):
             for _ in range(50):
                 if os.waitpid(pid, os.WNOHANG)[0]:
                     break
                 time.sleep(0.1)
             else:
-                os.killpg(pid, signal.SIGKILL)
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
 
 
@@ -3622,7 +3726,13 @@ class Service:
         it lives without use (X-Session-Idle-Left, seconds; the page's background polls do not count as use) and at
         most (X-Session-Lifetime-Left): the page warns before the end and offers to stay logged in."""
         seen = []
-        status, out_headers, data = self.respond(method, target, headers, body, address, seen)
+        try:
+            status, out_headers, data = self.respond(method, target, headers, body, address, seen)
+        except Exception as exc:  # noqa: BLE001 - an error nobody expected: a 500 with its kind, never no answer
+            with contextlib.suppress(Exception):
+                audit("error", address=address, method=method, path=urllib.parse.urlsplit(target).path,
+                      why=f"{type(exc).__name__}: {printable(exc)[:300]}")
+            return self.error(500, f"the service failed: {type(exc).__name__}")
         if seen and self.sessions.get(self.cookie(headers), touch=False) is seen[0]:
             idle, lifetime = self.sessions.left(seen[0])
             out_headers = [*out_headers, ("X-Session-Idle-Left", str(idle)),
@@ -3654,10 +3764,10 @@ class Service:
             if body:
                 try:
                     data = json.loads(body)
-                except (ValueError, UnicodeDecodeError):
+                except (ValueError, UnicodeDecodeError, RecursionError):  # nested too deep: RecursionError
                     raise Refused(400, "invalid JSON") from None
             if path == "/api/login" and method == "POST":
-                return self.login(data or {}, address)
+                return self.login(data if isinstance(data, dict) else {}, address)
             if session is None:
                 raise Refused(401, "log in", code="login-needed")
             seen.append(session)
@@ -3731,6 +3841,19 @@ class Service:
         return self.json(200, {"user": user, "csrf": session["csrf"]},
                          [("Set-Cookie", self.set_cookie(token, LIFETIME))])
 
+    def claim_terminal(self, session):
+        """One of the session's TERMINALS_PER_SESSION terminals, checked and counted at once (False: none left);
+        two browser tabs opening terminals at the same moment must not both pass the check."""
+        with self.sessions.lock:
+            if session["terminals"] >= TERMINALS_PER_SESSION:
+                return False
+            session["terminals"] += 1
+            return True
+
+    def release_terminal(self, session):
+        with self.sessions.lock:
+            session["terminals"] -= 1
+
     @staticmethod
     def set_cookie(token, age):
         return f"{COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={age}"
@@ -3753,8 +3876,8 @@ class Service:
             raise Refused(403, "the page is out of date: reload it")
         try:
             host, argv = self.terminal(query)
-        except ValueError as exc:
-            raise Refused(400, printable(exc)) from None
+        except (ValueError, RecursionError) as exc:  # options: JSON nested too deep is a RecursionError
+            raise Refused(400, printable(exc)[:300]) from None
         installing = getattr(self.api, "installing", {})
         if query.get("kind") == "install" and host in installing:  # one install per host: the route's runs now
             since = round(time.monotonic() - installing[host])
@@ -3767,7 +3890,7 @@ class Service:
         if query.get("kind") in ("start", "team-start"):
             try:
                 options = redacted(json.loads(query.get("options") or "[]"))
-            except ValueError:
+            except (ValueError, RecursionError):
                 options = printable(query.get("options"))[:500]
             started = {"agent": query.get("agent") or query.get("agents"), "workspace": query.get("workspace"),
                        "options": options}
@@ -4084,12 +4207,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         try:
             argv, session = self.service.websocket(self.path, self.headers, self.client_address[0])
-        except (Refused, ValueError) as exc:
+            # The limit counted at once with its check, under the lock: tabs opening terminals at the same moment
+            # all passed websocket()'s check.
+            if not self.service.claim_terminal(session):
+                raise Refused(429, f"at most {TERMINALS_PER_SESSION} terminals at once")
+        except Exception as exc:  # noqa: BLE001 - refused with an answer, before anything runs
             self.close_connection = True
-            status = getattr(exc, "status", 400)
+            status = exc.status if isinstance(exc, Refused) else 400 if isinstance(exc, ValueError) else 500
             if status in (401, 403, 421, 503) or not isinstance(exc, Refused):
                 # No WebSocket for a browser that is not logged in, another page or name, a broken handshake.
-                self.send(*self.service.error(status, str(exc)))
+                self.send(*self.service.error(status, str(exc) if status != 500 else type(exc).__name__))
                 return
             # Logged in, from this page, but not this terminal (a query that is not one, too many terminals): the
             # WebSocket opens only to say why in its close frame, as a browser shows a refused handshake as code
@@ -4101,12 +4228,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.connection.settimeout(3)
                 ws.receive()  # the browser's answer to the close
             return
-        self.accept_websocket(key)
-        self.close_connection = True
-        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query))
-        size = [int(query[k]) if query.get(k, "").isdigit() else d for k, d in (("cols", 100), ("rows", 30))]
-        session["terminals"] += 1
         try:
+            self.close_connection = True
+            self.accept_websocket(key)
+            cols, rows = terminal_size(dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)))
             token = self.service.cookie(self.headers)
             sessions = self.service.sessions
             # A terminal may be quiet for long, its browser is not: it answers the pings. Nothing heard for
@@ -4122,10 +4247,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except ValueError:  # users.json became unreadable: no session holds any more
                     return False
                 return sessions.current(token, users, touch=False) is session
-            bridge(WebSocket(Stream(self.rfile, self.wfile), hang_up=self.hang_up), argv, *size, alive=alive,
+            bridge(WebSocket(Stream(self.rfile, self.wfile), hang_up=self.hang_up), argv, cols, rows, alive=alive,
                    used=lambda: sessions.get(token, touch=True))
         finally:
-            session["terminals"] -= 1
+            self.service.release_terminal(session)
 
     def accept_websocket(self, key):
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
@@ -4316,6 +4441,7 @@ def serve(listen=DEFAULT_LISTEN, hostnames=(), cert=None, key=None, out=print, r
         with contextlib.suppress(OSError):
             if json.loads(listen_file().read_text()).get("pid") == os.getpid():
                 listen_file().unlink()
+        module("approvals").end_heartbeat()  # no page here watches the questions any more
         server.server_close()
 
 

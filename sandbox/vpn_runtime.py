@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The VPN container's runtime: tunnel, kill switch and checks. Standard library only.
 
-Runs as `python3 -I /vpn/vpn_runtime.py serve|check` in localhost/sandbox-ai-vpn (Containerfile.vpn), in the
-network namespace of the agent's pod (or of its own container for `sandbox-ai vpn check` and MCP image
-servers). The launcher (vpn.py) loads this file by path too, for what both sides share: the DNS client, the
+Runs as `python3 -I /vpn/vpn_runtime.py serve|check` in localhost/sandbox-ai-vpn (Containerfile.vpn; a Tor
+profile in localhost/sandbox-ai-tor, Containerfile.tor), in the network namespace of the agent's pod (or of its
+own container for `sandbox-ai vpn check` and MCP image servers). The launcher (vpn.py) loads this file by path too, for what both sides share: the DNS client, the
 address echo and the kill-switch rules.
 
 The launcher writes one JSON line to stdin: the profile with its secrets, the names to resolve and the
@@ -19,6 +19,7 @@ Tor has no tunnel interface: the kill switch lets only tor's own user (debian-to
 (to its bridges alone when it has some), and a NAT chain hands every other TCP connection of the namespace to
 tor's TransPort and every lookup on port 53 to its DNSPort; other UDP and all IPv6 are dropped.
 """
+import base64
 import contextlib
 import http.client
 import ipaddress
@@ -29,6 +30,7 @@ import pwd
 import re
 import secrets
 import select
+import shutil
 import socket
 import ssl
 import struct
@@ -48,7 +50,7 @@ RUN = Path("/run/vpn")
 TAILNET = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
 QUAD100 = "100.100.100.100"  # Tailscale's MagicDNS resolver
 FALLBACK_DNS = ["1.1.1.1", "8.8.8.8"]  # what the sandbox uses with --dns when the profile names no resolver
-# Tor (vpn add --tor). Containerfile.vpn creates debian-tor with this uid before Debian's tor package (which keeps
+# Tor (vpn add --tor). Containerfile.tor creates debian-tor with this uid before Debian's tor package (which keeps
 # an existing debian-tor with a system uid): the kill switch and the agent's firewall know tor's packets by it
 # (meta skuid), which only a process with CAP_SETUID could take on, and the agent and the proxy have none.
 TOR_UID = 950
@@ -68,6 +70,13 @@ BRIDGE_TRANSPORTS = {"obfs4": "/usr/bin/obfs4proxy"}
 DEFAULT_MTU = 1420
 DEFAULT_KEEPALIVE = 25  # keeps the conntrack entry (and NAT on the way) of the endpoint alive
 ECHO_LIMIT = 64 << 10
+# While serving, the address the echo services see is checked again this often (seconds; the payload's
+# checks.recheck, 0: never): a provider's exit that moved, a tunnel that stalls, show during the run, not only at
+# its start.
+RECHECK = 600
+REQUEST_LIMIT = 8 << 20  # the body of an answer to a request of the launcher (llm check|models through the VPN)
+REQUEST_TIMEOUT = 10
+SERVE_STATE = RUN / "serve.json"  # what `resolve` (podman exec during a run) needs of the tunnel: its resolvers
 QTYPES = {4: 1, 6: 28}  # A, AAAA
 SECRET_PATTERNS = [re.compile(r"[A-Za-z0-9+/]{42,43}="), re.compile(r"tskey-[A-Za-z0-9-]+"),
                    re.compile(r"\b[0-9]{16}\b")]  # WireGuard keys, Tailscale auth keys, Mullvad accounts
@@ -638,7 +647,7 @@ def tor_uid(name=TOR_USER):
     try:
         return pwd.getpwnam(name).pw_uid
     except KeyError:
-        raise RuntimeError(f"the VPN image has no user {name}: rebuild it with sandbox-ai build vpn") from None
+        raise RuntimeError(f"the Tor image has no user {name}: rebuild it with sandbox-ai build tor") from None
 
 
 def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
@@ -650,8 +659,8 @@ def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
         raise ValueError("the profile has bridges, but none arrived")
     uid = (uid_of or tor_uid)()
     if uid != TOR_UID:
-        raise RuntimeError(f"{TOR_USER} has the uid {uid} in the VPN image, not {TOR_UID}: rebuild it with "
-                           "sandbox-ai build vpn")
+        raise RuntimeError(f"{TOR_USER} has the uid {uid} in the Tor image, not {TOR_UID}: rebuild it with "
+                           "sandbox-ai build tor")
     load_killswitch(runner, tor_rules(uid, bridges))
     RUN.mkdir(mode=0o700, exist_ok=True)
     config, defaults = RUN / "torrc", RUN / "torrc-defaults"
@@ -725,6 +734,26 @@ def load_killswitch(runner, rules):
     runner.run(["nft", "list", "table", "inet", TABLE])
 
 
+# What became of the optional wireguard-go when the image was built (Containerfile.vpn writes it).
+WIREGUARD_GO_STATUS = Path("/usr/local/share/sandbox-ai/wireguard-go")
+
+
+def wireguard_go():
+    """wireguard-go's path in this image, or None: it is left out when it could not be built."""
+    return shutil.which("wireguard-go")
+
+
+def no_wireguard_go_message():
+    try:
+        status = WIREGUARD_GO_STATUS.read_text().strip()[:300]
+    except OSError:
+        status = ""
+    return ("the host has no WireGuard kernel module loaded (the kernel's WireGuard could not create the interface) "
+            "and this VPN image has no wireguard-go, the fallback for that" + (f" ({status})" if status else "") +
+            ": load the module on the host (sudo modprobe wireguard; sandbox-ai doctor shows it), or rebuild the "
+            "image with network for Go's module proxy: sandbox-ai build vpn")
+
+
 def up_wireguard(payload, runner, resolve=system_resolver):
     wireguard = payload["profile"]["wireguard"]
     endpoints = {}
@@ -742,6 +771,8 @@ def up_wireguard(payload, runner, resolve=system_resolver):
     if runner.run(["ip", "link", "add", "dev", interface, "type", "wireguard"], check=False).returncode == 0:
         tunnel["implementation"] = "kernel"
     else:
+        if not wireguard_go():
+            raise RuntimeError(no_wireguard_go_message())
         RUN.mkdir(mode=0o700, exist_ok=True)
         log = open(RUN / "wireguard-go.log", "ab")
         runner.spawn(["wireguard-go", "--foreground", interface], log)
@@ -1030,9 +1061,187 @@ def resolve_hosts(names, tunnel, mode_tailnet=False):
     return result
 
 
+# --- requests of the launcher while the tunnel serves --------------------------------------------------------------
+#
+# A line on standard input is one request {"op", "id", ...}; the answer is one event {"event": "answer", "id", ...}
+# (or with "error"). The launcher sends one at a time and waits for its answer. Every lookup goes to the tunnel's
+# resolvers, every connection through the tunnel: sandbox-ai llm check|models|status of a server that only the VPN
+# reaches, and the lookups of names allowed during a run (`resolve`, through podman exec).
+
+def addresses_of(name, tunnel, tailnet=False):
+    """The addresses of NAME through the tunnel's resolvers (resolve_hosts' rules for families and the tailnet)."""
+    return resolve_hosts([name], tunnel, tailnet)[name]
+
+
+def within_networks(address, networks):
+    ip = ipaddress.ip_address(address)
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return any(ip.version == net.version and ip in net for net in map(ipaddress.ip_network, networks))
+
+
+def target_of(url, tunnel, tailnet, resolve=None):
+    """(parts, address, port) for URL (http or https): its host resolved through the tunnel."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("only http and https URLs")
+    try:
+        address = str(ipaddress.ip_address(parts.hostname))
+    except ValueError:
+        found = (resolve or (lambda name: addresses_of(name, tunnel, tailnet)))(parts.hostname)
+        if not found:
+            raise ValueError(f"{parts.hostname} has no address through the VPN") from None
+        address = found[0]
+    return parts, address, parts.port or (443 if parts.scheme == "https" else 80)
+
+
+def tls_context_for(ca=None):
+    context = ssl.create_default_context()
+    if ca:
+        context.load_verify_locations(cadata=ca)
+    return context
+
+
+def plain_problem(parts, address, request):
+    """Why a request with a secret (an API key, a header the launcher marked) may not go over plain http to ADDRESS:
+    only to the networks the launcher names ("plain_networks"; None: any, the endpoint was added with
+    --insecure-http). None when it may."""
+    networks = request.get("plain_networks")
+    if parts.scheme != "http" or not request.get("secret") or networks is None:
+        return None
+    if within_networks(address, networks):
+        return None
+    return (f"plain http to {address} would cross networks you do not control unencrypted (the key would go with "
+            "it; nothing was sent)")
+
+
+def request_connect(request, tunnel, tailnet, connect=socket.create_connection, resolve=None):
+    """Reach URL's host and port through the tunnel; for https the TLS handshake with the certificate checked
+    (the request's "ca" too): {"address", "tls"}."""
+    parts, address, port = target_of(request["url"], tunnel, tailnet, resolve)
+    timeout = float(request.get("timeout") or REQUEST_TIMEOUT)
+    with connect((address, port), timeout=timeout) as sock:
+        if parts.scheme == "https":
+            with tls_context_for(request.get("ca")).wrap_socket(sock, server_hostname=parts.hostname) as tls:
+                return {"address": address, "tls": tls.version()}
+    return {"address": address, "tls": None}
+
+
+def request_http(request, tunnel, tailnet, resolve=None):
+    """One HTTP request through the tunnel, no redirect followed: {"status", "body" (base64), "address"}."""
+    parts, address, port = target_of(request["url"], tunnel, tailnet, resolve)
+    problem = plain_problem(parts, address, request)
+    if problem:
+        raise ValueError(problem)
+    timeout = float(request.get("timeout") or REQUEST_TIMEOUT)
+    if parts.scheme == "https":
+        connection = PinnedHTTPSConnection(parts.hostname, address, port, timeout, tls_context_for(request.get("ca")))
+    else:
+        connection = PinnedHTTPConnection(parts.hostname, address, port, timeout)
+    limit = min(int(request.get("limit") or REQUEST_LIMIT), REQUEST_LIMIT)
+    body = base64.b64decode(request["body"]) if request.get("body") else None
+    headers = {str(k): str(v) for k, v in (request.get("headers") or {}).items()}
+    try:
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        connection.request(request.get("method") or ("GET" if body is None else "POST"), target, body=body,
+                           headers=headers)
+        response = connection.getresponse()
+        data = response.read(limit + 1)[:limit]
+        return {"status": response.status, "body": base64.b64encode(data).decode(), "address": address}
+    finally:
+        connection.close()
+
+
+def handle_request(line, tunnel, tailnet, secrets=()):
+    """The answer event to one request LINE of the launcher."""
+    try:
+        request = json.loads(line)
+        if not isinstance(request, dict):
+            raise ValueError("a request is a JSON object")
+    except ValueError as exc:
+        return {"event": "answer", "id": None, "error": f"unreadable request: {exc}"}
+    ident, op = request.get("id"), request.get("op")
+    try:
+        if op == "resolve":
+            names = request.get("names")
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                raise ValueError("names: a list of host names")
+            return {"event": "answer", "id": ident, "hosts": resolve_hosts(names, tunnel, tailnet)}
+        if op == "connect":
+            return {"event": "answer", "id": ident, **request_connect(request, tunnel, tailnet)}
+        if op == "http":
+            return {"event": "answer", "id": ident, **request_http(request, tunnel, tailnet)}
+        raise ValueError(f"unknown request {op!r}")
+    except (OSError, ValueError, KeyError, TypeError, ssl.SSLError, http.client.HTTPException) as exc:
+        extra = [str(v) for v in (request.get("headers") or {}).values()] if isinstance(request.get("headers"), dict) \
+            else []
+        return {"event": "answer", "id": ident, "error": redact(f"{getattr(exc, 'reason', None) or exc}",
+                                                              [*secrets, *extra])}
+
+
+def recheck(payload, tunnel, runner, get=fetch):
+    """The address checks again while serving (IPv4 and IPv6 echo, the resolvers): the "recheck" event's checks."""
+    return gather_checks(payload, tunnel, runner, get)
+
+
+def save_serve_state(tunnel, tailnet, path=None):
+    """What `resolve` needs of the running tunnel, in the container's private /run."""
+    with contextlib.suppress(OSError):
+        write_private(path or SERVE_STATE, json.dumps({"dns": tunnel.get("dns") or [], "ipv4": tunnel.get("ipv4"),
+                                                       "ipv6": tunnel.get("ipv6"), "tailnet": bool(tailnet)}))
+
+
+def baseline(settings, resolve=system_resolver, get=fetch):
+    """The public addresses (IPv4, IPv6) and the resolver's egress of the network this runs in, outside every VPN:
+    what the checks compare the tunnel's with."""
+    result = {}
+    for family in (4, 6):
+        result[f"ipv{family}"] = echo(settings["urls"], family, resolve, get, settings["timeout"]).get("ip")
+    if settings.get("dns_probe"):
+        try:
+            result["dns_egress"] = resolve(settings["dns_probe"], 4)
+        except (OSError, ValueError):
+            result["dns_egress"] = []
+    return result
+
+
+def baseline_command(stdin, out):
+    """`vpn_runtime.py baseline`: baseline() of the settings on standard input, as one JSON line (a remote Podman
+    engine's own addresses: the launcher runs this in a plain container there)."""
+    try:
+        settings = json.loads(stdin.read(1 << 16))
+        out.write(json.dumps(baseline({"urls": [u for u in settings.get("urls") or [] if isinstance(u, str)],
+                                       "timeout": float(settings.get("timeout") or 8),
+                                       "dns_probe": settings.get("dns_probe")})) + "\n")
+        return 0
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        out.write(json.dumps({"error": str(exc)}) + "\n")
+        return 1
+
+
+def resolve_command(stdin, out, path=None):
+    """`vpn_runtime.py resolve`, run by the launcher with podman exec in the running VPN container: the names on
+    standard input (a JSON list) resolved through the tunnel's resolvers, {"hosts": {...}} or {"error"} on stdout."""
+    try:
+        state = json.loads(Path(path or SERVE_STATE).read_text())
+        names = json.loads(stdin.read(1 << 16))
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names) or len(names) > 256:
+            raise ValueError("expected a JSON list of host names")
+        tunnel = {"dns": state.get("dns") or [], "ipv4": state.get("ipv4"), "ipv6": state.get("ipv6")}
+        out.write(json.dumps({"hosts": resolve_hosts(names, tunnel, bool(state.get("tailnet")))}) + "\n")
+        return 0
+    except (OSError, ValueError) as exc:
+        out.write(json.dumps({"error": str(exc)}) + "\n")
+        return 1
+
+
 def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
     if argv[:1] == ["openvpn-route-up"]:
         return openvpn_route_up()
+    if argv[:1] == ["resolve"]:
+        return resolve_command(stdin, out)
+    if argv[:1] == ["baseline"]:
+        return baseline_command(stdin, out)
     if argv[:1] not in (["serve"], ["check"]):
         print("sandbox-ai vpn runtime: internal entry point; use sandbox-ai vpn", file=sys.stderr)
         return 2
@@ -1061,11 +1270,28 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
         return 1
     if argv[0] == "check":
         return 0
-    # Serve: keep the tunnel until the launcher closes stdin; report a daemon that dies (the kill switch stays).
+    # Serve: keep the tunnel until the launcher closes stdin; answer its requests (a line each); check the address
+    # again every RECHECK seconds; report a daemon that dies (the kill switch stays).
+    save_serve_state(tunnel, tailnet)
+    checks_of = payload.get("checks") or {}
+    every = float(checks_of.get("recheck", RECHECK) or 0) if not tailnet and checks_of.get("ip", True) else 0
+    due = time.monotonic() + every
+    secrets_of = secret_values(payload)
     while True:
-        ready = select.select([stdin], [], [], 2)[0]
-        if ready and not stdin.readline():
-            return 0
+        ready = select.select([stdin], [], [], max(0.0, min(2.0, due - time.monotonic())) if every else 2)[0]
+        if ready:
+            line = stdin.readline()
+            if not line:
+                return 0
+            if line.strip():
+                answer = handle_request(line, tunnel, tailnet, secrets_of)
+                emit(answer.pop("event"), out=out, **answer)
+        if every and time.monotonic() >= due:
+            due = time.monotonic() + every
+            try:
+                emit("recheck", out=out, checks=recheck(payload, tunnel, runner))
+            except Exception as exc:  # noqa: BLE001 - said, the next one comes at its time
+                emit("recheck", out=out, error=redact(f"{exc}", secrets_of))
         for child in list(runner.children):
             if child.poll() is not None:
                 emit("down", out=out, message=f"{child.args[0]} exited ({child.returncode}); the kill switch "

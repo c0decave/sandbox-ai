@@ -463,9 +463,11 @@ def test_wait_child(scenario, monkeypatch):
     else:
         assert s.wait_child(child) == 7
     assert len(restored) == 3
-    assert child.send_signal.call_count == (0 if scenario == "edge" else 3)
+    assert child.send_signal.call_count == (0 if scenario == "edge" else 6)
     if scenario != "edge":
-        assert [call.args[0] for call in child.send_signal.call_args_list] == [signal.SIGTERM, signal.SIGINT, signal.SIGHUP]
+        # Each forwarded signal is followed by SIGCONT: a frozen child (a canary's pause) would hold it for good.
+        assert [call.args[0] for call in child.send_signal.call_args_list] == [
+            signal.SIGTERM, signal.SIGCONT, signal.SIGINT, signal.SIGCONT, signal.SIGHUP, signal.SIGCONT]
 
 
 def test_inner_bootstrap(scenario, monkeypatch, tmp_path):
@@ -6173,6 +6175,26 @@ def test_control_server(scenario, tmp_path):
         thread.join(5)
 
 
+def test_http_sources(scenario):
+    """The rulesets the proxy holds, as the launcher's proxy_rules writes them (rules reload shapes them so too)."""
+    def source(name, document):
+        return {"name": name, **rt.Ruleset.validated(document, name)}
+    deny = {"version": 1, "http": [{"id": "x", "host": "a.example", "decision": "deny"}],
+            "mcp": [{"id": "m", "server": "s", "tool": "*", "decision": "ask"}]}
+    if scenario == "happy":
+        shaped = rt.http_sources([source("mine", deny)])
+        assert [s["name"] for s in shaped] == ["mine"] and set(shaped[0]) == {"name", "version", "defaults", "http",
+                                                                             "untrusted"}
+        assert shaped[0]["defaults"] == {"http": "allow"} and "mcp" not in shaped[0]
+    elif scenario == "sad":
+        # No HTTP rules, no stricter default, no untrusted host: nothing for the proxy; --allow-http comes apart.
+        assert rt.http_sources([source("mcp-only", {"version": 1, "mcp": deny["mcp"]}),
+                                source("--allow-http", deny)]) == []
+    else:
+        shaped = rt.http_sources([source("strict", {"version": 1, "defaults": {"http": "ask"}})])
+        assert shaped[0]["http"] == [] and shaped[0]["defaults"] == {"http": "ask"}
+
+
 def test_proxy_enabled(scenario):
     if scenario == "happy":
         assert s.proxy_enabled(s.parse_args(["codex"]))
@@ -8086,10 +8108,11 @@ def test_proxy_rules(scenario, tmp_path, monkeypatch):
         assert config["rules"][0]["http"][0]["id"] == "no-gists" and "mcp" not in config["rules"][0]
         assert config["pinned"] == hosts
     elif scenario == "sad":
-        assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on"]), hosts) == {}
+        # No rules, but the addresses: rules reloaded during the run hold for a bare address too.
+        assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on"]), hosts) == {"rules": [], "pinned": hosts}
     else:  # --allow-http travels as http_rules, not twice
         assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on", "--allow-http", "api.github.com GET /**"]),
-                             hosts) == {}
+                             hosts) == {"rules": [], "pinned": hosts}
         assert s.proxy_config(s.parse_args(["codex", "--rules", str(mine)]), hosts, "l")["rules"][0]["http"]
 
 
@@ -9018,6 +9041,56 @@ def test_load_canary_module(scenario):
             module.parse_categories("nope")
     else:
         assert module is not s.load_canary_module()  # loaded fresh each time, like the other modules
+
+
+def test_load_safeguards_module(scenario):
+    module = s.load_safeguards_module()
+    if scenario == "happy":
+        assert {"firewall", "dns", "canary", "oom"} <= set(module.KINDS)
+        assert module.record("dns", "x.example", "not allowed", "sandbox-ai net allow x.example")["level"] == "warning"
+    elif scenario == "sad":
+        entry = module.record("no-such-kind", "?", "?", "")  # an unknown kind is a warning, never an error
+        assert entry["level"] == "warning" and entry["kind"] == "no-such-kind"
+    else:
+        assert module is s.load_safeguards_module()  # loaded once: the watch thread keeps using the same module
+
+
+def test_start_safeguards(scenario, tmp_path, capsys):
+    a = SimpleNamespace(probe=False, run_id="claude-contract", log_dir=tmp_path, control_dir=None)
+    cfg = {"env": {"API_TOKEN": "tok-contract-123456", "PLAIN": "shown"}, "secret_names": []}
+    if scenario == "happy":  # a watch writing safeguards.jsonl, the token's value redacted
+        watch = s.start_safeguards(a, None, cfg)
+        try:
+            assert watch is not None and set(watch.redact.values) == {"tok-contract-123456"}
+        finally:
+            watch.stop()
+    elif scenario == "sad":  # a probe keeps no records
+        assert s.start_safeguards(SimpleNamespace(**{**vars(a), "probe": True}), None, cfg) is None
+    else:  # a watch that cannot start never fails the launch
+        bad = SimpleNamespace(**{**vars(a), "log_dir": object()})
+        assert s.start_safeguards(bad, None, cfg) is None
+        assert "safeguards: not recorded" in capsys.readouterr().err
+
+
+def test_safeguard_event(scenario, tmp_path):
+    if scenario == "happy":  # one bounded line for the launcher's watch, the secret in WHY redacted
+        rt.safeguard_event("mode", "net allow", 'widens the mode {"api_key": "k-1"}', directory=tmp_path, rule="r")
+        entry = json.loads((tmp_path / rt.SAFEGUARD_FILE).read_text())
+        assert entry["kind"] == "mode" and entry["rule"] == "r" and "k-1" not in entry["why"]
+        assert stat.S_IMODE((tmp_path / rt.SAFEGUARD_FILE).stat().st_mode) == 0o600
+    elif scenario == "sad":  # no control directory: nothing, no exception
+        rt.safeguard_event("guard", "x", "y", directory=tmp_path / "missing")
+        assert not (tmp_path / "missing").exists()
+    else:  # a full file takes no more lines; a link in its place is never followed
+        (tmp_path / rt.SAFEGUARD_FILE).write_bytes(b"x" * rt.SAFEGUARD_LIMIT)
+        rt.safeguard_event("guard", "x", "y", directory=tmp_path)
+        assert (tmp_path / rt.SAFEGUARD_FILE).stat().st_size == rt.SAFEGUARD_LIMIT
+        other = tmp_path / "other"
+        other.mkdir()
+        target = tmp_path / "target"
+        (other / rt.SAFEGUARD_FILE).symlink_to(target)
+        rt.safeguard_event("guard", "x", "y", directory=other)
+        assert not target.exists()
 
 
 def test_plant_canaries(scenario, tmp_path):
@@ -10220,7 +10293,9 @@ def test_memory_state(scenario, tmp_path):
         assert s.memory_state(group) == {"current": 4294967296, "limit": 8589934592, "oom_kill": 2, "anon": 3000,
                                          "shmem": 500}
     elif scenario == "sad":
-        (group / "memory.max").write_text("max\n")  # no limit: not a cgroup the watch takes
+        (group / "memory.max").write_text("max\n")  # no memory limit (the watch may still watch the CPU): 0
+        assert s.memory_state(group)["limit"] == 0
+        (group / "memory.current").write_text("gone\n")
         with pytest.raises(ValueError):
             s.memory_state(group)
     else:
@@ -10287,7 +10362,8 @@ def test_podman_agent_pid(scenario, monkeypatch):
 
 
 def test_start_memory_watch(scenario, monkeypatch, tmp_path):
-    a = s.parse_args(["claude", *(["--memory", "none"] if scenario == "sad" else [])])
+    a = s.parse_args(["claude", *(["--memory", "none", "--cpus", "none", "--pids", "none"] if scenario == "sad"
+                                  else [])])
     monkeypatch.setattr(s, "enforced_limits", lambda a: (s.resource_limits(a), []))
     started = []
     monkeypatch.setattr(s.MemoryWatch, "start", lambda self: started.append(self) or self)
@@ -10471,12 +10547,14 @@ def test_engine_cpus(scenario, monkeypatch):
             s.resource_limits(s.parse_args(["claude", "--cpus", "8"]))
 
 
-def test_tmux_is_off_by_default_on_macos_until_attaching_reaches_the_vm(monkeypatch):
+def test_tmux_is_on_by_default_on_macos_again_now_that_attaching_reaches_the_vm(monkeypatch):
+    """Stage 2 of macOS support: attach goes through podman exec (sessions.attach_machine), so a terminal start is a
+    detachable session on a Mac as on Linux."""
     monkeypatch.setattr(s.sys.stdin, "isatty", lambda: True, raising=False)
     monkeypatch.setattr(s.sys.stdout, "isatty", lambda: True, raising=False)
     monkeypatch.setattr(s.sys, "platform", "darwin")
-    assert s.resolve_tmux(s.parse_args(["claude"])) is False
-    assert s.resolve_tmux(s.parse_args(["claude", "--tmux"])) is True  # asked for: still possible
+    assert s.resolve_tmux(s.parse_args(["claude"])) is True
+    assert s.resolve_tmux(s.parse_args(["claude", "--no-tmux"])) is False
     monkeypatch.setattr(s.sys, "platform", "linux")
     assert s.resolve_tmux(s.parse_args(["claude"])) is True
 
@@ -11198,3 +11276,336 @@ def test_project_directory(scenario, tmp_path, monkeypatch):
         for named in (f"{here}/", f"../{here.name}", "sub", str(tmp_path), f"{other},sub"):
             a = s.parse_args(["claude", "--workspace", named])
             assert a.cwd_project is None and a.workspaces == named.split(","), named
+
+
+def test_cgroup_limited(scenario, tmp_path):
+    if scenario == "happy":
+        (tmp_path / "pids.max").write_text("4096\n")
+        assert s.cgroup_limited(tmp_path)
+    elif scenario == "sad":
+        assert not s.cgroup_limited(tmp_path / "absent")  # nothing to read
+    else:
+        for name in ("memory.max", "cpu.max", "pids.max"):
+            (tmp_path / name).write_text("max 100000\n" if name == "cpu.max" else "max\n")
+        assert not s.cgroup_limited(tmp_path)  # every controller unlimited
+
+
+def test_cgroup_pairs(scenario, tmp_path):
+    if scenario == "happy":
+        (tmp_path / "cpu.stat").write_text("usage_usec 5\nnr_periods 2\n")
+        assert s.cgroup_pairs(tmp_path / "cpu.stat") == {"usage_usec": 5, "nr_periods": 2}
+    elif scenario == "sad":
+        assert s.cgroup_pairs(tmp_path / "absent") == {}
+    else:
+        (tmp_path / "x").write_text("a\nb x\nc 3\n\n")
+        assert s.cgroup_pairs(tmp_path / "x") == {"c": 3}
+
+
+def test_cpu_state(scenario, tmp_path):
+    (tmp_path / "cpu.stat").write_text("usage_usec 10\nnr_periods 4\nnr_throttled 1\nthrottled_usec 7\n")
+    if scenario == "happy":
+        (tmp_path / "cpu.max").write_text("150000 100000\n")
+        assert s.cpu_state(tmp_path) == {"usage_usec": 10, "nr_periods": 4, "nr_throttled": 1, "throttled_usec": 7,
+                                         "limit": 1.5}
+    elif scenario == "sad":
+        (tmp_path / "cpu.stat").write_text("")
+        assert s.cpu_state(tmp_path) is None  # no cpu controller
+    else:
+        (tmp_path / "cpu.max").write_text("100000 0\n")  # a broken period: no limit, no error
+        assert s.cpu_state(tmp_path)["limit"] == 0.0
+
+
+def test_pids_state(scenario, tmp_path):
+    if scenario == "happy":
+        (tmp_path / "pids.current").write_text("12\n")
+        (tmp_path / "pids.max").write_text("64\n")
+        assert s.pids_state(tmp_path) == {"current": 12, "limit": 64}
+    elif scenario == "sad":
+        assert s.pids_state(tmp_path) is None
+    else:
+        (tmp_path / "pids.current").write_text("3\n")
+        (tmp_path / "pids.max").write_text("max\n")
+        assert s.pids_state(tmp_path) == {"current": 3, "limit": 0}
+
+
+def test_cpu_usage(scenario):
+    before = {"usage_usec": 0, "nr_periods": 0, "nr_throttled": 0, "throttled_usec": 0, "limit": 2.0}
+    after = {"usage_usec": 2_000_000, "nr_periods": 10, "nr_throttled": 5, "throttled_usec": 9, "limit": 2.0}
+    if scenario == "happy":
+        assert s.cpu_usage(before, after, 1.0, host_cpus=4) == {"cpus": 2.0, "percent": 100.0, "limit": 2.0,
+                                                                "host_cpus": 4, "throttled_percent": 50.0,
+                                                                "throttled_usec": 9}
+    elif scenario == "sad":
+        assert s.cpu_usage(None, after, 1.0) is None and s.cpu_usage(before, after, 0) is None
+    else:
+        same = dict(before)
+        assert s.cpu_usage(same, same, 1.0, host_cpus=4)["throttled_percent"] == 0.0  # no periods: no division
+
+
+# --- macOS support, stage 2 (more in test_macos_host.py) ----------------------------------------------------------
+
+def test_procinfo(scenario):
+    """The process helper (procinfo.py) is loaded once and reads this process as /proc shows it."""
+    info = s.procinfo()
+    assert info is s.procinfo()
+    pid = {"happy": os.getpid(), "sad": 2 ** 22 + 9, "edge": os.getppid()}[scenario]
+    assert (info.start_time(pid) is None) is (scenario == "sad")
+    assert s.process_start(pid) == info.start_time(pid)
+
+
+def test_on_machine(scenario, monkeypatch):
+    monkeypatch.setattr(s.sys, "platform", "linux" if scenario == "edge" else "darwin")
+    argv = ["claude", *(["--podman-url", "ssh://core@vm/run/podman.sock"] if scenario == "sad" else [])]
+    assert s.on_machine(s.parse_args(argv)) is (scenario == "happy")
+
+
+def test_machine_host(scenario, monkeypatch):
+    value = {"happy": None, "sad": "::1", "edge": "10.0.2.2"}[scenario]
+    if value:
+        monkeypatch.setenv("SANDBOX_AI_MACHINE_HOST", value)
+    else:
+        monkeypatch.delenv("SANDBOX_AI_MACHINE_HOST", raising=False)
+    if scenario == "sad":
+        with pytest.raises(ValueError, match="IPv4"):
+            s.machine_host()
+    else:
+        assert s.machine_host() == (value or s.MACHINE_HOST)
+
+
+def test_machine_record(scenario, monkeypatch):
+    monkeypatch.setattr(s.sys, "platform", "darwin")
+    record = {"happy": {"backend": "podman"}, "sad": {"backend": "bwrap"},
+              "edge": {"backend": "podman", "podman_url": "unix:///x"}}[scenario]
+    assert s.machine_record(record) is (scenario == "happy")
+
+
+def test_run_container(scenario):
+    if scenario == "happy":
+        assert s.run_container({"pod": "agent-claude-1"}) == "agent-claude-1-agent"
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="no Podman container"):
+            s.run_container({"pod": "../x", "container": "$(id)"})
+    else:
+        assert s.run_container({"pod": "agent-claude-1", "container": "vpn-pod-agent"}) == "vpn-pod-agent"
+
+
+def test_machine_exec(scenario):
+    record = {"pod": "agent-claude-1", "podman_url": "unix:///run/p.sock" if scenario == "edge" else None}
+    command = s.machine_exec(record, ["--internal-attach-probe", s.ATTACH_SOCKET], interactive=scenario != "sad")
+    assert command[-4:] == ["-I", "/sandbox/runtime.py", "--internal-attach-probe", s.ATTACH_SOCKET]
+    assert ("--interactive" in command) is (scenario != "sad")
+    assert (command[1:4] == ["--remote", "--url", "unix:///run/p.sock"]) is (scenario == "edge")
+
+
+def test_connect_relay(scenario, tmp_path):
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(tmp_path / "real.sock"))
+    server.listen(1)
+    path = {"happy": tmp_path / "real.sock", "sad": tmp_path / "link.sock", "edge": tmp_path / "plain"}[scenario]
+    if scenario == "sad":
+        path.symlink_to(tmp_path / "real.sock")
+    if scenario == "edge":
+        path.write_text("")
+    with socket.socket(socket.AF_UNIX) as client:
+        if scenario == "happy":
+            rt.connect_relay(client, str(path))
+        else:
+            with pytest.raises(OSError):
+                rt.connect_relay(client, str(path))
+    server.close()
+
+
+def test_attach_probe(scenario, tmp_path):
+    path = tmp_path / "attach.sock"
+    if scenario != "sad":
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+        server.listen(1)
+        if scenario == "edge":
+            server.close()  # the file stays, nobody listens
+    assert rt.attach_probe(str(path)) == (0 if scenario == "happy" else 1)
+
+
+def test_exec_token(scenario, tmp_path):
+    token = tmp_path / "exec.token"
+    token.write_text({"happy": "ab" * 32 + "\n", "sad": "not a token", "edge": "ab"}[scenario])
+    assert rt.exec_token(token) == ("ab" * 32 if scenario == "happy" else None)
+    assert rt.exec_token(None) is None and rt.exec_token(tmp_path / "missing") is None
+
+
+def test_control_client(scenario, tmp_path):
+    path = tmp_path / "c.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(1)
+
+    def serve():
+        connection, _ = server.accept()
+        with connection:
+            line = connection.makefile("rb").readline()
+            connection.sendall(json.dumps({"ok": True, "got": json.loads(line)}).encode() + b"\n")
+    thread = threading.Thread(target=serve, daemon=True)
+    request = {"happy": b'{"op": "show"}\n', "sad": b'{"op": "show"}', "edge": b"x" * ((4 << 20) + 10) + b"\n"}[scenario]
+    out = io.BytesIO()
+    if scenario == "happy":
+        thread.start()
+        assert rt.control_client(io.BytesIO(request), out, paths=[tmp_path / "missing", path]) == 0
+        assert json.loads(out.getvalue()) == {"ok": True, "got": {"op": "show"}}
+        thread.join(5)
+    else:
+        assert rt.control_client(io.BytesIO(request), out, paths=[path]) == 2 and out.getvalue() == b""
+    server.close()
+
+
+# --- macOS support, stages 3 and 4 (more in test_macos_integration.py) --------------------------------------------
+
+def test_browser_forward(scenario, tmp_path):
+    left, right = socket.socketpair()
+    line = {"happy": b'{"url": "https://example.org"}\n', "sad": b"x" * 9000 + b"\n", "edge": b'{"url": 1}'}[scenario]
+    right.sendall(line)
+    if scenario == "edge":
+        right.shutdown(socket.SHUT_WR)  # cut off: no end of line
+
+    def host():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for request in tmp_path.glob("*.request"):
+                request.unlink()
+                (tmp_path / request.name.replace(".request", ".reply")).write_text('{"ok": true, "message": "m"}\n')
+                return
+            time.sleep(0.02)
+    thread = threading.Thread(target=host, daemon=True)
+    thread.start()
+    rt.browser_forward(left, tmp_path, 1, wait=3)
+    answer = json.loads(right.makefile().readline())
+    assert answer["ok"] is (scenario == "happy")
+    thread.join(6)
+
+
+def test_browser_relay(scenario, tmp_path):
+    sock = Path(tempfile.mkdtemp(prefix="br-", dir="/tmp")) / "open.sock"
+    stop = threading.Event()
+    if scenario == "edge":
+        stop.set()  # stopped before it took anything: it ends at once
+    thread = threading.Thread(target=rt.browser_relay, args=(str(sock), tmp_path / "requests", stop),
+                              kwargs={"wait": 0.3}, daemon=True)
+    thread.start()
+    try:
+        if scenario == "edge":
+            thread.join(5)
+            assert not thread.is_alive()
+            return
+        deadline = time.monotonic() + 5
+        while not sock.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        out = io.StringIO()
+        url = "https://example.org" if scenario == "happy" else "ftp://example.org"
+        assert rt.open_request([url], socket_path=str(sock), out=out) == 1
+        # nobody on the host answers here: said, not hanging (an ftp URL never leaves the sandbox at all)
+        assert ("did not take the request" in out.getvalue()) is (scenario == "happy")
+    finally:
+        stop.set()
+        thread.join(5)
+        shutil.rmtree(sock.parent, ignore_errors=True)
+
+
+def test_folded(scenario, monkeypatch):
+    monkeypatch.setattr(s.sys, "platform", "linux" if scenario == "edge" else "darwin")
+    path = {"happy": "/Users/Ada/Library", "sad": "/", "edge": "/home/Ada"}[scenario]
+    assert s.folded(path) == Path(path.casefold() if scenario != "edge" else path)
+
+
+def test_claude_keychain_login(scenario, monkeypatch):
+    monkeypatch.setattr(s.sys, "platform", "linux" if scenario == "edge" else "darwin")
+    def runner(argv, **kwargs):
+        assert "-w" not in argv  # the value is never asked for
+        if scenario == "sad":
+            raise OSError("no security")
+        return SimpleNamespace(returncode=0)
+    assert s.claude_keychain_login(runner) is (scenario == "happy")
+
+
+def test_mcp_volume(scenario, tmp_path):
+    directory = {"happy": tmp_path / "mcp" / "files" / "sock", "sad": tmp_path / "mcp" / "a b;c" / "sock",
+                 "edge": Path("/sock")}[scenario]
+    volume = s.mcp_volume(directory)
+    assert re.fullmatch(r"sandbox-ai-mcp-[A-Za-z0-9_.-]+-[0-9a-f]{12}", volume)
+    assert volume.startswith({"happy": "sandbox-ai-mcp-files-", "sad": "sandbox-ai-mcp-a_b_c-",
+                              "edge": "sandbox-ai-mcp-server-"}[scenario])
+
+
+def test_added_api_keys(scenario, tmp_path):
+    path = tmp_path / rt.ADDED_API_KEYS
+    entry = {"host": "Dev.To", "port": 443, "name": "DEVTO", "placeholder": "sandbox-ai-api-key-placeholder-DEVTO",
+             "key": "k-123"}
+    if scenario == "happy":
+        path.write_text(json.dumps({"version": 1, "api_keys": [entry]}))
+        first = rt.added_api_keys(path)
+        assert first == [{**entry, "host": "dev.to"}]
+        assert rt.added_api_keys(path) is first, "read again only when the file changes"
+    elif scenario == "sad":
+        path.write_text(json.dumps({"api_keys": [{**entry, "key": "a b"}, {**entry, "placeholder": "x"}, 7]}))
+        assert rt.added_api_keys(path) == []
+        path.write_text("{")
+        assert rt.added_api_keys(path) == []
+    else:
+        assert rt.added_api_keys(tmp_path / "none.json") == []
+        path.write_text(json.dumps([entry]))  # not an object
+        assert rt.added_api_keys(path) == []
+
+
+def test_no_delay(scenario):
+    import socket as socket_module
+    if scenario == "happy":
+        with socket_module.socket() as sock:
+            rt.no_delay(sock)
+            assert sock.getsockopt(socket_module.IPPROTO_TCP, socket_module.TCP_NODELAY) != 0
+    elif scenario == "sad":
+        with socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM) as sock:
+            rt.no_delay(sock)  # no TCP: nothing to set, nothing raised
+    else:
+        rt.no_delay(None)  # not a socket at all
+
+
+def test_option_actions(scenario):
+    actions = s.option_actions()
+    if scenario == "happy":
+        assert actions["--allow-host"].dest == "allow_host" and actions["-w"] is actions["--workspace"]
+    elif scenario == "sad":
+        assert "--no-such-option" not in actions
+    else:
+        assert s.option_actions() is actions, "built once"
+
+
+def test_checked_api_keys(scenario):
+    entry = {"host": "API.x.org", "port": 443, "name": "K", "placeholder": "sandbox-ai-api-key-placeholder-K",
+             "key": "abc"}
+    if scenario == "happy":
+        assert rt.checked_api_keys([entry]) == [{**entry, "host": "api.x.org"}]
+    elif scenario == "sad":
+        assert rt.checked_api_keys([{**entry, "placeholder": "sandbox-ai-api-key-placeholder-OTHER"},
+                                    {**entry, "port": True}, {**entry, "key": "a\nb"}, "x"]) == []
+    else:
+        assert rt.checked_api_keys(None) == [] and len(rt.checked_api_keys([entry] * 100)) == rt.API_KEYS_LIMIT
+
+
+def test_give_api_keys(scenario, tmp_path):
+    import os as os_module
+    entry = {"host": "api.x.org", "port": 443, "name": "K", "placeholder": "sandbox-ai-api-key-placeholder-K",
+             "key": "abc"}
+    path = tmp_path / rt.ADDED_API_KEYS
+    if scenario == "happy":
+        owner = (os_module.getuid(), os_module.getgid())
+        assert rt.give_api_keys([entry], path, owner=owner) == ["K"]
+        assert path.stat().st_mode & 0o777 == 0o600 and rt.added_api_keys(path) == [entry]
+        rt.give_api_keys([entry], path)  # by default the directory's owner (the proxy's user in a sandbox)
+        assert path.stat().st_uid == tmp_path.stat().st_uid
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="every key has"):
+            rt.give_api_keys([{**entry, "key": "a b"}], path)
+        with pytest.raises(ValueError, match="without the connection proxy"):
+            rt.give_api_keys([entry], tmp_path / "missing" / "keys.json")
+        assert not path.exists()
+    else:
+        assert rt.give_api_keys([], path, owner=(os_module.getuid(), os_module.getgid())) == []
+        assert rt.added_api_keys(path) == []

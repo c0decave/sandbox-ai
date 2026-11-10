@@ -21,6 +21,7 @@ import re
 import secrets
 import selectors
 import shlex
+import tempfile
 import shutil
 import signal
 import stat
@@ -37,6 +38,7 @@ from .files import printable
 # sandbox-ai's own modules (the launcher's parser, approvals.ID, secret_store.NAME and LIMIT, ...).
 AGENTS = ("claude", "codex", "opencode")
 MIN_VERSION = "0.1.21"  # the first release with approvals, secrets, images and log telemetry
+TRANSFER_SECONDS = 1200  # sandbox-ai session copy|move: its dry run there (up to 180 s) and the start (up to 900 s)
 # What the app uses of sandbox-ai: a development checkout may have it before its version number says so.
 REQUIRED = {"approvals": ("questions", "answer", "describe", "ID"), "secret_store": ("store", "FileStore", "NAME"),
             "images": ("images", "packages"), "logs": ("telemetry", "tool_calls"), "net": ("running",),
@@ -47,6 +49,32 @@ TERMINALS = (  # (program, arguments before the command)
     ("tilix", ["-e"]), ("xterm", ["-e"]),
 )
 ONE_ARGUMENT_TERMINALS = {"tilix"}
+# macOS: a terminal window of Terminal (or iTerm, SANDBOX_AI_TERMINAL=iTerm) through AppleScript. The shell command is
+# the script's argument (on run argv), never part of its source: nothing in it is read as AppleScript.
+MAC_TERMINALS = {
+    # do script types the line into the user's login shell (zsh, fish, tcsh ...), which would read the command's
+    # quotes its own way: it gets only `exec /bin/sh FILE` (mac_terminal), the command waiting in FILE.
+    "Terminal": ("on run argv", 'tell application "Terminal"', "activate", "do script (item 1 of argv)", "end tell",
+                 "end run"),
+    "iTerm": ("on run argv", 'tell application "iTerm"', "activate",
+              "create window with default profile command (\"/bin/sh -c \" & quoted form of (item 1 of argv))",
+              "end tell", "end run"),
+}
+
+
+def mac_terminal(script, iterm=False, directory=None):
+    """argv of osascript that opens a terminal window of Terminal (ITERM: iTerm) running the shell command SCRIPT.
+    Terminal types its line into the login shell: SCRIPT goes into a private file (DIRECTORY: a new one of mkdtemp,
+    0700) that /bin/sh runs and removes; the line typed holds only that file's path."""
+    lines = MAC_TERMINALS["iTerm" if iterm else "Terminal"]
+    if not iterm:
+        folder = Path(directory or tempfile.mkdtemp(prefix="sandbox-ai-terminal-"))
+        path = folder / "run.sh"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write('rm -f -- "$0"; rmdir -- "${0%/*}" 2>/dev/null\n' + script + "\n")
+        script = f"exec /bin/sh {shlex.quote(str(path))}"
+    return ["/usr/bin/osascript", *(part for line in lines for part in ("-e", line)), "--", script]
 # Option groups of the launcher, in the order the app shows them.
 GROUPS = {
     "Workspace": ["--workspace", "--workspace-ro", "--mount", "--state-dir", "--copy", "--name", "--name-style",
@@ -224,6 +252,16 @@ class SandboxAI:
                 self._modules[name] = module
             return self._modules[name]
 
+    def procinfo(self):
+        """sandbox-ai's procinfo.py on macOS (no /proc there: sysctl), None elsewhere or with a sandbox-ai too old to
+        have it: /proc is read then, as always."""
+        if sys.platform != "darwin":
+            return None
+        try:
+            return self.module("procinfo")
+        except Exception:  # noqa: BLE001 - an older sandbox-ai: what /proc would say (nothing on a Mac)
+            return None
+
     def forget_pods(self):
         """The next look asks Podman afresh (after an action: what it changed is shown at once)."""
         cache = getattr(self._modules.get("liveness"), "_cache", None)
@@ -362,7 +400,8 @@ class SandboxAI:
             for process in live:
                 signal_group(process.pid, signal.SIGTERM)
             deadline = time.monotonic() + grace
-            while time.monotonic() < deadline and any(group_alive(process.pid) for process in live):
+            info = self.procinfo()
+            while time.monotonic() < deadline and any(group_alive(process.pid, info=info) for process in live):
                 time.sleep(0.05)
             for process in live:
                 signal_group(process.pid, signal.SIGKILL)
@@ -471,11 +510,47 @@ class SandboxAI:
         """[[name, agent, backend, status, workspace, created]] of the named sessions."""
         return self.module("sessions").rows()
 
+    def session_transfer_supported(self):
+        """Whether this sandbox-ai has `session copy|move NAME HOST` (a session to another host)."""
+        sessions = self.module("sessions")
+        return hasattr(sessions, "copy_to_host") and hasattr(sessions, "plan_json")
+
+    def session_transfer_plan(self, name):
+        """(host paths, problems) of session NAME's copy to another host (`sandbox-ai session plan NAME --json`, a
+        process of its own: reading the plan changes directory, which in this process would move every thread's):
+        the absolute folders and files of this machine its options name, with what its trusted project file adds -
+        each one a candidate for --map - and what cannot go along (sandbox-ai session copy refuses then). ValueError:
+        no such session, or an answer that is not a plan."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", str(name)):
+            raise ValueError(f"not a session: {printable(name)}")
+        status, out, err = self.call("session", "plan", str(name), "--json", timeout=60)
+        if status != 0:
+            lines = (err or out or "").strip().splitlines()
+            raise ValueError(printable(lines[-1] if lines else f"sandbox-ai session plan: exit {status}")[:300])
+        try:
+            plan = json.loads(out)
+            paths, problems = plan["paths"], plan["problems"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"sandbox-ai session plan: not a plan ({exc})") from None
+        if not (isinstance(paths, list) and isinstance(problems, list)):
+            raise ValueError("sandbox-ai session plan: not a plan")
+        return [str(p) for p in paths if isinstance(p, str)], [str(p) for p in problems]
+
+    def session_copy(self, name, host, new_name=None, maps=(), check=False):
+        """`sandbox-ai session copy NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check]`: a dry run on HOST over
+        SSH, then the start there (minutes, at most). (status, out, err)."""
+        return self.call(*session_transfer_args("copy", name, host, new_name, maps, check), timeout=TRANSFER_SECONDS)
+
+    def session_move(self, name, host, new_name=None, maps=(), check=False):
+        """`sandbox-ai session move ...`: as session_copy, then the session here is stopped (its HOME stays)."""
+        return self.call(*session_transfer_args("move", name, host, new_name, maps, check), timeout=TRANSFER_SECONDS)
+
     def session_ids(self):
         """{name: id} of the named sessions: the id is the session's directory, which stays when it is renamed. The
         MCP servers each one's options name are kept on the way (session_servers: one read of each session.json)."""
         sessions = self.module("sessions")
         servers = self.__dict__["_session_servers"] = {}
+        starts = self.__dict__["_session_starts"] = {}
         if not hasattr(sessions, "display") or not hasattr(sessions, "root"):
             return {}
         found, root = {}, sessions.root()
@@ -491,7 +566,16 @@ class SandboxAI:
                 found[sessions.display(directory.name, data)] = directory.name
                 if isinstance(data, dict):
                     servers[directory.name] = mcp_option_names(data.get("options"))
+                    options, arguments = data.get("options"), data.get("agent_args", [])
+                    if data.get("agent") in self.agents and isinstance(options, list) and isinstance(arguments, list) \
+                            and all(isinstance(v, str) for v in options + arguments):
+                        starts[directory.name] = (data["agent"], list(options), list(arguments))
         return found
+
+    def session_start(self, ident):
+        """(agent, launcher options, agent arguments) session IDENT was created with, as session_ids last read them
+        (the Start page shows them for its project), or None."""
+        return self.__dict__.get("_session_starts", {}).get(ident)
 
     def session_servers(self, ident):
         """The MCP servers the options of session IDENT name (its later starts reach them), as session_ids last read
@@ -802,6 +886,20 @@ class SandboxAI:
             return self._questions.scan(self.live_runs() if runs is None else runs)
         finally:
             self._questions_lock.release()
+
+    def watcher_heartbeat(self, on=True):
+        """The app watches the questions and notifies of them itself (ON): its heartbeat (approvals.heartbeat("app"))
+        tells the launchers to show no notification of their own, so each question has one prompt, the app's. OFF:
+        the heartbeat goes (the app quits, or its notifications were switched off). False with a sandbox-ai that has
+        no heartbeats (its launcher notifies as before). Never raises."""
+        try:
+            approvals = self.module("approvals")
+            if not hasattr(approvals, "heartbeat"):
+                return False
+            approvals.heartbeat("app") if on else approvals.end_heartbeat()
+            return True
+        except Exception:  # noqa: BLE001 - a heartbeat that cannot be written: the launcher notifies as before
+            return False
 
     def answer(self, ident, decision, scope="once"):
         """Answer question IDENT through `sandbox-ai approvals allow|deny --scope SCOPE`: deny "always" blocks
@@ -1152,13 +1250,15 @@ class SandboxAI:
                                   state=run_state(record), proxy=record.get("proxy"), pid=record.get("pid"),
                                   record=record))
         known = {str(i.pid) for i in found if i.pid} | {str(state.get("pid")) for state in servers.values()}
-        for pid, agent, argv, cwd in launcher_processes(self.agents, proc):
+        info = self.procinfo()
+        for pid, agent, argv, cwd in launcher_processes(self.agents, proc, info):
             if str(pid) in known:
                 continue
             paths = paths_from_options(self.launcher, argv, cwd)
             project = paths["workspaces"][0] if paths["workspaces"] else cwd
             found.append(Instance("unregistered", f"pid:{pid}", f"pid {pid}", project=project or "", agent=agent,
-                                  backend=option_value(argv, "--backend") or "", started=process_started(pid, proc) or "",
+                                  backend=option_value(argv, "--backend") or "",
+                                  started=process_started(pid, proc, info) or "",
                                   state="starting", pid=pid))
         return found, problems
 
@@ -1185,7 +1285,7 @@ class SandboxAI:
     def remember_project(self, path):
         """PATH becomes the current project (settings: project) and the first of the recent ones."""
         path = os.path.realpath(os.path.expanduser(str(path)))
-        data = self.settings()
+        data = json_for_change(self.settings_file())
         recent = [path] + [p for p in self.recent_projects() if p != path]
         data["recent_projects"], data["project"] = recent[:RECENT_PROJECTS], path
         # When each was used last (the wizard's list of recent folders says it): only for the folders listed.
@@ -1217,7 +1317,7 @@ class SandboxAI:
         return merge_recent(found, limit)
 
     def forget_project(self, path):
-        data = self.settings()
+        data = json_for_change(self.settings_file())
         data["recent_projects"] = [p for p in self.recent_projects() if p != path]
         if data.get("project") == path:
             data["project"] = ""
@@ -1351,6 +1451,41 @@ class SandboxAI:
         if not isinstance(document, list):
             raise ValueError("sandbox-ai canaries log --json: not a log")
         return document
+
+    # -- safeguards (sandbox-ai safeguards): what refused or ended something in a run, why, and the fix --
+
+    def has_safeguards(self):
+        """This sandbox-ai records its safeguards (safeguards.py: safeguards.jsonl, `sandbox-ai safeguards`)."""
+        return (self.directory / "safeguards.py").is_file()
+
+    def safeguards(self, run=None, tail=1000):
+        """`sandbox-ai safeguards --json`: the records of RUN (of every run: the running ones and the default log
+        directories, without RUN), oldest first, at most TAIL."""
+        where = ["--", run] if run else ["--all"]
+        status, out, err = self.call("safeguards", "--json", "--tail", str(int(tail)), *where, timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip() or f"sandbox-ai safeguards: exit status {status}")
+        records = []
+        for line in out.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+
+    def safeguard_kinds(self):
+        """{kind: (level, title)} of this sandbox-ai's safeguards ({} for one without them)."""
+        if not self.has_safeguards():
+            return {}
+        return {kind: (spec[0], spec[1]) for kind, spec in self.module("safeguards").KINDS.items()}
+
+    def muted_safeguards(self):
+        """The kinds muted in sandbox-ai's defaults file (safeguard_mute): recorded, never announced."""
+        document, _ = self.sandbox_defaults()
+        value = document.get("safeguard_mute")
+        return set(value) if isinstance(value, list) else set()
 
     def trust_hooks_argv(self, name):
         """`sandbox-ai kits trust-hooks -- NAME`, for a terminal: it shows every hook and the full text of every
@@ -1550,7 +1685,7 @@ class SandboxAI:
             session = session_of(record)
             shown = names.get(key_of(session), session) if session else None
             add("run", shown or name, record.get("workspace"))
-            paths = run_paths(self.launcher, record.get("pid"))
+            paths = run_paths(self.launcher, record.get("pid"), info=self.procinfo())
             if session:
                 try:
                     add("session-home", shown, sessions.session_dir(key_of(session)) / "home")
@@ -1603,7 +1738,7 @@ class SandboxAI:
         except Exception:  # noqa: BLE001
             runs = {}
         for record in runs.values():
-            found += run_paths(self.launcher, record.get("pid"))["mounts"]
+            found += run_paths(self.launcher, record.get("pid"), info=self.procinfo())["mounts"]
         sessions = self.module("sessions")
         try:
             rows = sessions.rows()
@@ -1646,7 +1781,7 @@ class SandboxAI:
         self.save_settings({key: value})
 
     def save_settings(self, values):
-        data = self.settings()
+        data = json_for_change(self.settings_file())
         data.update(values)
         write_private_json(self.settings_file(), data)
 
@@ -1946,6 +2081,68 @@ class SandboxAI:
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
         return data
 
+    def restore_home(self, name, host="local", paths=()):
+        """Put back, in the HOME of the stopped kept start NAME on HOST, the recorded text of its changed start files
+        (`sandbox-ai resume NAME --restore-home --yes --json`, PATHS: only these): {"restored": [paths], "skipped":
+        [{"path", "reason"}]}. ValueError: nothing put back (the text of sandbox-ai)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        if not all(isinstance(path, str) and path and not path.startswith("-") and "\n" not in path for path in paths):
+            raise ValueError("invalid path")
+        status, out, err = self.host_run(host, "resume", name, "--restore-home", "--yes", "--json",
+                                         *[token for path in paths for token in ("--path", path)], timeout=120)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return data
+
+    def rules_check(self, paths):
+        """`sandbox-ai rules check FILE... --json` on this machine: {"ok", "rulesets": [{"name", "path", "ok",
+        "error"?, "counts"?, "summary"?}]} (a broken file is in the answer, not an error)."""
+        # Absolute: a file name is never read as an option.
+        files = [os.path.abspath(os.path.expanduser(str(path))) for path in paths]
+        status, out, err = self.call("rules", "check", "--json", *files, timeout=60)
+        try:
+            data = json.loads(out)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("rulesets"), list):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return data
+
+    def rules_show(self, agent, argv, project=None):
+        """The rulesets a start of AGENT with the launcher options ARGV (in PROJECT, else the app's folder) would
+        have (`sandbox-ai rules show --json`): {"agent", "project_config", "rulesets": [{"name", "from", ...}]}."""
+        if agent not in ("claude", "codex", "opencode"):
+            raise ValueError("invalid agent")
+        status, out, err = self.call("rules", "show", "--agent", agent, "--json",
+                                     *(["--project", str(project)] if project else []), "--",
+                                     *self.as_given(argv), timeout=60)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("rulesets"), list):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return data
+
+    def rules_reload(self, name, host="local"):
+        """The running start NAME on HOST reads its HTTP rules anew (`sandbox-ai rules reload NAME --json`): {"rules":
+        [{"name", "http", "kept"}], "reloaded", "not_reloaded"}. ValueError: refused (the text of sandbox-ai)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        status, out, err = self.host_run(host, "rules", "reload", name, "--json", timeout=90)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return data
+
     def host_json(self, name, *args, timeout=120):
         status, out, err = self.host_run(name, *args, timeout=timeout)
         try:
@@ -2103,7 +2300,12 @@ class SandboxAI:
         """Set KEY of sandbox-ai's defaults file to VALUE (None: remove it, sandbox-ai's own default applies);
         the other keys stay. Only keys and values this sandbox-ai accepts: a file it refused would stop every
         start."""
-        if key != "telemetry" or value is not None and value not in self.telemetry_levels():
+        if key == "safeguard_mute":
+            if not self.has_safeguards():
+                raise ValueError("this sandbox-ai has no safeguard records yet; update it")
+            if value is not None:
+                value = self.module("safeguards").check_mute(value)
+        elif key != "telemetry" or value is not None and value not in self.telemetry_levels():
             raise ValueError(f"this sandbox-ai has no default {key} = {value!r}")
         document, problem = self.sandbox_defaults()
         if problem:
@@ -2138,13 +2340,13 @@ class SandboxAI:
 
     def save_profile(self, name, agent, argv, agent_args=(), host=None):
         """HOST: the host of `sandbox-ai hosts` the profile starts on (None: this machine)."""
-        profiles = self.profiles()
+        profiles = json_for_change(self.profiles_file())
         profiles[name] = {"agent": agent, "options": list(argv), "agent_args": list(agent_args),
                           **({"host": host} if host and host != "local" else {})}
         write_private_json(self.profiles_file(), profiles)
 
     def delete_profile(self, name):
-        profiles = self.profiles()
+        profiles = json_for_change(self.profiles_file())
         if profiles.pop(name, None) is not None:
             write_private_json(self.profiles_file(), profiles)
             return True
@@ -2318,11 +2520,13 @@ class SandboxAI:
     def in_terminal(self, argv, title="sandbox-ai"):
         """argv that runs ARGV in a new terminal window, or None if no terminal emulator is known."""
         preferred = os.environ.get("SANDBOX_AI_TERMINAL")
+        # The window stays open after the end, so that a message or an error can be read.
+        script = f"{shlex.join(argv)}; status=$?; echo; echo \"[sandbox-ai: exit status $status, press Enter]\"; read _"
+        if sys.platform == "darwin":
+            return mac_terminal(script, iterm=(preferred or "").lower() in ("iterm", "iterm2", "iterm.app"))
         terminals = ([(preferred, ["-e"])] if preferred else []) + list(TERMINALS)
         for program, before in terminals:
             if program and shutil.which(program):
-                # The window stays open after the end, so that a message or an error can be read.
-                script = f"{shlex.join(argv)}; status=$?; echo; echo \"[sandbox-ai: exit status $status, press Enter]\"; read _"
                 if Path(program).name in ONE_ARGUMENT_TERMINALS:  # -e takes the whole command as one string
                     return [program, *before, shlex.join(["sh", "-c", script])]
                 return [program, *before, "sh", "-c", script]
@@ -3449,6 +3653,9 @@ NEEDS_CONFIRM = {
                     "unless kept)",
 }
 APP_NEEDS_CONFIRM = {
+    # sandbox-ai session move: no route of the web interface does it
+    "session-move": "moving a session stops it here once it runs on the other host (its HOME stays here until it is "
+                    "deleted; logins and HOME are not copied)",
     "preset-delete": "deleting a preset of your own removes it for good (export it first to keep a copy)",
     "files-delete": "deleting removes the files or folders for good (there is no wastebasket)",
     "files-replace": "replacing overwrites what is there now with what is copied or moved",
@@ -3458,10 +3665,17 @@ APP_NEEDS_CONFIRM = {
     "startup-risk": "sandbox-ai's code or the app lies where a sandbox writes: loading it runs what a sandbox may have "
                     "changed",
     "board-discard": "dropping the board's unapplied changes loses them",
+    "board-remove-part": "the part and its connections go from the board (Undo brings them back)",
     "tab-close": "closing the tab drops the board's unapplied changes",
     "terminal-end": "ending the command of a terminal tab loses what it did not save",
     "app-quit": "quitting ends what runs only in the window (its commands and work) and leaves the sandboxes' questions "
                 "unanswered",
+    "self-update": "updating replaces the sandbox-ai every later start and command uses (a system installation's for "
+                   "every user, as root); the previous version is kept for a rollback",
+    # sandbox-ai resume NAME OPTIONS, --restore-home and rules reload: no route of the web interface does them yet
+    "start-options": "other options at a start's rebirth change what it may reach or do, from now on at every start",
+    "home-restore": "restoring the HOME overwrites its changed start files with the text they had at the last start",
+    "rules-reload": "reloading the rules makes what you loosened in your rulesets apply to the running sandbox at once",
     # the web interface of a host (sandbox-ai web there): what no web route does
     "web-user-remove": "removing a login of the web interface ends its sessions at their next request",
     "web-user-reset": "a new password and TOTP secret replace the login's: the old ones stop working",
@@ -3494,6 +3708,8 @@ def needs_confirm(action, detail=None):
     if action == "workspace-writable" and detail.get("read_only") is True:
         return None
     if action == "secret-replace" and detail.get("exists") is False:
+        return None
+    if action == "board-remove-part" and detail.get("ask") is False:  # Settings: remove without asking
         return None
     if action == "web-listen" and detail.get("beyond") is False:
         return None
@@ -3613,8 +3829,37 @@ def url_host(url):
 
 # -- autostart (written only when the human asks for it) --
 
+# macOS: the app starts at login as a LaunchAgent of the user (~/Library/LaunchAgents), not a desktop entry.
+LAUNCH_AGENT_LABEL = "org.sandbox-ai.app"
+
+
 def autostart_file():
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "autostart" / "sandbox-ai-app.desktop"
+
+
+def launch_agent(command):
+    """The LaunchAgent (a property list) that starts COMMAND at the user's next login, in the GUI session only. Its
+    arguments are a list (ProgramArguments): no shell and no quoting, nothing an argument could break out of."""
+    import plistlib
+    if any(not isinstance(argument, str) or any(ord(c) < 32 or ord(c) == 127 for c in argument)
+           for argument in command):
+        raise ValueError("a control character (a new line?) has no place in a login item")
+    return plistlib.dumps({"Label": LAUNCH_AGENT_LABEL, "ProgramArguments": list(command), "RunAtLoad": True,
+                           "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua"}).decode()
+
+
+def unload_launch_agent(run=None, environ=None):
+    """launchctl bootout of the app's LaunchAgent (macOS), so that removing it takes effect now; nothing when it was
+    not loaded (written in this login session: launchd reads it at the next one). Not when this app is the one
+    that LaunchAgent started (bootout would end it, and with it the answers to the sandboxes' questions): the
+    removed file is enough, it is not started again."""
+    if (os.environ if environ is None else environ).get("XPC_SERVICE_NAME") == LAUNCH_AGENT_LABEL:
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        (run or subprocess.run)(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}"],
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False)
 
 
 def desktop_quote(argument):
@@ -3689,6 +3934,42 @@ def installed_launcher(environ=None):
     except OSError:
         return None
     return launcher if os.path.isfile(launcher) else None
+
+
+WAIT_FOR_PID = "--wait-for-pid="  # sandbox-ai-app --wait-for-pid=PID: start once PID (the app before) has ended
+RESTART_WAIT = 30  # seconds a restarted app waits for the one before to end, at most
+
+
+def restart_command(pid, directory=None, which=None):
+    """argv that starts the app again once this process (PID) has ended - after an update, the new version: the
+    installation's stable launcher (installed_launcher, else DATA/current/sandbox-ai-app of the installation whose
+    sandbox/ folder is DIRECTORY), else `sandbox-ai-app` on PATH, else this copy as the autostart runs it. It waits for
+    PID first (main.py): the single-instance guard is free only once this app has gone."""
+    launcher = installed_launcher()
+    if not launcher and directory is not None:
+        tree = Path(directory).parent
+        current = tree.parent.parent / "current" / "sandbox-ai-app"
+        if tree.parent.name == "versions" and current.is_file():
+            launcher = str(current)
+    launcher = launcher or (which or shutil.which)("sandbox-ai-app")
+    command = [launcher] if launcher else [arg for arg in autostart_command() if arg != "--hidden"]
+    return [*command, f"{WAIT_FOR_PID}{int(pid)}"]
+
+
+def wait_for_exit(pid, limit=RESTART_WAIT, sleep=time.sleep, clock=time.monotonic):
+    """Wait until process PID has ended, LIMIT seconds at most (a restart: before the new app claims the
+    single-instance guard). True when it has ended."""
+    end = clock() + limit
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            pass  # there (another user's, or not to be signalled): waited for like the app's own
+        if clock() >= end:
+            return False
+        sleep(0.1)
 
 
 def autostart_command(executable=None, package=PACKAGE_DIR, extra=None):
@@ -3775,6 +4056,8 @@ def set_autostart(enabled, command=None, forbidden=(), paths=None, also=()):
     starts at the next login."""
     path = autostart_file()
     if not enabled:
+        if sys.platform == "darwin":
+            unload_launch_agent()
         try:
             os.unlink(path)
         except FileNotFoundError:
@@ -3784,9 +4067,13 @@ def set_autostart(enabled, command=None, forbidden=(), paths=None, also=()):
         command, paths = autostart_command(), autostart_paths()
     check_outside(list(paths if paths is not None else [a for a in command if os.path.isabs(a)]) + list(also),
                   forbidden)
-    text = ("[Desktop Entry]\nType=Application\nName=sandbox-ai\n"
-            "Comment=Answers what running sandboxes ask (in the system tray)\n"
-            f"Exec={' '.join(desktop_quote(a) for a in command)}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n")
+    if sys.platform == "darwin":
+        text = launch_agent(command)
+    else:
+        text = ("[Desktop Entry]\nType=Application\nName=sandbox-ai\n"
+                "Comment=Answers what running sandboxes ask (in the system tray)\n"
+                f"Exec={' '.join(desktop_quote(a) for a in command)}\nTerminal=false\n"
+                "X-GNOME-Autostart-enabled=true\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
@@ -3937,8 +4224,17 @@ def signal_group(pgid, number):
         pass
 
 
-def group_alive(pgid, proc=Path("/proc")):
-    """True while a process of group PGID is left that is not a zombie."""
+def mac_processes(proc, info):
+    """sandbox-ai's procinfo.py (INFO) where there is no /proc to read (macOS), for PROC the real /proc only (the
+    tests hand in a fake one); None elsewhere: /proc is read as always."""
+    return info if info is not None and sys.platform == "darwin" and Path(proc) == Path("/proc") else None
+
+
+def group_alive(pgid, proc=Path("/proc"), info=None):
+    """True while a process of group PGID is left that is not a zombie (macOS: INFO, procinfo.py)."""
+    mac = mac_processes(proc, info)
+    if mac is not None:
+        return any(group == pgid and state != "Z" for _, group, state in mac.table().values())
     try:
         entries = [entry for entry in os.listdir(proc) if entry.isdigit()]
     except OSError:
@@ -3966,6 +4262,23 @@ def app_settings():
     return data if isinstance(data, dict) else {}
 
 
+def json_for_change(path):
+    """The JSON object in PATH ({} without the file) to change and write back: OSError when it cannot be read,
+    ValueError when it is no JSON object - never {} then, which written back would replace everything in it by the
+    one value changed."""
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(text)
+    except (ValueError, RecursionError):
+        data = None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is no JSON object (damaged, or being written): not changed")
+    return data
+
+
 def settings_problem():
     """Why the app's settings.json cannot be used (it is then moved aside and the defaults apply), or None."""
     path = settings_file()
@@ -3990,10 +4303,11 @@ def settings_problem():
 
 
 # The settings the app knows, with their defaults (the Settings dialog edits them; the file keeps them).
-SETTINGS = {"theme": "system", "language": "system", "terminal": "app", "tray": True, "notify": True,
+SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "", "language": "system", "terminal": "app", "tray": True, "notify": True,
+            "notify_safeguards": True,
             "notify_seconds": 15, "notify_style": "themed", "approvals_interval": 1000, "sandboxes_interval": 3000, "connections_interval": 2000,
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
-            "default_template": "development", "board_grid": 20, "auto_tabs": True, "guide_nodes": True,
+            "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "guide_nodes": True,
             "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
             "web_without_sandbox": False, "show_flags": False}
 
@@ -4113,15 +4427,31 @@ def trusted_copy(digest):
 
 
 def write_private_json(path, data):
-    """Write DATA as JSON to PATH, mode 0600 from the start (never briefly readable by others)."""
+    """Write DATA as JSON to PATH, mode 0600 from the start (never briefly readable by others), atomically and durably:
+    the text is made first and written in one go (json.dump wrote it in thousands of small pieces), and it is on the
+    disk (fsync) before it replaces the file - a crash or a power loss right after leaves the old file or the new
+    one, never an empty or a cut one."""
+    write_private_text(path, json.dumps(data, indent=2))
+
+
+def write_private_text(path, text):
+    """TEXT to PATH as write_private_json writes (0600, atomic, synced: the old file or the new one after a crash)."""
     path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         with os.fdopen(fd, "w") as stream:
-            json.dump(data, stream, indent=2)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
+        with contextlib.suppress(OSError):  # the rename itself durable too
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -4401,17 +4731,24 @@ def launcher_agents(launcher):
         return AGENTS
 
 
-def run_paths(launcher, pid, proc=Path("/proc")):
+def run_paths(launcher, pid, proc=Path("/proc"), info=None):
     """Workspaces, --state-dir and rw --mount sources of a running launcher, from its command line in /proc (only for a
-    process of this user); empty when that cannot be read."""
+    process of this user; macOS: INFO, procinfo.py); empty when that cannot be read."""
     empty = {"workspaces": [], "state_dir": None, "mounts": []}
+    mac = mac_processes(proc, info)
     try:
         pid = int(pid)
-        directory = proc / str(pid)
-        if directory.stat().st_uid != os.getuid():
-            return empty
-        argv = [a.decode("utf-8", "surrogateescape") for a in (directory / "cmdline").read_bytes().split(b"\0") if a]
-        cwd = os.readlink(directory / "cwd")
+        if mac is not None:
+            if mac.owner(pid) != os.getuid() or mac.cmdline(pid) is None or mac.cwd(pid) is None:
+                return empty
+            argv = [a.decode("utf-8", "surrogateescape") for a in mac.cmdline(pid) if a]
+            cwd = mac.cwd(pid)
+        else:
+            directory = proc / str(pid)
+            if directory.stat().st_uid != os.getuid():
+                return empty
+            argv = [a.decode("utf-8", "surrogateescape") for a in (directory / "cmdline").read_bytes().split(b"\0") if a]
+            cwd = os.readlink(directory / "cwd")
     except (OSError, ValueError, TypeError):
         return empty
     for index, token in enumerate(argv):
@@ -4470,8 +4807,15 @@ def option_value(argv, name):
     return value
 
 
-def process_started(pid, proc=Path("/proc")):
-    """When process PID started, as sandbox-ai writes times (UTC), or None."""
+def process_started(pid, proc=Path("/proc"), info=None):
+    """When process PID started, as sandbox-ai writes times (UTC), or None (macOS: INFO, procinfo.py)."""
+    mac = mac_processes(proc, info)
+    if mac is not None:
+        try:
+            moment = mac.started_epoch(int(pid))
+        except (ValueError, TypeError):
+            moment = None
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(moment)) if moment is not None else None
     try:
         ticks = int((proc / str(int(pid)) / "stat").read_text().rpartition(")")[2].split()[19])
         boot = next(int(line.split()[1]) for line in (proc / "stat").read_text().splitlines() if line.startswith("btime "))
@@ -4481,20 +4825,30 @@ def process_started(pid, proc=Path("/proc")):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(moment))
 
 
-def launcher_processes(agents=AGENTS, proc=Path("/proc")):
+def launcher_processes(agents=AGENTS, proc=Path("/proc"), info=None):
     """[(pid, agent, launcher options, cwd)] of sandbox-ai launchers of this user (python ... agent_sandbox.py
-    AGENT ...), dry runs left out (they start nothing). Read from /proc; processes of others are skipped."""
+    AGENT ...), dry runs left out (they start nothing). Read from /proc (macOS: INFO, procinfo.py); processes of
+    others are skipped."""
     found = []
+    mac = mac_processes(proc, info)
     try:
-        entries = [entry for entry in os.listdir(proc) if entry.isdigit()]
+        entries = [str(pid) for pid in mac.pids()] if mac is not None else \
+            [entry for entry in os.listdir(proc) if entry.isdigit()]
     except OSError:
         return found
     for entry in entries:
         directory = proc / entry
         try:
-            if directory.stat().st_uid != os.getuid():
-                continue
-            argv = [a.decode("utf-8", "surrogateescape") for a in (directory / "cmdline").read_bytes().split(b"\0") if a]
+            if mac is not None:
+                arguments = mac.cmdline(int(entry)) if mac.owner(int(entry)) == os.getuid() else None
+                if arguments is None:
+                    continue
+                argv = [a.decode("utf-8", "surrogateescape") for a in arguments if a]
+            else:
+                if directory.stat().st_uid != os.getuid():
+                    continue
+                argv = [a.decode("utf-8", "surrogateescape") for a in (directory / "cmdline").read_bytes().split(b"\0")
+                        if a]
         except OSError:
             continue
         for index, token in enumerate(argv[:-1]):
@@ -4503,7 +4857,7 @@ def launcher_processes(agents=AGENTS, proc=Path("/proc")):
                 if "--dry-run" in options[:options.index("--")] if "--" in options else "--dry-run" in options:
                     break
                 try:
-                    cwd = os.readlink(directory / "cwd")
+                    cwd = (mac.cwd(int(entry)) or "") if mac is not None else os.readlink(directory / "cwd")
                 except OSError:
                     cwd = ""
                 found.append((int(entry), argv[index + 1], options, cwd))
@@ -4800,6 +5154,61 @@ def parse_update_check(status, out):
     return installed[1], available[1]
 
 
+UPDATE_PACKAGES = ("pyz", "appimage", "macos-app")  # sandbox/main.py's PACKAGES: updated by a new download
+SYSTEM_HOMES = ("/home/", "/root/", "/Users/", "/var/home/")  # sandbox/main.py's HOMES: never a system installation
+
+
+def update_route(directory, euid=None, writable=None):
+    """How `sandbox-ai update` updates the copy of sandbox-ai whose sandbox/ folder is DIRECTORY, decided as sandbox/main.py
+    decides it (its `update` and installation_mode()): (ROUTE, PATH) with ROUTE
+    - "user": install.sh's installation that this user may update (their own, or a system one they can write);
+    - "root": a system installation (PREFIX/lib/sandbox-ai, installed by root for every user) whose files this user
+      cannot write: only root updates it (sudo sandbox-ai update); PATH is its folder;
+    - "package": the AppImage, the macOS app or the .pyz (PATH: the kind): a new download, never install.sh;
+    - "checkout": a git checkout (git pull); "other": not installed by install.sh (pip: pip install -U sandbox-ai).
+    Only files are looked at (no process): quick enough for the GUI thread."""
+    tree = Path(directory).parent
+    euid = os.geteuid() if euid is None else euid
+    writable = writable or (lambda path: os.access(path, os.W_OK))
+    try:
+        kind = (tree / "PACKAGING").read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        kind = None
+    if kind in UPDATE_PACKAGES:
+        return "package", kind
+    if (tree / ".git").exists():
+        return "checkout", str(tree)
+    if not (tree / "install.sh").is_file():
+        return "other", str(tree)
+    data = tree.parent.parent
+    if tree.parent.name == "versions" and data.name == "sandbox-ai" and data.parent.name == "lib" \
+            and not str(data).startswith(SYSTEM_HOMES) and euid != 0 and not writable(data):
+        return "root", str(data)
+    return "user", str(data if tree.parent.name == "versions" else tree)
+
+
+class NoSudo(ValueError):
+    """A system installation to update, and no sudo on PATH: the message says how to run it as root."""
+
+
+def self_update_command(sai, route, which=None):
+    """argv of the update of this machine's sandbox-ai for ROUTE (update_route), to run in a terminal where the human
+    sees it: `sandbox-ai update` with the app's Python; for "root" `sudo sandbox-ai update` - this installation's own
+    `sandbox-ai` command (root's files, run with root's python3; never the app's Python, which this user may write)
+    after sudo from PATH, which asks for the password in that terminal (the app never sees it). NoSudo without sudo
+    (its text: what to run as root instead); ValueError for a route that `sandbox-ai update` does not update."""
+    if route == "user":
+        return sai.command("update")
+    if route != "root":
+        raise ValueError(f"sandbox-ai update does not update this copy ({route})")
+    launcher = Path(sai.directory).parent / "sandbox-ai"
+    command = [str(launcher)] if launcher.is_file() and os.access(launcher, os.X_OK) else sai.command()
+    sudo = (which or shutil.which)("sudo")
+    if not sudo:
+        raise NoSudo(shlex.join([*command, "update"]))
+    return [sudo, "--", *command, "update"]
+
+
 def version_key(version):
     """Comparable key of 0.1.21, v0.1.21, 0.1.21rc1 (a pre-release sorts before its release)."""
     match = re.fullmatch(r"v?([0-9]+(?:\.[0-9]+)*)(?:[-.]?(a|alpha|b|beta|rc|dev)\.?([0-9]*))?(?:\+.*)?", str(version))
@@ -4936,11 +5345,12 @@ def path_value(value, what):
     return value
 
 
-def resume_args(name, restart=False, workspaces=(), mounts=(), mcp=()):
+def resume_args(name, restart=False, workspaces=(), mounts=(), mcp=(), options=(), dropped=()):
     """The words after `sandbox-ai` of `resume [--workspace=DIR]... [--mount=SOURCE:DESTINATION:MODE]...
-    [--mcp=NAME]... [--restart] NAME` (each kept for the start's later starts), checked: DIRs and the mounts' paths
-    absolute (on the start's host), MOUNTS [(source, destination, "ro"|"rw")] without ':' in them, MCP servers by
-    name. ValueError says what is wrong."""
+    [--mcp=NAME]... [--drop-option=OPTION]... [--restart] NAME [OPTIONS]` (each kept for the start's later starts),
+    checked: DIRs and the mounts' paths absolute (on the start's host), MOUNTS [(source, destination, "ro"|"rw")]
+    without ':' in them, MCP servers by name; OPTIONS (launcher options, after NAME: sandbox-ai checks them as a new
+    start) begin with an option, DROPPED are option names (with =VALUE). ValueError says what is wrong."""
     if not valid_run(name):
         raise ValueError("not a start's name")
     args = ["resume"]
@@ -4955,12 +5365,57 @@ def resume_args(name, restart=False, workspaces=(), mounts=(), mcp=()):
         if not re.fullmatch(MCP_NAME, str(server)):
             raise ValueError("an MCP server's name is 1-32 letters, digits, '_' or '-'")
         args.append(f"--mcp={server}")
+    for value in dropped:
+        if not re.fullmatch(r"-{0,2}[a-z][a-z0-9-]{0,40}(=[^\n\x00]{1,500})?", str(value)):
+            raise ValueError("an option to take out is its name, with =VALUE for one of its values")
+        args.append(f"--drop-option={value}")
+    options = [str(word) for word in options]
+    if options and not options[0].startswith("--"):
+        raise ValueError("the other options begin with an option (--gui, --cpus 4 …)")
+    if any("\n" in word or "\x00" in word or len(word) > 1000 for word in options) or len(options) > 64:
+        raise ValueError("these options cannot be passed on")
     if len(args) > 1 + 48:
         raise ValueError("too many workspaces, mounts and servers at once")
-    return args + (["--restart"] if restart else []) + [name]
+    return args + (["--restart"] if restart else []) + [name] + options
 
 
-LIVE_HELPERS = ("claude", "codex", "opencode")  # mcp attach --helper AGENT: the agents a helper can be
+SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # the launcher's SESSION_NAME (--session, --as)
+REMOTE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # a host of sandbox-ai hosts (host_choice.HOST)
+TRANSFER_MAPS = 64  # --map options one copy takes at most
+
+
+def session_transfer_args(command, name, host, new_name=None, maps=(), check=False):
+    """The words after `sandbox-ai` of `session copy|move NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check]`,
+    checked: COMMAND copy or move, NAME and NEW session names, HOST one of sandbox-ai hosts (never this machine), MAPS
+    [(local, remote)] absolute paths (a local one without '='); a pair that does not move anything is left out.
+    ValueError says what is wrong."""
+    if command not in ("copy", "move"):
+        raise ValueError(f"not copy or move: {printable(command)}")
+    if not isinstance(name, str) or not SESSION_NAME.fullmatch(name):
+        raise ValueError("not a session's name")
+    if not isinstance(host, str) or host == "local" or not REMOTE_HOST.fullmatch(host):
+        raise ValueError("choose a host of sandbox-ai hosts (not this machine)")
+    args = ["session", command, name, host]
+    if new_name not in (None, "", name):
+        if not isinstance(new_name, str) or not SESSION_NAME.fullmatch(new_name):
+            raise ValueError("a session's name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or "
+                             "digit")
+        args += ["--as", new_name]
+    moved = 0
+    for local, remote in maps:
+        local, remote = path_value(local, "a folder here"), path_value(remote, "its folder there")
+        if "=" in local:
+            raise ValueError(f"a folder here with '=' in it cannot be mapped: {printable(local)}")
+        local, remote = local.rstrip("/") or "/", remote.rstrip("/") or "/"
+        if local != remote:
+            moved += 1
+            args.append(f"--map={local}={remote}")
+    if moved > TRANSFER_MAPS:
+        raise ValueError("too many folders at once")
+    return args + (["--check"] if check else [])
+
+
+LIVE_HELPERS =("claude", "codex", "opencode")  # mcp attach --helper AGENT: the agents a helper can be
 HELPER_SERVER = re.compile(r"helper-(claude|codex|opencode)-[0-9a-f]{8}")  # agent_sandbox.helper_name
 
 

@@ -42,13 +42,118 @@ def test_projects_open_in_tabs_and_the_pages_follow_the_tab(window, env, wait):
     assert window.launch.form.values()["--workspace"] == [str(one)]
     assert wait(lambda: window.files.roots.currentData() == str(one)), "the roots are read in the background"
     assert window.statistics.directory.currentData() == str(window.sai.launcher.default_log_dir(one))
-    assert window.project_bar.name.text() == "one"
+    assert window.project_bar.name() == "one"
     window.set_project(two)  # an open project is reused, not opened twice
     assert window.tabs.count() == 2 and window.tabs.currentIndex() == 1
     window.next_tab()
     assert window.project == str(one)
     window.next_tab(-1)
     assert window.project == str(two)
+
+
+def test_the_terminals_sessions_are_folded_until_opened_and_kept_so(window, monkeypatch):
+    page = window.terminals
+    assert not page.sessions_fold.isChecked() and page.list.isHidden(), "folded at first"
+    page.sessions_fold.setChecked(True)
+    window.state.flush()
+    again = make_window(monkeypatch)
+    try:
+        assert again.terminals.sessions_fold.isChecked() and not again.terminals.list.isHidden()
+    finally:
+        close(again)
+
+
+def test_the_start_page_shows_each_projects_own_values_as_the_tabs_switch(window, env, wait, monkeypatch):
+    """The Start page's form per project: what was entered for a project comes back with its tab; a project shown
+    the first time shows its trusted .sandbox-ai.json's values (left out of the command line: the launcher takes them
+    from the file) or, for a session, the options it was started with; kept for the next start."""
+    one, two, three = project(env, "one"), project(env, "two"), project(env, "three")
+    (two / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex",
+                                                      "options": ["--offline", "--allow", "pypi.org"]}))
+    window.sai.trust_project(window.sai.review_project(two))
+    launch = window.launch
+    window.set_project(one)
+    launch.agent.setCurrentText("claude")
+    launch.form.widgets["--cpus"].setText("3")
+    window.set_project(two)
+    assert wait(lambda: launch.agent.currentText() == "codex", 10), "its trusted file's values, read in a thread"
+    values = launch.form.values()
+    assert values["--offline"] is True and values["--allow"] == ["pypi.org"] and values["--cpus"] == ""
+    assert values["--workspace"] == [str(two)]
+    argv = launch.argv()
+    assert "--offline" not in argv and "pypi.org" not in argv, "the launcher applies the file: not given twice"
+    launch.form.widgets["--allow"].set_value(["pypi.org", "example.org"])
+    assert launch.argv()[-2:] == ["--allow", "example.org"], "what is added goes on the command line"
+    window.tabs.setCurrentIndex(window.tabs.find(f"project:{one}"))
+    assert launch.agent.currentText() == "claude" and launch.form.values()["--cpus"] == "3"
+    assert launch.form.values()["--offline"] is False and launch.form.values()["--workspace"] == [str(one)]
+    assert "--offline" in (launch.form.widgets["--offline"].setChecked(True) or launch.argv()), "no file here"
+    window.tabs.setCurrentIndex(window.tabs.find(f"project:{two}"))
+    assert launch.agent.currentText() == "codex" and launch.form.values()["--allow"] == ["pypi.org", "example.org"]
+    # A session's tab, its project shown the first time: the options the session was started with.
+    session = fake_session(env, "work", three)
+    data = json.loads((session / "session.json").read_text())
+    data.update(agent="opencode", options=["--cpus", "2", "--workspace", str(three)], agent_args=["--verbose"])
+    (session / "session.json").write_text(json.dumps(data))
+    read_now(window.sandboxes)
+    from sandbox_ai_app.ui import instance_entry
+    window.open_tab(instance_entry(window.sandboxes.instances["session:work"]))
+    assert launch.agent.currentText() == "opencode" and launch.form.values()["--cpus"] == "2"
+    assert launch.agent_args.text() == "--verbose" and launch.form.values()["--workspace"] == [str(three)]
+    # Kept for the next start: the current tab's project shows its own values again.
+    window.tabs.setCurrentIndex(window.tabs.find(f"project:{one}"))
+    window.state.flush()
+    again = make_window(monkeypatch)
+    try:
+        assert again.project == str(one) and again.launch.agent.currentText() == "claude"
+        assert again.launch.form.values()["--cpus"] == "3" and again.launch.form.values()["--offline"] is True
+        again.tabs.setCurrentIndex(again.tabs.find(f"project:{two}"))
+        assert again.launch.agent.currentText() == "codex"
+        assert again.launch.form.values()["--allow"] == ["pypi.org", "example.org"]
+    finally:
+        close(again)
+
+
+def test_a_project_shown_first_keeps_what_was_typed_before_its_file_is_read(window, env, wait, monkeypatch):
+    """The trusted file is read in a thread: when the human changed the form meanwhile, it is not overwritten."""
+    one, two = project(env, "one"), project(env, "two")
+    (two / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--offline"]}))
+    window.sai.trust_project(window.sai.review_project(two))
+    launch = window.launch
+    window.set_project(one)
+    held = []
+    monkeypatch.setattr("sandbox_ai_app.ui.background",
+                        lambda function, *args, done, **kw: held.append((function, args, done)))
+    window.set_project(two)
+    launch.form.widgets["--cpus"].setText("5")
+    for function, args, done in held:
+        done(function(*args), None)
+    assert launch.form.values()["--cpus"] == "5" and launch.form.values()["--offline"] is False
+    assert launch.file_values[str(two)] == {"--offline": True}, "known for the command line all the same"
+
+
+def test_a_new_project_never_gets_the_last_projects_folders_or_limits(window, env, wait):
+    """A project shown the first time with nothing of its own (no file, no session) starts from the defaults: the
+    last project's mounts, devices or limits are not carried over to it."""
+    one, two = project(env, "carry-one"), project(env, "carry-two")
+    launch = window.launch
+    window.set_project(one)
+    launch.form.widgets["--cpus"].setText("3")
+    launch.form.widgets["--mount"].set_value([f"{env}:/mnt/secret:rw"])
+    window.set_project(two)
+    values = launch.form.values()
+    assert values["--cpus"] == "" and not values["--mount"] and values["--workspace"] == [str(two)]
+    window.set_project(one)
+    assert launch.form.values()["--cpus"] == "3", "the first project keeps its own"
+
+
+def test_without_file_values():
+    from sandbox_ai_app.ui import without_file_values
+    sai = backend.SandboxAI()
+    values = {"--offline": True, "--allow": ["a", "b"], "--cpus": "2", "--memory": "4g", "--backend": "podman"}
+    file_values = {"--offline": True, "--allow": ["a"], "--cpus": "2", "--memory": "8g", "--backend": "bwrap"}
+    assert without_file_values(sai.options(), values, file_values) == {
+        "--offline": False, "--allow": ["b"], "--cpus": "", "--memory": "4g", "--backend": "podman"}
 
 
 def test_each_tab_keeps_its_board_changes_undo_and_zoom(window, env):
@@ -346,7 +451,7 @@ def test_switching_tabs_does_not_wait_for_a_slow_disk(window, env, monkeypatch, 
     one, two = project(env, "one"), project(env, "two")
     window.set_project(one)
     window.set_project(two)
-    assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.text(), 10)
+    assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.toolTip(), 10)
     real, gui, slow = window.sai.project_state, threading.get_ident(), []
 
     def project_state(directory):
@@ -357,13 +462,31 @@ def test_switching_tabs_does_not_wait_for_a_slow_disk(window, env, monkeypatch, 
     began = time.monotonic()
     window.tabs.setCurrentIndex(0)
     assert time.monotonic() - began < 1, "the switch did not wait for the disk"
-    assert window.project == str(one) and window.project_bar.name.text() == "one"
+    assert window.project == str(one) and window.project_bar.name() == "one"
     assert wait(lambda: slow, 5) and gui not in slow, "read in a thread"
-    assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.text(), 15)
+    assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.toolTip(), 15)
     assert wait(lambda: "No .sandbox-ai.json in this project" in window.launch.project_note.text(), 15)
     began = time.monotonic()
     window.tabs.setCurrentIndex(1)
     window.tabs.setCurrentIndex(0)
     assert time.monotonic() - began < 1
     assert wait(lambda: not widgets.busy(window) and len(slow) >= 4, 20)
-    assert window.project == str(one) and "no .sandbox-ai.json yet" in window.project_bar.state.text()
+    assert window.project == str(one) and "no .sandbox-ai.json yet" in window.project_bar.state.toolTip()
+
+
+def test_esc_closes_a_floating_panel_but_never_the_window(window, qapp):
+    """Esc closes the app's windows as it closes its dialogs: a panel floated out (here the log window); docked, Esc
+    keeps its meaning in the window. A shortcut of the panel - never an application-wide filter."""
+    from PySide6.QtGui import QShortcut
+    window.show()
+    dock = window.docks["log"]
+    window.set_panel("log", True)
+    escape = next(s for s in dock.findChildren(QShortcut) if s.key().toString() == "Esc")
+    assert not escape.isEnabled(), "docked: not taken"
+    dock.setFloating(True)
+    dock.show()
+    qapp.processEvents()
+    assert escape.isEnabled()
+    escape.activated.emit()
+    qapp.processEvents()
+    assert not dock.isVisible() and "log" in window.closed_docks and window.isVisible()

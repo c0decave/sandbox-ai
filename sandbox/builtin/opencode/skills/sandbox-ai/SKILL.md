@@ -57,7 +57,8 @@ answers it, then the name is open for the run (`example.com` itself only if allo
   blocks the rest: "Operation not permitted" or "Network is unreachable" for IPv6 means the VPN
   carries none, and DNS goes to the VPN's resolvers. The human manages it with `sandbox-ai vpn`
   (`check NAME` shows what the tunnel looks like from outside); you cannot change it from inside.
-- With a Tor VPN profile every TCP connection goes through Tor (no UDP, no IPv6, so no ping) and
+- With a Tor profile (also `--vpn PROFILE`, but Tor is no VPN: its own container and image)
+  every TCP connection goes through Tor (no UDP, no IPv6, so no ping) and
   `.onion` names resolve: every one with `--dns` at the start, else only those on the allow-list
   (`net allow` during the run cannot add one). If the profile has `--socks`,
   `socks5h://127.0.0.1:9050` is Tor's SocksPort (Tor Browser with `TOR_SKIP_LAUNCH=1`,
@@ -160,8 +161,9 @@ and the system bundle point at it. Each request is logged on the host with heade
   (half the host's) and processes (4096). A build killed for memory ("Killed", exit 137) or
   "Resource temporarily unavailable" on fork may be one; the human can start with `--memory 16g`,
   `--cpus N`, `--pids N` (or `none`), or raise them during the run.
-- Check `/sandbox/session/memory.json` (used, limit, files in /tmp and HOME) before starting something big,
-  and run tests and builds with little parallelism. Files in `/tmp`, `/var/tmp` and HOME are memory. From
+- Check `/sandbox/session/resources.json` (memory, CPUs and processes: used, limit, warnings, advice;
+  `memory.json` has memory alone) before starting something big, and run tests and builds with little
+  parallelism (a "cpu" warning: `--cpus` holds you back; the human can raise it during the run). Files in `/tmp`, `/var/tmp` and HOME are memory. From
   92 % of the limit the kernel slows the sandbox down (everything gets slow: that is memory, not the
   network); near the limit, or when it stalls on memory, the launcher ends the largest process that is
   not you (a test run, a build) to keep the sandbox alive; when the kernel's OOM killer hits sandbox-ai's
@@ -220,7 +222,7 @@ and the system bundle point at it. Each request is logged on the host with heade
 | A display | `--gui` or `--gui-vnc DIR` | restart needed |
 | Sound | `--audio virtual --image-variant media` (after `sandbox-ai images recipe media --from AGENT` and `sandbox-ai build media`) | restart needed |
 | Publishing to npm, PyPI, crates.io, GitLab, GitHub | `--publish KIND` (after `sandbox-ai publish-logins add KIND --secret NAME`) | restart needed |
-| An API key | `--api-key HOST=NAME` (the key stays out of the sandbox) or `--secret-env NAME` (after `sandbox-ai secrets set NAME`) | restart needed |
+| An API key | `--api-key HOST=NAME` (the key stays out of the sandbox) or `--secret-env NAME` (after `sandbox-ai secrets set NAME`) | `sandbox-ai net allow $SANDBOX_AI_RUN --api-key HOST=NAME` (runs started with 0.1.92 or newer; then `export NAME=...` as the command prints); `--secret-env`: restart needed |
 | More memory, CPUs, processes | `--memory SIZE`, `--cpus N`, `--pids N` | `sandbox-ai limits $SANDBOX_AI_RUN --memory 16g` (and `--cpus`, `--pids`) |
 | Another folder of the host | `--workspace DIR` (at `/workspaces/<name>`) or `--mount SRC:DEST:ro` | `sandbox-ai workspace add $SANDBOX_AI_RUN DIR` (at `/workspaces/<name>`, no restart; `--ro` read-only, `--name AS` for `/workspaces/AS`, a single file too), or `sandbox-ai resume NAME --restart --workspace DIR` |
 | An MCP server | `--mcp NAME` (after `sandbox-ai mcp add NAME` from `sandbox-ai mcp catalog`) | `sandbox-ai mcp attach NAME $SANDBOX_AI_RUN --live` (no restart) |

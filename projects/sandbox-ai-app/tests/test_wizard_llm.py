@@ -273,3 +273,40 @@ def test_the_launcher_accepts_any_agent_with_a_registered_local_server(agent, tm
     board.first("agent").props["model"] = "some-cloud-model"
     plan, message = sai.dry_run(agent, B.launcher_argv(sai, board))
     assert plan is None and "--model and --llm" in message
+
+
+def test_several_models_go_on_the_board_as_the_cli_writes_them():
+    """--llm NAME:MODEL,MODEL... (the CLI wizard writes it; OpenCode offers exactly these): read, kept and passed on as
+    it is; an empty or option-like part, or more than MODELS_MAX, is refused."""
+    assert WL.parse_value("lm:qwen2.5-coder:7b,llama3.2:3b") == ("lm", "qwen2.5-coder:7b,llama3.2:3b")
+    assert WL.llm_value("lm", "a,b") == "lm:a,b" and WL.chosen_model(LOCAL, "a,b") == "a,b"
+    for bad in ("a,,b", "a,-x", ",".join(["m"] * (WL.MODELS_MAX + 1)), "a b"):
+        assert WL.valid_models(bad) is None and WL.parse_value(f"lm:{bad}") == ("", "")
+        with pytest.raises(ValueError):
+            WL.llm_value("lm", bad)
+
+
+def test_servers_found_on_this_machine_and_at_the_addresses_named():
+    """`sandbox-ai llm detect --json`: this machine's loopback always, other addresses only as named (IP addresses,
+    never a name); what comes back is checked before anything shows it or passes it on."""
+    assert WL.detect_argv() == ["llm", "detect", "--json"]
+    assert WL.detect_argv(["127.0.0.1", " 192.168.1.20 ", "192.168.1.20", "fd00::5"]) == [
+        "llm", "detect", "--json", "--address", "192.168.1.20", "--address", "fd00::5"]
+    for bad in ("llm.example.org", "--address", "10.0.0.0/8"):
+        with pytest.raises(ValueError, match="IP address"):
+            WL.detect_argv([bad])
+    answer = json.dumps([
+        {"kind": "ollama", "host": "127.0.0.1", "port": 11434, "url": "http://127.0.0.1:11434",
+         "models": [{"name": "qwen2.5-coder:7b"}, {"name": "-x"}, {"name": 7}, "llama"]},
+        {"kind": "nonsense", "url": "http://127.0.0.1:1"}, {"kind": "vllm", "url": "http://user@host:8000"},
+        {"kind": "vllm", "url": "http://192.168.1.20:8000", "models": None}, "x"])
+    sai = FakeSai({("llm", "detect"): (0, answer, "")})
+    assert WL.detect(sai, ["192.168.1.20"]) == [
+        {"kind": "ollama", "url": "http://127.0.0.1:11434", "models": ["qwen2.5-coder:7b"]},
+        {"kind": "vllm", "url": "http://192.168.1.20:8000", "models": []}]
+    assert sai.calls == [("llm", "detect", "--json", "--address", "192.168.1.20")]
+    older = FakeSai({("llm", "detect"): (2, "", "sandbox-ai llm: error: argument command: invalid choice: 'detect'")})
+    with pytest.raises(ValueError, match="invalid choice"):
+        WL.detect(older)
+    with pytest.raises(ValueError):
+        WL.parse_detected("not json")

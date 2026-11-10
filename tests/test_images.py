@@ -1,5 +1,5 @@
 """sandbox-ai images, with podman replaced by recorded answers: listing, packages, extensions (validator,
-changes, variants, history), the extension layer of sandbox-build-image and --image-variant."""
+changes, variants, history), the extension layer of sandbox-ai build and --image-variant."""
 import importlib.util
 import io
 import json
@@ -224,7 +224,7 @@ def test_extend_new_remove_and_history(config, capsys, tmp_path):
     assert im.agent_of("gpu") == "claude" and im.variants() == [("gpu", "claude")]
     assert im.describe("gpu")["apt"] == ["ripgrep=14.1.0-1"] and im.describe("gpu")["available"] == ["tool.sh"]
     assert im.main(["new", "gpu", "--from", "codex"]) == 1, "exists already"
-    for name in ("claude", "all", "vpn", "Upper", "a/b", "x" * 31):  # vpn: sandbox-build-image vpn
+    for name in ("claude", "all", "vpn", "Upper", "a/b", "x" * 31):  # vpn: sandbox-ai build vpn
         assert im.main(["new", name, "--from", "codex"]) == 1
     assert im.main(["new", "empty", "--from", "codex", "--empty", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["image"] == "localhost/codex-sandbox-empty:latest"
@@ -374,6 +374,7 @@ if args[:2] == ["image", "inspect"]:
     script.chmod(0o700)
     monkeypatch.setenv("PATH", f"{script.parent}:/usr/bin:/bin")
     monkeypatch.setenv("SANDBOX_AI_PYTHON", sys.executable)
+    monkeypatch.setenv("SANDBOX_AI_BUILD_NO_DNS_CHECK", "1")  # (its own tests below: test_build_network)
     cgroups = [] if os.path.exists(f"/run/user/{os.getuid()}/bus") else ["--cgroup-manager=cgroupfs"]
 
     def calls():
@@ -387,7 +388,7 @@ if args[:2] == ["image", "inspect"]:
 
 
 def builder(*args):
-    return subprocess.run([str(ROOT / "sandbox-build-image"), *args], capture_output=True, text=True)
+    return subprocess.run([str(ROOT / "sandbox-ai"), "build", *args], capture_output=True, text=True)
 
 
 def test_builder_adds_the_extension_layer(fake_engine, tmp_path):
@@ -482,3 +483,72 @@ def test_the_tor_recipe(config):
     assert im.main(["recipe", "tor", "--from", "codex", "--as", "tor-codex"], out=lines.append) == 0
     codex = (im.config_root() / "tor-codex" / im.FRAGMENT).read_text()
     assert codex.index("RUN true") < codex.index("torbrowser-launcher")
+
+
+
+# -- names during the build: Podman's own network, else the host's, else a clear stop --
+
+
+def dns_engine(tmp_path, monkeypatch, resolves):
+    """podman whose `run ... getent hosts` succeeds only on the networks in RESOLVES ("default", "host")."""
+    log = tmp_path / "podman.log"
+    script = tmp_path / "bin" / "podman"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text(f"""#!{sys.executable}
+import json, sys
+args = sys.argv[1:]
+with open({str(log)!r}, "a") as handle:
+    handle.write(json.dumps(args) + "\\n")
+while args and args[0].startswith("--cgroup-manager"):
+    args = args[1:]
+if args[:1] == ["run"]:
+    network = "host" if "--network=host" in args else "default"
+    sys.exit(0 if network in {resolves!r} else 1)
+if args[:2] == ["image", "inspect"]:
+    print(json.dumps([{{"Id": "base-id", "Config": {{"Labels": {{}}}}}}]))
+""")
+    script.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{script.parent}:/usr/bin:/bin")
+    monkeypatch.setenv("SANDBOX_AI_PYTHON", sys.executable)
+    monkeypatch.delenv("SANDBOX_AI_BUILD_NO_DNS_CHECK", raising=False)
+
+    def builds():
+        found = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return [[a for a in call if not a.startswith("--cgroup-manager")] for call in found]
+    return builds
+
+
+@pytest.mark.parametrize("target", ["claude", "vpn", "tor", "team"])
+def test_a_build_whose_network_resolves_nothing_uses_the_hosts(tmp_path, monkeypatch, target):
+    """The user's `sandbox-ai build all` and `build vpn` failed at every RUN step: "Temporary failure resolving
+    deb.debian.org" (Podman's build network reached no resolver). Checked first; only the host's network resolves:
+    the build uses it and says so."""
+    builds = dns_engine(tmp_path, monkeypatch, {"host"})
+    result = builder(target, "--build-arg", "CLAUDE_VERSION=1.2.3", "--build-arg", "CODEX_VERSION=1.2.3",
+                     "--build-arg", "OPENCODE_VERSION=1.2.3")
+    assert result.returncode == 0, result.stderr
+    assert "resolves no names here" in result.stderr and "--network=host" in result.stderr
+    built = [c for c in builds() if c[:1] == ["build"]]
+    assert built and all("--network=host" in c for c in built)
+
+
+def test_a_build_whose_network_resolves_builds_as_before(tmp_path, monkeypatch):
+    builds = dns_engine(tmp_path, monkeypatch, {"default", "host"})
+    result = builder("claude", "--build-arg", "CLAUDE_VERSION=1.2.3")
+    assert result.returncode == 0, result.stderr
+    built = [c for c in builds() if c[:1] == ["build"]]
+    assert built and not any("--network=host" in c for c in built) and "resolves no names" not in result.stderr
+
+
+def test_no_name_resolves_anywhere_stops_before_building(tmp_path, monkeypatch):
+    builds = dns_engine(tmp_path, monkeypatch, set())
+    result = builder("claude", "--build-arg", "CLAUDE_VERSION=1.2.3")
+    assert result.returncode == 1 and "not even on the host's network" in result.stderr and "--dns IP" in result.stderr
+    assert not [c for c in builds() if c[:1] == ["build"]], "nothing built"
+
+
+def test_a_network_given_to_the_build_is_left_as_given(tmp_path, monkeypatch):
+    builds = dns_engine(tmp_path, monkeypatch, set())
+    result = builder("claude", "--build-arg", "CLAUDE_VERSION=1.2.3", "--dns", "192.0.2.53")
+    assert result.returncode == 0, result.stderr
+    assert not [c for c in builds() if c[:1] == ["run"]], "no check"

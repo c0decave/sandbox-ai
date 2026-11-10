@@ -514,7 +514,7 @@ class PresetGallery(QDialog):
             return False
         try:
             PR.remove_mine(self.sai, preset.id)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             warn(self, tr("Delete"), printable(exc))
             return False
         self.selected = None

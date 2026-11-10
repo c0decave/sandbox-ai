@@ -117,3 +117,16 @@ def test_a_keyring_that_refuses_says_how_to_keep_it_in_the_files(monkeypatch, ca
     monkeypatch.setattr(ss, "store", lambda: refusing)
     assert ss.main(["set", "GH_PUSH"], stdin=io.StringIO("ghp_value\n")) == 1
     assert "SANDBOX_AI_SECRETS=file sandbox-ai secrets set GH_PUSH" in capsys.readouterr().err
+
+
+def test_set_refuses_several_lines_and_an_unset_variable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.delenv("NO_SUCH_VARIABLE", raising=False)
+    out = []
+    assert ss.main(["set", "MULTI"], stdin=io.StringIO("a\nb\n"), out=out.append) == 1
+    assert "it had several" in capsys.readouterr().err and ss.FileStore().get("MULTI") is None, "never cut"
+    assert ss.main(["set", "ONE"], stdin=io.StringIO("value\n"), out=out.append) == 0
+    assert ss.FileStore().get("ONE") == "value"
+    assert ss.main(["set", "E", "--from-env", "NO_SUCH_VARIABLE"], out=out.append) == 1
+    assert "NO_SUCH_VARIABLE is not set" in capsys.readouterr().err

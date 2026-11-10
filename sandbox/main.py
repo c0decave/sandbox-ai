@@ -7,12 +7,13 @@
   sandbox-ai attach|pause|resume|stop|delete NAME                    any start by its name (detach: Ctrl-b d)
   sandbox-ai gc [--older-than DAYS] [--dry-run]                      remove leftovers and old kept starts
   sandbox-ai session list|attach|pause|resume|stop|delete ...       the same for sessions (older form)
+  sandbox-ai session copy|move NAME HOST [--map L=R]                 a session's configuration started on another host
   sandbox-ai mcp list|start|stop|attach|detach ... [--live]         MCP server sandboxes (attach/detach: a start's, --live: while it runs)
   sandbox-ai login claude|codex|opencode | --status                  log in inside a sandbox; kept for all sandboxes
   sandbox-ai plugins [claude [--update] | --status | marketplaces]   install the plugins the kits declare; every marketplace
   sandbox-ai kits [list|show|new|add-skill|add-plugin|import-marketplace|...]  see and change kits (skills, plugins)
   sandbox-ai wizard [new|edit|trust|forget|models] ...               project setup
-  sandbox-ai build [--pin VERSION] AGENT|all|VARIANT|team|vpn ...    build the images and their extensions
+  sandbox-ai build [--pin VERSION] AGENT|all|VARIANT|team|vpn|tor ... build the images and their extensions
   sandbox-ai doctor [--backend podman|bwrap|both]                    check the host
   sandbox-ai logs [DIR|--project PATH]                               blocked egress and file access, with suggestions
   sandbox-ai activity [RUN|--session NAME|--project PATH] [--follow]  what the agents did: prompts, tools, files, network
@@ -21,11 +22,14 @@
   sandbox-ai devices list|add|remove [RUN] PATH|usb:VID:PID          hand devices to a running sandbox
   sandbox-ai workspace list|add|remove [RUN] DIR|FILE [--ro] [--name NAME]  hand a host folder or file to a running sandbox
   sandbox-ai limits [RUN] --memory|--cpus|--pids ...                 change a running sandbox's limits
+  sandbox-ai usage [RUN|--all] [--json] [--follow]                   what a running sandbox uses: CPU, memory, processes
   sandbox-ai approvals list|allow|deny|history|remembered|forget ... answer what running sandboxes ask
+  sandbox-ai rules check|show|reload ...                              check rulesets, show a start's, reload a running one's
   sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them
+  sandbox-ai safeguards [RUN|--all] [--follow] [--json]               what the safeguards refused or ended, why, the fix
   sandbox-ai secrets list|set|delete|backend ...                     API keys and tokens in your keyring
   sandbox-ai llm add|list|show|remove|models|status|check ...         LLM servers, local or remote, for --llm
-  sandbox-ai vpn add|list|show|remove|check ...                      VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale)
+  sandbox-ai vpn add|list|show|remove|check|rotate ...               VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale, Tor)
   sandbox-ai hosts list|add|set|remove|test|update|install|run ...    other machines (LXC containers) managed over SSH
   sandbox-ai team start|list|show|post|stop|delete ...                a team of agents, one sandbox each, with a task board
   sandbox-ai web [serve|user|vendor|cert] ...                         the web interface (HTTPS, password and TOTP)
@@ -40,9 +44,8 @@
   sandbox-ai version [--verbose]                                     version; --verbose: install place, release keys
   sandbox-ai completion bash|zsh|fish|install                        Tab completion for your shell (install.sh sets it up)
 
-The older single commands (claude-sandbox, sandbox-session, sandbox-mcp, sandbox-wizard,
-sandbox-build-image, ...) still work but are deprecated: they print a note (SANDBOX_AI_NO_DEPRECATION=1 hides
-it) and will be removed in a later version.
+The older single commands (claude-sandbox, sandbox-session, sandbox-mcp, sandbox-wizard, sandbox-build-image,
+...) are removed: each is one of the commands above.
 """
 import importlib.util
 import os
@@ -60,9 +63,9 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "mcp": ("mcp.py",), "wizard": ("wizard.py",), "login": ("login.py",), "plugins": ("plugins.py",), "kits": ("kitctl.py",), "doctor": ("doctor.py",), "logs": ("logs.py",),
                    "activity": ("activity.py",),
                    "privacy-check": ("privacy.py", "check"), "net": ("net.py",),
-                   "approvals": ("approvals.py",), "canaries": ("canary.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
+                   "approvals": ("approvals.py",), "canaries": ("canary.py",), "safeguards": ("safeguards.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
-                   "workspace": ("workspaces.py",)}
+                   "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",)}
 
 
 def version():
@@ -180,14 +183,14 @@ def installation_mode(rest, here=None, euid=None, writable=None):
     here = Path(here or HERE)
     euid = os.geteuid() if euid is None else euid
     writable = writable or (lambda path: os.access(path, os.W_OK))
-    given = any(arg in ("--user", "--system", "--prefix", "--uninstall") or arg.startswith("--prefix=")
-                for arg in rest)
-    if given or "--check" in rest or here.parent.parent.name != "versions":
+    # --uninstall and --check act on an installation too: the one this copy belongs to, unless one is named.
+    given = any(arg in ("--user", "--system", "--prefix") or arg.startswith("--prefix=") for arg in rest)
+    if given or here.parent.parent.name != "versions":
         return list(rest)
     data = here.parent.parent.parent
     if data.name == "sandbox-ai" and data.parent.name == "lib" and not str(data).startswith(HOMES):
         prefix = data.parent.parent
-        if euid != 0 and not writable(data):
+        if euid != 0 and not writable(data) and "--check" not in rest:  # (a check changes nothing)
             raise ValueError(f"this is a system installation ({data}): update it as root: sudo sandbox-ai update")
         return ["--system", "--prefix", str(prefix), *rest]
     return ["--user", *rest] if euid == 0 else list(rest)
@@ -223,11 +226,23 @@ def bash(script, args):
     os.execv(executable, [executable, str(script), *args])
 
 
+# The single commands removed in 0.1.92 (deprecated since 0.1.30) and what took their place.
+REMOVED = {"claude-sandbox": "sandbox-ai claude", "codex-sandbox": "sandbox-ai codex",
+           "opencode-sandbox": "sandbox-ai opencode", "sandbox-session": "sandbox-ai session",
+           "sandbox-mcp": "sandbox-ai mcp", "sandbox-wizard": "sandbox-ai wizard",
+           "sandbox-build-image": "sandbox-ai build"}
+
+
 def main(argv):
+    if argv[:1] == ["help"] and argv[1:2] and argv[1] != "help":
+        return main([*argv[1:2], "--help"])  # sandbox-ai help net: the help of that command
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__.strip())
         return 0 if argv else 2
     command, rest = argv[0], argv[1:]
+    if command in REMOVED:
+        print(f"sandbox-ai: {command} was removed in 0.1.92; use {REMOVED[command]}", file=sys.stderr)
+        return 2
     if command in ("version", "--version", "-V"):
         if rest[:1] in (["--verbose"], ["-v"]):
             return verbose_version()

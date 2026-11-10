@@ -309,6 +309,39 @@ def test_settings_are_private(sai):
     assert oct(sai.settings_file().stat().st_mode & 0o777) == "0o600"
 
 
+@pytest.mark.parametrize("trouble", ["unreadable", "damaged"])
+def test_a_settings_or_profiles_file_that_cannot_be_read_is_never_replaced_by_one_value(sai, monkeypatch, trouble):
+    """Stability review 2: a change of one setting (or profile) reads the file, changes the value and writes it all
+    back. When the read failed (too many open files, an I/O error, a file being written by an editor) the file
+    counted as empty: every other setting, the recent projects, every other profile were lost with the write. Now the
+    change fails (OSError or ValueError, as when the disk is full) and the file stays as it was."""
+    sai.save_settings({"theme": "dark", "recent_projects": ["/p"], "project": "/p"})
+    sai.save_profile("work", "claude", ["-D"])
+    real = Path.read_text
+    for path in (sai.settings_file(), sai.profiles_file()):
+        before = path.read_bytes()
+        if trouble == "damaged":
+            path.write_text(before.decode()[:-3])
+            before = path.read_bytes()
+        else:
+            monkeypatch.setattr(Path, "read_text", lambda self, *a, p=path, **k: (_ for _ in ()).throw(
+                OSError(24, "Too many open files")) if self == p else real(self, *a, **k))
+        with pytest.raises((OSError, ValueError)):
+            if path == sai.settings_file():
+                sai.save_setting("language", "de")
+            else:
+                sai.save_profile("other", "codex", [])
+        if path == sai.settings_file():
+            for change in (lambda: sai.remember_project("/q"), lambda: sai.forget_project("/p")):
+                with pytest.raises((OSError, ValueError)):
+                    change()
+        else:
+            with pytest.raises((OSError, ValueError)):
+                sai.delete_profile("work")
+        monkeypatch.setattr(Path, "read_text", real)
+        assert path.read_bytes() == before, f"{path.name} stays as it was"
+
+
 def test_modules_load_once_even_from_several_threads(monkeypatch):
     import threading
     import time as clock

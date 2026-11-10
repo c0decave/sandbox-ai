@@ -97,7 +97,8 @@
           pty.write(encodeText(text));
         }
       },
-      size: function () { return [term.cols, term.rows]; }
+      size: function () { return [term.cols, term.rows]; },
+      fontFamily: function () { return term.options.fontFamily; }
     };
   });
 })();

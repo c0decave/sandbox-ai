@@ -166,3 +166,38 @@ def test_the_reasons_in_german(qapp, sai):
         assert terminal.attach_why(STARTS[0]) == ""
     finally:
         i18n.set_language("en")
+
+
+def test_sessions_lie_below_the_tabs_folded_until_opened(qapp, sai, monkeypatch):
+    """Sessions (the running starts) below the terminal tabs, folded to one line at first: its count still shows;
+    opened, it takes about 30% of the height. The line above the tabs says nothing while nothing is wrong."""
+    monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
+    page = terminal.TerminalsPage(sai=sai, in_terminal=lambda *a, **k: None)
+    page.resize(900, 1000)
+    page.show()
+    assert page.hint.text() == "" and page.hint.isHidden(), "no explanation that stays on the page"
+    assert page.split.indexOf(page.tabs) == 0 and page.split.indexOf(page.starts) == 1, "the terminals first"
+    assert page.sessions_fold.text() == "Sessions" and page.list.accessibleName() == "Sessions"
+    assert page.sessions_fold.property("disclosure") and not page.sessions_fold.isChecked()
+    assert page.list.isHidden() and "5 running on local" in page.summary.text(), "folded: its count is still there"
+    tabs, sessions = page.split.sizes()
+    assert sessions < 100 < tabs
+    page.sessions_fold.setChecked(True)
+    assert not page.list.isHidden()
+    tabs, sessions = page.split.sizes()
+    assert 0.2 < sessions / (tabs + sessions) < 0.4, (tabs, sessions)
+    page.sessions_fold.setChecked(False)
+    assert page.list.isHidden() and page.split.sizes()[1] < 100
+    page.reveal("starts")  # a tour points at it: it opens
+    assert page.sessions_fold.isChecked() and not page.list.isHidden()
+    page.deleteLater()
+
+
+def test_sessions_in_german(qapp, sai):
+    i18n.set_language("de")
+    try:
+        page = terminal.TerminalsPage(sai=sai, in_terminal=lambda *a, **k: None)
+        assert page.sessions_fold.text() == "Sitzungen" and page.list.accessibleName() == "Sitzungen"
+        page.deleteLater()
+    finally:
+        i18n.set_language("en")

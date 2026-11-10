@@ -9,6 +9,7 @@
   sandbox-ai llm models NAME [--sort name|size|loaded] [--json]
   sandbox-ai llm check NAME [--agent claude|codex|opencode] [--model MODEL]
   sandbox-ai llm status [NAME] [--json] [--watch SECONDS]
+  sandbox-ai llm detect [--address IP]... [--json]
 
 KIND is ollama, lmstudio, llamacpp, vllm or openai-compatible. URL is the server's root, with a path
 prefix if a gateway puts one in front (https://gw.example.org/ollama); each agent gets the API path it
@@ -17,8 +18,10 @@ loopback (127.0.0.1 or localhost, reached with --allow-host-port), private, CGNA
 (100.64.0.0/10) and unique-local IPv6 addresses, unless --insecure-http.
 
 A start with --llm NAME[:MODEL] opens exactly that server's address and port and configures the agent
-for it. The key (a secret of sandbox-ai secrets, never stored here) is added by the connection proxy on
-the wire, so the agent only ever sees a placeholder. Endpoints are kept in ~/.config/sandbox-ai/llm.json.
+for it; --llm NAME:MODEL,MODEL... names several (the first is the agent's; OpenCode offers exactly these).
+The key (a secret of sandbox-ai secrets, never stored here) is added by the connection proxy on the wire,
+so the agent only ever sees a placeholder. Endpoints are kept in ~/.config/sandbox-ai/llm.json. An endpoint
+added with --vpn is checked, listed and watched through that VPN (llm check|models|status).
 
 llm status shows what each server has loaded and uses now, as far as its API reports it: Ollama the loaded models
 with their VRAM and RAM, vLLM the KV cache and the requests running and waiting, llama.cpp its slots (and requests
@@ -28,6 +31,7 @@ these APIs (llama.cpp's router mode excepted).
 Standard library only.
 """
 import argparse
+import base64
 import contextlib
 import http.client
 import importlib.util
@@ -96,6 +100,13 @@ def printable(text):
 
 def load_secret_store_module():
     spec = importlib.util.spec_from_file_location("sandbox_secret_store_llm", HERE / "secret_store.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_vpn_module():
+    spec = importlib.util.spec_from_file_location("sandbox_vpn_llm", HERE / "vpn.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -278,7 +289,7 @@ def check_record(name, record):
     if not NAME.fullmatch(name) or not isinstance(record, dict):
         raise ValueError(f"{where}: invalid entry")
     known = {"kind", "url", "api_key_secret", "headers", "ca", "vpn", "model", "anthropic", "insecure_http",
-             "models", "checked"}
+             "models", "checked", "contexts"}
     if set(record) - known:
         raise ValueError(f"{where}: unknown fields {sorted(set(record) - known)}")
     if record.get("kind") not in KINDS:
@@ -315,6 +326,10 @@ def check_record(name, record):
     models = record.get("models", [])
     if not isinstance(models, list) or not all(isinstance(m, str) and MODEL_NAME.fullmatch(m) for m in models):
         raise ValueError(f"{where}: models is a list of model names")
+    contexts = record.get("contexts", {})
+    if not isinstance(contexts, dict) or not all(isinstance(m, str) and MODEL_NAME.fullmatch(m) and context_value(n)
+                                                 for m, n in contexts.items()):
+        raise ValueError(f"{where}: contexts maps model names to their context window (tokens)")
     if parsed["scheme"] == "http" and not record.get("insecure_http"):
         problem = plain_http_problem(parsed)
         if problem:
@@ -322,7 +337,7 @@ def check_record(name, record):
     return {"name": name, "kind": record["kind"], "url": parsed["url"], "api_key_secret": secret,
             "headers": dict(headers), "ca": ca, "vpn": vpn, "model": model,
             "anthropic": record.get("anthropic", False), "insecure_http": record.get("insecure_http", False),
-            "models": list(models), "checked": record.get("checked"), "parsed": parsed}
+            "models": list(models), "checked": record.get("checked"), "contexts": dict(contexts), "parsed": parsed}
 
 
 def endpoint(name, path=None):
@@ -340,7 +355,8 @@ def endpoint(name, path=None):
 def record_of(endpoint):
     """The stored form of a checked endpoint."""
     record = {key: endpoint[key] for key in ("kind", "url", "api_key_secret", "headers", "ca", "vpn", "model",
-                                              "anthropic", "insecure_http", "models", "checked")}
+                                              "anthropic", "insecure_http", "models", "checked", "contexts")
+              if key in endpoint}
     return {key: value for key, value in record.items() if value not in (None, False, {}, [])}
 
 
@@ -447,6 +463,7 @@ class Client:
     def __init__(self, endpoint, get=None, timeout=TIMEOUT, opener=None):
         self.endpoint, self.timeout = endpoint, timeout
         key, headers = secret_values(endpoint, get)
+        self.secret = bool(key or headers)
         self.headers = {"Accept": "application/json", "User-Agent": "sandbox-ai"}
         if key:
             self.headers["Authorization"] = f"Bearer {key}"
@@ -496,10 +513,11 @@ class Client:
         """The text answer of GET PATH (Prometheus' /metrics); ValueError as json() says it."""
         return self.json(path, parse=lambda data: data.decode("utf-8"))
 
-    def json(self, path, parse=json.loads):
-        """The JSON answer of GET PATH; ValueError says what went wrong (never with a secret)."""
+    def json(self, path, parse=json.loads, body=None):
+        """The JSON answer of GET PATH (POST with BODY, a dict); ValueError says what went wrong (never with a
+        secret)."""
         try:
-            status, data = self.call(path)
+            status, data = self.call(path, body)
         except (OSError, ssl.SSLError) as exc:
             raise ValueError(f"{self.endpoint['url']}{path}: {printable(getattr(exc, 'reason', exc))}") from None
         if status in (401, 403):
@@ -514,6 +532,40 @@ class Client:
         except (ValueError, RecursionError):
             raise ValueError(f"{self.endpoint['url']}{path}: the answer is not "
                              f"{'JSON' if parse is json.loads else 'text'}") from None
+
+
+class VPNClient(Client):
+    """Requests to an endpoint added with --vpn: sent through that profile's tunnel (a container of its own,
+    vpn.channel), the name resolved by the VPN's resolvers. The same rules as from the host: the key over plain http
+    only to a local address (the address checked in the tunnel), unless --insecure-http; no redirect followed."""
+
+    def __init__(self, endpoint, tunnel, get=None, timeout=TIMEOUT):
+        super().__init__(endpoint, get, timeout, opener=object())  # (no opener: every request goes through TUNNEL)
+        self.tunnel = tunnel
+
+    def call(self, path, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
+        try:
+            answer = self.tunnel.request(
+                "http", wait=self.timeout + 15, timeout=self.timeout, url=self.endpoint["url"] + path,
+                method="GET" if data is None else "POST", headers=headers,
+                body=base64.b64encode(data).decode() if data is not None else None,
+                ca=ca_text(self.endpoint) or None, secret=self.secret, limit=RESPONSE_LIMIT,
+                plain_networks=None if self.endpoint.get("insecure_http") else [str(n) for n in LOCAL_NETWORKS])
+        except ValueError as exc:
+            raise OSError(f"through the VPN {self.endpoint.get('vpn')}: {exc}") from None
+        return answer["status"], base64.b64decode(answer.get("body") or "")
+
+
+@contextlib.contextmanager
+def through_vpn(endpoint, podman_url=None):
+    """The endpoint's VPN tunnel (vpn.channel) while the block runs, or None for an endpoint without --vpn."""
+    if not endpoint.get("vpn"):
+        yield None
+        return
+    with load_vpn_module().channel(endpoint["vpn"], podman_url) as tunnel:
+        yield tunnel
 
 
 def model_date(value):
@@ -593,7 +645,7 @@ def discover_raw(kind, fetch):
         # vLLM serves exactly the models it has loaded.
         return [{"name": m["id"], "size": None, "loaded": True,
                  "details": with_date(f"max_model_len {m['max_model_len']}" if m.get("max_model_len") else "",
-                                      m.get("created"))}
+                                      m.get("created")), "context": m.get("max_model_len")}
                 for m in fetch("/v1/models")["data"]]
     if kind == "llamacpp":
         answer = fetch("/v1/models")
@@ -920,6 +972,20 @@ def endpoint_status(endpoint, get=None, client=None):
     return {**base, "reachable": True, "error": None, "models": len(models), **status}
 
 
+def vpn_status(endpoint, get=None):
+    """endpoint_status, through the endpoint's VPN when it was added with --vpn (a tunnel brought up for the
+    reading: some seconds); a VPN that does not come up is the reading's error."""
+    if not endpoint.get("vpn"):
+        return endpoint_status(endpoint, get)
+    try:
+        with through_vpn(endpoint) as tunnel:
+            return endpoint_status(endpoint, get, client=VPNClient(endpoint, tunnel, get, timeout=STATUS_TIMEOUT))
+    except (OSError, ValueError) as exc:
+        return {"name": endpoint["name"], "kind": endpoint["kind"], "url": endpoint["url"], "reachable": False,
+                "error": printable(f"VPN {endpoint['vpn']}: {exc}")[:600], "read_at": now_text(), "models": None,
+                "loaded": None, "usage": {}, "reported_by": [], "not_reported": list(REPORTABLE)}
+
+
 def status_lines(entry):
     """`llm status` as text for one server (ENTRY: endpoint_status, or a status of wizard models --status)."""
     head = f"{entry['name']}: {KINDS[entry['kind']]['label']} at {entry['url']}" if entry.get("name") else None
@@ -1067,23 +1133,236 @@ def discover_url(kind, url, get=None, client=None, ca=None, api_key_secret=None,
 
 
 def endpoint_models(endpoint, get=None, client=None):
-    """The models the endpoint lists now, checked; remembered in the store for later starts."""
+    """The models the endpoint lists now, checked; remembered in the store for later starts, with the context window
+    of those whose listing gives one (vLLM, LM Studio)."""
     client = client or Client(endpoint, get)
     models = discover(endpoint["kind"], client.json)
-    remember_models(endpoint["name"], [m["name"] for m in models])
+    remember_models(endpoint["name"], [m["name"] for m in models],
+                    {m["name"]: m["context"] for m in models if m.get("context")})
     return models
 
 
-def remember_models(name, names):
-    """The models NAME lists now, in its record: read and written back under the store's lock, and only while NAME
-    is still there (an `llm remove` meanwhile is never undone)."""
+def remember_models(name, names, contexts=None):
+    """The models NAME lists now, in its record (with CONTEXTS, {model: tokens}, the context windows known): read and
+    written back under the store's lock, and only while NAME is still there (an `llm remove` meanwhile is never
+    undone)."""
     with settings_lock(store_path()):
         store = load_store()
         record = store["endpoints"].get(name)
         if isinstance(record, dict):
             record["models"] = names[:500]
             record["checked"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            known = {model: value for model, value in (contexts or {}).items()
+                     if model in record["models"] and context_value(value)}
+            if known:
+                record["contexts"] = known
+            else:
+                record.pop("contexts", None)
             save_store(store)
+
+
+# --- the context window --------------------------------------------------------------------------------------------
+#
+# Local models are in neither Codex's nor OpenCode's catalog: without a context window the agents guess (and compact
+# too late, or cut what the server would have taken). What each server reports for a model, the window it serves:
+#   vLLM       /v1/models: max_model_len
+#   llama.cpp  /props: default_generation_settings.n_ctx (a slot's context); in router mode /v1/models' n_ctx first
+#   LM Studio  /api/v1/models: a loaded instance's context_length, else max_context_length (also /api/v0/models)
+#   Ollama     /api/ps: a loaded model's context_length, else /api/show: num_ctx of its parameters, else the
+#              model's own <arch>.context_length
+CONTEXT_TIMEOUT = 3          # seconds per request at a start (never fatal: the agent's own guess then)
+CONTEXT_RANGE = (512, 1 << 24)
+OUTPUT_LIMIT = 32768         # tokens OpenCode may ask for in one answer, at most a quarter of the window
+
+
+def context_value(value):
+    """VALUE when it is a plausible context window (tokens), else None (the answers are untrusted)."""
+    if isinstance(value, int) and not isinstance(value, bool) and CONTEXT_RANGE[0] <= value <= CONTEXT_RANGE[1]:
+        return value
+    return None
+
+
+def output_limit(context):
+    """OpenCode's limit.output for a window of CONTEXT tokens: a quarter of it, at most OUTPUT_LIMIT."""
+    return max(256, min(OUTPUT_LIMIT, context // 4))
+
+
+def model_context(kind, fetch, model, post=None):
+    """The context window (tokens) a server of KIND reports for MODEL, or None. FETCH(PATH) is the JSON of GET PATH,
+    POST(PATH, BODY) of a POST (Ollama's /api/show)."""
+    def listed(answer, key, id_key="id"):
+        entries = answer.get(key) if isinstance(answer, dict) else None
+        return [m for m in entries if isinstance(m, dict) and m.get(id_key) == model] \
+            if isinstance(entries, list) else []
+    if kind == "vllm":
+        for m in listed(optional(fetch, "/v1/models", {}), "data"):
+            return context_value(m.get("max_model_len"))
+    elif kind == "llamacpp":
+        for m in listed(optional(fetch, "/v1/models", {}), "data"):
+            memory = m.get("memory") if isinstance(m.get("memory"), dict) else {}
+            effective = memory.get("effective") if isinstance(memory.get("effective"), dict) else {}
+            if context_value(effective.get("n_ctx")):
+                return effective["n_ctx"]
+        props = optional(fetch, "/props", {})
+        settings = props.get("default_generation_settings") if isinstance(props, dict) else None
+        if isinstance(settings, dict) and context_value(settings.get("n_ctx")):
+            return settings["n_ctx"]
+        return context_value(props.get("n_ctx")) if isinstance(props, dict) else None
+    elif kind == "lmstudio":
+        native = lmstudio_native(fetch).get(model) or {}
+        for instance in native.get("loaded_instances") or []:
+            config = instance.get("config") if isinstance(instance, dict) else None
+            if isinstance(config, dict) and context_value(config.get("context_length")):
+                return config["context_length"]
+        if context_value(native.get("max_context_length")):
+            return native["max_context_length"]
+        for m in listed(optional(fetch, "/api/v0/models", {}), "data"):
+            return context_value(m.get("loaded_context_length")) or context_value(m.get("max_context_length"))
+    elif kind == "ollama":
+        for m in listed(optional(fetch, "/api/ps", {}), "models", "name"):
+            if context_value(m.get("context_length")):
+                return m["context_length"]
+        if post is None:
+            return None
+        try:
+            shown = post("/api/show", {"model": model})
+        except (OSError, ValueError):
+            return None
+        if not isinstance(shown, dict):
+            return None
+        parameters = shown.get("parameters")
+        found = re.search(r"^num_ctx\s+(\d{1,9})\s*$", parameters, re.MULTILINE) if isinstance(parameters, str) \
+            else None
+        if found and context_value(int(found.group(1))):
+            return int(found.group(1))
+        info = shown.get("model_info") if isinstance(shown.get("model_info"), dict) else {}
+        values = [context_value(v) for k, v in info.items() if isinstance(k, str) and k.endswith(".context_length")]
+        return next((v for v in values if v), None)
+    return None
+
+
+def context_window(endpoint, model, get=None, client=None):
+    """The context window of MODEL at ENDPOINT for a start: the one remembered (llm models), else what the server
+    reports now (CONTEXT_TIMEOUT per request); None when neither says (or the server sits behind its VPN, which
+    the host does not reach). Never raises: the agent's own guess stays then."""
+    known = context_value((endpoint.get("contexts") or {}).get(model))
+    if known or endpoint.get("vpn") or os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
+        return known
+    try:
+        client = client or Client(endpoint, get, timeout=CONTEXT_TIMEOUT)
+        return model_context(endpoint["kind"], client.json, model,
+                             lambda path, body: client.json(path, body=body))
+    except Exception:  # noqa: BLE001 - a server that cannot say leaves the agents' defaults
+        return None
+
+
+# --- finding servers -------------------------------------------------------------------------------------------
+#
+# llm detect (and both wizards) look for servers at a few addresses only: this host's loopback and the addresses
+# the human names (never a network range, never an address of its own choosing), on the usual ports of each kind.
+# Each look is one read-only GET of the model listing, without a proxy, with a short timeout; nothing else is sent,
+# and no network is scanned.
+
+DETECT_PORTS = (("ollama", 11434), ("lmstudio", 1234), ("llamacpp", 8080), ("vllm", 8000))
+DETECT_TIMEOUT = 1.5
+
+
+def lan_address():
+    """This host's outward-facing IPv4 address, or None; no packet is sent (a UDP socket only picks the route)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            return probe.getsockname()[0]
+    except OSError:
+        return None
+
+
+def plain_fetch(url, timeout=DETECT_TIMEOUT):
+    """The JSON of GET URL: no proxy (a local server is never reached through one), no redirects."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "sandbox-ai"})
+    with opener.open(request, timeout=timeout) as response:
+        return json.loads(response.read(RESPONSE_LIMIT + 1)[:RESPONSE_LIMIT])
+
+
+def host_form(host):
+    return f"[{host}]" if ":" in host else host
+
+
+def identify(host, port, fetch=plain_fetch, kind=None, hint=None):
+    """(kind, models) of the server at HOST:PORT: Ollama by /api/tags, any other by /v1/models (HINT, else the kind
+    its port usually has, or what "owned_by" names); KIND: only that kind is tried. ValueError when nothing answers
+    so."""
+    base = f"http://{host_form(host)}:{port}"
+    usual = hint or next((name for name, number in DETECT_PORTS if number == port), "openai-compatible")
+    tried = [kind] if kind else [usual] + (["ollama"] if usual != "ollama" else ["openai-compatible"])
+    problems = []
+    for candidate in dict.fromkeys(tried):
+        try:
+            if candidate != "ollama" and not kind:
+                answer = fetch(base + "/v1/models")
+                owners = {str(m.get("owned_by", "")).lower() for m in answer.get("data", []) if isinstance(m, dict)}
+                if "vllm" in owners:
+                    candidate = "vllm"
+                elif owners & {"llamacpp", "llama.cpp"}:
+                    candidate = "llamacpp"
+            return candidate, discover(candidate, lambda path: fetch(base + path))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            problems.append(f"{candidate}: {printable(getattr(exc, 'reason', exc))}")
+    raise ValueError(f"no LLM server answers at {host}:{port} ({'; '.join(problems)})")
+
+
+def detect_addresses(extra=()):
+    """The addresses llm detect looks at: this host's loopback, then EXTRA, the ones the human names (each
+    once). This host's LAN address only when named: a look there may reach the network's own policy."""
+    found = ["127.0.0.1", *extra]
+    return list(dict.fromkeys(address for address in found if address))
+
+
+def detect(addresses=None, fetch=plain_fetch, ports=None):
+    """[{kind, host, port, url, models}] of the servers that answer at ADDRESSES (default: detect_addresses()) on
+    the usual PORTS ((kind, port) pairs), looked at in parallel. Addresses only: no name is resolved."""
+    import concurrent.futures
+    addresses = list(addresses or detect_addresses())
+    for address in addresses:
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            raise ValueError(f"llm detect looks at IP addresses only: {printable(address)!r}") from None
+    targets = [(host, kind, port) for host in addresses for kind, port in (ports or DETECT_PORTS)]
+
+    def look(target):
+        host, kind, port = target
+        try:
+            found, models = identify(host, port, fetch, hint=kind)
+        except ValueError:
+            return None
+        return {"kind": found, "host": host, "port": port, "url": f"http://{host_form(host)}:{port}",
+                "models": models}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, max(1, len(targets)))) as pool:
+        return [entry for entry in pool.map(look, targets) if entry]
+
+
+def suggested_name(kind, host, taken=()):
+    """A name for a server found at HOST: its kind, with the host's last part when it is not this host."""
+    base = kind if host in LOOPBACK_HOSTS else f"{kind}-{host.replace(':', '.').rsplit('.', 1)[-1] or 'lan'}"
+    name, number = base[:32], 2
+    while name in taken:
+        name, number = f"{base[:29]}-{number}", number + 1
+    return name
+
+
+def register(name, kind, url, out=print, replace=False, models=None):
+    """sandbox-ai llm add NAME --kind KIND --url URL (checked as the command checks it), then MODELS remembered;
+    the checked endpoint."""
+    args = argparse.Namespace(name=name, kind=kind, url=url, api_key_secret=None, header_secret=[], ca=None,
+                              no_ca=False, vpn=None, model=None, anthropic=False, insecure_http=False, replace=replace)
+    with settings_lock(store_path()):  # from reading the store to writing it back, as the command
+        add(args, out)
+    if models is not None:
+        remember_models(name, [m["name"] for m in models],
+                        {m["name"]: m["context"] for m in models if m.get("context")})
+    return endpoint(name)
 
 
 # --- which agent can use which server --------------------------------------------------------------------
@@ -1099,11 +1378,16 @@ def anthropic_api(endpoint):
     return endpoint["kind"] in ANTHROPIC_SINCE or endpoint.get("anthropic", False)
 
 
+def article(label):
+    """LABEL with "a" or "an" before it."""
+    return ("an " if label[:1].lower() in "aeiou" else "a ") + label
+
+
 def agent_problem(endpoint, agent):
     """Why AGENT cannot use ENDPOINT, or None."""
     if agent == "claude" and not anthropic_api(endpoint):
         return (f"Claude Code speaks only the Anthropic Messages API (/v1/messages); the LLM endpoint "
-                f"{endpoint['name']} is a {KINDS[endpoint['kind']]['label']} without it. Use Codex or OpenCode with "
+                f"{endpoint['name']} is {article(KINDS[endpoint['kind']]['label'])} without it. Use Codex or OpenCode with "
                 f"it, run Ollama (0.14.0 or later), LM Studio (0.4.1), llama.cpp (b7187) or vLLM (0.11.1), or add "
                 f"a server that offers /v1/messages (a LiteLLM gateway, for one) with --anthropic")
     return None
@@ -1119,13 +1403,27 @@ KEY_VARIABLE = "SANDBOX_AI_LLM_KEY"
 OPENCODE_CONFIG = ".config/opencode/sandbox-ai-llm.json"
 
 
+def parse_models(value):
+    """(name, [models]) of --llm NAME[:MODEL[,MODEL...]]; a model may contain ':' itself (qwen2.5-coder:7b), never
+    ','. The first model is the agent's; OpenCode offers exactly the ones named (its model allow-list)."""
+    name, sep, models = (value or "").partition(":")
+    listed = models.split(",") if sep else []
+    if not NAME.fullmatch(name) or (sep and not all(MODEL_NAME.fullmatch(model) for model in listed)) \
+            or len(listed) > 50:
+        raise ValueError(f"--llm expects NAME[:MODEL[,MODEL...]], an endpoint of sandbox-ai llm list and model "
+                         f"names: {printable(value)!r}")
+    return name, list(dict.fromkeys(listed))
+
+
 def parse_choice(value):
-    """(name, model or None) of --llm NAME[:MODEL]; a model may contain ':' itself (qwen2.5-coder:7b)."""
-    name, sep, model = (value or "").partition(":")
-    if not NAME.fullmatch(name) or (sep and not MODEL_NAME.fullmatch(model)):
-        raise ValueError(f"--llm expects NAME[:MODEL], an endpoint of sandbox-ai llm list and a model name: "
-                         f"{printable(value)!r}")
-    return name, model or None
+    """(name, model or None) of --llm NAME[:MODEL[,MODEL...]]: the first model, the one the agent starts with."""
+    name, models = parse_models(value)
+    return name, models[0] if models else None
+
+
+def selected_models(a):
+    """The models --llm names ([] when it names none: the endpoint's model then, and the ones it listed)."""
+    return parse_models(a.llm)[1]
 
 
 def provider_id(endpoint):
@@ -1280,17 +1578,22 @@ def proxy_entry(a, get=None):
              "headers": [[name, value] for name, value in headers], "ca": ca_text(found)}]
 
 
-def opencode_config(endpoint, model, only=False):
+def opencode_config(endpoint, model, only=False, allowed=None, contexts=None):
     """OpenCode's configuration (the v1 shape, which OpenCode 2 reads too): an OpenAI-compatible provider
-    (@ai-sdk/openai-compatible, Chat Completions) with the endpoint's models. ONLY (--no-provider-defaults):
-    no other provider is offered."""
+    (@ai-sdk/openai-compatible, Chat Completions) with the endpoint's models, or exactly ALLOWED (the models
+    --llm NAME:MODEL,... names: no other one is offered). ONLY (--no-provider-defaults): no other provider is
+    offered. CONTEXTS ({model: tokens}): limit.context and limit.output of the models whose window is known."""
     pid = provider_id(endpoint)
-    names = list(dict.fromkeys([model, *endpoint.get("models", [])]))
+    names = list(dict.fromkeys([model, *(allowed if allowed else endpoint.get("models", []))]))
+
+    def entry(name):
+        context = context_value((contexts or {}).get(name))
+        return {"name": name, **({"limit": {"context": context, "output": output_limit(context)}} if context else {})}
     config = {"$schema": "https://opencode.ai/config.json",
               "provider": {pid: {"npm": "@ai-sdk/openai-compatible",
                                  "name": f"{endpoint['name']} ({KINDS[endpoint['kind']]['label']})",
                                  "options": {"baseURL": agent_url(endpoint), "apiKey": PLACEHOLDER},
-                                 "models": {name: {"name": name} for name in names}}},
+                                 "models": {name: entry(name) for name in names}}},
               "model": f"{pid}/{model}", "small_model": f"{pid}/{model}", "share": "disabled"}
     if only:
         config["enabled_providers"] = [pid]
@@ -1342,15 +1645,18 @@ def toml_string(value):
     return json.dumps(value)
 
 
-def codex_profile(endpoint, model):
+def codex_profile(endpoint, model, context=None):
     """~/.codex/sandbox-ai-llm.config.toml: a provider with the Responses API (Codex has no other since 0.95.0),
     the key from an environment variable that holds only the placeholder, and none of Codex's own calls home
-    (update check, analytics, metrics, plugin sync, the hosted web search a local server does not have)."""
+    (update check, analytics, metrics, plugin sync, the hosted web search a local server does not have). CONTEXT:
+    the model's context window as the server reports it (model_context_window), when known."""
     pid = provider_id(endpoint)
+    context = context_value(context)
     return "\n".join([
         f"# Written by sandbox-ai for --llm {endpoint['name']} at every start (codex --profile {CODEX_PROFILE}).",
         f"model_provider = {toml_string(pid)}",
         f"model = {toml_string(model)}",
+        *([f"model_context_window = {context}"] if context else []),
         "check_for_update_on_startup = false",
         'web_search = "disabled"',
         "",
@@ -1392,12 +1698,15 @@ def prepare_home(a, home, replace_private, update_json_defaults, state_limit):
     follow a symlink the agent planted. Returns the HOME-relative paths written."""
     found, model = selection(a)
     if a.agent == "opencode":
-        config = opencode_config(found, model, only=a.no_provider_defaults)
+        contexts = dict(found.get("contexts") or {})
+        contexts[model] = context_window(found, model)
+        config = opencode_config(found, model, only=a.no_provider_defaults, allowed=selected_models(a) or None,
+                                 contexts=contexts)
         replace_private((json.dumps(config, indent=2) + "\n").encode(), home, OPENCODE_CONFIG)
         return [OPENCODE_CONFIG]
     if a.agent == "codex":
         relative = f".codex/{CODEX_PROFILE}.config.toml"
-        replace_private(codex_profile(found, model).encode(), home, relative)
+        replace_private(codex_profile(found, model, context_window(found, model)).encode(), home, relative)
         return [relative]
     written = []
     for relative, apply, limit in ((".claude/settings.json", claude_settings, None), (".claude.json", claude_state,
@@ -1423,6 +1732,8 @@ def plan(a):
     config = {"opencode": "/root/" + OPENCODE_CONFIG, "codex": f"/root/.codex/{CODEX_PROFILE}.config.toml",
               "claude": "environment (ANTHROPIC_BASE_URL ...)"}[a.agent]
     return {"name": found["name"], "kind": found["kind"], "url": found["url"], "model": model,
+            # OpenCode offers exactly these (the models --llm names); none named: the endpoint's model and list.
+            "models": selected_models(a) or None,
             "agent_url": agent_url(found, "anthropic" if a.agent == "claude" else "openai"),
             "api": {"claude": "anthropic-messages", "codex": "openai-responses", "opencode": "openai-chat"}[a.agent],
             "opens": opens, "path_prefix": parsed["prefix"] or None, "http_rule": prefix_rule(a, found),
@@ -1482,9 +1793,11 @@ def resolve(host, port):
                    socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
 
 
-def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.create_connection, client=None):
+def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.create_connection, client=None,
+          tunnel=None):
     """Reachability, TLS, the key, the models and the APIs the agents need, line by line; True if nothing failed.
-    From the host: a server only reachable through the endpoint's VPN needs that VPN up here too."""
+    TUNNEL (an endpoint added with --vpn: its profile's tunnel, vpn.channel): every lookup, connection and request
+    goes through it, as the agent's will."""
     parsed, failed = endpoint["parsed"], []
 
     def line(ok, text):
@@ -1492,11 +1805,20 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
             failed.append(text)
         out(f"  {'ok  ' if ok else 'FAIL' if ok is False else 'note'}  {printable(text)}")
     out(f"{endpoint['name']}: {KINDS[endpoint['kind']]['label']} at {endpoint['url']}")
-    if endpoint.get("vpn"):
+    if tunnel is not None:
+        line(True, f"through the VPN profile {endpoint['vpn']}: its tunnel is up and checked")
+    elif endpoint.get("vpn"):
         line(None, f"reached through the VPN profile {endpoint['vpn']}; this check runs from the host's network")
     try:
-        addresses = [parsed["address"]] if parsed["address"] else \
-            (["127.0.0.1"] if parsed["loopback"] else resolve(parsed["host"], parsed["port"]))
+        if parsed["address"] or parsed["loopback"]:
+            addresses = [parsed["address"]] if parsed["address"] else ["127.0.0.1"]
+        elif tunnel is not None:
+            try:
+                addresses = tunnel.request("resolve", names=[parsed["host"]])["hosts"][parsed["host"]]
+            except (ValueError, KeyError) as exc:
+                raise OSError(f"through the VPN: {exc}") from None
+        else:
+            addresses = resolve(parsed["host"], parsed["port"])
     except OSError as exc:
         line(False, f"{parsed['host']} does not resolve: {exc}")
         return False
@@ -1512,17 +1834,29 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
                        "cross the network unencrypted")
         else:
             line(True, "plain http to " + ("the host's loopback" if parsed["loopback"] else "a local address"))
-    try:
-        with connect((addresses[0], parsed["port"]), timeout=TIMEOUT) as sock:
-            if parsed["scheme"] == "https":
-                with tls_context(endpoint).wrap_socket(sock, server_hostname=parsed["host"]) as tls:
-                    line(True, f"TLS {tls.version()}, certificate verified for {parsed['host']}"
-                         + (" with the endpoint's own CA" if endpoint.get("ca") else ""))
-            else:
-                line(True, f"port {parsed['port']} answers")
-    except (OSError, ssl.SSLError, ValueError) as exc:
-        line(False, f"{addresses[0]} port {parsed['port']}: {getattr(exc, 'reason', None) or exc}")
-        return False
+    if tunnel is not None:
+        try:
+            reached = tunnel.request("connect", wait=TIMEOUT + 15, url=endpoint["url"], timeout=TIMEOUT,
+                                     ca=ca_text(endpoint) or None)
+        except ValueError as exc:
+            line(False, f"{addresses[0]} port {parsed['port']} through the VPN: {exc}")
+            return False
+        line(True, f"TLS {reached['tls']}, certificate verified for {parsed['host']} through the VPN"
+             + (" with the endpoint's own CA" if endpoint.get("ca") else "") if reached.get("tls") else
+             f"port {parsed['port']} answers through the VPN")
+        client = client or VPNClient(endpoint, tunnel, get)
+    else:
+        try:
+            with connect((addresses[0], parsed["port"]), timeout=TIMEOUT) as sock:
+                if parsed["scheme"] == "https":
+                    with tls_context(endpoint).wrap_socket(sock, server_hostname=parsed["host"]) as tls:
+                        line(True, f"TLS {tls.version()}, certificate verified for {parsed['host']}"
+                             + (" with the endpoint's own CA" if endpoint.get("ca") else ""))
+                else:
+                    line(True, f"port {parsed['port']} answers")
+        except (OSError, ssl.SSLError, ValueError) as exc:
+            line(False, f"{addresses[0]} port {parsed['port']}: {getattr(exc, 'reason', None) or exc}")
+            return False
     try:
         client = client or Client(endpoint, get)
     except ValueError as exc:
@@ -1544,12 +1878,14 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
     apis = [("claude", "/v1/messages", "the Anthropic Messages API (Claude Code)"),
             ("codex", "/v1/responses", "the OpenAI Responses API (Codex)"),
             ("opencode", "/v1/chat/completions", "the OpenAI Chat Completions API (OpenCode)")]
+    found_messages = False
     for name, path, label in apis:
         if agent and agent != name:
             continue
         answer = probe(client, path)
         required = agent == name
         if answer == "yes":
+            found_messages = found_messages or name == "claude"
             line(True, f"{label} at {path}")
         elif answer == "auth":
             line(False, f"{label}: the server refused the key at {path}")
@@ -1561,7 +1897,12 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
             line(False if required else None, f"{label}: {answer}")
     if agent:
         problem = agent_problem(endpoint, agent)
-        if problem:
+        if problem and agent == "claude" and found_messages:
+            # The server has it; the endpoint is only not marked as having it.
+            line(False, f"the server has the Anthropic Messages API, but the endpoint {endpoint['name']} is not marked "
+                        f"with it: add it again with sandbox-ai llm add {endpoint['name']} --kind {endpoint['kind']} "
+                        f"--url {endpoint['url']} --anthropic --replace")
+        elif problem:
             line(False, problem)
     return not failed
 
@@ -1574,7 +1915,7 @@ WATCH_MIN = 2
 def statuses(name=None, get=None, read=None):
     """[endpoint_status] of the endpoint NAME (ValueError when there is none) or of every endpoint, read at the same
     time (a server that does not answer holds up no other). An endpoint the store cannot use is listed with why."""
-    read = read or (lambda found: endpoint_status(found, get))
+    read = read or (lambda found: vpn_status(found, get))
     if name is not None:
         found = [endpoint(name)]
         broken = []
@@ -1785,6 +2126,12 @@ def main(argv, out=print, get=None):
     watching.add_argument("-w", "--watch", type=float, metavar="SECONDS",
                           help=f"read again every SECONDS (at least {WATCH_MIN}) until Ctrl-C; with --json one line "
                                "per reading")
+    detecting = commands.add_parser("detect", help="look for servers on this host and at the addresses given "
+                                    "(read-only model listings, short timeouts)")
+    detecting.add_argument("-A", "--address", action="append", default=[], metavar="IP",
+                           help="a further address to look at (this host's loopback always; its LAN address "
+                                "and other machines only when named); repeatable")
+    detecting.add_argument("-j", "--json", action="store_true")
     checking = commands.add_parser("check", help="reachability, TLS, key, models and the agents' APIs")
     checking.add_argument("name")
     checking.add_argument("-a", "--agent", choices=["claude", "codex", "opencode"])
@@ -1830,8 +2177,27 @@ def main(argv, out=print, get=None):
                 (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
             out(f"{args.name} removed")
             return 0
+        if args.command == "detect":
+            addresses = detect_addresses(args.address)
+            found = detect(addresses)
+            if args.json:
+                out(json.dumps(found, indent=2))
+                return 0
+            for entry in found:
+                loaded = sum(1 for m in entry["models"] if m["loaded"])
+                out(printable(f"{entry['kind']}  {entry['url']}  {len(entry['models'])} models"
+                              f"{f', {loaded} loaded' if loaded else ''}"))
+            if not found:
+                out("no LLM server found (looked at " + ", ".join(addresses) + " on ports "
+                    + ", ".join(str(port) for _, port in DETECT_PORTS) + ")")
+            else:
+                out("add one with: sandbox-ai llm add NAME --kind KIND --url URL")
+            return 0
         if args.command == "models":
-            found = sort_models(endpoint_models(endpoint(args.name), get), args.sort)
+            chosen = endpoint(args.name)
+            with through_vpn(chosen) as tunnel:
+                found = sort_models(endpoint_models(chosen, get, client=VPNClient(chosen, tunnel, get) if tunnel
+                                                    else None), args.sort)
             for line in [json.dumps(found, indent=2)] if args.json else model_table(found):
                 out(line)
             return 0
@@ -1843,7 +2209,10 @@ def main(argv, out=print, get=None):
         found = endpoint(args.name)
         if args.model and not MODEL_NAME.fullmatch(args.model):
             raise ValueError(f"--model: not a model name: {printable(args.model)!r}")
-        return 0 if check(found, args.agent, args.model, get, out) else 1
+        if found.get("vpn"):
+            out(f"{found['name']}: bringing up the VPN profile {found['vpn']} for the check ...")
+        with through_vpn(found) as tunnel:
+            return 0 if check(found, args.agent, args.model, get, out, tunnel=tunnel) else 1
     except (OSError, ValueError) as exc:
         print(f"sandbox-ai llm: {printable(exc)}", file=sys.stderr)
         return 1

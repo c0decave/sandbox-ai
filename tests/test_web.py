@@ -596,8 +596,8 @@ def logged_in():
      ["vpn", "add", "ts", "--tailscale", "--dns=100.100.100.100", "--check-url=https://ip.example.org",
       "--provider=mine", "--no-dns-probe", "--force", "--ephemeral", "--hostname=box-1",
       "--tailnet-allow=100.64.0.0/10"]),
-    ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "no_ipv6": True},
-     ["vpn", "add", "mv", "--mullvad", "--no-ipv6"]),
+    ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "no_ipv6": True},
+     ["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--no-ipv6"]),
     ("POST", "/api/hosts/ct1/logs", {"project": "/home/u/src/web"}, ["logs", "--json", "--project=/home/u/src/web"]),
     ("POST", "/api/hosts/ct1/logs", {"directory": "/home/u/.local/state/sandbox-ai/logs/web"},
      ["logs", "--json", "/home/u/.local/state/sandbox-ai/logs/web"]),
@@ -1810,6 +1810,86 @@ def test_toasts_in_the_page(tmp_path):
         assert signs == [badge_sign(bg, c) for bg in (c["accent"], s["ok"], s["warn"], s["bad"])], name
 
 
+# -- themes and fonts of the desktop app --
+
+EDITOR_THEMES = ("solarized_dark", "solarized_light", "dracula", "nord", "gruvbox_dark", "one_dark",
+                 "catppuccin_mocha", "catppuccin_latte", "tokyo_night")
+
+
+def test_the_editor_themes_and_the_font_lists_are_exported():
+    """themes.json: the app's themes (also the editor themes, with every colour key of the others) and the fonts its
+    settings offer, each with how to get it (the app's tests/test_theme.py checks that both are the app's)."""
+    data = json.loads((WEB / "themes.json").read_text())
+    keys = set(THEMES["light"]["colors"])
+    for name in EDITOR_THEMES:
+        assert keys <= set(THEMES[name]["colors"]) and set(THEMES[name]["status"]) == {"ok", "warn", "bad", "muted"}
+    for kind, must in (("ui", {"Inter", "IBM Plex Sans", "Noto Sans", "Cantarell"}),
+                       ("mono", {"JetBrains Mono", "Fira Code", "Cascadia Code", "Hack", "DejaVu Sans Mono"})):
+        fonts = data["fonts"][kind]
+        assert must <= {family for family, _ in fonts} and all(isinstance(how, str) and how for _, how in fonts)
+        assert all(family.replace(" ", "").isascii() and family.replace(" ", "").isalnum() for family, _ in fonts)
+
+
+def test_the_page_downloads_no_fonts():
+    script, css = (WEB / "app.js").read_text(), (WEB / "app.css").read_text()
+    assert "FontFace" not in script and "@font-face" not in css and "url(" not in css
+    assert "(not installed)" in script and "To get it: " in script
+
+
+FONTS_DRIVER = r"""
+const fs = require("fs"), vm = require("vm");
+const props = {};
+const style = { setProperty: (k, v) => { props[k] = v; }, removeProperty: (k) => { delete props[k]; } };
+const DEFAULT_MONO = '"JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace';
+const stored = { "sandbox-ai-font-ui": "IBM Plex Sans", "sandbox-ai-font-mono": "Hack", "sandbox-ai-theme": "dracula" };
+// Only Hack is installed: text set in it has another width than in any generic family.
+const canvas = { getContext: () => ({ font: "", measureText(text) { return { width: this.font.includes('"Hack"') ? 120 : 100 }; } }) };
+const document = { createElement: t => (t === "canvas" ? canvas : {}), documentElement: { style }, body: { classList: { toggle() {} } } };
+const getComputedStyle = () => ({ getPropertyValue: k => (k === "--mono" ? (props["--mono"] || ` ${DEFAULT_MONO}`) : (props[k] || "")) });
+const context = vm.createContext({ document, getComputedStyle, console, window: {}, location: { host: "x" }, setTimeout, clearTimeout,
+  localStorage: { getItem: k => (k in stored ? stored[k] : null), setItem(k, v) { stored[k] = String(v); } },
+  fetch: () => Promise.reject(new Error("offline")) });
+const source = fs.readFileSync(process.argv[2], "utf8").replace(/loadThemes\(\)\.then\(render\);\s*$/, "");
+// i18n.js first, as the page loads it (app.js's tables of texts use its N_ and t)
+vm.runInContext(fs.readFileSync(require("path").join(require("path").dirname(process.argv[2]), "i18n.js"), "utf8"), context);
+vm.runInContext(source, context);
+const data = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+vm.runInContext(`state.themes = ${JSON.stringify(data.themes)}; state.fontLists = ${JSON.stringify(data.fonts)};
+  state.terminals = [{ term: { options: {} }, fits: 0, fit() { this.fits++; } }];`, context);
+const terminal = () => vm.runInContext("[state.terminals[0].term.options.fontFamily, state.terminals[0].fits]", context);
+const result = {};
+context.applyTheme("dracula");
+result.chosen = { font: props["--font"], mono: props["--mono"], terminal: terminal() };
+result.installed = [context.fontInstalled("Hack"), context.fontInstalled("Iosevka")];
+context.chooseFont("mono", "");
+result.theirs = { mono: props["--mono"] === undefined ? null : props["--mono"], stored: stored["sandbox-ai-font-mono"], terminal: terminal() };
+context.chooseFont("ui", '"; } body { background: url(https://x.example/) } /*');
+result.refused = props["--font"];
+console.log(JSON.stringify(result));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_chosen_fonts_become_css_variables(tmp_path):
+    """app.js in node: the fonts chosen in this browser go before the theme's (--font) and the page's monospace
+    fonts (--mono, also open terminals'), ending in a generic family; the theme's again when none is chosen; a name
+    that is not one of the list is ignored; installed fonts are told by their width, nothing is loaded."""
+    driver = tmp_path / "fonts.js"
+    driver.write_text(FONTS_DRIVER)
+    run = subprocess.run(["node", str(driver), str(WEB / "app.js"), str(WEB / "themes.json")], capture_output=True,
+                         text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    default_mono = '"JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace'
+    sans = ", ".join(f if f == "sans-serif" else f'"{f}"' for f in THEMES["dracula"]["font"]["families"])
+    assert result["chosen"]["font"] == f'"IBM Plex Sans", {sans}' and result["chosen"]["font"].endswith("sans-serif")
+    assert result["chosen"]["mono"] == f'"Hack", {default_mono}'
+    assert result["chosen"]["terminal"] == [f'"Hack", {default_mono}', 1], "open terminals follow and are fitted"
+    assert result["installed"] == [True, False]
+    assert result["theirs"] == {"mono": None, "stored": "", "terminal": [default_mono, 2]}
+    assert result["refused"] == sans and "url(" not in result["refused"]
+
+
 def test_a_removed_or_reset_user_loses_its_sessions_at_once():
     """sandbox-ai web user remove|reset end the running service's sessions of that user at their next request,
     also while they keep being used (they would otherwise live up to 12 hours)."""
@@ -2135,8 +2215,9 @@ CONFIRM_CASES = {
     "llm-replace": ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "https://gw.example.org",
                                                    "replace": True},
                     ["llm", "add", "gw", "--kind", "vllm", "--url", "https://gw.example.org", "--replace"]),
-    "vpn-replace": ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "force": True},
-                    ["vpn", "add", "mv", "--mullvad", "--force"]),
+    "vpn-replace": ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD",
+                                                   "force": True},
+                    ["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--force"]),
     "team-stop": ("POST", "/api/hosts/ct1/teams/review/stop", {}, ["team", "stop", "review"]),
     "team-delete": ("DELETE", "/api/hosts/ct1/teams/review", {}, ["team", "delete", "review", "--yes"]),
     "image-file": ("POST", "/api/hosts/ct1/images/data/extend", {"add_files": [
@@ -5430,7 +5511,7 @@ def test_round_four_of_the_page(tmp_path):
                                    ["POST", "/api/hosts/ct1/teams/review/stop", {"confirm": True}]]
     assert result["teamStart"] == [{"kind": "team-start", "host": "ct1", "team": "duo", "agents": "opencode,codex",
                                     "workspace": "/srv/x", "options": '["--mode","high"]'}]
-    assert result["buildTargets"] == ["claude", "codex", "opencode", "all", "team", "vpn", "data"]
+    assert result["buildTargets"] == ["claude", "codex", "opencode", "all", "team", "vpn", "tor", "data"]
     ask, before = result["imageAsk"]
     assert ask.startswith("Build /home/u/t.sh of ct1 into data?") and before == 0
     assert "Remove the variant data on ct1" in result["imageRemoveAsk"]
@@ -6298,3 +6379,277 @@ def test_fields_for_a_secrets_or_vpn_profiles_name_offer_the_hosts_names(tmp_pat
     assert all(method == "GET" and re.fullmatch(r"/api/hosts/(local|ct1)/(secrets|vpn)", path)
                for method, path in result["asked"]), "names only: no secret is ever asked for by its name"
     assert result["datalists"] == ["names-secret-ct1", "names-secret-local", "names-vpn-ct1", "names-vpn-local"]
+
+
+# --- bug hunt: requests that used to end without an answer, terminals that leaked -----------------------------
+
+
+def test_an_unexpected_error_is_answered_with_a_500():
+    secret = add_user()
+
+    def broken(host, args, timeout=120, input=None):
+        raise RuntimeError("boom")
+    svc = service(broken)
+    _, headers, body = login(svc, secret)
+    ok = {**HEADERS, "Cookie": cookie_of(headers), "X-CSRF-Token": body["csrf"]}
+    status, _, out = svc.handle("POST", "/api/hosts/ct1/starts/web/pause", ok, b"{}", "192.0.2.1")
+    assert status == 500 and "RuntimeError" in json.loads(out)["error"]
+    assert any('"event": "error"' in line for line in (w.state_dir() / "audit.jsonl").read_text().splitlines())
+
+
+@pytest.mark.parametrize("body", [b'"admin"', b"[1]", b"7", b"[" * 100000, b'{"a": ' * 50000])
+def test_a_login_with_a_strange_body_is_refused(body):
+    """A login body that is JSON but not an object raised AttributeError; JSON nested too deep raised
+    RecursionError (not a ValueError): both ended the connection without an answer."""
+    status, _, _ = service().handle("POST", "/api/login", HEADERS, body, "192.0.2.1")
+    assert status == 400
+
+
+def test_the_terminal_size_of_the_url_is_checked():
+    assert w.terminal_size({"cols": "120", "rows": "40"}) == (120, 40)
+    assert w.terminal_size({"cols": "70000", "rows": "0"}) == (1000, 1)
+    assert w.terminal_size({"cols": "\u00b2", "rows": "-5"}) == (100, 30), "isdigit() took '\u00b2', int() refused it"
+    assert w.terminal_size({}) == (100, 30)
+
+
+class ScriptedSocket:
+    """WebSocket as bridge() uses it: MESSAGES as the browser's, then a close."""
+
+    def __init__(self, messages):
+        self.messages, self.closed, self.hang_up, self.sent = list(messages), False, None, []
+
+    def receive(self):
+        return self.messages.pop(0) if self.messages else (8, b"")
+
+    def send(self, payload, opcode=2):
+        self.sent.append((opcode, payload))
+
+    def close(self, code=1000, reason=""):
+        self.closed = True
+
+
+@pytest.fixture
+def children(monkeypatch):
+    """The pids bridge() forks; each one must be reaped when bridge() returns (killed here if not)."""
+    pids, real = [], w.pty.fork
+
+    def fork():
+        pid, fd = real()
+        if pid:
+            pids.append(pid)
+        return pid, fd
+    monkeypatch.setattr(w.pty, "fork", fork)
+    yield pids
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+
+
+def reaped(pid):
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    return False
+
+
+def test_a_terminal_size_out_of_range_leaks_no_child(children):
+    """cols=70000 made set_size() raise struct.error right after the fork, before the cleanup: the command (an
+    attach, or a new agent start) ran on with its pty, never reaped."""
+    with contextlib.suppress(Exception):
+        w.bridge(ScriptedSocket([]), ["sleep", "30"], cols=70000, rows=30)
+    assert children and reaped(children[0])
+
+
+def test_a_resize_with_an_infinite_size_does_not_end_the_terminal(children):
+    ws = ScriptedSocket([(1, b'{"resize": [1e999, 30]}'), (1, b'{"resize": "x"}'), (2, b"exit\n")])
+    w.bridge(ws, ["sh"])
+    assert reaped(children[0])
+
+
+def test_input_the_command_does_not_read_does_not_hold_the_terminal(children, monkeypatch):
+    """A paste into a command that reads nothing: os.write() on the pty blocked (after ~16 KB) until the command
+    read, so the terminal's thread, the command and its pty stayed even after the browser was gone."""
+    monkeypatch.setattr(w, "WS_DEADLINE", 1)
+    ws = ScriptedSocket([(2, b"x" * 1000 + b"\n")] * 300)
+    done = threading.Thread(target=w.bridge, args=(ws, ["sleep", "30"]), daemon=True)
+    started = time.monotonic()
+    done.start()
+    done.join(15)
+    assert not done.is_alive(), "the write into the terminal blocked"
+    assert time.monotonic() - started < 12 and reaped(children[0])
+
+
+def test_terminals_of_a_session_are_counted_at_once():
+    """The limit was checked in websocket() and counted later in the upgrade: tabs opening terminals at the same
+    moment all passed the check. claim_terminal() checks and counts under the lock."""
+    svc = service()
+    session = svc.sessions.items[svc.sessions.key(svc.sessions.new("admin", "192.0.2.1"))]
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(svc.claim_terminal(session)))
+               for _ in range(w.TERMINALS_PER_SESSION + 4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert results.count(True) == w.TERMINALS_PER_SESSION and session["terminals"] == w.TERMINALS_PER_SESSION
+    svc.release_terminal(session)
+    assert svc.claim_terminal(session) and not svc.claim_terminal(session)
+
+
+def test_sessions_past_their_limits_do_not_stay_in_memory():
+    now = [0.0]
+    sessions = w.Sessions(idle=10, lifetime=100, clock=lambda: now[0])
+    for _ in range(5):
+        sessions.new("admin", "192.0.2.1")
+    now[0] = 50
+    sessions.new("admin", "192.0.2.1")
+    assert len(sessions.items) == 1, "sessions never used again stayed for good"
+
+
+def test_a_module_asked_for_by_several_threads_at_once_is_loaded_once(monkeypatch):
+    """module() loads sandbox-ai's modules at their first use, from the handlers' threads: each thread asking at the
+    same moment loaded a copy of its own, with locks and caches of its own."""
+    monkeypatch.setattr(w, "_modules", {})
+    results, start = [], threading.Barrier(6)
+
+    def ask():
+        start.wait()
+        results.append(w.module("hosts"))
+    threads = [threading.Thread(target=ask) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+    assert len(results) == 6 and all(r is results[0] for r in results)
+
+
+def test_a_mullvad_profile_without_its_secret_is_refused(logged_in):
+    """Without --account-secret `vpn add --mullvad` asks for the account number with getpass: on the service's own
+    terminal, if it has one, where the request waited for the full timeout."""
+    count = len(logged_in.runner.calls)
+    status, out = logged_in("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad"})
+    assert status == 400 and "secret" in out["error"] and len(logged_in.runner.calls) == count
+
+
+RENDER_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const result = {};
+  main.remove();  // render() draws the frame with its own main
+  const held = [];
+  let hold = true;
+  answer = (method, path) => {
+    if (path === "/api/hosts" && hold) { hold = false; return new Promise(r => held.push(() => r([{ name: "local", kind: "local" }]))); }
+    if (path === "/api/hosts") return [{ name: "local", kind: "local" }];
+    if (path === "/api/approvals") return { questions: [], errors: {} };
+    if (path === "/api/policy") return {};
+    return [];
+  };
+  const layouts = () => app.all().filter(n => (n.className || "").split(" ").includes("layout")).length;
+  const login = () => Boolean(app.all().find(n => n.id === "user"));
+  // two renders at once (the first one waits for its hosts): one frame, not two
+  vm.runInContext('state.me = { user: "admin", csrf: "c" };', context);
+  const first = vm.runInContext("render()", context);
+  await settle();
+  const second = vm.runInContext("render()", context);
+  await second; await settle();
+  held.shift()(); await first; await settle();
+  result.frames = [layouts(), login()];
+  // a render waiting for its hosts when the session ends: the login page, and nothing drawn over it
+  hold = true;
+  const waiting = vm.runInContext("render()", context);
+  await settle();
+  vm.runInContext("sessionEnded()", context);
+  await settle();
+  held.shift()(); await waiting; await settle();
+  result.ended = [layouts(), login()];
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_only_the_newest_render_draws(tmp_path):
+    """render() waits for /api/hosts and /api/policy before it draws: one still waiting when another started (a
+    login, a language chosen, a session that ended) drew its frame too, a second one under the first, or the pages
+    over the login page."""
+    result = run_driver(tmp_path, RENDER_DRIVER, "render")
+    assert result["frames"] == [1, False]
+    assert result["ended"] == [0, True]
+
+
+class SlowStream:
+    """A stream whose writes take a while: what was written, frame by frame (their opcodes)."""
+
+    def __init__(self):
+        self.frames = []
+
+    def write(self, data):
+        time.sleep(0.01)
+        self.frames.append(data[0] & 0x0F)
+
+    def flush(self):
+        pass
+
+
+def test_nothing_follows_the_close_frame_and_it_is_sent_once():
+    """The closed check ran outside the send lock: the output thread's frame could follow the close frame, and two
+    threads closing at once both sent one."""
+    stream = SlowStream()
+    ws = w.WebSocket(stream)
+    stop = threading.Event()
+
+    def output():
+        while not stop.is_set():
+            ws.send(b"data", 2)
+    threads = [threading.Thread(target=output) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.05)
+    closers = [threading.Thread(target=ws.close, args=(1000, "bye")) for _ in range(3)]
+    for thread in closers:
+        thread.start()
+    for thread in closers:
+        thread.join(10)
+    time.sleep(0.1)
+    stop.set()
+    for thread in threads:
+        thread.join(10)
+    assert stream.frames.count(8) == 1 and stream.frames[-1] == 8, stream.frames[-6:]
+
+
+def test_a_page_that_polls_this_machines_questions_keeps_the_web_heartbeat(logged_in):
+    """While a page asks for this machine's questions (every 5 s), the service keeps a heartbeat ("web"): the
+    launcher then shows no notification of its own, the page's is the one prompt. Another host's questions are that
+    host's: no heartbeat here for them."""
+    approvals = w.module("approvals")
+    assert logged_in("GET", "/api/hosts/ct1/approvals")[0] == 200 and not approvals.watched()
+    assert logged_in("GET", "/api/hosts/local/approvals")[0] == 200
+    assert [(r["kind"], r["pid"]) for r in approvals.watchers()] == [("web", os.getpid())]
+    assert not approvals.watched(now=time.time() + approvals.WATCHER_STALE + 1), "no page polls: stale"
+    approvals.end_heartbeat()
+    assert logged_in("GET", "/api/approvals")[0] == 200, "every host's questions: this machine's among them"
+    assert [r["kind"] for r in approvals.watchers()] == ["web"]
+    approvals.end_heartbeat()
+
+
+def test_the_heartbeat_ends_with_the_service(home):
+    if not shutil.which("openssl"):
+        pytest.skip("needs openssl")
+    add_user()
+    started, holder = threading.Event(), {}
+
+    def ready(srv):
+        holder["server"] = srv
+        started.set()
+    thread = threading.Thread(target=w.serve, kwargs={"listen": "127.0.0.1:0", "out": lambda line: None,
+                                                      "ready": ready}, daemon=True)
+    thread.start()
+    assert started.wait(30)
+    approvals = w.module("approvals")
+    approvals.heartbeat("web")
+    assert approvals.watched()
+    holder["server"].shutdown()
+    thread.join(30)
+    assert not approvals.watched()

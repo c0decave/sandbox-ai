@@ -12,13 +12,14 @@ them), errors stay until they are closed. They follow a theme change at once.
 
 Where a window cannot place itself on the screen (Wayland), or with the setting notify_style "system", the
 desktop's own notification is shown through the tray icon instead, with the icon of the level; on Wayland
-without a tray, a toast is shown inside the window while it is visible.
+without a tray, a toast is shown inside the window while it is visible. On macOS, an app run by a Python outside
+an app bundle shows the desktop's notification through osascript (Qt's needs a bundle).
 """
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSystemTrayIcon, QToolButton, QVBoxLayout
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSystemTrayIcon, QToolButton, QVBoxLayout
 
 from . import theme
 from .files import printable
@@ -56,6 +57,32 @@ def clean(text, limit):
     """TEXT for a toast: control characters escaped, shortened to LIMIT characters."""
     text = printable(text)
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+# macOS: Qt posts the tray's notifications through the Notification Center, which takes them only from an app bundle;
+# the app run by an unbundled Python (install.sh, pip) shows them through AppleScript. The title and text are the
+# script's arguments (on run argv), never part of its source.
+OSASCRIPT_NOTIFICATION = ("on run argv", "display notification (item 2 of argv) with title (item 1 of argv)", "end run")
+
+
+def mac_unbundled(executable=None):
+    """macOS, and this Python is not inside an app bundle (sandbox-ai.app)."""
+    import os
+    import sys
+    return sys.platform == "darwin" and ".app/Contents/" not in os.path.realpath(executable or sys.executable)
+
+
+def mac_notification(title, text, popen=None):
+    """Show TITLE and TEXT through osascript (macOS), without waiting for it; None, as the tray's notification."""
+    import subprocess
+    command = ["/usr/bin/osascript", *(part for line in OSASCRIPT_NOTIFICATION for part in ("-e", line)), "--", title,
+               text]
+    try:
+        (popen or subprocess.Popen)(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass  # no notification then, as when the desktop has none
+    return None
 
 
 def glyph(level, color, size=22):
@@ -136,18 +163,24 @@ class Toast(QFrame):
         self.text.setVisible(bool(self.text.text()))
         texts.addWidget(self.title)
         texts.addWidget(self.text)
-        self.action = None
-        if action is not None:
-            label, callback = action
-            self.action = QPushButton(clean(label, 60))
-            self.action.setObjectName("toastAction")
-            self.action.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.action.clicked.connect(lambda: (callback(), self.close()))
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 4, 0, 0)
-            row.addWidget(self.action)
-            row.addStretch(1)
-            texts.addLayout(row)
+        # ACTION: (label, callback), or a list of them (a question's answers: Allow, Allow always, Block, Block
+        # always, then the way to its page), two to a row.
+        actions = [action] if isinstance(action, tuple) else list(action or [])
+        self.action, self.actions = None, []
+        if actions:
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 4, 0, 0)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(4)
+            for index, (label, callback) in enumerate(actions):
+                button = QPushButton(clean(label, 60))
+                button.setObjectName("toastAction")
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(lambda _=False, c=callback: self.act(c))
+                grid.addWidget(button, index // 2, index % 2)
+                self.actions.append(button)
+            self.action = self.actions[0]
+            texts.addLayout(grid)
         texts.addStretch(1)
         body.addLayout(texts, 1)
         self.close_button = QToolButton()
@@ -173,6 +206,14 @@ class Toast(QFrame):
         self.restyle_timer.setInterval(0)
         self.restyle_timer.timeout.connect(self.restyle)
         self.restyle()
+
+    def act(self, callback):
+        """A button of the toast: the toast closes first, then CALLBACK runs from the event loop - an answer may ask
+        first (a dialog of its own), and meanwhile the toast's time ran out and it was deleted; closing it after the
+        callback then raised "Internal C++ object (Toast) already deleted"."""
+        self.timer.stop()
+        QTimer.singleShot(0, callback)  # (not bound to the toast: it runs whatever happens to the toast)
+        self.close()
 
     @staticmethod
     def _label(text, name):
@@ -291,6 +332,8 @@ class Notifier:
         return toast
 
     def _desktop(self, level, title, text, seconds):
+        if mac_unbundled():
+            return mac_notification(clean(title, TITLE_LIMIT), clean(text, 300))
         # The notification daemon may read markup in the body: what an agent chose is escaped (after
         # shortening, so no entity is cut).
         import html

@@ -325,7 +325,9 @@ def recorded_threads(m):
     started, real = [], threading.Thread
 
     def thread(*args, target=None, kwargs=None, **rest):
-        started.append((getattr(target, "__name__", str(target)), kwargs or {}))
+        name = "safeguards" if getattr(target, "__qualname__", "") == "Watch.watch" else \
+            getattr(target, "__name__", str(target))  # the safeguard watch is not the approvals' watcher
+        started.append((name, kwargs or {}))
         return real(target=lambda *a: None, daemon=True)
     m.monkeypatch.setattr(s.threading, "Thread", thread)
     return started

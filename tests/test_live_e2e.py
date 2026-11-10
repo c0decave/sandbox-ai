@@ -127,7 +127,7 @@ for _ in range(600):
 after = exchanges("example.org", 443, timeout=15)
 print("BEFORE=%s AFTER=%s" % (before, after))
 '''
-    command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(work), "--no-auth",
+    command = [str(ROOT / "sandbox-ai"), "codex", "--backend", backend, "--workspace", str(work), "--no-auth",
                "--no-provider-defaults", "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
     if backend == "podman" and request.config.getoption("--agent-image"):
         command[1:1] = ["--image", request.config.getoption("--agent-image")]
@@ -180,10 +180,10 @@ def test_live_mcp_server_from_the_catalog(request, backend, tmp_path):
     samples.mkdir()
     (samples / "a.txt").write_text("hello yara\n")
     # The axross hub's catalog is not signed with an MCP key yet: taken explicitly (sandbox/mcp-signers).
-    added = subprocess.run([str(ROOT / "sandbox-mcp"), "add", "hub:yara", "--unsigned", "--mount", f"/work={samples}"],
+    added = subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "add", "hub:yara", "--unsigned", "--mount", f"/work={samples}"],
                            capture_output=True, text=True, env=env, timeout=600)
     assert added.returncode == 0, added.stdout + added.stderr
-    started = subprocess.run([str(ROOT / "sandbox-mcp"), "start", "yara"], capture_output=True, text=True, env=env,
+    started = subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "start", "yara"], capture_output=True, text=True, env=env,
                              timeout=300)
     try:
         assert started.returncode == 0, started.stderr
@@ -211,7 +211,7 @@ def test_live_mcp_server_from_the_catalog(request, backend, tmp_path):
                 answers[answer.get("id")] = answer
         assert answers[1]["result"]["tools"], answers
     finally:
-        subprocess.run([str(ROOT / "sandbox-mcp"), "stop", "yara"], env=env, timeout=120)
+        subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "stop", "yara"], env=env, timeout=120)
 
 
 def test_live_resource_limits_reach_the_container(request, backend, tmp_path):
@@ -246,7 +246,7 @@ def running_sandbox(request, backend, tmp_path, script, options=(), extra_env=No
     # XDG_DATA_HOME stays: rootless Podman keeps its images there.
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "XDG_CONFIG_HOME": str(tmp_path / "config"),
            "SANDBOX_AI_SECRETS": "file", **(extra_env or {})}
-    command = [str(ROOT / "codex-sandbox"), "--backend", backend, "--workspace", str(work), "--no-auth",
+    command = [str(ROOT / "sandbox-ai"), "codex", "--backend", backend, "--workspace", str(work), "--no-auth",
                *options, "--binary", "/usr/bin/python3", "--", "-I", "-c", script]
     if backend == "podman" and request.config.getoption("--agent-image"):
         command[1:1] = ["--image", request.config.getoption("--agent-image")]

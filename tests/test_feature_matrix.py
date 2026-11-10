@@ -37,6 +37,14 @@ BACKENDS = ("podman", "bwrap")
 COMBOS = [(agent, backend) for agent in AGENTS for backend in BACKENDS]
 # The launcher loads its helper modules afresh for every call; once is enough here (they read the environment
 # when called, not when loaded), and keeps the matrix fast. (Not the parser: parse_args extends its list defaults.)
+def thread_name(target):
+    """The name a recorded thread is known by: its function's; the safeguard watch's (Watch.watch) is "safeguards",
+    not "watch", which is the approvals' watcher."""
+    if getattr(target, "__qualname__", "") == "Watch.watch":
+        return "safeguards"
+    return getattr(target, "__name__", str(target))
+
+
 CACHED = {name: getattr(s, f"load_{name}_module")() for name in ("privacy", "kits", "approvals", "login", "sessions")}
 GITHUB = s.PRESETS["github"]
 VPN_PEER = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
@@ -245,7 +253,7 @@ def m(request, tmp_path, monkeypatch, capsys):
     real_thread = threading.Thread
 
     def thread(*args, target=None, **kwargs):
-        matrix.threads.append(getattr(target, "__name__", str(target)))
+        matrix.threads.append(thread_name(target))
         return real_thread(target=lambda *a: None, daemon=True)
     monkeypatch.setattr(s.threading, "Thread", thread)
     mcp = s.load_mcp_module()
@@ -507,7 +515,7 @@ def ask_off(m):
     # No approval watchers; the threads are the canaries' (on by default) and the activity timeline's (the default
     # log directory is used).
     # (the memory watch runs as always: it asks nothing)
-    threads = [name for name in m.threads if name != "watch_memory"]
+    threads = [name for name in m.threads if name not in ("watch_memory", "safeguards")]
     assert run.config["ask"] is False and "BROWSER" not in run.env and threads == ["follow", "collect"]
     assert run.proxy is not None  # the proxy still runs; it just refuses instead of asking
     assert str(s.BROWSER_DIR) not in run.joined
@@ -517,7 +525,7 @@ def ask_off(m):
 def no_questions_without_the_proxy(m):
     for options in (["--no-proxy"], ["--offline"]):
         run = m.run(*options)
-        assert run.config["ask"] is False and set(m.threads) - {"watch_memory"} == {"follow"}, options  # the canaries' only
+        assert run.config["ask"] is False and set(m.threads) - {"watch_memory", "safeguards"} == {"follow"}, options  # the canaries' only
 
 
 @approvals

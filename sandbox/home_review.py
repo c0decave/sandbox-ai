@@ -7,7 +7,9 @@ an SSH configuration, a .pth file Python runs at every start. At every start of 
 records a manifest of these files (SHA-256, size, mode, link target; the text of small files that hold no
 secrets) in the start's directory, outside the HOME, where the sandbox cannot reach it. When the start is
 resumed, the HOME is compared with that manifest: every change since that start, by its agent or by anyone
-else, is named, and `sandbox-ai resume NAME --review-home` shows the differences.
+else, is named, and `sandbox-ai resume NAME --review-home` shows the differences. `--restore-home` puts back the
+text the manifest kept of changed or removed files (restorable, put_back): only where it is their exact content,
+written anew without following a link, in the file or on the way to it.
 
 Nothing is followed: links are recorded as links, only regular files are read (bounded), and names and
 contents are escaped before they are shown. Standard library only.
@@ -18,6 +20,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import stat
 import tempfile
 import time
@@ -291,6 +294,92 @@ def compare(home, directory, with_diffs=False):
         changes.append(entry)
     return {"since": manifest.get("recorded"), "run": manifest.get("run"), "changes": changes,
             "complete": bool(manifest.get("complete", True)) and current["complete"]}
+
+
+def watched(relative):
+    """RELATIVE (a path below HOME, as the manifest names it) is a watched entry or lies below one."""
+    parts = PurePosixPath(relative).parts
+    if not parts or any(part in ("", ".", "..") for part in parts) or PurePosixPath(relative).is_absolute():
+        return False
+    return PYTHON_STARTUP.fullmatch(relative) is not None or any(
+        relative == root or relative.startswith(root + "/") for root in WATCHED)
+
+
+def restorable(review, manifest):
+    """What --restore-home can put back of REVIEW's changes (compare's result) from MANIFEST (load's): [{"path",
+    "change", "data" (bytes) or None, "mode", "why" (when it cannot)}]. Only regular files the manifest kept the
+    exact text of (its SHA-256 and size match: small text files that hold no key or token); never what was added
+    since (there is nothing to put back), links, folders, or the part of ~/.claude.json the manifest records."""
+    result = []
+    for entry in (review or {}).get("changes", []):
+        path, change, before, after = entry["path"], entry["change"], entry.get("before"), entry.get("after")
+        item = {"path": path, "change": change, "data": None, "mode": None, "why": None}
+        text = manifest["texts"].get(path) if before else None
+        data = text.encode("utf-8") if isinstance(text, str) else None
+        if not watched(path):
+            item["why"] = "only a part of it is recorded" if path.startswith(CLAUDE_STATE) else "not a watched file"
+        elif change == "added":
+            item["why"] = "added since its last start: nothing to put back (remove it yourself if it is not yours)"
+        elif (before or {}).get("type") != "file":
+            item["why"] = f"a {'link' if (before or {}).get('type') == 'link' else 'folder or other entry'}: not put back"
+        elif (after or {}).get("type") == "dir":
+            item["why"] = "a folder is there now: remove it yourself first"
+        elif SECRET.search(path):
+            item["why"] = "it may hold a key or token: its text is never kept"
+        elif data is None:
+            item["why"] = "no text kept (binary, or larger than the limits)"
+        elif len(data) != before.get("size") or hashlib.sha256(data).hexdigest() != before.get("sha256"):
+            item["why"] = "the text kept is not its exact content (not UTF-8)"
+        else:
+            item.update(data=data, mode=int(before.get("mode") or 0o600) & 0o777)
+        result.append(item)
+    return result
+
+
+def put_back(home, relative, data, mode, folder_modes=None):
+    """Write DATA (with MODE) to HOME/RELATIVE as a new file that replaces what is there (a link there is replaced,
+    never followed). Every folder on the way must be a real folder (a link there: OSError, nothing written); one
+    that is missing is made (its mode as FOLDER_MODES {relative: mode} recorded it, else 0700)."""
+    parts = PurePosixPath(relative).parts
+    if not watched(relative):
+        raise ValueError(f"{relative}: not a watched file")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(home, flags)
+    temporary = None
+    try:
+        for index, part in enumerate(parts[:-1]):
+            try:
+                inner = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part, (folder_modes or {}).get("/".join(parts[:index + 1]), 0o700) & 0o777, dir_fd=fd)
+                inner = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = inner
+        try:
+            if stat.S_ISDIR(os.stat(parts[-1], dir_fd=fd, follow_symlinks=False).st_mode):
+                raise ValueError(f"{relative}: a folder is there now")
+        except FileNotFoundError:
+            pass
+        temporary = f".sandbox-ai-restore-{secrets.token_hex(6)}"
+        out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                      0o600, dir_fd=fd)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(out, view):]
+            os.fchmod(out, mode & 0o777)
+            os.fsync(out)
+        finally:
+            os.close(out)
+        os.rename(temporary, parts[-1], src_dir_fd=fd, dst_dir_fd=fd)  # replaces a link itself, never its target
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=fd)
+            except OSError:
+                pass
+        os.close(fd)
 
 
 def save_review(directory, review):

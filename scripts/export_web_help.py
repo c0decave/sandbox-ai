@@ -46,6 +46,10 @@ def text(found=None):
 
 
 def main(argv):
+    if argv not in ([], ["--check"]):
+        print("usage: scripts/export_web_help.py [--check]   (writes sandbox/web/help.json; --check only compares)",
+              file=sys.stderr)
+        return 2
     wanted = text()
     if argv[:1] == ["--check"]:
         current = TARGET.read_text(encoding="utf-8") if TARGET.exists() else ""

@@ -1754,3 +1754,40 @@ def test_push_options_go_to_the_privacy_check(tmp_path):
     upstream, answer = exchange_once(server, (b"POST /a/public.git/git-receive-pack HTTP/1.1\r\nHost: gitlab.com\r\n"
                                               b"Content-Length: %d\r\n\r\n" % len(cut)) + cut, "gitlab.com")
     assert seen == [] and upstream == b"" and answer.startswith(b"HTTP/1.1 200")  # refused, nothing passed on
+
+
+class KeepAlive(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
+
+    def do_GET(self):
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_keep_alive_requests_are_not_held_back_by_nagle(tmp_path, pki):
+    """The proxy writes a request's or answer's head and body separately: without TCP_NODELAY each second write
+    waited for the peer's delayed ACK, some 40 ms per request (100 requests took over 4 s, now well under 1)."""
+    upstream = serve(KeepAlive, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        context = ssl.create_default_context(cafile=str(pki["ca"]))
+        with socket.create_connection(("127.0.0.1", proxy.port)) as raw, \
+                context.wrap_socket(raw, server_hostname="example.test") as tls:
+            begin, buffer = time.monotonic(), b""
+            for _ in range(100):
+                tls.sendall(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+                while b'{"ok": true}' not in buffer:
+                    buffer += tls.recv(65536)
+                buffer = buffer.split(b'{"ok": true}', 1)[1]
+            assert time.monotonic() - begin < 2.5
+    finally:
+        proxy.close()
+        upstream.shutdown()
+

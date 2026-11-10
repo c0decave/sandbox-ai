@@ -10,7 +10,11 @@
   sandbox-ai pause|resume NAME           freeze every process of a start, and thaw it again
   sandbox-ai resume NAME                 a stopped kept start: reborn with its HOME and options, the agent
                                          continues its last conversation (running processes are not kept)
+  sandbox-ai resume NAME [--restart] [OPTIONS] [--drop-option OPTION[=VALUE]]
+                                         reborn with options changed (--gui, --cpus 4, --allow-host H ...), kept
   sandbox-ai resume NAME --review-home   what changed in its HOME's start files since its last start
+  sandbox-ai resume NAME --restore-home [--path PATH] [--yes]
+                                         put back what those files held at its last start (small text files)
   sandbox-ai stop NAME [--wait SECONDS]  end a start (or an MCP server sandbox); what it keeps stays
   sandbox-ai delete NAME --yes           remove a stopped start with its kept HOME
   sandbox-ai gc [--older-than DAYS] [--dry-run] [--json]
@@ -410,12 +414,14 @@ def start_entries(prune=True):
     return found
 
 
-LLM_CHOICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200})?", re.ASCII)  # llm.parse_choice
+# llm.parse_models: NAME[:MODEL[,MODEL...]]
+LLM_CHOICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200}(?:,[\w.:/@+-]{1,200}){0,49})?",
+                        re.ASCII)
 
 
 def llm_choice(options):
-    """The LLM server OPTIONS (a start's saved options) name as --llm NAME[:MODEL] (the last one given), or None: the
-    app and the web show that server's status (sandbox-ai llm status NAME) beside the start."""
+    """The LLM server OPTIONS (a start's saved options) name as --llm NAME[:MODEL[,MODEL...]] (the last one given), or
+    None: the app and the web show that server's status (sandbox-ai llm status NAME) beside the start."""
     found = None
     for index, token in enumerate(options if isinstance(options, list) else []):
         if token in ("--llm", "-lm") and index + 1 < len(options) and isinstance(options[index + 1], str):
@@ -735,10 +741,13 @@ def rename(old, new=None, out=print):
 
 
 def act(command, name, out=print, wait=None, yes=False, review=False, as_json=False, workspaces=(), mounts=(),
-        restart=False, mcp=()):
+        restart=False, mcp=(), options=(), dropped=(), restore=False, paths=()):
     """attach, pause, resume, stop or delete the start NAME, whatever kind it is. REVIEW (resume): show what
-    changed in its kept HOME instead, AS_JSON for programs. WORKSPACES, MOUNTS, MCP servers (resume): added at its
-    start; RESTART: a running one is stopped first."""
+    changed in its kept HOME instead, AS_JSON for programs; RESTORE: put back what the HOME's manifest kept of the
+    changed files (PATHS: only these; YES: without asking). WORKSPACES, MOUNTS, MCP servers (resume): added at its
+    start, OPTIONS (launcher options) and DROPPED (--drop-option) change its saved options; RESTART: a running one is
+    stopped first."""
+    changing = bool(workspaces or mounts or mcp or restart or options or dropped)
     printable = launcher().printable
     try:
         entry = find(name)
@@ -769,28 +778,35 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
             return sessions.delete(key, yes)
         if review:
             return sessions.review(key, as_json, out)
+        if restore:
+            return sessions.restore_home(key, list(paths), yes, as_json, out)
         if command == "stop":
             return sessions.stop(key) if wait is None else sessions.stop(key, wait)
-        if command == "resume" and (workspaces or mounts or mcp or restart):
+        if command == "resume" and changing:
             if restart and entry["state"] in ("running", "paused", "orphaned"):
+                if options or dropped:
+                    # Checked before it is stopped: a refused change leaves it running as it was.
+                    data = sessions.load(key)
+                    sessions.check_start(key, {**data, "options": sessions.changed_options(
+                        {**data, "name": entry["name"]}, list(options), list(dropped))[0]})
                 out(f"{shown}: stopping it to start it again")
                 sessions.stop(key)
-            return sessions.resume(key, list(workspaces), list(mounts), list(mcp))
+            return sessions.resume(key, list(workspaces), list(mounts), list(mcp), list(options), list(dropped))
         return {"attach": sessions.attach, "pause": sessions.pause, "resume": sessions.resume}[command](key)
     if entry["state"] == "orphaned":
         if command == "stop":
             return stop_orphaned_run(entry, module("net").STOP_WAIT if wait is None else wait, out)
         raise ValueError(f"{shown} runs without its launcher (that ended unexpectedly; its Podman pod runs on): end it "
                          f"with: sandbox-ai stop {shown}")
-    if workspaces or mounts or mcp or restart:
+    if changing:
         raise ValueError(f"{shown} keeps nothing to start again with (a run without a kept start): end it and start "
                          "anew with " + ("--mcp " + " --mcp ".join(mcp) if mcp and not (workspaces or mounts)
                                          else "the workspace"))
     record_ = module("net").running().get(entry["run"])
     if record_ is None:
         raise ValueError(f"{shown} has ended meanwhile")
-    if review:
-        raise ValueError(f"{shown} keeps no HOME: there is nothing to review")
+    if review or restore:
+        raise ValueError(f"{shown} keeps no HOME: there is nothing to {'review' if review else 'restore'}")
     if command == "attach":
         raise ValueError(f"{shown} runs without tmux (a task, no terminal, or --no-tmux): there is no terminal "
                          f"to attach to; it ends with its task, or with: sandbox-ai stop {shown}")
@@ -1093,6 +1109,8 @@ def event_details(entry):
         return f"renamed from {printable(str(entry.get('from')))}"
     if event in ("start", "rebirth"):
         return " ".join(printable(str(entry[key])) for key in ("agent", "workspace") if entry.get(key))
+    if event == "restore-home" and isinstance(entry.get("paths"), list):
+        return "put back: " + ", ".join(printable(str(path)) for path in entry["paths"])
     return printable(str(entry.get("note") or ""))
 
 
@@ -1173,7 +1191,7 @@ def parser():
                            ("resume", "thaw a paused start, or bring a stopped one back"),
                            ("stop", "end a start; what it keeps stays"),
                            ("delete", "remove a stopped start with its kept HOME")):
-        sub = commands.add_parser(command, help=text_)
+        sub = commands.add_parser(command, help=text_, allow_abbrev=False)
         sub.add_argument("name", metavar="NAME")
         if command == "stop":
             sub.add_argument("-w", "--wait", type=float, metavar="SECONDS",
@@ -1183,7 +1201,14 @@ def parser():
         if command == "resume":
             sub.add_argument("-r", "--review-home", action="store_true",
                              help="show what changed in its HOME's start files since its last start; start nothing")
-            sub.add_argument("-j", "--json", action="store_true", help="with --review-home: as JSON")
+            sub.add_argument("--restore-home", action="store_true",
+                             help="put back the text its HOME's start files had at its last start, as recorded "
+                                  "(small text files only, never keys or tokens; links are never followed): asked "
+                                  "file by file, or --yes; start nothing")
+            sub.add_argument("--path", action="append", default=[], metavar="PATH",
+                             help="with --restore-home: only this file (relative to the HOME; repeatable)")
+            sub.add_argument("--yes", action="store_true", help="with --restore-home: put every file back unasked")
+            sub.add_argument("-j", "--json", action="store_true", help="with --review-home or --restore-home: as JSON")
             sub.add_argument("-w", "--workspace", action="append", default=[], metavar="DIR",
                              help="start it with this directory added (at /workspaces/<name>; repeatable), kept for "
                                   "its later starts")
@@ -1194,11 +1219,49 @@ def parser():
                                   "for its later starts")
             sub.add_argument("--restart", action="store_true",
                              help="a running start is stopped first (the agent continues its conversation)")
+            sub.add_argument("--drop-option", action="append", default=[], metavar="OPTION[=VALUE]",
+                             help="take an option out of its saved options: every value of a list option "
+                                  "(--allow-host), or the one VALUE (--drop-option allow-host=example.org); a single "
+                                  "one goes back to its default (repeatable)")
+            sub.epilog = RESUME_OPTIONS
+            sub.formatter_class = argparse.RawDescriptionHelpFormatter
     return p
 
 
+RESUME_OPTIONS = """\
+Any option of the launcher after NAME changes the start's saved options at this rebirth and for its later ones
+(sandbox-ai resume NAME --gui --cpus 4 --allow-host example.org): an option with one value (--cpus, --memory, --gui,
+--mode, --canaries ...) replaces the saved one, a list option (--allow-host, --env, --allow-pypi ...) adds its
+value; --drop-option takes one out. The start gets the checks of a new start first (the administrator's policy,
+the security mode, private locations, its project file's trust): refused, nothing changes. Not changed by a
+rebirth: its name, HOME and backend, --config, and the workspaces (--workspace adds one)."""
+
+
+def launcher_long_forms(argv):
+    """ARGV of `resume NAME ...` with each short option of the launcher (-me 4g, -ru FILE, -wa) written as its long
+    form, unless resume has that short option itself: argparse would read -me as resume's -m with the value "e".
+    Words after "--" stay as they are."""
+    if len(argv) < 2 or argv[0] != "resume":
+        return argv
+    own = set(parser()._subparsers._group_actions[0].choices["resume"]._option_string_actions)
+    actions = launcher().option_actions() if hasattr(launcher(), "option_actions") else {}
+    result, rest = list(argv[:2]), list(argv[2:])
+    for index, token in enumerate(rest):
+        if token == "--":
+            result += rest[index:]
+            break
+        name, equals, value = token.partition("=")  # -me=4g too, as the launcher reads it
+        if token.startswith("-") and not token.startswith("--") and name not in own and name in actions:
+            token = max(actions[name].option_strings, key=len) + equals + value
+        result.append(token)
+    return result
+
+
 def main(argv, out=print):
-    args = parser().parse_args(argv)
+    argv = launcher_long_forms(list(argv))
+    args, extra = parser().parse_known_args(argv)
+    if extra and args.command != "resume":
+        parser().parse_args(argv)  # the usual error for what it does not know
     try:
         if args.command == "rename":
             if args.codename and args.new is not None:  # the name given wins; said, not refused
@@ -1211,16 +1274,23 @@ def main(argv, out=print):
             show_gc(gc(args.older_than, args.dry_run), out, args.json)
             return 0
         if args.command in ("attach", "pause", "resume", "stop", "delete"):
-            if getattr(args, "json", False) and not getattr(args, "review_home", False):
-                raise ValueError("--json goes with --review-home")
-            if getattr(args, "review_home", False) and (getattr(args, "workspace", None) or getattr(args, "mount", None)
-                                                         or getattr(args, "mcp", None) or getattr(args, "restart", False)):
-                raise ValueError("--review-home starts nothing: it goes without --workspace, --mount, --mcp and "
-                                 "--restart")
+            review, restore = getattr(args, "review_home", False), getattr(args, "restore_home", False)
+            if getattr(args, "json", False) and not (review or restore):
+                raise ValueError("--json goes with --review-home or --restore-home")
+            if review and restore:
+                raise ValueError("--review-home shows, --restore-home puts back: one at a time")
+            if (getattr(args, "path", None) or (args.command == "resume" and args.yes)) and not restore:
+                raise ValueError("--path and --yes go with --restore-home")
+            if (review or restore) and (getattr(args, "workspace", None) or getattr(args, "mount", None)
+                                        or getattr(args, "mcp", None) or getattr(args, "restart", False)
+                                        or getattr(args, "drop_option", None) or extra):
+                raise ValueError(f"{'--review-home' if review else '--restore-home'} starts nothing: it goes without "
+                                 "--workspace, --mount, --mcp, --restart and other options")
             return act(args.command, args.name, out, wait=getattr(args, "wait", None), yes=getattr(args, "yes", False),
-                       review=getattr(args, "review_home", False), as_json=getattr(args, "json", False),
+                       review=review, as_json=getattr(args, "json", False),
                        workspaces=getattr(args, "workspace", []), mounts=getattr(args, "mount", []),
-                       restart=getattr(args, "restart", False), mcp=getattr(args, "mcp", []))
+                       restart=getattr(args, "restart", False), mcp=getattr(args, "mcp", []), options=extra,
+                       dropped=getattr(args, "drop_option", []), restore=restore, paths=getattr(args, "path", []))
         colour = colour_choice(args.color)
         if args.history:
             return show_history(args.history, out, args.json, colour)

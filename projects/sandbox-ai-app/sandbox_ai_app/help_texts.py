@@ -127,8 +127,8 @@ KIND_DOES = {
     "display": ("Starts a virtual display (or VNC, or your Wayland) so GUI programs and browsers can run.",
                 "Startet eine virtuelle Anzeige (oder VNC, oder Ihr Wayland), damit GUI-Programme und Browser "
                 "laufen können."),
-    "session": ("tmux inside the sandbox or not; a session itself is started with Start as session.",
-                "tmux in der Sandbox oder nicht; eine Sitzung selbst starten Sie mit Als Sitzung starten."),
+    "session": ("tmux inside the sandbox or not; a session itself is started with Start and as session.",
+                "tmux in der Sandbox oder nicht; eine Sitzung selbst starten Sie mit Start und als Sitzung."),
     "logs": ("Where the connection and file logs go (outside the sandbox) and how much they keep.",
              "Wohin die Verbindungs- und Dateilogs gehen (außerhalb der Sandbox) und wie viel sie behalten."),
     "engine": ("Podman or Bubblewrap, the image or variant, and the agent's executable.",
@@ -213,8 +213,8 @@ AREA_TIPS = (
     _tip("launch.session", ("Session", "Sitzung"),
          ("A named sandbox that keeps running when you close the terminal or the app.",
           "Eine benannte Sandbox, die weiterläuft, wenn Sie das Terminal oder die App schließen."),
-         ("Start as session starts it detached; attach, pause, resume and stop it on Sandboxes & sessions.",
-          "Als Sitzung starten startet sie losgelöst; Verbinden, Pausieren, Fortsetzen und Stoppen auf Sandboxen & "
+         ("Start with as session starts it detached; attach, pause, resume and stop it on Sandboxes & sessions.",
+          "Start mit als Sitzung startet sie losgelöst; Verbinden, Pausieren, Fortsetzen und Stoppen auf Sandboxen & "
           "Sitzungen."),
          "--session NAME", "sessions"),
     # Board
@@ -378,12 +378,13 @@ AREA_TIPS = (
          None, "sandbox-ai stop NAME", "sessions"),
     _tip("sandboxes.live", ("While it runs", "Während sie läuft"),
          ("Changes for a running sandbox: allow or revoke a host, hand over a device, change the limits, show "
-          "its log, add or remove a workspace (a folder, a single file, with a name of its own) and add or remove "
-          "an MCP server or a helper agent without a restart.",
+          "its log, add or remove a workspace (a folder, a single file, with a name of its own), add or remove "
+          "an MCP server or a helper agent without a restart, and Reload rules (its proxy reads your rulesets and "
+          "its project's anew).",
           "Änderungen für eine laufende Sandbox: einen Host erlauben oder entziehen, ein Gerät geben, die Grenzen "
           "ändern, ihr Protokoll zeigen, einen Arbeitsordner (einen Ordner, eine einzelne Datei, mit eigenem Namen) "
-          "hinzufügen oder entfernen und einen MCP-Server oder einen Helfer-Agenten ohne Neustart hinzufügen oder "
-          "entfernen."),
+          "hinzufügen oder entfernen, einen MCP-Server oder einen Helfer-Agenten ohne Neustart hinzufügen oder "
+          "entfernen und Regeln neu laden (ihr Proxy liest Ihre Regelwerke und die ihres Projekts neu)."),
          ("Allowed hosts, devices and limits last until the sandbox ends; a session keeps an added folder for its "
           "restart unless it is read-only. An MCP server added here is kept for the start's later starts too "
           "(Remove MCP server… takes it from them); where the agent needs a restart to see it, the app offers one "
@@ -393,7 +394,8 @@ AREA_TIPS = (
           "bleibt auch für die späteren Starts des Starts (MCP-Server entfernen… nimmt ihn ihnen); braucht der "
           "Agent einen Neustart, um ihn zu sehen, bietet die App einen an (der Agent setzt sein Gespräch fort). "
           "Jede Erweiterung fragt zuerst; die Projektdatei bleibt, wie sie ist."),
-         "sandbox-ai net allow | devices | limits | workspace add | mcp attach --live | mcp detach --live",
+         "sandbox-ai net allow | devices | limits | workspace add | mcp attach --live | mcp detach --live | "
+         "rules reload",
          "page-sandboxes"),
     # Approvals
     _tip("approvals.open", ("Open questions", "Offene Fragen"),
@@ -740,10 +742,13 @@ AREA_TIPS = (
          "", "app-tours"),
     # Settings dialog: one per tab
     _tip("settings.appearance", ("Appearance", "Aussehen"),
-         ("Theme and language, the guide for new board parts, the guided tour and the intro.",
-          "Farbschema und Sprache, der Guide für neue Teile der Tafel, die geführte Tour und das Intro."),
-         ("Each field is saved when it changes; a new language applies at the next start.",
-          "Jedes Feld wird gespeichert, wenn es sich ändert; eine neue Sprache gilt beim nächsten Start."),
+         ("Theme, fonts and language, the guide for new board parts, the guided tour and the intro.",
+          "Farbschema, Schriften und Sprache, der Guide für neue Teile der Tafel, die geführte Tour und das Intro."),
+         ("Each field is saved when it changes; a new language applies at the next start. A font marked not installed "
+          "is not downloaded: install it (the list says how) and start the app again.",
+          "Jedes Feld wird gespeichert, wenn es sich ändert; eine neue Sprache gilt beim nächsten Start. Eine als nicht "
+          "installiert markierte Schrift wird nicht heruntergeladen: Installieren Sie sie (die Liste sagt, wie) und "
+          "starten Sie die App neu."),
          "", "app-settings"),
     _tip("settings.window", ("Window", "Fenster"),
          ("The system tray, start at login, where commands run, Chromium's sandbox for terminal tabs, "
@@ -1008,6 +1013,11 @@ TERMS = _terms(
 # The settings of the Settings dialog, by their key (backend.SETTINGS).
 SETTING_TIPS = _terms(
     ("theme", "The app's colours and shapes.", "Farben und Formen der App."),
+    ("ui_font", "The font of the app's texts; empty: the theme's. Only fonts installed here are used, nothing is "
+     "downloaded.", "Die Schrift der Texte der App; leer: die des Farbschemas. Nur hier installierte Schriften werden "
+     "verwendet, nichts wird heruntergeladen."),
+    ("mono_font", "The font of terminals, code and logs; empty: the theme's.",
+     "Die Schrift von Terminals, Code und Protokollen; leer: die des Farbschemas."),
     ("language", "The language of the app; it applies at the next start.",
      "Die Sprache der App; sie gilt ab dem nächsten Start."),
     ("guide_nodes", "A new part of the board asks what matters for it, one question at a time.",
@@ -1034,6 +1044,8 @@ SETTING_TIPS = _terms(
     ("auto_tabs", "Each session or sandbox that starts gets a terminal tab of its own.",
      "Jede Sitzung oder Sandbox, die startet, bekommt einen eigenen Terminal-Tab."),
     ("notify_seconds", "How long a notification stays on the screen.", "Wie lange eine Benachrichtigung zu sehen ist."),
+    ("notify_safeguards", "A notification when a safeguard refuses or ends something; the Safeguards tab lists all.",
+     "Eine Benachrichtigung, wenn eine Schutzmaßnahme etwas ablehnt oder beendet; der Tab listet alle."),
     ("notify_style", "In the app's colours at a corner of the screen, or as the desktop's own notification.",
      "In den Farben der App an einer Ecke des Bildschirms oder als eigene Benachrichtigung des Desktops."),
     ("debug", "Logs every step with its time and result, to find a problem.",
@@ -1051,6 +1063,8 @@ SETTING_TIPS = _terms(
     ("default_backend", "What isolates a new project: Podman (containers) or Bubblewrap.",
      "Was ein neues Projekt abschottet: Podman (Container) oder Bubblewrap."),
     ("default_template", "The preset a new board starts from.", "Die Vorlage, mit der eine neue Tafel beginnt."),
+    ("board_confirm_remove", "On: the [x] of a part asks first. Off: it removes the part at once (Undo brings it "
+     "back).", "An: das [x] eines Teils fragt zuerst. Aus: es entfernt das Teil sofort (Rückgängig holt es zurück)."),
     ("board_grid", "Moved parts snap to a grid of this many pixels; 0 switches it off.",
      "Verschobene Teile rasten in einem Raster dieser Pixelzahl ein; 0 schaltet es ab."),
     ("telemetry", "Whether the agents send usage statistics, error reports and update checks; off is "

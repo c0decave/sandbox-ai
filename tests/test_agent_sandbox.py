@@ -107,7 +107,7 @@ class SandboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             for agent in ["codex", "claude", "opencode"]:
                 workspace = Path(d) / agent / "workspace"
-                result = subprocess.run([str(ROOT / f"{agent}-sandbox"), "--workspace", str(workspace), "--dry-run"], capture_output=True, text=True)
+                result = subprocess.run([str(ROOT / "sandbox-ai"), agent, "--workspace", str(workspace), "--dry-run"], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout)["workspace"], str(workspace))
                 self.assertFalse(workspace.exists())
@@ -1245,7 +1245,7 @@ class SandboxTests(unittest.TestCase):
 
     def test_dry_run_has_no_auth_read_or_runtime_dependency(self):
         for agent in ["codex", "claude", "opencode"]:
-            result = subprocess.run([str(ROOT / f"{agent}-sandbox"), "--dry-run", "--copy-auth", "--", "--version"], text=True, capture_output=True)
+            result = subprocess.run([str(ROOT / "sandbox-ai"), agent, "--dry-run", "--copy-auth", "--", "--version"], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             plan = json.loads(result.stdout)
             self.assertEqual(plan["agent"], agent)
@@ -1332,7 +1332,7 @@ class SandboxTests(unittest.TestCase):
         self.assertIn("12345", slirp_cmd)
 
     def test_cli_invalid_option_fails_before_start(self):
-        result = subprocess.run([str(ROOT / "codex-sandbox"), "--network", "host", "--dry-run"], capture_output=True, text=True)
+        result = subprocess.run([str(ROOT / "sandbox-ai"), "codex", "--network", "host", "--dry-run"], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("network", result.stderr)
 
@@ -1367,10 +1367,10 @@ class SandboxTests(unittest.TestCase):
 
     def test_starters_work_through_symlinks(self):
         with tempfile.TemporaryDirectory() as d:
-            for name in ["codex-sandbox", "claude-sandbox", "opencode-sandbox"]:
-                link = Path(d) / name
-                link.symlink_to(ROOT / name)
-                result = subprocess.run([str(link), "--dry-run"], text=True, capture_output=True)
+            link = Path(d) / "sandbox-ai"
+            link.symlink_to(ROOT / "sandbox-ai")
+            for agent in ["codex", "claude", "opencode"]:
+                result = subprocess.run([str(link), agent, "--dry-run"], text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_user_mapping_preserves_setgroups_for_firejail(self):

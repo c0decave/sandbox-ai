@@ -163,6 +163,8 @@ class DockFold(QObject):
                 other.dockLocationChanged.connect(lambda _area: self.apply_soon())
                 other.topLevelChanged.connect(lambda _floating: self.apply_soon())
                 other.visibilityChanged.connect(lambda _shown: self.apply_soon())
+        self.pending = False  # a change while the panel is not shown: applied when it is shown again
+        dock.visibilityChanged.connect(lambda shown: shown and self.pending and self.apply_soon())
         self.applying = False
         self.apply()
 
@@ -252,6 +254,13 @@ class DockFold(QObject):
         """Show the state: the content shown or not, the title bar along the strip or across, the panel's room."""
         if self.applying:
             return
+        if not self.dock.isVisible() and not self.dock.isFloating() and self.dock.widget() is not None \
+                and self.dock.widget().isHidden() == (self.folded and not self.dock.isFloating()):
+            # A panel of another page (hidden as that page is not shown): nothing to look at now - every page switch
+            # applied every panel, each looking through all panels' places (as_strip). Done when it is shown.
+            self.pending = True
+            return
+        self.pending = False
         self.applying = True
         try:
             dock, floating, area = self.dock, self.dock.isFloating(), self.area()

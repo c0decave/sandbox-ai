@@ -135,8 +135,8 @@ def test_a_right_click_on_the_canvas_opens_its_menu_and_moves_nothing(page, qapp
     assert looks(page) == before, "a right click moves, snaps and selects nothing"
     assert len(page.menus) == 1
     menu = page.menus[0]
-    assert texts(menu) == ["Add a part here", "Paste", "Select all", "Fit the board", "Zoom 100 %", "Arrange", "Undo", "Redo",
-                           "What is this?"]
+    assert texts(menu) == ["Add a part here", "Paste", "Select all", "Fit the board", "Zoom 100 %", "Arrange",
+                           "Discard the changes not applied", "Undo", "Redo", "What is this?"]
     assert not action(menu, "Undo").isEnabled()
     parts = action(menu, "Add a part here").menu()
     limits = next(a for a in parts.actions() if a.text() == "Limits")
@@ -300,6 +300,12 @@ def click(view, item, button=LEFT):
     QTest.mouseClick(view.viewport(), button, NONE, view.mapFromScene(item.sceneBoundingRect().center()))
 
 
+def double_click(view, item):
+    """A part's properties open on a double click (a click selects it, held it moves)."""
+    click(view, item)
+    QTest.mouseDClick(view.viewport(), LEFT, NONE, view.mapFromScene(item.sceneBoundingRect().center()))
+
+
 def test_the_inspector_is_beside_the_canvas_on_a_page_alone(page, qapp):
     """Without the window (no panel): beside the canvas, always there; Esc and the empty canvas change nothing."""
     assert page.side.isVisible() and page.side.parentWidget() is page.view.parentWidget()
@@ -438,7 +444,7 @@ def test_the_inspector_is_a_panel_that_moves_undocks_and_closes(window, qapp):
     assert not window.actions.get("inspector-window"), "no mode of its own any more: it is undocked like any panel"
 
 
-def test_a_click_on_a_part_unfolds_the_docked_inspector_and_esc_or_the_canvas_fold_it(window, qapp):
+def test_a_double_click_on_a_part_unfolds_the_docked_inspector_and_esc_or_the_canvas_fold_it(window, qapp):
     board, dock, fold = board_window(window, qapp)
     window.activateWindow()
     board.view.setFocus()
@@ -447,12 +453,15 @@ def test_a_click_on_a_part_unfolds_the_docked_inspector_and_esc_or_the_canvas_fo
     agent = board.items[board.board.first("agent").id]
     click(board.view, agent)
     qapp.processEvents()
+    assert agent.isSelected() and fold.folded, "a click only selects"
+    double_click(board.view, agent)
+    qapp.processEvents()
     assert agent.isSelected() and not fold.folded and board.side.isVisible() and dock.width() > 200
     assert QApplication.focusWidget() is focused, "the keyboard stays on the canvas"
     QTest.keyClick(board.view, Qt.Key.Key_Escape)
     qapp.processEvents()
     assert fold.folded and strip_wide(dock, fold)
-    click(board.view, agent)  # the part selected already: unfolds again
+    double_click(board.view, agent)  # the part selected already: unfolds again
     qapp.processEvents()
     assert not fold.folded
     QTest.mouseClick(board.view.viewport(), LEFT, NONE, empty_point(board))  # the empty canvas
@@ -466,7 +475,7 @@ def test_a_click_on_a_part_unfolds_the_docked_inspector_and_esc_or_the_canvas_fo
 
 
 @pytest.mark.parametrize("closed", [False, True])
-def test_a_click_on_a_part_brings_a_floating_inspector_back_where_it_was(window, qapp, wait, closed):
+def test_a_double_click_on_a_part_brings_a_floating_inspector_back_where_it_was(window, qapp, wait, closed):
     board, dock, fold = board_window(window, qapp)
     dock.setFloating(True)
     dock.move(dock.x() + 37, dock.y() + 23)
@@ -481,7 +490,7 @@ def test_a_click_on_a_part_brings_a_floating_inspector_back_where_it_was(window,
     qapp.processEvents()
     focused = QApplication.focusWidget()
     agent = board.items[board.board.first("agent").id]
-    click(board.view, agent)
+    double_click(board.view, agent)
     qapp.processEvents()
     assert agent.isSelected() and dock.isVisible() and dock.isFloating() and dock.geometry() == where
     assert window.panel_actions["inspector"].isChecked() and "inspector" not in window.closed_docks
@@ -492,7 +501,7 @@ def test_a_click_on_a_part_brings_a_floating_inspector_back_where_it_was(window,
     assert dock.isVisible() and dock.isFloating() and not fold.folded, "Esc and the canvas never close a window"
 
 
-def test_a_click_on_a_part_shows_a_closed_docked_inspector(window, qapp):
+def test_a_double_click_on_a_part_shows_a_closed_docked_inspector(window, qapp):
     board, dock, fold = board_window(window, qapp)
     dock.close()
     qapp.processEvents()
@@ -500,6 +509,9 @@ def test_a_click_on_a_part_shows_a_closed_docked_inspector(window, qapp):
     QTest.keyClick(board.view, Qt.Key.Key_Escape)
     assert not dock.isVisible(), "Esc does not bring it back"
     click(board.view, board.items[board.board.first("agent").id])
+    qapp.processEvents()
+    assert not dock.isVisible(), "a click alone does not bring it back"
+    double_click(board.view, board.items[board.board.first("agent").id])
     qapp.processEvents()
     assert dock.isVisible() and not dock.isFloating() and not fold.folded and board.side.isVisible()
     assert window.panel_actions["inspector"].isChecked()

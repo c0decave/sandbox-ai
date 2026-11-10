@@ -24,6 +24,10 @@ always names the newest (the README's install commands use that).
 ## Steps
 
 ```bash
+# 0. On a host with Podman and Bubblewrap (not in a sandbox): the live check, its report under
+#    ~/.local/state/sandbox-ai/live-check/ (scripts/live_check.py --help)
+scripts/live_check.py --build
+
 # 1. Bump the version, commit, tag
 v=$(python3 scripts/bump_version.py)
 python3 -m pytest -q tests
@@ -41,7 +45,8 @@ export SANDBOX_AI_TOKEN=...
 python3 scripts/publish_release.py --source "${SANDBOX_AI_SOURCE:-https://github.com/c0decave/sandbox-ai}" dist/*
 ```
 
-Without a key in `sandbox/release-signers` (see below), leave out `--sign`.
+`sandbox/release-signers` lists the release key since 0.1.92: sign every release (installations that trust it
+refuse an unsigned one).
 
 ## The release page
 

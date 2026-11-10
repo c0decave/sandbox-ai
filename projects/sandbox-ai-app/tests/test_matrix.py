@@ -319,7 +319,9 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     assert review.trusted and review.problems == [] and (project / B.LAYOUT_NAME).is_file()
     document, main = B.project_document(sai, board)
     assert json.loads((project / ".sandbox-ai.json").read_text()) == document and main == str(project)
-    trusted_note = i18n.tr("The project's trusted .sandbox-ai.json is applied by the launcher on top of these options.")
+    trusted_note = i18n.tr("The launcher applies the project's trusted .sandbox-ai.json: the form shows its options, "
+                           "the command line carries only what you add or change. To drop one of its options, save "
+                           "the form as the project configuration.")
     assert wait(lambda: w.launch.project_note.text().endswith(trusted_note), 10)  # the state is read in the background
     before = (B.command_line(sai, board), B.project_document(sai, board))
     assert page.open_project(str(project))
@@ -881,10 +883,11 @@ def all_texts(widget):
 
 def changed_settings(env):
     """A value other than the default for every setting the app knows."""
-    return {"theme": "dark", "language": "de", "terminal": "window", "tray": False, "notify": False,
+    return {"theme": "dark", "ui_font": "Inter", "mono_font": "Hack", "language": "de", "terminal": "window", "tray": False, "notify": False,
+            "notify_safeguards": False,
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
-            "default_template": "research", "board_grid": 40, "auto_tabs": False, "guide_nodes": False,
+            "default_template": "research", "board_grid": 40, "board_confirm_remove": False, "auto_tabs": False, "guide_nodes": False,
             "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True,
             "show_flags": True}
 

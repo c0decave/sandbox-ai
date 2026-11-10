@@ -1,4 +1,5 @@
 """The app's log: each entry says when, where (component, file and line) and in which versions."""
+import os
 import re
 import sys
 import threading
@@ -91,6 +92,26 @@ def test_a_crash_of_the_process_leaves_the_python_stack_in_the_log(tmp_path):
     assert " INFO [start]" in log and "Fatal Python error: Segmentation fault" in log and "Current thread" in log
 
 
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGTRAP"), reason="no SIGTRAP here")
+def test_a_trap_of_chromium_leaves_the_python_stack_in_the_log_too(tmp_path):
+    """Chromium (QtWebEngine runs inside the app's process) ends the process on a failed check with a trap
+    instruction: SIGTRAP, which faulthandler.enable() does not watch - the app was gone without a line in app.log.
+    It is watched as well; the process still ends by the trap."""
+    import os
+    import signal
+    import subprocess
+    script = ("import sys; sys.path.insert(0, %r)\n"
+              "from sandbox_ai_app import applog\n"
+              "applog.install()\n"
+              "import os, signal; os.kill(os.getpid(), signal.SIGTRAP)\n"
+              "print('went on')\n") % str(__import__("pathlib").Path(applog.__file__).parents[1])
+    done = subprocess.run([sys.executable, "-c", script], env={**os.environ, "XDG_STATE_HOME": str(tmp_path)},
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == -signal.SIGTRAP and "went on" not in done.stdout
+    log = (tmp_path / "sandbox-ai" / "app.log").read_text()
+    assert "Current thread" in log and "<module>" in log, log
+
+
 def test_the_app_keeps_its_own_log_rotated(tmp_path, monkeypatch):
     path = tmp_path / "app.log"
     path.write_text("x" * 100)
@@ -103,6 +124,32 @@ def test_the_app_keeps_its_own_log_rotated(tmp_path, monkeypatch):
     link = tmp_path / "linked.log"
     link.symlink_to(tmp_path / "elsewhere")
     assert applog.open_log(link) is None  # never through a link
+
+
+def test_the_log_is_rotated_while_the_app_runs(tmp_path, monkeypatch):
+    """Stability review 2: app.log was rotated only at a start. An app that runs for weeks in the tray - with debug
+    lines twice a second, or an error repeated every second - filled the disk with it. Now it is rotated again once
+    it is larger than LOG_LIMIT; a second app writing the same log never makes it grow without bound either."""
+    path = tmp_path / "app.log"
+    monkeypatch.setattr(applog, "LOG_LIMIT", 1000)
+    monkeypatch.setattr(applog, "_path", path)
+    monkeypatch.setattr(applog, "_file", applog.open_log(path))
+    other = applog.open_log(path)  # a second app's
+    monkeypatch.setattr(sys, "stderr", open(tmp_path / "stderr", "w"))  # (not the test's output)
+    line = "x" * 99 + "\n"
+    for _ in range(100):
+        applog.write(line)
+        other.write(line)
+        other.flush()
+        if os.fstat(other.fileno()).st_size > applog.LOG_LIMIT:  # what keep_rotated does in the other app
+            other.close()
+            applog.rotate(path, applog.LOG_LIMIT, applog.LOG_KEEP)
+            other = applog.open_log(path)
+    sizes = [p.stat().st_size for p in tmp_path.glob("app.log*")]
+    assert len(sizes) <= applog.LOG_KEEP + 1 and max(sizes) <= 2 * applog.LOG_LIMIT + 2 * len(line), sizes
+    assert path.stat().st_size <= 2 * applog.LOG_LIMIT
+    other.close()
+    applog._file.close()
 
 
 def test_debug_mode_logs_each_step_with_its_component(capsys, monkeypatch):

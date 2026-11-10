@@ -747,7 +747,8 @@ def test_resume_with_workspaces_and_restart(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "stop", stopped)
     if scenario == "happy":
         assert st.main(["resume", "web", "-w", str(tmp_path), "--mount", f"{tmp_path}:/mnt/x:ro"]) == 0
-        assert resumed.call_args.args[1:] == ([str(tmp_path)], [f"{tmp_path}:/mnt/x:ro"], []) and not stopped.called
+        assert resumed.call_args.args[1:] == ([str(tmp_path)], [f"{tmp_path}:/mnt/x:ro"], [], [], []) and \
+            not stopped.called
     elif scenario == "sad":
         register("claude-1", name="task")
         assert st.main(["resume", "task", "--workspace", str(tmp_path)]) == 1  # a plain run: nothing to start again
@@ -757,51 +758,78 @@ def test_resume_with_workspaces_and_restart(scenario, tmp_path, monkeypatch):
         monkeypatch.setattr(st, "find", lambda name: {**st.entries(True)[0], "state": "running"})
         lines = []
         assert st.main(["resume", "web", "--restart"], out=lines.append) == 0
-        assert stopped.called and resumed.call_args.args[1:] == ([], [], []) and "stopping it" in lines[0]
+        assert stopped.called and resumed.call_args.args[1:] == ([], [], [], [], []) and "stopping it" in lines[0]
 
 
-# --- the single commands are deprecated ---------------------------------------------------------------------
+def test_resume_takes_launcher_options_and_drop_option(scenario, tmp_path, monkeypatch):
+    """resume NAME --gui --cpus 4 --drop-option allow-host: the launcher's options after NAME change the saved
+    options; a running start is checked before it is stopped (a refused change leaves it running)."""
+    make_start("web", started="2026-11-01T00:00:00Z")
+    resumed, stopped = Mock(return_value=0), Mock(return_value=0)
+    monkeypatch.setattr(sessions, "resume", resumed)
+    monkeypatch.setattr(sessions, "stop", stopped)
+    if scenario == "happy":
+        assert st.main(["resume", "web", "--gui", "--cpus", "4", "--allow-host", "example.org", "--drop-option",
+                        "allow-pypi"]) == 0
+        assert resumed.call_args.args[1:] == ([], [], [], ["--gui", "--cpus", "4", "--allow-host", "example.org"],
+                                              ["allow-pypi"])
+    elif scenario == "sad":
+        with pytest.raises(SystemExit):
+            st.main(["stop", "web", "--gui"])  # only resume takes the launcher's options
+        assert st.main(["resume", "web", "--review-home", "--gui"]) == 1
+        assert st.main(["resume", "web", "--yes"]) == 1  # --yes goes with --restore-home
+        register("claude-1", name="task")
+        assert st.main(["resume", "task", "--gui"]) == 1  # a plain run: nothing to start again
+        assert not resumed.called
+    else:
+        monkeypatch.setattr(st, "find", lambda name: {**st.entries(True)[0], "state": "running"})
+        monkeypatch.setattr(sessions, "check_start", Mock(side_effect=ValueError("would be refused: paranoid")))
+        assert st.main(["resume", "web", "--restart", "--mode", "paranoid", "--gui"]) == 1
+        assert not stopped.called and not resumed.called  # checked first: it runs on as it was
 
-OLD_COMMANDS = {"claude-sandbox": "sandbox-ai claude", "codex-sandbox": "sandbox-ai codex",
-                "opencode-sandbox": "sandbox-ai opencode", "sandbox-mcp": "sandbox-ai mcp",
-                "sandbox-wizard": "sandbox-ai wizard", "sandbox-build-image": "sandbox-ai build",
-                "sandbox-session": "sandbox-ai list|attach|pause|resume|stop|delete"}
+
+def test_resume_restore_home_from_the_command_line(tmp_path, monkeypatch):
+    make_start("web", started="2026-11-01T00:00:00Z")
+    restored = Mock(return_value=0)
+    monkeypatch.setattr(sessions, "restore_home", restored)
+    assert st.main(["resume", "web", "--restore-home", "--path", ".bashrc", "--yes", "--json"]) == 0
+    assert restored.call_args.args[1:4] == ([".bashrc"], True, True)
+    assert st.main(["resume", "web", "--restore-home", "--review-home"]) == 1
+    assert st.main(["resume", "web", "--restore-home", "--workspace", str(tmp_path)]) == 1
+    assert restored.call_count == 1
+
+
+# --- the single commands are gone: sandbox-ai does all they did ---------------------------------------------
+
+OLD_COMMANDS = {"claude-sandbox": ["claude"], "codex-sandbox": ["codex"], "opencode-sandbox": ["opencode"],
+                "sandbox-mcp": ["mcp"], "sandbox-wizard": ["wizard"], "sandbox-build-image": ["build"],
+                "sandbox-session": ["session"]}
 
 
 @pytest.mark.parametrize("command", sorted(OLD_COMMANDS))
-def test_old_commands_say_they_are_deprecated(command, tmp_path):
+def test_the_old_single_commands_are_gone_and_sandbox_ai_does_what_they_did(command, tmp_path):
+    """Deprecated since 0.1.30, removed since: no wrapper in the checkout, no console entry point in the package, and
+    sandbox-ai offers each of them (its --help answers)."""
+    assert not (ROOT / command).exists()
+    assert command not in (ROOT / "pyproject.toml").read_text().split("[project.scripts]")[1].split("[")[0]
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state"), "XDG_RUNTIME_DIR": str(tmp_path / "runtime")}
-    env.pop("SANDBOX_AI_NO_DEPRECATION", None)
-    result = subprocess.run([str(ROOT / command), "--help"], capture_output=True, text=True, env=env)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), *OLD_COMMANDS[command], "--help"], capture_output=True,
+                            text=True, env=env, timeout=60)
     assert result.returncode == 0, result.stderr
-    assert result.stderr.splitlines()[0] == (f"{command}: deprecated, to be removed in a later version; use: "
-                                             f"{OLD_COMMANDS[command]} (SANDBOX_AI_NO_DEPRECATION=1 hides this note)")
-    quiet = subprocess.run([str(ROOT / command), "--help"], capture_output=True, text=True,
-                           env={**env, "SANDBOX_AI_NO_DEPRECATION": "1"})
-    assert "deprecated" not in quiet.stderr and quiet.stdout == result.stdout
-    # sandbox-ai itself says nothing of the kind.
-    new = subprocess.run([str(ROOT / "sandbox-ai"), "list"], capture_output=True, text=True, env=env)
-    assert "deprecated" not in new.stderr
+    assert "deprecated" not in result.stderr and result.stdout
 
 
-def test_console_entry_points_say_so_too(scenario, monkeypatch, capsys):
+def test_the_console_entry_point_runs_main(monkeypatch, capsys):
     spec = importlib.util.spec_from_file_location("sandbox_cli_test", ROOT / "sandbox/cli.py")
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     calls = []
     monkeypatch.setattr(cli.os, "execv", lambda path, argv: calls.append(argv))
-    monkeypatch.delenv("SANDBOX_AI_NO_DEPRECATION", raising=False)
-    if scenario == "happy":
-        cli.claude()
-        assert "claude-sandbox: deprecated" in capsys.readouterr().err
-        assert str(calls[-1][2]).endswith("agent_sandbox.py") and calls[-1][3] == "claude"
-    elif scenario == "sad":
-        monkeypatch.setenv("SANDBOX_AI_NO_DEPRECATION", "1")
-        cli.session()
-        assert capsys.readouterr().err == "" and str(calls[-1][2]).endswith("sessions.py")
-    else:
-        cli.main()  # sandbox-ai: not deprecated
-        assert capsys.readouterr().err == "" and str(calls[-1][2]).endswith("main.py")
+    monkeypatch.setattr(cli.sys, "argv", ["sandbox-ai", "list", "--json"])
+    cli.main()
+    assert capsys.readouterr().err == "" and str(calls[-1][2]).endswith("main.py") and calls[-1][3:] == ["list",
+                                                                                                         "--json"]
+    assert not hasattr(cli, "claude") and not hasattr(cli, "build_image")
 
 
 # --- an MCP server for a named start: mcp attach NAME START, mcp start NAME --for START ------------------------
@@ -1174,3 +1202,12 @@ def test_every_alias_names_itself_in_its_help(command, tmp_path):
                             timeout=120)
     assert result.returncode == 0 and result.stdout.startswith(f"usage: sandbox-ai {command} "), result.stdout[:200]
     assert "ps" in shared_commands() and "list" in shared_commands()
+
+
+def test_the_launchers_short_options_after_resume_name_are_its_own():
+    """resume's own -m, -w, -r, -j would swallow the launcher's -me, -wa, -ru ... (argparse reads -me as -m e)."""
+    long_forms = st.launcher_long_forms(["resume", "web", "-me", "4g", "-ru", "r.json", "-m", "/a:/b", "-r", "--",
+                                         "-me"])
+    assert long_forms == ["resume", "web", "--memory", "4g", "--rules", "r.json", "-m", "/a:/b", "-r", "--", "-me"]
+    assert st.launcher_long_forms(["stop", "web", "-w", "3"]) == ["stop", "web", "-w", "3"]
+    assert st.launcher_long_forms(["resume", "web", "-me=4g", "-m=/a:/b"]) == ["resume", "web", "--memory=4g", "-m=/a:/b"]

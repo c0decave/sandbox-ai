@@ -16,4 +16,6 @@ evidence/
 # Machine-local: the wizard's project configuration names host paths, LAN
 # addresses and ports; Claude Code's local settings are per machine too.
 .sandbox-ai.json
+# The desktop app's board layout beside it: node positions keyed by host paths.
+.sandbox-ai.board.json
 .claude/settings.local.json

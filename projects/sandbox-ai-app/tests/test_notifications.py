@@ -186,3 +186,23 @@ def test_the_desktop_notification_where_asked_or_where_a_toast_cannot_be_placed(
     monkeypatch.setattr(N, "can_place_windows", lambda: True)
     notifier._tray = None
     assert notifier.show("info", "i", "x", style="system") is not None
+
+
+def test_an_action_that_outlives_its_toast_raises_nothing(qapp):
+    """Seen in the user's log (0.1.88): an answer asked first in a dialog, the toast's time ran out meanwhile and it was
+    deleted; closing it after the answer raised "Internal C++ object (Toast) already deleted". Now the toast closes
+    first and the answer runs from the event loop."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from sandbox_ai_app import notifications
+    ran = []
+
+    def answer():
+        ran.append(True)
+        toast.deleteLater()  # (as if its time ran out while the answer's question was open)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    toast = notifications.Toast("warning", "sandbox-ai asks", "x.example", 15, action=[("Allow", answer)])
+    toast.show()
+    toast.actions[0].click()
+    for _ in range(5):
+        qapp.processEvents()
+    assert ran == [True]

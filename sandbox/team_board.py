@@ -14,7 +14,7 @@ The server sandbox starts one instance per connection, so the board lives in a f
 directory, the server's private /work), changed under a lock. `sandbox-ai team post` writes the same file from
 the host.
 
-    python3 team_board.py --members claude,codex[,opencode] [--dir DIRECTORY]
+    python3 team_board.py --members claude,codex[,opencode] [--dir DIRECTORY] [--post TO < TASK]
 """
 import contextlib
 import fcntl
@@ -267,18 +267,26 @@ def write(directory, board):
     os.replace(temporary, path)
 
 
-def main(argv):
-    members, directory, rest = None, ".", list(argv)
+def main(argv, stdin=None, out=None):
+    """Serve the board; with --post TO, post the task read from stdin for TO as the human (macOS: `sandbox-ai team
+    post` runs this in the board's sandbox, where the lock holds) and print {"id": N}."""
+    members, directory, to, rest = None, ".", None, list(argv)
     while rest:
         if rest[0] == "--members" and len(rest) > 1:
             members, rest = rest[1].split(","), rest[2:]
         elif rest[0] == "--dir" and len(rest) > 1:
             directory, rest = rest[1], rest[2:]
+        elif rest[0] == "--post" and len(rest) > 1:
+            to, rest = rest[1], rest[2:]
         else:
             print(f"team_board.py: unknown argument {rest[0]!r}", file=sys.stderr)
             return 2
     try:
         board = Board(members or [], directory)
+        if to is not None:
+            task = (stdin or sys.stdin).read(TASK_LIMIT + 1)
+            print(json.dumps(board.post(to, task, sender="human")), file=out or sys.stdout)
+            return 0
     except ValueError as exc:
         print(f"team_board.py: {exc}", file=sys.stderr)
         return 2

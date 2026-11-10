@@ -47,6 +47,20 @@ def home_review(name, data, host="local"):
     return "\n".join(lines), "\n".join(details)[:200000] or None
 
 
+REVIEW_PATHS = 10  # files a Restore HOME question names
+
+
+def restorable_paths(data):
+    """The changed or removed files of a review (`--review-home --json`: DATA) whose text the record kept: those
+    `sandbox-ai resume NAME --restore-home` can put back (it checks each again). Others are left as they are."""
+    review = data.get("review") if isinstance(data, dict) else None
+    changes = review.get("changes") if isinstance(review, dict) else None
+    return [str(change["path"]) for change in changes or []
+            if isinstance(change, dict) and isinstance(change.get("path"), str)
+            and change.get("change") in ("changed", "removed", "mode", "type") and change.get("diff")
+            and isinstance(change.get("before"), dict) and change["before"].get("type") == "file"]
+
+
 def review_refusal(error):
     """True if sandbox-ai's ERROR says the start keeps no HOME (a run: nothing to review, nothing to ask)."""
     return "keeps no HOME" in str(error)

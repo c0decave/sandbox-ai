@@ -10,7 +10,7 @@ const state = {
   // the questions a toast tells of (one toast for them, drawn anew from what is still open), the ones answered here
   // (never shown again until their host stops listing them), the open ones of the last poll
   toastQuestions: new Map(), questionToast: null, answered: new Map(), questions: [],
-  boxes: null, terminalCount: 0, polling: false, pollAgain: false, policy: null, session: null, loginMessage: null,
+  boxes: null, terminalCount: 0, renders: 0, polling: false, pollAgain: false, policy: null, session: null, loginMessage: null,
   cards: [], shown: null,
   renderToken: 0,  // counts the pages drawn: a drawing that awaited an answer goes on only while it is still the last
   installing: {},  // host -> when its install began (it may outlast the page that started it)
@@ -18,11 +18,13 @@ const state = {
   review: null,  // {host, path}: a project configuration to review (a start refused it as untrusted)
   help: null, helpFor: null,  // help.json's sections once loaded; the page whose (?) opened Help
   formHost: null,  // the host of the new start's form, when another than the table's was chosen there
+  // safeguards: the records seen per host (the first look only notes them), every other poll asks the host
+  safeguardsSeen: new Set(), safeguardsPrimed: new Set(), safeguardTick: 0, safeguardsNotifier: null, safeguardMuted: {},
 };
 const AGENTS = ["claude", "codex", "opencode"];
 const PAGES = [
   ["starts", N_("Starts and sessions")], ["approvals", N_("Approvals")], ["terminals", N_("Terminals")],
-  ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
+  ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["safeguards", N_("Safeguards")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
   ["presets", N_("Presets")], ["teams", N_("Teams")], ["images", N_("Images and tools")], ["activity", N_("Activity")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
   ["help", N_("Help")],
 ];
@@ -453,12 +455,128 @@ async function busy(button, work) {
   try { return await work(); } finally { button.disabled = false; }
 }
 
+// --- safeguards: what refused or ended something in a sandbox (sandbox-ai safeguards on that host) ------------
+// A host's new records become toasts, grouped and rate-limited as the launcher's desktop notifications are
+// (safeguards.py's Notifier): the first of a run, kind and place at once, those that follow within a minute as one
+// ("12 connections to x.example dropped by the firewall in the last minute"), at most SAFEGUARD_RATE warnings a
+// minute (errors always: a canary, an out-of-memory kill, a failed check), the rest summed up later. Kinds muted
+// in the host's defaults (safeguard_mute) never pop up; the Safeguards page lists them all.
+
+const SAFEGUARD_WINDOW = 60000;
+const SAFEGUARD_RATE = 4;
+const SAFEGUARD_TITLES = {
+  firewall: N_("connection dropped by the firewall"), dns: N_("name lookup refused"), network: N_("connection refused by the proxy"),
+  rule: N_("refused by a rule"), "approval-timeout": N_("refused without an answer"), push: N_("push refused by the privacy check"),
+  publish: N_("publishing refused"), mode: N_("refused by the security mode"), policy: N_("refused by the administrator's policy"),
+  taint: N_("held: the run is tainted"), device: N_("device refused"), memory: N_("process ended: memory nearly full"),
+  "supervisor-memory": N_("the supervisor dropped its caches"), guard: N_("a safety check failed"), canary: N_("a canary went off"),
+  oom: N_("out of memory: the kernel ended a process"),
+};
+const SAFEGUARD_GROUPED = {
+  firewall: N_("{count} connections to {target} dropped by the firewall in the last minute"),
+  dns: N_("{count} lookups of {target} refused in the last minute"),
+  network: N_("{count} connections to {target} refused in the last minute"),
+  rule: N_("{count} actions refused by {target} in the last minute"),
+  "approval-timeout": N_("{count} questions about {target} refused without an answer in the last minute"),
+  push: N_("{count} pushes to {target} refused in the last minute"),
+  publish: N_("{count} publishing requests to {target} refused in the last minute"),
+};
+
+function safeguardTitle(kind) { return SAFEGUARD_TITLES[kind] ? t(SAFEGUARD_TITLES[kind]) : String(kind); }
+
+function safeguardFix(r) { return r.fix ? (r.stays ? t("Stays refused: {fix}", { fix: r.fix }) : t("To allow it: {fix}", { fix: r.fix })) : null; }
+
+class SafeguardNotifier {
+  constructor(send, clock) {
+    this.send = send; this.clock = clock || (() => Date.now());
+    this.groups = new Map(); this.sent = []; this.held = new Map(); this.muted = new Set();
+  }
+  add(r) {
+    if (!r || !Object.prototype.hasOwnProperty.call(SAFEGUARD_TITLES, r.kind) || r.announced || this.muted.has(r.kind)) return;
+    const now = this.clock(), key = JSON.stringify([r.run || null, r.kind, r.target || r.what || ""]);
+    const number = Number.isInteger(r.count) && r.count > 0 ? r.count : 1;
+    const group = this.groups.get(key);
+    if (group) { group.fresh += number; group.total += number; group.record = r; return; }
+    this.groups.set(key, { since: now, fresh: 0, total: number, record: r });
+    this.emit({ level: r.level === "error" ? "error" : "warning", run: r.run, kind: r.kind, count: 1,
+      title: `${r.run || state.host}: ${safeguardTitle(r.kind)}`,
+      text: [r.what, r.process ? t("Process: {process}", { process: r.process }) : null, r.why ? t("Why: {why}", { why: r.why }) : null, safeguardFix(r)].filter(Boolean).join("\n") }, now);
+  }
+  flush(final) {
+    const now = this.clock();
+    for (const [key, group] of this.groups) {
+      if (!final && now - group.since < SAFEGUARD_WINDOW) continue;
+      if (!group.fresh) { this.groups.delete(key); continue; }
+      const r = group.record;
+      const what = SAFEGUARD_GROUPED[r.kind] ? t(SAFEGUARD_GROUPED[r.kind], { count: group.total, target: r.target || "?" })
+        : t("{what} ({count} times in the last minute)", { what: safeguardTitle(r.kind), count: group.total });
+      this.emit({ level: r.level === "error" ? "error" : "warning", run: r.run, kind: r.kind, count: group.total,
+        title: `${r.run || state.host}: ${what}`, text: [r.why ? t("Why: {why}", { why: r.why }) : null, safeguardFix(r)].filter(Boolean).join("\n") }, now, true);
+      Object.assign(group, { since: now, fresh: 0, total: 0 });
+    }
+    if (this.held.size && (final || this.room(now))) {
+      let count = 0; const kinds = new Set(), runs = new Set();
+      for (const [key, n] of this.held) { const [run, kind] = JSON.parse(key); count += n; kinds.add(kind); runs.add(run); }
+      this.held.clear();
+      const run = runs.size === 1 ? [...runs][0] : null;
+      this.emit({ level: "warning", run, kind: "summary", count, title: `${run || state.host}: ${t("{count} more safeguard events", { count })}`,
+        text: t("Kinds: {kinds}", { kinds: [...kinds].sort().join(", ") }) }, now, true);
+    }
+  }
+  room(now) {
+    this.sent = this.sent.filter(t => now - t < SAFEGUARD_WINDOW);
+    return this.sent.length < SAFEGUARD_RATE;
+  }
+  emit(n, now, force) {
+    if (n.level !== "error" && !force && !this.room(now)) {
+      const key = JSON.stringify([n.run || null, n.kind]);
+      this.held.set(key, (this.held.get(key) || 0) + n.count);
+      return;
+    }
+    if (n.level !== "error") { this.room(now); this.sent.push(now); }
+    try { this.send(n); } catch (e) { /* a toast that fails never stops the others */ }
+  }
+}
+
+function safeguardsNotifier() {
+  if (!state.safeguardsNotifier) state.safeguardsNotifier = new SafeguardNotifier(n =>
+    toast(n.level, n.title, n.text, { action: [t("Show safeguards"), () => show("safeguards")] }));
+  return state.safeguardsNotifier;
+}
+
+// Every other poll (10 s: it is a command on that host); an older sandbox-ai there has no safeguards: no toasts.
+async function pollSafeguards() {
+  const notifier = safeguardsNotifier();
+  state.safeguardTick = (state.safeguardTick + 1) % 2;
+  if (state.safeguardTick) { notifier.flush(); return; }
+  const host = state.host;
+  let records;
+  try { records = await api("GET", hostPath("/safeguards")); } catch (e) { return; }
+  if (!Array.isArray(records) || host !== state.host) return;
+  const primed = state.safeguardsPrimed.has(host);
+  if (!primed) {
+    state.safeguardsPrimed.add(host);
+    try { state.safeguardMuted[host] = new Set(((await api("GET", hostPath("/defaults"))).values || {}).safeguard_mute || []); }
+    catch (e) { state.safeguardMuted[host] = new Set(); }
+  }
+  notifier.muted = state.safeguardMuted[host] || new Set();
+  for (const r of records) {
+    const key = `${host} ${r.id}`;
+    if (state.safeguardsSeen.has(key)) continue;
+    state.safeguardsSeen.add(key);
+    if (primed && state.page !== "safeguards") notifier.add(r);
+  }
+  notifier.flush();
+  if (state.page === "safeguards" && primed) pages.safeguards(clear(document.getElementById("main")), records);
+}
+
 // --- themes: the desktop app's ---------------------------------------------------------------------------
 
 async function loadThemes() {
   try {
     const data = await (await fetch("/static/themes.json", { cache: "no-cache" })).json();
     state.themes = data.themes || {};
+    state.fontLists = data.fonts || {};
   } catch (e) { state.themes = {}; }
   applyTheme(state.theme);
   if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(state.theme));
@@ -501,12 +619,96 @@ function applyTheme(name) {
   document.body.classList.toggle("bevel", Boolean(theme.bevel));
   document.documentElement.style.colorScheme = theme.dark ? "dark" : "light";
   for (const entry of state.terminals) entry.term.options.theme = terminalTheme();
+  applyFonts();
 }
 
 function terminalTheme() {
   const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
   const theme = state.themes[state.theme] || state.themes[dark ? "dark" : "light"] || {};
   return theme.terminal || {};
+}
+
+// --- fonts: the app's lists (themes.json "fonts"), chosen in this browser; nothing is downloaded -----------
+
+state.fonts = { ui: localStorage.getItem("sandbox-ai-font-ui") || "", mono: localStorage.getItem("sandbox-ai-font-mono") || "" };
+state.fontLists = state.fontLists || {};
+const GENERIC_FONTS = new Set(["serif", "sans-serif", "monospace", "system-ui", "ui-monospace", "ui-sans-serif"]);
+
+function cssFamilies(families) {
+  return [...new Set(families.filter(Boolean))].map(f => (GENERIC_FONTS.has(f) ? f : `"${f}"`)).join(", ");
+}
+
+// The font of KIND ("ui" or "mono") chosen here, if it is one of the list (else "": the theme's).
+function chosenFont(kind) {
+  const name = state.fonts[kind];
+  return name && (state.fontLists[kind] || []).some(([family]) => family === name) ? name : "";
+}
+
+// Installed on this computer? A font that is missing renders in the fallback, so the text keeps the generic
+// family's width for each of three generics. (document.fonts.check() says true for any system font name.)
+// null: cannot tell here.
+function fontInstalled(family) {
+  try {
+    const context = document.createElement("canvas").getContext("2d");
+    if (!context) return null;
+    const sample = "mmmmmmmmmmlli1|WQ@#0Ow";
+    return ["monospace", "sans-serif", "serif"].some((generic) => {
+      context.font = `72px ${generic}`;
+      const fallback = context.measureText(sample).width;
+      context.font = `72px "${family}", ${generic}`;
+      return context.measureText(sample).width !== fallback;
+    });
+  } catch (e) { return null; }
+}
+
+// The chosen fonts as CSS variables, before the theme's (--font) and the page's monospace fonts (--mono, also the
+// terminals'): a missing font falls back to them, at the end a generic family.
+function applyFonts() {
+  const root = document.documentElement.style;
+  const dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const theme = state.themes[state.theme] || state.themes[dark ? "dark" : "light"] || {};
+  const families = (theme.font && theme.font.families) || [];
+  const ui = chosenFont("ui"), mono = chosenFont("mono");
+  if (families.length || ui) root.setProperty("--font", cssFamilies([ui, ...families, "sans-serif"]));
+  root.removeProperty("--mono");
+  const fallback = (getComputedStyle(document.documentElement).getPropertyValue("--mono") || "").trim() || "monospace";
+  const stack = mono ? `${cssFamilies([mono])}, ${fallback}` : fallback;
+  if (mono) root.setProperty("--mono", stack);
+  for (const t of state.terminals) { t.term.options.fontFamily = stack; t.fit(); }
+}
+
+function chooseFont(kind, name) {
+  state.fonts[kind] = name;
+  try { localStorage.setItem(`sandbox-ai-font-${kind}`, name); } catch (e) { /* kept for this page only */ }
+  applyFonts();
+}
+
+// Two lists in the header: the theme's font or one of the app's; one that is not installed here is marked and
+// says how to get it.
+function fontPicker() {
+  const hint = el("p", { class: "hint" });
+  const showHint = () => {
+    const missing = ["ui", "mono"].map(kind => [kind, state.fonts[kind]]).filter(([kind, name]) => name && chosenFont(kind) && fontInstalled(name) === false);
+    clear(hint).append(...missing.map(([kind, name]) => el("span", { class: "font-missing" },
+      t("{name} is not installed on this computer: the theme's font is used until it is. To get it: {how}", { name, how: howToGet(kind, name) }))));
+  };
+  const select = (kind, label) => el("label", {}, label, el("select", { onchange: (e) => { chooseFont(kind, e.target.value); showHint(); } },
+    el("option", { value: "", selected: !chosenFont(kind) }, t("the theme's")),
+    (state.fontLists[kind] || []).map(([family, how]) => {
+      const installed = fontInstalled(family);
+      return el("option", { value: family, selected: chosenFont(kind) === family, title: installed === false ? t("Not installed. To get it: {how}", { how }) : undefined },
+        installed === false ? t("{family} (not installed)", { family }) : family);
+    })));
+  showHint();
+  return el("details", { class: "fonts" }, el("summary", {}, t("Fonts")),
+    el("div", { class: "font-panel" },
+      select("ui", t("Interface font")), select("mono", t("Monospace font (terminal, code, logs)")),
+      el("p", { class: "hint" }, t("Nothing is downloaded: install a font on this computer to use it.")), hint));
+}
+
+function howToGet(kind, name) {
+  const found = (state.fontLists[kind] || []).find(([family]) => family === name);
+  return found ? found[1] : "";
 }
 
 // --- login -----------------------------------------------------------------------------------------------
@@ -555,15 +757,20 @@ function languageSelect(id) {
 
 // --- the frame -------------------------------------------------------------------------------------------
 
+// Only the newest render() draws: one still waiting for an answer when another starts (a login, a session that
+// ended, a language chosen) drew its page as well, a second frame under the first or one over the login page.
 async function render() {
-  const root = clear(document.getElementById("app"));
+  const run = ++state.renders;
   if (!state.me && !state.loginMessage) {
     try { state.me = await api("GET", "/api/me"); } catch (e) { state.me = null; }
   }
-  if (!state.me) { document.title = state.loginMessage ? endedTitle() : "sandbox-ai"; removeSessionBanner(); root.append(loginView(state.loginMessage)); return; }
+  if (run !== state.renders) return;
+  if (!state.me) { const root = clear(document.getElementById("app")); document.title = state.loginMessage ? endedTitle() : "sandbox-ai"; removeSessionBanner(); root.append(loginView(state.loginMessage)); return; }
   state.loginMessage = null;
   try { state.hosts = await api("GET", "/api/hosts"); } catch (e) { state.hosts = [{ name: "local", kind: "local" }]; }
   try { state.policy = await api("GET", "/api/policy"); } catch (e) { state.policy = null; }  // without it: every prompt is asked
+  if (run !== state.renders || !state.me) return;
+  const root = clear(document.getElementById("app"));
   if (!state.hosts.some(h => h.name === state.host)) state.host = "local";
   const where = addressOf();
   state.page = where.page || state.page;
@@ -584,6 +791,7 @@ async function render() {
       el("span", { class: "spacer" }),
       languageSelect("header-language"),
       themeSelect,
+      fontPicker(),
       el("span", { class: "hint" }, state.me.user),
       el("button", { onclick: logout }, t("Log out"))),
     nav, el("main", { id: "main" })));
@@ -668,6 +876,7 @@ async function poll() {
   if (state.page === "approvals") pages.approvals(main, open).catch(() => {});
   if (state.page === "terminals") refreshTerminalStarts(main, true);
   if (state.page === "starts") refreshStarts(main);
+  pollSafeguards().catch(() => {});
   if (state.pollAgain) { state.pollAgain = false; poll(); }
 }
 
@@ -948,7 +1157,7 @@ function startRow(s, starts, main, all) {
 // The LLM server start S works with (list --json's "llm": --llm NAME[:MODEL]): what it has loaded and uses now (llm
 // status NAME on the start's host), read again every LLM_STATUS_SECONDS while the card is open (a poll of the page's
 // own: not the user's activity). A host whose sandbox-ai does not know it yet says so, once.
-const LLM_CHOICE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}(:[\w.:/@+-]{1,200})?$/;
+const LLM_CHOICE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}(:[\w.:/@+-]{1,200}(,[\w.:/@+-]{1,200}){0,49})?$/;  // NAME[:MODEL[,MODEL...]]
 function llmStatusCard(main, s) {
   const value = String(s.llm), server = value.split(":")[0];
   const old = document.getElementById("llm-status-card");
@@ -3858,6 +4067,39 @@ pages.canaries = async (main) => {
   main.append(table([t("Time"), t("Run"), t("Event"), t("Canary"), t("What"), t("Process"), ""], rows));
 };
 
+// what the safeguards refused or ended (sandbox-ai safeguards on that host): why, the process, the command that
+// would allow it or that it stays refused; newest first, warnings in the theme's warning colour, errors in its bad one
+pages.safeguards = async (main, known) => {
+  main.append(el("h1", {}, t("Safeguards on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
+  let records = known;
+  if (!records) {
+    try { records = await api("GET", hostPath("/safeguards")); }
+    catch (e) { clear(main).append(el("h1", {}, t("Safeguards on {host}", { host: state.host })), notice(e.status === 502 ? t("{error} (an older sandbox-ai there records no safeguards: sandbox-ai update)", { error: e.message }) : e.message, "error")); return; }
+  }
+  clear(main).append(el("h1", {}, t("Safeguards on {host}", { host: state.host })),
+    el("p", { class: "hint" }, t("Whatever a sandbox's safeguards refused or ended: the firewall, name lookups, the proxy, rules, questions nobody answered, the privacy check of pushes, the security mode, the administrator's policy, the run's taint, devices, memory, canaries. Each with why and what would allow it. Mute kinds on the Defaults page; they are still listed here.")));
+  const kinds = [...new Set(records.map(r => r.kind))].sort();
+  const filter = el("select", { id: "safeguard-kind", "aria-label": t("Kind") }, el("option", { value: "" }, t("every kind")),
+    kinds.map(k => el("option", { value: k, selected: state.safeguardKind === k }, `${safeguardTitle(k)} (${k})`)));
+  const body = el("div");
+  const fill = () => {
+    state.safeguardKind = filter.value;
+    const shown = records.filter(r => !filter.value || r.kind === filter.value).slice().reverse();
+    const rows = shown.map(r => el("tr", { class: `safeguard ${r.level === "error" ? "error" : "warning"}` },
+      el("td", {}, (r.time || "").replace("T", " ").replace("Z", "")), el("td", { class: "mono" }, r.run || ""),
+      el("td", { class: r.level === "error" ? "status-bad" : "status-warn" }, safeguardTitle(r.kind)),
+      el("td", {}, `${r.what || ""}${r.count > 1 ? ` ×${r.count}` : ""}`, r.process ? el("div", { class: "hint mono" }, r.process) : null),
+      el("td", {}, r.why || ""),
+      el("td", { class: "mono" }, r.stays ? t("stays refused: {fix}", { fix: r.fix || "" }) : (r.fix || "")),
+      el("td", { class: "actions" }, r.fix && !r.stays && navigator.clipboard ? el("button", { onclick: async () => {
+        try { await navigator.clipboard.writeText(r.fix); toast("success", t("Copied"), r.fix); } catch (e) { failed(t("Could not copy"))(e); }
+      } }, t("Copy")) : null)));
+    clear(body).append(table([t("Time"), t("Run"), t("Kind"), t("What"), t("Why"), t("To allow it"), ""], rows, t("No safeguard refused or ended anything on this host.")));
+  };
+  filter.addEventListener("change", fill);
+  main.append(el("div", { class: "row" }, el("label", { for: "safeguard-kind" }, t("Kind"), " "), filter), body);
+  fill();
+};
 // What lowers the protection of every later start on a host is asked first, in place, naming the host; Cancel puts
 // the control back. Lowering is any step down from what the host has now: the mode (lax < low < medium < high <
 // paranoid), the agents' telemetry (on < off < strict), fewer canary categories. The service compares the same way
@@ -3935,10 +4177,22 @@ pages.settings = async (main) => {
       : t("Put no canary files at all into later starts on {host}? A decoy opened or a token sent away is no longer noticed.", { host }),
     "canaries", picked.length ? picked : false, revert, () => { canariesNow = picked; });
   });
+  // which safeguards are announced (desktop notifications, the app's and these toasts); unticked: safeguard_mute
+  const safeguardKinds = data.safeguard_kinds || [];
+  const muted = values.safeguard_mute || [];
+  const announced = safeguardKinds.map(k => el("input", { type: "checkbox", id: `safeguard-${k.kind}`, value: k.kind, checked: !muted.includes(k.kind) }));
+  for (const box of announced) box.addEventListener("change", () => {
+    const silenced = announced.filter(b => !b.checked).map(b => b.value);
+    state.safeguardMuted[host] = new Set(silenced);
+    if (state.safeguardsNotifier && host === state.host) state.safeguardsNotifier.muted = state.safeguardMuted[host];
+    save("safeguard_mute", silenced.length ? silenced : null);
+  });
   main.append(status, el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "telemetry" }, t("Telemetry of the agents")), telemetry, el("span"), telemetryAsk,
     el("label", { for: "mode" }, t("Security mode")), mode, el("span"), modeAsk,
-    el("span", {}, t("Canary files")), el("div", { class: "row" }, boxes.map((b, i) => el("label", {}, b, " ", categories[i]))), el("span"), canaryAsk),
+    el("span", {}, t("Canary files")), el("div", { class: "row" }, boxes.map((b, i) => el("label", {}, b, " ", categories[i]))), el("span"), canaryAsk,
+    safeguardKinds.length ? el("span", {}, t("Safeguards announced")) : null,
+    safeguardKinds.length ? el("div", { class: "row" }, announced.map((b, i) => el("label", { title: `${safeguardKinds[i].kind} (${safeguardKinds[i].level})` }, b, " ", safeguardKinds[i].title))) : null),
     el("p", { class: "hint mono" }, data.path || ""),
     el("p", { class: "hint" }, t("For every start on this host; an option given at a start wins."))));
   // keep_days, preset_dirs, subnet, subnet6, name_style: saved with Save; what lowers the protection the service asks first
@@ -5292,7 +5546,7 @@ pages.teams = async (main) => {
 
 // Images and tools: the images (sandbox-ai images) with their extensions and variants (packages, files, a
 // Containerfile fragment; checked, changed, removed), a build in a terminal, the demo device.
-const BUILD_TARGETS = ["claude", "codex", "opencode", "all", "team", "vpn"];
+const BUILD_TARGETS = ["claude", "codex", "opencode", "all", "team", "vpn", "tor"];
 const IMAGE_STATES = { current: N_("current"), outdated: N_("extension changed: rebuild"), "base-changed": N_("base rebuilt: rebuild"),
   invalid: N_("extension has errors"), "not-built": N_("not built") };
 const IMAGE_TARGET = /^[a-z0-9][a-z0-9_.-]{0,29}$/;
@@ -5437,7 +5691,7 @@ pages.images = async (main) => {
   main.append(el("h2", {}, t("Changes and builds")), el("div", { class: "row" }, el("button", { onclick: (ev) => busy(ev.target, async () => {
     try { clear(historyBox).append(dataView(await api("GET", hostPath("/images-history", host)), t("No changes or builds yet."))); } catch (e) { clear(historyBox).append(errorNotice(e)); }
   }) }, t("Show the history"))), historyBox);
-  // a build in a terminal: the agents, all, team, vpn, and the variants (images --json: "target", "variant": true)
+  // a build in a terminal: the agents, all, team, vpn, tor, and the variants (images --json: "target", "variant": true)
   const variants = listed.filter(x => x.variant && !BUILD_TARGETS.includes(x.target)).map(x => x.target);
   const buildTarget = el("select", { id: "build-target" }, [...BUILD_TARGETS, ...new Set(variants)].map(v => el("option", { value: v }, v)));
   const only = el("input", { id: "build-only", type: "checkbox" });

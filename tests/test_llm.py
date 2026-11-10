@@ -192,7 +192,7 @@ def test_selection_picks_the_model():
         llm.selection(ns("b"))
     llm.remember_models("b", ["only-one"])
     assert llm.selection(ns("b"))[1] == "only-one"  # the one model it lists
-    with pytest.raises(ValueError, match="NAME\\[:MODEL\\]"):
+    with pytest.raises(ValueError, match="NAME\\[:MODEL"):
         llm.parse_choice("a:bad model")
 
 
@@ -711,3 +711,179 @@ def test_the_name_refusal_names_the_character_that_is_wrong():
     lines = []
     assert llm.main(["add", "lm.studio", "--kind", "lmstudio", "--url", "http://127.0.0.1:1234"],
                     out=lines.append) == 1  # the CLI uses the same words
+
+
+# --- several models: OpenCode offers exactly these -------------------------------------------------------------
+
+def test_several_models_and_the_opencode_allow_list(team):
+    assert llm.parse_models("team:qwen3-coder-30b,llama3:8b,qwen3-coder-30b") == ("team", ["qwen3-coder-30b",
+                                                                                         "llama3:8b"])
+    assert llm.parse_choice("team:qwen2.5-coder:7b,b") == ("team", "qwen2.5-coder:7b") and llm.parse_models("team") == \
+        ("team", [])
+    for bad in ("team:a,,b", "team:a,bad model", "team:" + ",".join(["m"] * 51)):
+        with pytest.raises(ValueError, match="NAME\\[:MODEL\\[,MODEL...\\]\\]"):
+            llm.parse_models(bad)
+    a = argparse.Namespace(llm="team:llama-3.1-8b,qwen3-coder-30b", agent="opencode", no_provider_defaults=True)
+    assert llm.selection(a)[1] == "llama-3.1-8b" and llm.selected_models(a) == ["llama-3.1-8b", "qwen3-coder-30b"]
+    llm.remember_models("team", ["qwen3-coder-30b", "llama-3.1-8b", "mistral-7b"])
+    config = llm.opencode_config(llm.endpoint("team"), "llama-3.1-8b", only=True, allowed=llm.selected_models(a))
+    assert list(config["provider"]["llm-team"]["models"]) == ["llama-3.1-8b", "qwen3-coder-30b"]  # not mistral-7b
+    assert config["model"] == "llm-team/llama-3.1-8b" and config["enabled_providers"] == ["llm-team"]
+    # Without a list, the endpoint's models as before (the golden file).
+    assert "mistral-7b" in llm.opencode_config(llm.endpoint("team"), "llama-3.1-8b")["provider"]["llm-team"]["models"]
+    written = {}
+    llm.prepare_home(a, Path("/h"), lambda data, home, relative: written.update({relative: json.loads(data)}),
+                     None, None)
+    assert list(written[llm.OPENCODE_CONFIG]["provider"]["llm-team"]["models"]) == ["llama-3.1-8b", "qwen3-coder-30b"]
+
+
+# --- the context window: what each server reports --------------------------------------------------------------
+
+CONTEXT_ROUTES = {
+    "vllm": {"/v1/models": {"data": [{"id": "other", "max_model_len": 4096},
+                                     {"id": "qwen", "max_model_len": 65536}]}},
+    # A slot's context in /props (the trained one, n_ctx_train, is not what it serves).
+    "llamacpp": {"/v1/models": {"data": [{"id": "qwen", "meta": {"n_ctx_train": 262144}}]},
+                 "/props": {"default_generation_settings": {"n_ctx": 32768}, "total_slots": 1}},
+    # A loaded instance's context before the model's maximum.
+    "lmstudio": {"/api/v1/models": {"models": [{"key": "qwen", "type": "llm", "max_context_length": 131072,
+                                                "loaded_instances": [{"id": "qwen", "config": {"context_length": 16384}}]}]}},
+    # Not loaded: num_ctx of /api/show's parameters before the model's own context_length.
+    "ollama": {"/api/ps": {"models": []},
+               "POST /api/show": {"parameters": "temperature 0.2\nnum_ctx 24576\n",
+                                  "model_info": {"qwen2.context_length": 32768}}},
+}
+
+
+def context_server(routes):
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def answer(self, key):
+            seen.append(key)
+            body = json.dumps(routes[key]).encode() if key in routes else b'{"error": "not found"}'
+            self.send_response(200 if key in routes else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self.answer(self.path)
+
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0))))
+            self.answer(f"POST {self.path}")
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+@pytest.mark.parametrize("kind, context", [("vllm", 65536), ("llamacpp", 32768), ("lmstudio", 16384),
+                                           ("ollama", 24576)])
+def test_the_context_window_the_server_reports_reaches_codex_and_opencode(kind, context, monkeypatch):
+    monkeypatch.delenv("SANDBOX_AI_LLM_NO_CONTEXT_FETCH", raising=False)
+    server, seen = context_server(CONTEXT_ROUTES[kind])
+    try:
+        run("add", "e", "--kind", kind, "--url", f"http://localhost:{server.server_address[1]}", "--model", "qwen")
+        found = llm.endpoint("e")
+        assert llm.context_window(found, "qwen") == context
+        if kind == "ollama":
+            assert {"model": "qwen"} in seen  # /api/show is asked for the model in use
+        for agent in ("codex", "opencode"):
+            written = {}
+            a = argparse.Namespace(llm="e", agent=agent, no_provider_defaults=True)
+            llm.prepare_home(a, Path("/h"), lambda data, home, relative: written.update({relative: data.decode()}),
+                             None, None)
+            if agent == "codex":
+                assert f"\nmodel_context_window = {context}\n" in written[f".codex/{llm.CODEX_PROFILE}.config.toml"]
+            else:
+                model = json.loads(written[llm.OPENCODE_CONFIG])["provider"]["llm-e"]["models"]["qwen"]
+                assert model["limit"] == {"context": context, "output": min(context // 4, llm.OUTPUT_LIMIT)}
+    finally:
+        server.shutdown()
+
+
+def test_the_context_window_is_remembered_checked_and_never_fatal(monkeypatch):
+    monkeypatch.delenv("SANDBOX_AI_LLM_NO_CONTEXT_FETCH", raising=False)
+    server, seen = context_server(CONTEXT_ROUTES["vllm"])
+    try:
+        run("add", "v", "--kind", "vllm", "--url", f"http://localhost:{server.server_address[1]}")
+        assert run("models", "v")[0] == 0
+        assert llm.endpoint("v")["contexts"] == {"other": 4096, "qwen": 65536}  # from the listing, for later starts
+        seen.clear()
+        assert llm.context_window(llm.endpoint("v"), "qwen") == 65536 and seen == []  # nothing asked again
+    finally:
+        server.shutdown()
+    # Gone, or answering nonsense: no window, nothing raised; the agents' own guess stays.
+    assert llm.context_window(llm.endpoint("v"), "unlisted") is None
+    for bad in (0, -5, True, "65536", 1 << 30, 3.5):
+        assert llm.context_value(bad) is None
+        assert llm.model_context("vllm", lambda path: {"data": [{"id": "m", "max_model_len": bad}]}, "m") is None
+    assert "model_context_window" not in llm.codex_profile(llm.endpoint("v"), "qwen", None)
+    store = json.loads(llm.store_path().read_text())
+    store["endpoints"]["v"]["contexts"] = {"qwen": "big"}  # edited by hand: refused as any other field
+    llm.save_store(store)
+    with pytest.raises(ValueError, match="contexts maps model names"):
+        llm.endpoint("v")
+    # Behind its VPN the host does not reach the server: nothing is asked.
+    assert llm.context_window({"kind": "vllm", "vpn": "office", "contexts": {}}, "qwen") is None
+
+
+# --- finding servers: fake ones on this host's loopback, at ports of the test's own -----------------------------
+
+def free_port():
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_detect_finds_the_fake_servers_and_asks_only_for_model_lists():
+    ollama, ollama_seen = fake_server("ollama")
+    vllm, vllm_seen = fake_server("vllm")
+    try:
+        ports = (("ollama", ollama.server_address[1]), ("vllm", vllm.server_address[1]), ("lmstudio", free_port()))
+        found = llm.detect(["127.0.0.1"], ports=ports)
+        assert [(e["kind"], e["port"]) for e in found] == [("ollama", ports[0][1]), ("vllm", ports[1][1])]
+        assert found[0]["url"] == f"http://127.0.0.1:{ports[0][1]}"
+        assert [(m["name"], m["loaded"]) for m in found[0]["models"]] == [("qwen2.5-coder:7b", False),
+                                                                           ("llama3.2:3b", True)]
+        # Read-only: GETs of the model listings, nothing else.
+        assert {(method, path) for method, path, *_ in ollama_seen + vllm_seen} <= {
+            ("GET", "/api/tags"), ("GET", "/api/ps"), ("GET", "/v1/models")}
+        # A server on a port of its own is told by what it answers.
+        assert llm.identify("127.0.0.1", ports[0][1])[0] == "ollama"
+        with pytest.raises(ValueError, match="no LLM server answers"):
+            llm.identify("127.0.0.1", ports[2][1])
+    finally:
+        ollama.shutdown()
+        vllm.shutdown()
+    with pytest.raises(ValueError, match="IP addresses only"):
+        llm.detect(["llm.example.org"], ports=ports)
+    assert llm.detect_addresses() == ["127.0.0.1"]  # never this host's LAN address unless named
+    assert llm.detect_addresses(["10.0.0.5", "127.0.0.1"]) == ["127.0.0.1", "10.0.0.5"]
+    assert llm.suggested_name("ollama", "127.0.0.1") == "ollama"
+    assert llm.suggested_name("vllm", "192.168.1.20", {"vllm-20"}) == "vllm-20-2"
+
+
+def test_llm_detect_command_and_register(monkeypatch):
+    server, _ = fake_server("ollama")
+    try:
+        monkeypatch.setattr(llm, "DETECT_PORTS", (("ollama", server.server_address[1]),))
+        status, text = run("detect")
+        assert status == 0 and f"ollama  http://127.0.0.1:{server.server_address[1]}  2 models, 1 loaded" in text
+        status, text = run("detect", "--json")
+        assert json.loads(text)[0]["kind"] == "ollama"
+        found = llm.register("local", "ollama", f"http://127.0.0.1:{server.server_address[1]}", out=lambda l: None,
+                             models=json.loads(text)[0]["models"])
+        assert found["models"] == ["qwen2.5-coder:7b", "llama3.2:3b"] and llm.endpoint("local")["kind"] == "ollama"
+    finally:
+        server.shutdown()
+    monkeypatch.setattr(llm, "DETECT_PORTS", (("ollama", free_port()),))
+    assert "no LLM server found (looked at 127.0.0.1" in run("detect")[1]
+    assert run("detect", "--address", "not-an-ip")[0] == 1

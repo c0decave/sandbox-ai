@@ -13,7 +13,7 @@ import re
 import weakref
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QAbstractScrollArea, QBoxLayout, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QStyle,
@@ -112,13 +112,36 @@ class HelpButton(QToolButton):
         return QSize(SIZE, SIZE)
 
     def paintEvent(self, event):  # noqa: N802
+        """Drawn from a cached picture (mark_pixmap): the app has hundreds of (?)s, each painted at every repaint."""
+        lit = self.underMouse() or self.hasFocus() or self.isDown()
         painter = QPainter(self)
-        paint_mark(painter, QRectF(0, 0, SIZE, SIZE), self.underMouse() or self.hasFocus() or self.isDown(),
-                   self.font())
+        painter.drawPixmap(0, 0, mark_pixmap(SIZE, lit, self.font(), self.devicePixelRatioF()))
 
     def explain(self):
         self.popover = show_tip(self.tip_id, self, self.mapToGlobal(QPoint(0, self.height() + 2)))
         return self.popover
+
+
+_MARKS = {}  # (size, lit, colours, font, pixel ratio): the (?) drawn once (mark_pixmap)
+
+
+def mark_pixmap(size, lit, font=None, ratio=1.0):
+    """A (?) of SIZE (lit or not) in the theme's colours now, drawn once and kept (a new theme draws new ones)."""
+    colors = theme.colors()
+    key = (size, bool(lit), colors["accent"], colors["base"], colors["accent_text"],
+           QFont(font).key() if font is not None else "", round(float(ratio), 2))
+    pixmap = _MARKS.get(key)
+    if pixmap is None:
+        if len(_MARKS) > 64:  # (theme after theme: the old ones go)
+            _MARKS.clear()
+        pixmap = QPixmap(int(size * ratio), int(size * ratio))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        paint_mark(painter, QRectF(0, 0, size, size), lit, font)
+        painter.end()
+        _MARKS[key] = pixmap
+    return pixmap
 
 
 def paint_mark(painter, rect, lit=False, font=None):

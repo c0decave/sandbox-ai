@@ -68,6 +68,8 @@ listen_unix = RUNTIME.listen_unix
 read_frames = RUNTIME.read_frames
 attach_relay = RUNTIME.attach_relay
 relay_terminal = RUNTIME.relay_terminal
+attach_frame = RUNTIME.attach_frame
+attach_client = RUNTIME.attach_client
 mcp_serve = RUNTIME.mcp_serve
 mcp_bridge = RUNTIME.mcp_bridge
 namespace_state = RUNTIME.namespace_state
@@ -217,12 +219,12 @@ SUBNET_RANGES = {4: [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0
                  6: [ipaddress.ip_network("fc00::/7")]}
 ROUTE_FILES = (Path("/proc/net/route"), Path("/proc/net/ipv6_route"))
 DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days", "telemetry", "preset_dirs",
-                 "name_style"}
+                 "safeguard_mute", "name_style"}
 NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without --name is named
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.84"
+__version__ = "0.1.92"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -449,11 +451,23 @@ def group_help(p):
     p._action_groups.append(general)
 
 
+_OPTION_ACTIONS = None
+
+
+def option_actions():
+    """{option string: argparse action} of build_parser(), built once: what the code that looks options up by name
+    (canonical_options, project files, merging, the modes) reads, never changes (each build took 4 ms, and a start
+    looked several times)."""
+    global _OPTION_ACTIONS
+    if _OPTION_ACTIONS is None:
+        _OPTION_ACTIONS = build_parser()._option_string_actions
+    return _OPTION_ACTIONS
+
+
 def build_parser():
     """The launcher's option parser (also used by the wizard to split option lists)."""
     # No prefix matching: abbreviations must not reach internal or forbidden options.
-    p = argparse.ArgumentParser(prog="sandbox-ai", usage="sandbox-ai claude|codex|opencode [options] [-- agent arguments]\n"
-                                "       claude-sandbox|codex-sandbox|opencode-sandbox (deprecated) [options] [-- agent arguments]",
+    p = argparse.ArgumentParser(prog="sandbox-ai", usage="sandbox-ai claude|codex|opencode [options] [-- agent arguments]",
                                 description="Agent in rootless Podman/Bubblewrap + verified Firejail.",
                                 epilog=HELP_EPILOG, formatter_class=HelpFormatter, allow_abbrev=False)
     add = p.add_argument
@@ -612,12 +626,13 @@ def build_parser():
     p.add_argument("--frontier", action="store_true", help="Also allow OpenAI and Anthropic API/auth hosts (TCP/443); everything else stays denied")
     p.add_argument("--dangerously-skip-permissions", action="store_true",
                    help="Start the agent without approval prompts; the outer sandbox and egress firewall stay in force")
-    p.add_argument("--llm", metavar="NAME[:MODEL]",
+    p.add_argument("--llm", metavar="NAME[:MODEL[,MODEL...]]",
                    help="Use the LLM server NAME of sandbox-ai llm (Ollama, LM Studio, llama.cpp, vLLM or another "
                         "OpenAI-compatible one, local or remote) with MODEL (default: the endpoint's model): opens "
                         "exactly its address and port and configures the agent for it; its key is added by the "
                         "connection proxy, the agent sees only a placeholder. With --no-provider-defaults the agent "
-                        "reaches nothing else")
+                        "reaches nothing else. NAME:MODEL,MODEL...: several models, the first the agent's; OpenCode "
+                        "offers exactly these")
     p.add_argument("--local-config", type=Path, help="OpenCode local-only config: copy privately and disable default cloud access")
     p.add_argument("--offline", action="store_true", help="No outside network, including provider defaults")
     p.add_argument("--egress-all-allow", action="store_true",
@@ -772,7 +787,7 @@ def canonical_options(tokens):
     long option, a value attached to a one-letter form (-w/path) split off and bundled flags (-Dn) taken
     apart. Code that looks for options by name (project files, MCP definitions, merging) sees only
     long names; argparse reads both forms the same way."""
-    actions = build_parser()._option_string_actions
+    actions = option_actions()
     result, index, value_next = [], 0, False
     while index < len(tokens):
         token = tokens[index]
@@ -912,7 +927,7 @@ def load_policy(path=None):
                                  "default inside them")
             if limits and not any(ipaddress.ip_network(policy[key]).subnet_of(n) for n in limits):
                 raise ValueError(f"Policy {path}: {key} {policy[key]} lies outside subnet_within")
-    known = build_parser()._option_string_actions
+    known = option_actions()
     for value in forbid:
         if value.split("=", 1)[0] not in known:
             raise ValueError(f"Policy {path}: unknown option {value}")
@@ -945,7 +960,7 @@ def check_policy(a, policy, path=None):
     if a.forbid_keep and a.state_dir and not (a.tmux_socket_dir or a.mcp_socket_dir):
         raise ValueError(f"--state-dir keeps the sandbox HOME beyond the run, which the administrator's policy forbids "
                          f"(forbid_keep in {where}){note}; start without it: the HOME is discarded at the end")
-    actions = build_parser()._option_string_actions
+    actions = option_actions()
     for entry in policy.get("forbid", []):
         option, _, wanted = entry.partition("=")
         action = actions[option]
@@ -1347,6 +1362,11 @@ def private_locations():
              home / ".local", home / ".ssh", home / ".gnupg", home / ".bin", home / "bin", home / ".mozilla",
              # The copies sandbox-ai.pyz and the AppImage run from (scripts/dist_boot.py).
              Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache") / "sandbox-ai"}
+    if sys.platform == "darwin":
+        # macOS: login items and agents (run at the next login), the Keychains, and the settings and data of the
+        # Mac's own programs.
+        fixed |= {home / "Library" / name for name in ("LaunchAgents", "Keychains", "Application Support",
+                                                       "Preferences")}
     path = {Path(entry) for entry in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(entry)}
 
     def resolved(paths):
@@ -1510,6 +1530,12 @@ def sandbox_ai_folders():
     return list(dict.fromkeys(found))
 
 
+def folded(path):
+    """PATH as compared with the private locations: on macOS case-folded (APFS and HFS+ are case-insensitive by
+    default: ~/library/launchagents is ~/Library/LaunchAgents there), elsewhere as it is."""
+    return Path(str(path).casefold()) if sys.platform == "darwin" else Path(path)
+
+
 def check_private_location(path, option, warn=None, own=(), refused=()):
     """A host tree PATH (resolved) in or over a private location (settings, keys, autostart entries, programs on your
     PATH, the agents' login folders, files directly in your HOME): you decide what a sandbox gets, so it is given,
@@ -1520,32 +1546,35 @@ def check_private_location(path, option, warn=None, own=(), refused=()):
     path = Path(path)
     if own_home(path, own):
         return None
+    shown, path = path, folded(path)
     for own_folder in list(dict.fromkeys([*sandbox_ai_folders(), *map(Path, refused)])):
+        shown_folder, own_folder = own_folder, folded(own_folder)
         if path == own_folder or own_folder in path.parents or path in own_folder.parents:
             inside = own_folder in path.parents or path == own_folder
+            path, own_folder = shown, shown_folder
             raise ValueError(f"{option} {path} {'lies in' if inside else 'contains'} {own_folder}, sandbox-ai's own "
                              "folder: a sandbox given it could change sandbox-ai itself (its trust store, approvals "
                              "and policy). Give a folder beside it.")
     say = warn or (lambda line: print(f"agent-sandbox: warning: {printable(line)}", file=sys.stderr))
-    home = Path.home().resolve()
-    if path.parent == home and path.name and path.exists() and not path.is_dir():
-        label = HOME_FILES.get(path.name, "a file of your HOME directory: settings that programs of yours read or "
-                                          "run as you")
-        text = f"{option} {path} is {label}; where the agent may write, what it puts there acts on this host"
+    home = folded(Path.home().resolve())
+    if path.parent == home and path.name and shown.exists() and not shown.is_dir():
+        label = {folded(name).name: text for name, text in HOME_FILES.items()}.get(
+            path.name, "a file of your HOME directory: settings that programs of yours read or run as you")
+        text = f"{option} {shown} is {label}; where the agent may write, what it puts there acts on this host"
         say(text)
         return text
     for location, label in login_locations():
-        inside = path == location or location in path.parents
-        if inside or path in location.parents:
-            text = (f"{option} {path} {'lies in' if inside else 'contains'} {location}, {label}: the agent sees the "
+        inside = path == folded(location) or folded(location) in path.parents
+        if inside or path in folded(location).parents:
+            text = (f"{option} {shown} {'lies in' if inside else 'contains'} {location}, {label}: the agent sees the "
                     "logins and settings there, and where it may write, what it puts there acts as you")
             say(text)
             return text
     fixed, program_dirs = private_locations()
     for private in fixed + program_dirs:
-        inside = path == private or private in path.parents
-        if inside or (path in private.parents and not project_tool_dir(private, path)):
-            text = (f"{option} {path} {'lies in' if inside else 'contains'} {private}: the agent sees what is there "
+        inside = path == folded(private) or folded(private) in path.parents
+        if inside or (path in folded(private).parents and not project_tool_dir(private, shown)):
+            text = (f"{option} {shown} {'lies in' if inside else 'contains'} {private}: the agent sees what is there "
                     "(settings, keys), and where it may write, what it puts there (autostart entries, programs on your "
                     "PATH) runs on this host")
             say(text)
@@ -1584,11 +1613,13 @@ def check_launcher_location(path, option, trees=None):
     own launcher trees (TREES, default launcher_trees()): the agent could rewrite the launcher, and the next start
     would run that on the host. One check for every writable path: workspaces (also those added during the run),
     --mount rw, --state-dir, an MCP server's folders. Read-only, all of them may hold it."""
-    path = Path(path)
+    shown = Path(path)
+    path = folded(path)
     for tree in launcher_trees() if trees is None else trees:
-        tree = Path(tree)
+        shown_tree, tree = Path(tree), folded(tree)
         if path == tree or tree in path.parents or path in tree.parents:
             where = "lies in" if tree in path.parents else "is" if path == tree else "contains"
+            path, tree = shown, shown_tree
             raise ValueError(f"{option} {path} {where} sandbox-ai's own launcher ({tree}); the agent could rewrite "
                              "it and run code on the host at the next start. Give it read-only (a --mount with :ro), "
                              "a folder that does not hold the launcher, or install sandbox-ai (./install.sh --from .) "
@@ -1848,7 +1879,9 @@ def pod_network(a):
         return "none"
     if a.network:
         return a.network
-    ports = host_ports(a)
+    # macOS: pasta runs in podman machine's VM, its -T reaches the VM's loopback; the supervisor relays the ports
+    # to the Mac instead (runtime.PortRelay).
+    ports = host_ports(a) if not on_machine(a) else []
     options = list(PASTA_OPTIONS)
     if ports:
         index = options.index("-T")
@@ -1978,6 +2011,8 @@ def load_user_defaults(a):
         # Extra preset directories (presets.py): their shape here; where they lie when one is used (presets.py and
         # check_host_sources: never where an agent writes).
         load_presets_module().check_dirs(document["preset_dirs"], f"{path}: preset_dirs")
+    if "safeguard_mute" in document:  # kinds of safeguard warnings never announced (still recorded)
+        load_safeguards_module().check_mute(document["safeguard_mute"], f"{path}: safeguard_mute")
     days = document.get("keep_days", 1)
     if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 36500:
         raise ValueError(f"{path}: keep_days is a number of days (1 or more): kept starts unused for longer expire")
@@ -2749,7 +2784,7 @@ def copies_credential(value):
 def auth_choices(options):
     """Indices of the tokens in OPTIONS (canonical, as on the command line) that make an auth choice:
     an AUTH_OPTIONS option or a --copy of a credential file, each with a value given as the next token."""
-    actions = build_parser()._option_string_actions
+    actions = option_actions()
     chosen, index = set(), 0
     while index < len(options):
         name, equals, value = options[index].partition("=")
@@ -2933,6 +2968,15 @@ def mcp_socket_dir(name):
     return state / "sandbox-ai" / "mcp" / name / "sock"
 
 
+def mcp_volume(directory):
+    """macOS: the Podman volume that holds the socket of the MCP server whose host socket directory is DIRECTORY
+    (mcp_socket_dir): sandbox-ai-mcp-NAME-HASH, the hash of that directory telling state roots apart."""
+    directory = Path(directory).expanduser().resolve()
+    digest = hashlib.sha256(os.fsencode(str(directory))).hexdigest()[:12]
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", directory.parent.name)[:64] or "server"
+    return f"sandbox-ai-mcp-{name}-{digest}"
+
+
 def mcp_bridge_args(name):
     return ["-I", "/sandbox/runtime.py", "--internal-mcp-bridge", f"{MCP_AGENT_DIR}/{name}/server.sock"]
 
@@ -2950,82 +2994,6 @@ def mcp_agent_args(a):
                  *(("-c", f"mcp_servers.{name}.tool_timeout_sec={LONG_TOOL_TIMEOUT}")
                    if name.startswith((HELPER_PREFIX, "team-")) else ()))]
     return []
-
-
-def attach_frame(kind, payload):
-    """Host-to-sandbox terminal frame: b"d" input bytes or b"r" (rows, columns)."""
-    return kind + struct.pack("!I", len(payload)) + payload
-
-
-def attach_client(socket_path, stdin=0, stdout=1):
-    """Host side of an attach: a dumb byte pipe. Nothing from the sandbox is executed."""
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        # The directory is writable from the sandbox: a symlink there could
-        # point at another socket of the host user and receive our keystrokes.
-        fd = os.open(socket_path, os.O_PATH | os.O_NOFOLLOW)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-                raise OSError(errno.EPERM, "not a socket owned by you")
-            client.connect(f"/proc/self/fd/{fd}")
-        finally:
-            os.close(fd)
-    except OSError as exc:
-        client.close()
-        raise RuntimeError(f"Session terminal relay not reachable: {socket_path}: {exc}") from None
-    interactive = os.isatty(stdin)
-    def send_size():
-        size = os.get_terminal_size(stdin) if interactive else os.terminal_size((80, 24))
-        client.sendall(attach_frame(b"r", struct.pack("!HH", size.lines, size.columns)))
-    send_size()
-    # The SIGWINCH handler only wakes the loop: a frame sent from the handler could land
-    # inside a partially sent input frame and corrupt the stream.
-    wake_read, wake_write = os.pipe()
-    os.set_blocking(wake_write, False)
-    def resized(*_):
-        try:
-            os.write(wake_write, b"r")
-        except BlockingIOError:
-            pass
-    saved = termios.tcgetattr(stdin) if interactive else None
-    previous = signal.signal(signal.SIGWINCH, resized) if interactive else None
-    if interactive:
-        import tty
-        tty.setraw(stdin)
-    sources = [stdin, client, wake_read]
-    try:
-        while True:
-            ready, _, _ = select.select(sources, [], [])
-            if wake_read in ready:
-                os.read(wake_read, 4096)
-                send_size()
-            if stdin in ready:
-                data = os.read(stdin, 65536)
-                if data:
-                    client.sendall(attach_frame(b"d", data))
-                else:
-                    sources = [client, wake_read]
-            if client in ready:
-                data = client.recv(65536)
-                if not data:
-                    break
-                view = memoryview(data)
-                while view:
-                    view = view[os.write(stdout, view):]
-    except ConnectionResetError:
-        pass
-    finally:
-        if interactive:
-            termios.tcsetattr(stdin, termios.TCSADRAIN, saved)
-            signal.signal(signal.SIGWINCH, previous)
-            # Drop terminal answers to queries the sandbox sent just before it closed,
-            # so they do not reach the host shell as typed input.
-            termios.tcflush(stdin, termios.TCIFLUSH)
-        os.close(wake_read)
-        os.close(wake_write)
-        client.close()
-    return 0
 
 
 def nameservers(a):
@@ -3405,7 +3373,12 @@ def validate(a):
     for value in a.allow:
         if "%" in value:  # a scope ID may hold any text, which would reach nft
             raise ValueError(f"--allow does not accept an IPv6 scope ID: {value!r}")
-        ipaddress.ip_network(value, strict=False)
+        try:
+            ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            hint = "; a host name goes to --allow-host (-A)" if re.search(r"[A-Za-z]", value) else ""
+            raise ValueError(f"--allow takes an address or a network (192.0.2.10, 192.0.2.0/24): {value!r}{hint}") \
+                from None
     for host in a.allow_host:
         if host.startswith("*."):
             try:
@@ -4045,13 +4018,14 @@ def resolve_pod_hosts(a, hosts):
 
 
 def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=(), proxy=None, vpn_mark=None,
-                   vpn_rules=()):
+                   vpn_rules=(), machine_host=None):
     """The sandbox's nftables table. PROXY ({"port", "loopback"}) redirects every TCP connection of the agent
     to the connection proxy, except the proxy's own (PROXY_UID) and those to loopback ports other than
     LOOPBACK (the host's forwarded ports). The chain "runtime" holds what `sandbox-ai net` allows later.
     VPN_MARK (an nft match, see vpn.py) lets the VPN's own packets pass, unredirected: only a process with
     CAP_NET_ADMIN can mark one, and the VPN's kill switch limits where they go. VPN_RULES (vpn.py: Tor's
-    loopback ports) open the output chain, before loopback is accepted."""
+    loopback ports) open the output chain, before loopback is accepted. MACHINE_HOST (macOS): the Mac's address in
+    podman machine, reached only by the supervisor's relays of host ports (runtime.HOST_RELAY_MARK)."""
     for rule in vpn_rules:
         if not re.fullmatch(r"[a-z0-9 .:/,=-]{1,200}", rule):
             raise ValueError(f"not a firewall rule of a VPN: {rule!r}")
@@ -4079,6 +4053,9 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
                   f"  ct status dnat ip6 daddr ::1 tcp dport {port} accept"]
     if vpn_mark:
         lines.append(f"  {vpn_mark} accept")
+    if machine_host:
+        lines.append(f"  meta mark {RUNTIME.HOST_RELAY_MARK:#x} ip daddr {ipaddress.IPv4Address(machine_host)} "
+                     "meta l4proto tcp accept")
     lines += ["  jump runtime"]
     for raw in networks:
         net = ipaddress.ip_network(raw, strict=False)
@@ -4106,6 +4083,7 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
         lines += [" chain relay {", " }",
                   " chain proxy { type nat hook output priority -100; policy accept;",
                   f"  meta skuid {PROXY_UID} return", *([f"  {vpn_mark} return"] if vpn_mark else []),
+                  *([f"  meta mark {RUNTIME.HOST_RELAY_MARK:#x} return"] if machine_host else []),
                   # Host ports relayed during the run (sandbox-ai net allow --allow-host-port) go through the proxy too.
                   "  jump relay",
                   f"  ip daddr 127.0.0.0/8 tcp dport != {{ {', '.join(map(str, ports))} }} return" if ports
@@ -5571,8 +5549,31 @@ def check_login(a):
             if load_login_module().login(a.agent, login_options) != 0:
                 raise ValueError(f"Login failed; try again with: sandbox-ai login {a.agent}")
             return
+    if a.agent == "claude" and where == "host" and problem == "missing" and claude_keychain_login():
+        # Claude Code on a Mac keeps its login in the Keychain, not in ~/.claude/.credentials.json: nothing a
+        # sandbox could be given (and reading it would ask the human for the Keychain's password every start).
+        print("agent-sandbox: Claude Code keeps this Mac's login in the macOS Keychain, which sandboxes cannot use; "
+              "log in once with `sandbox-ai login claude` (kept for all sandboxes)", file=sys.stderr)
+        return
     print(f"agent-sandbox: {message}; log in with `sandbox-ai login {a.agent}` (kept for all sandboxes) "
           "or on the host", file=sys.stderr)
+
+
+# The Keychain item in which Claude Code keeps its login on macOS.
+CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def claude_keychain_login(runner=None):
+    """macOS: the Keychain holds a Claude Code login (asked for its attributes only, never its value: that would
+    show the Keychain's question to the human)."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        return (runner or subprocess.run)(["/usr/bin/security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE],
+                                          stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                                          check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def load_login_module():
@@ -5744,6 +5745,53 @@ def local_engine(a):
     return not a.podman_url and sys.platform == "linux"
 
 
+# podman machine's address of the Mac (gvproxy's host address, which it forwards to the Mac's loopback; what
+# host.containers.internal names in the VM). SANDBOX_AI_MACHINE_HOST overrides it for a machine set up otherwise.
+MACHINE_HOST = "192.168.127.254"
+
+
+def on_machine(a):
+    """This run's Podman container runs in podman machine's VM on this Mac: Unix sockets do not cross its shared
+    folders, so the run's sockets stay in the VM and the host reaches them through `podman exec` (TODO.md: macOS
+    support, stage 2)."""
+    return sys.platform == "darwin" and a.backend == "podman" and not a.podman_url
+
+
+def machine_host():
+    """The Mac's address as the sandbox's supervisor reaches it in podman machine (MACHINE_HOST)."""
+    value = os.environ.get("SANDBOX_AI_MACHINE_HOST") or MACHINE_HOST
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        raise ValueError(f"SANDBOX_AI_MACHINE_HOST must be an IPv4 address: {value!r}") from None
+
+
+def machine_record(record):
+    """A run (its run.json RECORD) whose sockets are in podman machine's VM: started on this Mac with Podman."""
+    return sys.platform == "darwin" and isinstance(record, dict) and record.get("backend") == "podman" \
+        and not record.get("podman_url")
+
+
+def run_container(record):
+    """The Podman container of the agent of the run RECORD (run.json or session.json): "container", else POD-agent."""
+    container = record.get("container") if isinstance(record, dict) else None
+    if isinstance(container, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,200}", container):
+        return container
+    pod = record.get("pod") if isinstance(record, dict) else None
+    if isinstance(pod, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,190}", pod):
+        return f"{pod}-agent"
+    raise ValueError("the run's record names no Podman container to reach it through")
+
+
+def machine_exec(record, args, interactive=True, tty=False):
+    """`podman exec` of runtime.py ARGS in the container of the run RECORD (macOS): how the host reaches the
+    supervisor's control socket and the terminal relay in podman machine's VM. Only runtime.py's clients run there,
+    never a command the sandbox chose."""
+    return ["podman", *(["--remote", "--url", record["podman_url"]] if record.get("podman_url") else []), "exec",
+            *(["--interactive"] if interactive else []), *(["--tty"] if tty else []), "--user=0:0",
+            run_container(record), "/usr/bin/python3", "-I", "/sandbox/runtime.py", *args]
+
+
 _machine = None
 
 
@@ -5793,7 +5841,8 @@ def check_machine_shares(a, machine=None):
 
 def engine_cpus(a):
     """The CPUs the engine's machine has: this host's on Linux, podman machine's VM on macOS."""
-    if sys.platform == "darwin" and not a.podman_url:
+    # getattr: `sandbox-ai limits` validates its values with a namespace of the three limits alone.
+    if sys.platform == "darwin" and not getattr(a, "podman_url", None):
         cpus = (podman_machine().get("Resources") or {}).get("CPUs")
         if isinstance(cpus, int) and cpus > 0:
             return cpus
@@ -5927,7 +5976,7 @@ def check_api_keys(a, get=None):
             raise ValueError(f"--api-key: the variable {name} is given twice")
         if name in SANDBOX_OWNED:
             raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
-        if host in (h.lower() for h in a.no_inspect):
+        if any(host_matches_any(host, value) for value in a.no_inspect):  # *.DOMAIN too
             raise ValueError(f"--api-key {host}: the proxy adds the key only to requests it opens; drop --no-inspect {host}")
     if keys and a.no_proxy:
         raise ValueError("--api-key needs the connection proxy (it adds the key on the wire); drop --no-proxy")
@@ -6024,7 +6073,7 @@ def check_publish(a, get=None):
     inspected_off = {h.lower() for h in a.no_inspect}
     for entry in found:
         for host in entry["hosts"]:
-            if host in inspected_off:
+            if any(host_matches_any(host, value) for value in inspected_off):
                 raise ValueError(f"--publish {entry['kind']}: the proxy adds the token only to requests it opens; "
                                  f"drop --no-inspect {host}")
     taken = {value.partition("=")[0] for value in a.secret_env} | set(a.env) | {n for _, n, _ in api_key_values(a)}
@@ -6563,7 +6612,8 @@ def proxy_rules(a, hosts):
              for source in load_rulesets(a)
              if source["name"] != "--allow-http" and (source["http"] or source["defaults"]["http"] != "allow"
                                                        or any("host" in entry for entry in source.get("untrusted", [])))]
-    return {"rules": rules, "pinned": {name: list(values) for name, values in hosts.items()}} if rules else {}
+    # The addresses always, also without rules now: rules reloaded during the run hold for bare addresses too.
+    return {"rules": rules, "pinned": {name: list(values) for name, values in hosts.items()}}
 
 
 def write_proxy_files(a, directory, hosts, log_name):
@@ -6688,6 +6738,9 @@ def register_run(a, run, session):
     a.runtime_mode = MODES.runtime_record(launcher_namespace(), a)
     (directory / "run.json").write_text(json.dumps({
         "run": run, "agent": a.agent, "backend": a.backend, "workspace": a.workspaces[0], "pid": os.getpid(),
+        # The sandbox-ai that runs it: the app tells a run started before a change of behaviour (one prompt per
+        # question since 0.1.86) by it.
+        "version": __version__,
         # The PID's start time: `sandbox-ai net stop` signals this process only, never a later one of that PID.
         "pid_start": process_start(os.getpid()),
         # Its PID namespace: only a process in the same one may conclude from a missing PID that this run ended
@@ -6699,12 +6752,23 @@ def register_run(a, run, session):
         "name": run_name(a), "start": getattr(a, "start_key", None) or a.start_id,
         "kind": "mcp" if a.mcp_socket_dir else "agent",
         "pod": pod_name(a, run) if a.backend == "podman" else None, "podman_url": a.podman_url,
+        # --vpn: its container in the pod; names allowed during the run are looked up through it (vpn.resolver_for_run).
+        "vpn_container": load_vpn_module().container_name(a.vpn_pod) if getattr(a, "vpn_pod", None) else None,
+        # `sandbox-ai net allow --api-key` refuses a host the proxy does not open (as the start does).
+        "no_inspect": sorted({value.lower() for value in a.no_inspect}),
+        # `sandbox-ai vpn rotate` refuses a profile in use.
+        "vpn_profile": a.vpn_profile["name"] if getattr(a, "vpn_profile", None) else None,
+        # macOS: the container `sandbox-ai net` reaches the supervisor in (podman exec; runtime.VM_CONTROL_DIR).
+        **({"container": f"{pod_name(a, run)}-agent"} if on_machine(a) else {}),
         # sandbox-ai list (and the app and the web, which group by them): the agents --with in this sandbox, and
         # whose helper this sandbox is (--helper starts it as an MCP server of the lead).
         "companions": companions(a), "helper_of": getattr(a, "helper_of", None),
         # A HOME of your own (--state-dir) stays when the run ends; sandbox-ai list says so.
         "own_home": bool(a.state_dir) and not (getattr(a, "start_key", None) or a.tmux_socket_dir or a.mcp_socket_dir),
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "proxy": proxy_enabled(a),
+        # `sandbox-ai rules reload` reads these rulesets again (rules.json too); the start's own stay as they are.
+        "rules_sources": {"files": [str(Path(path).expanduser().absolute()) for path in a.rules],
+                          "project_config": getattr(a, "project_config", None)},
         # sandbox-ai activity and session events find the run's timeline (activity.jsonl) here.
         "log_dir": str(Path(a.log_dir).expanduser().resolve()) if a.log_dir else None,
         # devices.jsonl keeps serial numbers in full only then.
@@ -6737,6 +6801,12 @@ def register_run(a, run, session):
            if getattr(a, "push_check_dir", None) else {}),
         # `sandbox-ai workspace add` holds a workspace added during the run to the checks of a start (workspaces.py).
         **({} if a.mcp_socket_dir else {"workspace_checks": workspace_checks(a, session)})}))
+    if on_machine(a):
+        # macOS: the token a request through podman exec must carry (runtime.VM_CONTROL_DIR); this directory is
+        # never mounted for the agent.
+        fd = os.open(directory / RUNTIME.EXEC_TOKEN, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(os.urandom(32).hex())
     return directory
 
 
@@ -7224,8 +7294,8 @@ def pod_commands(a, name, session, home):
     if "pids" in limits:
         run += ["--pids-limit", str(limits["pids"])]
     # The bootstrap's DNS logging stub binds port 53; Firejail drops it again.
-    if a.pod_name:
-        # Named so that `sandbox-session attach` can exec into it.
+    if a.pod_name or on_machine(a):
+        # Named so that `sandbox-session attach` can exec into it (macOS: also `sandbox-ai net`, run.json "container").
         run += ["--name", f"{name}-agent"]
     for cap in CAPS + (["NET_BIND_SERVICE"] if a.log_dir else []):
         run += ["--cap-add", cap]
@@ -7248,14 +7318,25 @@ def pod_commands(a, name, session, home):
         bindings.append((a.log_dir.expanduser().resolve(), str(LOG_DIR), "rw"))
     if a.gui_vnc:
         bindings.append((a.gui_vnc.expanduser().resolve(), str(VNC_DIR), "rw"))
-    if a.tmux_socket_dir:
+    if a.tmux_socket_dir and on_machine(a):
+        # macOS: the terminal relay's socket stays in the VM (a socket does not cross its shared folders); the host
+        # attaches through podman exec (sessions.attach).
+        run += [f"--tmpfs={TMUX_DIR}:rw,nosuid,nodev,mode=0700"]
+    elif a.tmux_socket_dir:
         bindings.append((a.tmux_socket_dir.expanduser().resolve(), TMUX_DIR, "rw"))
-    if a.mcp_socket_dir:
+    if a.mcp_socket_dir and on_machine(a):
+        # macOS: an MCP server's socket in a Podman volume in the VM, where its agents' sandboxes reach it (a socket
+        # does not cross the VM's shared folders).
+        run += ["--mount", f"type=volume,src={mcp_volume(a.mcp_socket_dir)},dst={MCP_SERVE_DIR}"]
+    elif a.mcp_socket_dir:
         bindings.append((a.mcp_socket_dir.expanduser().resolve(), MCP_SERVE_DIR, "rw"))
     if a.mcp_approvals_dir:
         bindings.append((a.mcp_approvals_dir.expanduser().resolve(), MCP_APPROVALS_DIR, "ro"))
     for name in dict.fromkeys(a.mcp):  # reached through the supervisor's relay (MCP_AGENT_DIR), never directly
-        bindings.append((mcp_socket_dir(name), f"{MCP_UPSTREAM_DIR}/{name}", "ro"))
+        if on_machine(a):
+            run += ["--mount", f"type=volume,src={mcp_volume(mcp_socket_dir(name))},dst={MCP_UPSTREAM_DIR}/{name},ro"]
+        else:
+            bindings.append((mcp_socket_dir(name), f"{MCP_UPSTREAM_DIR}/{name}", "ro"))
     if hook_mount(a, session):  # the agent's managed configuration: its hooks, which it cannot change
         bindings.append((*hook_mount(a, session), "ro"))
     for source, target in companion_hook_mounts(a, session):
@@ -7266,7 +7347,11 @@ def pod_commands(a, name, session, home):
         bindings.append((a.proxy_dir, str(PROXY_DIR), "ro"))
     if getattr(a, "control_dir", None):
         bindings.append((a.control_dir, str(CONTROL_DIR), "rw"))
-    if getattr(a, "browser_dir", None):
+    if getattr(a, "browser_dir", None) and on_machine(a):
+        # macOS: the supervisor serves the browser socket in the VM (runtime.browser_relay), the host reads requests
+        # from the control directory.
+        run += [f"--tmpfs={BROWSER_DIR}:rw,nosuid,nodev,mode=0755"]
+    elif getattr(a, "browser_dir", None):
         bindings.append((a.browser_dir, str(BROWSER_DIR), "ro"))
     for src, dest, mode in bindings:
         run += mount_option(src, dest, mode)
@@ -7279,14 +7364,27 @@ def pod_commands(a, name, session, home):
     return create, run
 
 
+_procinfo = None
+
+
+def procinfo():
+    """procinfo.py: start times, command lines, owners and children of this host's processes (/proc on Linux,
+    sysctl on macOS)."""
+    global _procinfo
+    if _procinfo is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_procinfo", HERE / "procinfo.py")
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _procinfo is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _procinfo = loaded
+    return _procinfo
+
+
 def process_start(pid, proc=Path("/proc")):
-    """Start time of PID in clock ticks after boot (field 22 of /proc/PID/stat), or None if it is gone.
-    Recorded with a supervisor's PID, so a later check can tell a reused PID apart."""
-    try:
-        # comm (field 2) may contain spaces and parentheses: the fields after it follow the last ')'.
-        return int((proc / str(pid) / "stat").read_text().rpartition(")")[2].split()[19])
-    except (OSError, IndexError, ValueError):
-        return None
+    """Start time of PID (Linux: clock ticks after boot, field 22 of /proc/PID/stat; macOS: from sysctl), or None
+    if it is gone. Recorded with a supervisor's PID, so a later check can tell a reused PID apart."""
+    return procinfo().start_time(pid, proc)
 
 
 def process_cmdline(pid, start, proc=Path("/proc")):
@@ -7295,9 +7393,8 @@ def process_cmdline(pid, start, proc=Path("/proc")):
     versions have no START (None) and rely on that check alone."""
     if not pid:
         return []
-    try:
-        cmdline = (proc / str(pid) / "cmdline").read_bytes().split(b"\0")
-    except OSError:
+    cmdline = procinfo().cmdline(pid, proc)
+    if cmdline is None:
         return []
     # Compared after reading the arguments: a match means they belonged to the recorded process.
     if start is not None and process_start(pid, proc) != start:
@@ -7335,13 +7432,17 @@ def remove_stale_pod(a, pod, owner):
     return True
 
 
-# --- memory watch ----------------------------------------------------------------------------------------------
+# --- resource watch (memory, CPU, processes) ------------------------------------------------------------------
 #
 # The kernel enforces --memory: when the sandbox's cgroup is full, its OOM killer ends a process, and if that is the
 # supervisor (PID 1 of the sandbox) the whole run ends. The launcher watches the cgroup from the host (the sandbox
 # cannot see it): at MEMORY_WARN it tells the human and the agent (the session directory's memory.json, which the
 # agent reads), at MEMORY_ACT it ends the largest process that is neither sandbox-ai's nor the agent's (a test run,
 # a build), before the kernel picks one. Files in the sandbox's /tmp and HOME (tmpfs) count as memory too.
+# Beside memory it watches the CPU (cpu.stat: the CPUs used, and how often --cpus held the sandbox back) and the
+# processes (pids.current against --pids): a sandbox held at its CPU limit for CPU_THROTTLE_SUSTAIN, or near its
+# process limit, is told about the same way (nothing is ended for that). The session directory's resources.json
+# gives the agent all three; the log directory's memory.jsonl keeps the events and a sample a minute.
 
 MEMORY_WARN, MEMORY_ACT, MEMORY_INTERVAL, MEMORY_GRACE = 0.85, 0.95, 2.0, 3.0
 # memory.high, set by the watch at this share of the limit: above it the kernel reclaims and slows the sandbox's
@@ -7355,6 +7456,13 @@ MEMORY_EVENTS = 200  # records kept in memory for the summary after the run (mem
 # each doubling), the human told once at SUPERVISOR_WARN; its own records (runtime.py MemoryGuard) are in the run's
 # control directory and are copied to the memory log when the run ends.
 SUPERVISOR_NAME, SUPERVISOR_RECORD, SUPERVISOR_WARN = "kthreadd", 512 << 20, 1 << 30
+# CPU: held back (throttled) in at least CPU_THROTTLE_RATIO of the scheduler's periods for CPU_THROTTLE_SUSTAIN
+# seconds is told (again at most every CPU_RENOTIFY seconds; calm again below CPU_THROTTLE_CALM); processes: at
+# PIDS_WARN of --pids (cleared below PIDS_CLEAR). A sample of all three goes to the log every RESOURCE_SAMPLE
+# seconds, the shared files are written every RESOURCE_SHARE seconds (and at once when a warning comes or goes).
+CPU_THROTTLE_RATIO, CPU_THROTTLE_CALM, CPU_THROTTLE_SUSTAIN, CPU_RENOTIFY = 0.5, 0.2, 60.0, 600.0
+PIDS_WARN, PIDS_CLEAR = 0.9, 0.8
+RESOURCE_SAMPLE, RESOURCE_SHARE = 60.0, 10.0
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 # Never ended by the watch: sandbox-ai's own processes (their command lines name an --internal- entry point too).
 MEMORY_PROTECTED = {"kthreadd", "firejail", "tmux: server", "tmux: client", "conmon", "catatonit", "pasta",
@@ -7362,9 +7470,21 @@ MEMORY_PROTECTED = {"kthreadd", "firejail", "tmux: server", "tmux: client", "con
 AGENT_PROGRAMS = {"claude", "codex", "opencode"}
 
 
+def cgroup_limited(directory):
+    """True if the cgroup DIRECTORY carries a limit of its own: memory.max, cpu.max (a quota) or pids.max."""
+    for name in ("memory.max", "cpu.max", "pids.max"):
+        try:
+            value = (Path(directory) / name).read_text().split()
+        except OSError:
+            continue
+        if value and value[0] != "max":
+            return True
+    return False
+
+
 def cgroup_dir(pid, proc=Path("/proc"), root=CGROUP_ROOT):
-    """The cgroup v2 directory of PID that carries a memory limit (its own, or its parent's when the process sits in
-    a leaf without one), or None (no cgroup v2, no limit, gone)."""
+    """The cgroup v2 directory of PID that carries a limit (memory, CPU or processes: its own, or its parent's when
+    the process sits in a leaf without one), or None (no cgroup v2, no limit, gone)."""
     try:
         text = (Path(proc) / str(int(pid)) / "cgroup").read_text()
     except (OSError, ValueError):
@@ -7375,19 +7495,32 @@ def cgroup_dir(pid, proc=Path("/proc"), root=CGROUP_ROOT):
     path = Path(root) / line[3:].strip().lstrip("/")
     top = MemoryWatch.sandbox_top(path)
     for candidate in (path, path.parent) if path != top else (path,):  # never above the sandbox's own cgroup
-        try:
-            if (candidate / "memory.max").read_text().strip() not in ("max", ""):
-                return candidate
-        except OSError:
-            continue
+        if cgroup_limited(candidate):
+            return candidate
     return None
+
+
+def cgroup_pairs(path):
+    """{key: int} of a cgroup file of "key value" lines (memory.stat, cpu.stat, ...); {} if it cannot be read."""
+    found = {}
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return found
+    for line in text.splitlines():
+        key, _, value = line.partition(" ")
+        if value.strip().isdigit():
+            found[key] = int(value)
+    return found
 
 
 def memory_state(cgroup, top=None):
     """{"current", "limit", "oom_kill", "anon", "shmem"} (bytes, kills) of CGROUP; shmem is what tmpfs files hold.
     The limit is the smallest memory.max on the path from CGROUP up to the sandbox's own top cgroup TOP (default:
     MemoryWatch.sandbox_top; one set on a parent, a pod's, holds CGROUP as well), never above it, with that
-    cgroup's use as "current"; read again at every look. ValueError when no cgroup on the path has a limit."""
+    cgroup's use as "current"; read again at every look. Without a limit on the path (a run limited only in CPUs or
+    processes, or `sandbox-ai limits --memory none`): limit 0 and CGROUP's own use. ValueError when CGROUP's use
+    cannot be read (it went)."""
     cgroup = Path(cgroup)
     top = Path(top) if top is not None else MemoryWatch.sandbox_top(cgroup)
     if cgroup != top and top not in cgroup.parents:
@@ -7410,20 +7543,60 @@ def memory_state(cgroup, top=None):
         if directory == top or directory.parent == directory:
             break
         directory = directory.parent
-    if not levels:
-        raise ValueError(f"no memory limit on {cgroup} or above it, up to the sandbox's own {top.name}")
-    current, limit = min(levels, key=lambda level: level[1])  # the smallest; of equal ones the nearest
-
-    def pairs(name):
-        found = {}
-        for line in (cgroup / name).read_text().splitlines():
-            key, _, value = line.partition(" ")
-            if value.strip().isdigit():
-                found[key] = int(value)
-        return found
-    stat, events = pairs("memory.stat"), pairs("memory.events")
+    if levels:
+        current, limit = min(levels, key=lambda level: level[1])  # the smallest; of equal ones the nearest
+    else:
+        try:
+            current, limit = int((cgroup / "memory.current").read_text().strip()), 0
+        except OSError:
+            raise ValueError(f"the memory use of {cgroup} cannot be read") from None
+    stat, events = cgroup_pairs(cgroup / "memory.stat"), cgroup_pairs(cgroup / "memory.events")
     return {"current": current, "limit": limit, "oom_kill": events.get("oom_kill", 0), "anon": stat.get("anon", 0),
             "shmem": stat.get("shmem", 0)}
+
+
+def cpu_state(cgroup):
+    """{"usage_usec", "nr_periods", "nr_throttled", "throttled_usec", "limit"} of CGROUP (cpu.stat, cpu.max);
+    limit: the CPUs its quota allows (0.0: none). None without cpu.stat."""
+    stat = cgroup_pairs(Path(cgroup) / "cpu.stat")
+    if "usage_usec" not in stat:
+        return None
+    limit = 0.0
+    with contextlib.suppress(OSError, ValueError, ZeroDivisionError):
+        quota, period = (Path(cgroup) / "cpu.max").read_text().split()[:2]
+        limit = 0.0 if quota == "max" else round(int(quota) / int(period), 2)
+    return {"usage_usec": stat["usage_usec"], "nr_periods": stat.get("nr_periods", 0),
+            "nr_throttled": stat.get("nr_throttled", 0), "throttled_usec": stat.get("throttled_usec", 0),
+            "limit": limit}
+
+
+def pids_state(cgroup):
+    """{"current", "limit"} of CGROUP (pids.current, pids.max; limit 0: none), or None without them."""
+    try:
+        current = int((Path(cgroup) / "pids.current").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    limit = 0
+    with contextlib.suppress(OSError, ValueError):
+        text = (Path(cgroup) / "pids.max").read_text().strip()
+        limit = 0 if text == "max" else int(text)
+    return {"current": current, "limit": limit}
+
+
+def cpu_usage(before, after, seconds, host_cpus=None):
+    """{"cpus", "percent", "limit", "host_cpus", "throttled_percent", "throttled_usec"} between two cpu_state()s
+    SECONDS apart: the CPUs used, as a percentage of the limit (or of the host's CPUs without one), and the share of
+    the scheduler's periods in which the limit held the sandbox back. None without both."""
+    if not before or not after or seconds <= 0:
+        return None
+    host_cpus = host_cpus or os.cpu_count() or 1
+    cpus = max(0, after["usage_usec"] - before["usage_usec"]) / (seconds * 1e6)
+    periods = after["nr_periods"] - before["nr_periods"]
+    throttled = after["nr_throttled"] - before["nr_throttled"]
+    of = after["limit"] or host_cpus
+    return {"cpus": round(cpus, 2), "percent": round(100 * cpus / of, 1), "limit": after["limit"],
+            "host_cpus": host_cpus, "throttled_percent": round(100 * throttled / periods, 1) if periods > 0 else 0.0,
+            "throttled_usec": after["throttled_usec"]}
 
 
 def memory_stall(cgroup):
@@ -7482,10 +7655,11 @@ def gib(value):
     return f"{value / (1 << 30):.1f} GiB"
 
 
-class MemoryWatch:
-    """Watches the sandbox's memory from the host while it runs (see above). LOCATE() gives (cgroup, protected pids)
-    once the sandbox's processes exist, or None; SESSION is the session directory (memory.json for the agent), LOG
-    a file for memory.jsonl records (or None), NOTIFY(title, text) tells the human."""
+class ResourceWatch:
+    """Watches the sandbox's memory, CPU and processes from the host while it runs (see above). LOCATE() gives
+    (cgroup, protected pids) once the sandbox's processes exist, or None; SESSION is the session directory
+    (memory.json and resources.json for the agent), LOG a file for memory.jsonl records (or None), NOTIFY(title,
+    text) tells the human; HOST_CPUS: the engine's CPUs (the measure of the CPU use without a limit)."""
 
     @staticmethod
     def sandbox_top(cgroup):
@@ -7505,8 +7679,10 @@ class MemoryWatch:
 
     def __init__(self, locate, name, session=None, log=None, notify=None, warn=MEMORY_WARN, act=MEMORY_ACT,
                  interval=MEMORY_INTERVAL, grace=MEMORY_GRACE, clock=time.monotonic, kill=os.kill, proc=Path("/proc"),
-                 control=None):
+                 control=None, safeguard=None, host_cpus=None):
         self.locate, self.name, self.session, self.log, self.notify = locate, name, session, log, notify
+        # SAFEGUARD(kind, what, why, fix, process=...): the run's safeguard records (safeguards.py Watch.report).
+        self.safeguard, self.oom_told = safeguard, None
         # CONTROL() gives the run's control directory (or None), where the supervisor writes its own records.
         self.control = control or (lambda: None)
         self.supervisor, self.supervisor_peak, self.supervisor_next, self.supervisor_warned = None, 0, \
@@ -7518,7 +7694,12 @@ class MemoryWatch:
         self.high_set = False  # memory.high was written for high_for (else the write failed, recorded once)
         self.ended_at = None  # when the watch last ended a process
         self.warned, self.peak, self.ended, self.ending, self.events = False, 0, [], {}, []
-        self.stopping, self.thread, self.written = threading.Event(), None, 0.0
+        self.stopping, self.thread, self.written = threading.Event(), None, None
+        # CPU and processes: the last cpu.stat (and when), what was measured since, since when the limit holds the
+        # sandbox back, whether and when that was told; the processes' state and whether that was told.
+        self.host_cpus = host_cpus or os.cpu_count() or 1
+        self.cpu_last, self.cpu, self.throttled_since, self.cpu_warned, self.cpu_told = None, None, None, False, None
+        self.cpu_peak, self.pids, self.pids_warned, self.pids_peak, self.sampled = 0.0, None, False, 0, None
 
     def record(self, event, **fields):
         entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, "run": self.name, **fields}
@@ -7530,23 +7711,129 @@ class MemoryWatch:
                 with open(self.log, "a", encoding="utf-8") as stream:
                     stream.write(json.dumps(entry) + "\n")
 
+    def inform(self, title, text):
+        """A desktop notification to the human (NOTIFY), never an error of the watch."""
+        if self.notify is not None:
+            with contextlib.suppress(Exception):
+                self.notify(title, text)
+
+    def resources(self, state, warning):
+        """What resources.json holds: memory, CPU and processes, the warnings and what to do (no names, no PIDs)."""
+        warnings, advice = [], []
+        if warning:
+            warnings.append("memory")
+            advice.append("memory is nearly full: run fewer things at once (tests, builds), remove large files from "
+                          "/tmp and HOME (they count as memory)")
+        if self.cpu_warned:
+            warnings.append("cpu")
+            advice.append("the CPU limit holds the sandbox back: run fewer jobs in parallel (make -j, test workers), "
+                          "or ask the human for more CPUs (sandbox-ai limits RUN --cpus N)")
+        if self.pids_warned:
+            warnings.append("pids")
+            advice.append("processes and threads are nearly at the limit, new ones will fail: end idle ones, use "
+                          "fewer workers")
+        cpu, pids = self.cpu or {}, self.pids or {}
+        return {"memory": {"used_bytes": state["current"], "limit_bytes": state["limit"] or None,
+                           "percent": round(100 * state["current"] / state["limit"], 1) if state["limit"] else None,
+                           "tmpfs_bytes": state["shmem"]},
+                "cpu": {"used_cpus": cpu.get("cpus"), "limit_cpus": cpu.get("limit") or None,
+                        "host_cpus": self.host_cpus, "percent": cpu.get("percent"),
+                        "throttled_percent": cpu.get("throttled_percent")},
+                "pids": {"current": pids.get("current"), "limit": pids.get("limit") or None,
+                         "percent": round(100 * pids["current"] / pids["limit"], 1) if pids.get("limit") else None},
+                "warnings": warnings, "advice": advice,
+                "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
     def share(self, state, warning):
-        """The session directory's memory.json: what the agent can read about its memory (no names, no PIDs)."""
+        """The session directory's memory.json (memory alone, as before; only with a memory limit) and
+        resources.json (memory, CPU, processes): what the agent can read about its resources (no names, no PIDs)."""
         if self.session is None:
             return
-        data = {"used_bytes": state["current"], "limit_bytes": state["limit"],
+        files = {"resources.json": self.resources(state, warning)}
+        if state["limit"]:
+            files["memory.json"] = {
+                "used_bytes": state["current"], "limit_bytes": state["limit"],
                 "percent": round(100 * state["current"] / state["limit"], 1), "tmpfs_bytes": state["shmem"],
                 "warning": warning, "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "advice": ("memory is nearly full: run fewer things at once (tests, builds), remove large files from "
                            "/tmp and HOME (they count as memory)") if warning else ""}
-        with contextlib.suppress(OSError):
-            target = Path(self.session) / "memory.json"
-            temporary = target.with_name(f".memory.json.{os.getpid()}")
-            temporary.write_text(json.dumps(data))
-            os.replace(temporary, target)
+        for name, data in files.items():
+            with contextlib.suppress(OSError):
+                target = Path(self.session) / name
+                temporary = target.with_name(f".{name}.{os.getpid()}")
+                temporary.write_text(json.dumps(data))
+                os.replace(temporary, target)
+
+    def watch_cpu(self, now):
+        """One look at the CPU: what was used since the last look, and whether the limit holds the sandbox back for
+        long (told once per such stretch, at most every CPU_RENOTIFY). True if what the agent reads changed."""
+        sample = cpu_state(self.cgroup)
+        if sample is None:
+            return False
+        last, self.cpu_last = self.cpu_last, (now, sample)
+        usage = cpu_usage(last[1], sample, now - last[0], self.host_cpus) if last else None
+        if usage is None:
+            return False
+        self.cpu = usage
+        self.cpu_peak = max(self.cpu_peak, usage["cpus"])
+        ratio = usage["throttled_percent"] / 100
+        if ratio >= CPU_THROTTLE_RATIO and usage["limit"]:
+            self.throttled_since = now if self.throttled_since is None else self.throttled_since
+            held = now - self.throttled_since
+            if held >= CPU_THROTTLE_SUSTAIN and not self.cpu_warned:
+                self.cpu_warned = True
+                self.record("cpu-throttled", cpus=usage["cpus"], limit=usage["limit"],
+                            throttled_percent=usage["throttled_percent"], seconds=round(held))
+                if self.cpu_told is None or now - self.cpu_told >= CPU_RENOTIFY:
+                    self.cpu_told = now
+                    self.inform("sandbox-ai: CPU limit reached",
+                                f"{self.name} has been held at its CPU limit ({usage['limit']:g} CPUs) for "
+                                f"{round(held)} s: it runs slower. More CPUs: sandbox-ai limits {self.name} --cpus N")
+                return True
+        elif ratio < CPU_THROTTLE_CALM:
+            self.throttled_since = None
+            if self.cpu_warned:
+                self.cpu_warned = False
+                return True
+        return False
+
+    def watch_pids(self):
+        """One look at the processes against --pids (told once, again after it fell below PIDS_CLEAR). True if
+        what the agent reads changed."""
+        self.pids = pids_state(self.cgroup)
+        if not self.pids:
+            return False
+        self.pids_peak = max(self.pids_peak, self.pids["current"])
+        if not self.pids["limit"]:
+            return False
+        ratio = self.pids["current"] / self.pids["limit"]
+        if ratio >= PIDS_WARN and not self.pids_warned:
+            self.pids_warned = True
+            self.record("pids-warning", current=self.pids["current"], limit=self.pids["limit"])
+            self.inform("sandbox-ai: processes nearly at the limit",
+                        f"{self.name} has {self.pids['current']} of {self.pids['limit']} processes and threads: at "
+                        f"the limit new ones fail. More: sandbox-ai limits {self.name} --pids N")
+            return True
+        if ratio < PIDS_CLEAR and self.pids_warned:
+            self.pids_warned = False
+            return True
+        return False
+
+    def sample(self, state, now):
+        """A record of memory, CPU and processes every RESOURCE_SAMPLE seconds (from the first look on)."""
+        if self.sampled is None:
+            self.sampled = now
+            return
+        if now - self.sampled < RESOURCE_SAMPLE:
+            return
+        self.sampled = now
+        cpu, pids = self.cpu or {}, self.pids or {}
+        self.record("sample", used=state["current"], limit=state["limit"], tmpfs=state["shmem"],
+                    cpus=cpu.get("cpus"), cpu_limit=cpu.get("limit"), throttled_percent=cpu.get("throttled_percent"),
+                    pids=pids.get("current"), pids_limit=pids.get("limit"))
 
     def tick(self):
-        """One look at the cgroup; returns its state (or None before the sandbox's processes exist)."""
+        """One look at the cgroup; returns its memory state (or None before the sandbox's processes exist)."""
         if self.cgroup is None:
             found = self.locate()
             if not found:
@@ -7555,28 +7842,37 @@ class MemoryWatch:
         try:
             state = memory_state(self.cgroup)
         except (OSError, ValueError):
-            self.unthrottle()  # no limit any more (`sandbox-ai limits --memory none`), or the cgroup went
+            self.unthrottle()  # the cgroup went
             return None
+        now = self.clock()
+        if not state["limit"]:
+            self.unthrottle()  # no memory limit any more (`sandbox-ai limits --memory none`)
         if self.first_oom is None:
-            self.first_oom = state["oom_kill"]
+            self.first_oom = self.oom_told = state["oom_kill"]
+        elif state["oom_kill"] > (self.oom_told or 0):
+            self.tell_oom(state["oom_kill"])
         self.peak = max(self.peak, state["current"])
         ratio = state["current"] / state["limit"] if state["limit"] else 0
+        changed = False
         if ratio >= self.warn and not self.warned:
-            self.warned = True
+            self.warned = changed = True
             text = (f"{self.name} uses {ratio:.0%} of its memory ({gib(state['current'])} of {gib(state['limit'])}, "
                     f"files in its /tmp and HOME: {gib(state['shmem'])})")
             self.record("memory-warning", used=state["current"], limit=state["limit"], tmpfs=state["shmem"])
-            if self.notify is not None:
-                with contextlib.suppress(Exception):
-                    self.notify("sandbox-ai: memory nearly full", text)
-            self.share(state, True)
+            self.inform("sandbox-ai: memory nearly full", text)
         elif ratio < self.warn - 0.05 and self.warned:
-            self.warned = False
-            self.share(state, False)
-        elif self.clock() - self.written >= 10:
+            self.warned, changed = False, True
+        with contextlib.suppress(OSError, ValueError):
+            changed = self.watch_cpu(now) or changed
+        with contextlib.suppress(OSError, ValueError):
+            changed = self.watch_pids() or changed
+        if changed:
+            self.share(state, self.warned)
+        elif self.written is None or self.clock() - self.written >= RESOURCE_SHARE:
             self.share(state, self.warned)
             self.written = self.clock()
             self.watch_supervisor(state)
+        self.sample(state, now)
         self.throttle(state)
         stall = memory_stall(self.cgroup) if ratio >= MEMORY_HIGH - 0.02 else None
         # PSI's avg10 decays over ten seconds: after a relief, a stall alone does not end the next process yet.
@@ -7587,6 +7883,18 @@ class MemoryWatch:
             self.relieve(state)
         return state
 
+    def tell(self, kind, what, why, fix, process=None):
+        if self.safeguard is not None:
+            with contextlib.suppress(Exception):
+                self.safeguard(kind, what, why, fix, process=process, target=kind)
+
+    def tell_oom(self, count):
+        """The kernel's out-of-memory killer ended processes since the last look (COUNT: its total)."""
+        ended, self.oom_told = count - (self.oom_told or 0), count
+        self.tell("oom", f"the kernel ended {ended} process{'es' if ended != 1 else ''} of {self.name}",
+                  f"the sandbox ran out of memory (peak {gib(self.peak)})",
+                  f"start with a larger --memory (e.g. --memory 16g), or now: sandbox-ai limits {self.name} --memory "
+                  "16g; or run fewer things at once")
     def unthrottle(self):
         """The limit was lifted: memory.high goes with it (else the sandbox stayed slowed at 92 % of the old one)."""
         if self.high_for is None:
@@ -7648,11 +7956,9 @@ class MemoryWatch:
             self.record("supervisor-memory", rss=rss, used=state["current"], limit=state["limit"])
         if rss >= SUPERVISOR_WARN and not self.supervisor_warned:
             self.supervisor_warned = True
-            if self.notify is not None:
-                with contextlib.suppress(Exception):
-                    self.notify("sandbox-ai: supervisor memory",
-                                f"sandbox-ai's supervisor of {self.name} holds {gib(rss)} (it should stay far below); "
-                                "if the run ends by memory, its records are in memory.jsonl: please report them")
+            self.inform("sandbox-ai: supervisor memory",
+                        f"sandbox-ai's supervisor of {self.name} holds {gib(rss)} (it should stay far below); "
+                        "if the run ends by memory, its records are in memory.jsonl: please report them")
 
     def supervisor_records(self):
         """The supervisor's own records (runtime.py MemoryGuard) from the control directory, copied into the memory
@@ -7718,6 +8024,11 @@ class MemoryWatch:
         self.ended_at = now
         self.ended.append({"pid": pid, "name": name, "rss": rss})
         self.record("memory-relief", pid=pid, process=name, rss=rss, used=state["current"], limit=state["limit"])
+        self.tell("memory", f"ended {name} (PID {pid}, {gib(rss)})",
+                  f"{self.name} used {state['current'] / state['limit']:.0%} of its memory ({gib(state['current'])} of "
+                  f"{gib(state['limit'])}; files in /tmp and HOME count too): the largest process was ended so that "
+                  "the sandbox goes on", f"start with a larger --memory (e.g. --memory 16g), or now: sandbox-ai limits "
+                  f"{self.name} --memory 16g; or run fewer things at once", process=f"{name} (pid {pid})")
 
     def watch_memory(self):
         while not self.stopping.wait(self.interval):
@@ -7738,7 +8049,10 @@ class MemoryWatch:
         oom = 0
         if self.cgroup is not None:
             with contextlib.suppress(OSError, ValueError):
-                oom = memory_state(self.cgroup)["oom_kill"] - (self.first_oom or 0)
+                total = memory_state(self.cgroup)["oom_kill"]
+                oom = total - (self.first_oom or 0)
+                if self.first_oom is not None and total > (self.oom_told or 0):
+                    self.tell_oom(total)
         for entry in self.ended:
             lines.append(f"memory nearly full: ended {printable(entry['name'])} (PID {entry['pid']}, {gib(entry['rss'])}) "
                          "so that the sandbox could go on")
@@ -7750,7 +8064,18 @@ class MemoryWatch:
             where = f" (details: {self.log})" if self.log is not None and details else ""
             lines.append(f"sandbox-ai's supervisor held up to {gib(self.supervisor_peak)}{where}; that is more than it "
                          "should: please report it")
+        held = [entry for entry in self.events if entry["event"] == "cpu-throttled"]
+        if held:
+            lines.append(f"the CPU limit ({held[-1]['limit']:g} CPUs) held the sandbox back {len(held)} "
+                         f"time{'s' if len(held) != 1 else ''} for a minute or more; start with a higher --cpus, or "
+                         f"change it while it runs: sandbox-ai limits {self.name} --cpus N")
+        if any(entry["event"] == "pids-warning" for entry in self.events):
+            lines.append(f"processes and threads came near the limit (peak {self.pids_peak}); start with a higher "
+                         "--pids if something failed to start a process")
         return lines
+
+
+MemoryWatch = ResourceWatch  # its older name
 
 
 def tmpfs_size(limits):
@@ -7780,10 +8105,11 @@ def podman_agent_pid(a, pod):
         return None
 
 
-def start_memory_watch(a, session):
-    """The memory watch of this run, or None: only where the launcher sees the sandbox's cgroup (a local engine on
-    Linux) and the run has a memory limit."""
-    if not local_engine(a) or "memory" not in enforced_limits(a)[0]:
+def start_memory_watch(a, session, safeguard=None):
+    """The resource watch of this run, or None: only where the launcher sees the sandbox's cgroup (a local engine on
+    Linux) and the run has a limit there (memory, CPUs or processes). SAFEGUARD: the safeguard watch's report
+    (processes it ends, OOM kills)."""
+    if not local_engine(a) or not set(enforced_limits(a)[0]) & {"memory", "cpus", "pids"}:
         return None
 
     def locate():
@@ -7794,8 +8120,12 @@ def start_memory_watch(a, session):
 
     def notify(title, text):
         load_approvals_module().desktop_notification(title, text)
-    return MemoryWatch(locate, getattr(a, "run_id", None) or pod_name(a), session=session, log=log,
-                       notify=notify, control=lambda: getattr(a, "control_dir", None)).start()
+    return ResourceWatch(locate, getattr(a, "run_id", None) or pod_name(a), session=session, log=log,
+                         notify=notify, control=lambda: getattr(a, "control_dir", None), safeguard=safeguard,
+                         host_cpus=engine_cpus(a)).start()
+
+
+POD_REMOVE_SECONDS = 120  # the removal of a run's pod at its end, at most
 
 
 def run_pod(a, session, home):
@@ -7821,15 +8151,24 @@ def run_pod(a, session, home):
         if owned:
             # --time 0: the infra container's sleep ignores SIGTERM; waiting for it only costs 10 seconds.
             with signals_deferred():
-                removed = subprocess.run(podman_command(a, "pod", "rm", "--force", "--time", "0", name), check=False,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                # With a time limit: Ctrl-C and SIGTERM are held here (and in podman, which inherits the mask), so a
+                # podman that hangs (a stuck lock of its own) would hold the launcher until a kill -9.
+                def remove(*extra):
+                    try:
+                        return subprocess.run(podman_command(a, "pod", "rm", "--force", *extra, name), check=False,
+                                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                              timeout=POD_REMOVE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        print(f"agent-sandbox: podman did not remove the pod {name} within {POD_REMOVE_SECONDS} s; "
+                              f"remove it with: podman pod rm --force {name}", file=sys.stderr)
+                        return None
+                removed = remove("--time", "0")
                 said = str(getattr(removed, "stderr", "") or "").strip()
                 def failed(done):
                     return isinstance(getattr(done, "returncode", None), int) and done.returncode != 0
                 if failed(removed) and "no such pod" not in said.lower():
                     # Once more without --time (Podman before 4.0 knows none); a pod still left is said, not hidden.
-                    removed = subprocess.run(podman_command(a, "pod", "rm", "--force", name), check=False,
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    removed = remove()
                     said = str(getattr(removed, "stderr", "") or "").strip()
                     if failed(removed) and "no such pod" not in said.lower():
                         print(f"agent-sandbox: could not remove the pod {name} "
@@ -8036,6 +8375,40 @@ def load_canary_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_safeguards_module = None
+
+
+def load_safeguards_module():
+    global _safeguards_module
+    if _safeguards_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_safeguards", HERE / "safeguards.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _safeguards_module = module
+    return _safeguards_module
+
+
+def start_safeguards(a, connection_log, cfg):
+    """The run's safeguard watch (safeguards.py), started: every safeguard that refuses or ends something becomes a
+    record (safeguards.jsonl) and a desktop warning, grouped and rate-limited. The values of the agent's secret
+    variables (--env, --secret-env, and names like the activity log's) are redacted wherever they appear. None for a
+    probe; never fails the launch."""
+    if a.probe:
+        return None
+    try:
+        S = load_safeguards_module()
+        env, names = cfg.get("env") or {}, set(cfg.get("secret_names") or [])
+        secret_values = [value for name, value in env.items() if isinstance(value, str) and
+                         (name in names or re.search(r"token|secret|passw|api_?key|apikey|auth|credential|private"
+                                                     r"|cookie|session_?key", name, re.I))]
+        return S.Watch(a.run_id, log_dir=a.log_dir, control_dir=getattr(a, "control_dir", None),
+                       connection_log=connection_log, notify=S.desktop_sender(load_approvals_module()),
+                       secrets=secret_values).start()
+    except Exception as exc:  # noqa: BLE001 - the run goes on without its safeguard records
+        print(f"agent-sandbox: safeguards: not recorded: {printable(str(exc))[:300]}", file=sys.stderr)
+        return None
 
 
 def plant_canaries(a, home, cleanup):
@@ -8288,9 +8661,7 @@ def resolve_tmux(a):
     if a.tmux is None:
         a.tmux = bool(not (a.probe or a.session is not None or a.tmux_socket_dir or a.mcp_socket_dir
                            or a.binary) and sys.stdin.isatty() and sys.stdout.isatty()
-                      and interactive_args(a.agent, a.agent_args) and (a.backend == "podman" or shutil.which("tmux"))
-                      # macOS: attaching reaches the VM's socket only in stage 2 (TODO.md); --tmux still asks for it
-                      and sys.platform != "darwin")
+                      and interactive_args(a.agent, a.agent_args) and (a.backend == "podman" or shutil.which("tmux")))
     return a.tmux
 
 
@@ -8556,7 +8927,8 @@ def launch(argv, floor_by=None):
         if a.agent == "claude" and auth_mode(a) != "none" and (home / AUTH_TARGETS["claude"]).exists():
             print(f"agent-sandbox: {claude_token_status(home / AUTH_TARGETS['claude'])}", file=sys.stderr)
         for port in host_ports(a):
-            host = "the Podman machine at --podman-url" if a.podman_url else "the host"
+            host = "the Podman machine at --podman-url" if a.podman_url else \
+                "this Mac (relayed through podman machine)" if on_machine(a) else "the host"
             print(f"agent-sandbox: 127.0.0.1:{port} in the sandbox reaches port {port} on the loopback of {host}; "
                   "the sandbox cannot listen on that port itself", file=sys.stderr)
         log_name = None
@@ -8608,7 +8980,9 @@ def launch(argv, floor_by=None):
                "ask_blocked": getattr(a, "blocked_approvals", {"hosts": [], "tcp": []}),
                "policy": getattr(a, "policy", {}),  # the supervisor holds run-time changes to it too
                "pinned": [*hosts, *a.llm_pins], "wildcards": host_wildcards(a), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
-                         *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else []}
+                         *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else [],
+               # macOS: the sandbox runs in podman machine's VM (runtime.VM_CONTROL_DIR, PortRelay's upstream).
+               **({"machine": {"host": machine_host(), "browser": asking(a)}} if on_machine(a) else {})}
         resolv, nsswitch = resolver_files(a)
         files = {"config.json": json.dumps(cfg), "hosts": hosts_file({**hosts, **a.llm_pins}),
                  "resolv.conf": resolv, "nsswitch.conf": nsswitch,
@@ -8619,7 +8993,8 @@ def launch(argv, floor_by=None):
                                                 tcp=tcp_targets(a),
                                                 proxy={"port": PROXY_PORT, "loopback": host_ports(a)}
                                                 if log_name else None, vpn_mark=getattr(a, "vpn_mark", None),
-                                                vpn_rules=getattr(a, "vpn_firewall", ()))}
+                                                vpn_rules=getattr(a, "vpn_firewall", ()),
+                                                machine_host=machine_host() if on_machine(a) else None)}
         if gui_config(a):
             files["gui.json"] = json.dumps(gui_config(a))
         if getattr(a, "audio", None) == "virtual":
@@ -8647,7 +9022,11 @@ def launch(argv, floor_by=None):
             # --ask allow: answered here at once, nobody is notified (a canary's alarm still is).
             threading.Thread(target=approvals.watch, args=(a.control_dir / "approvals", watching),
                              kwargs={"auto": True, "interval": 0.2} if asks_nobody(a) else {}, daemon=True).start()
-        if asking(a):
+        if asking(a) and on_machine(a):
+            threading.Thread(target=approvals.serve_browser_files,
+                             args=(a.control_dir / RUNTIME.BROWSER_REQUESTS, a.control_dir / "approvals", watching),
+                             kwargs={"auto": asks_nobody(a)}, daemon=True).start()
+        elif asking(a):
             threading.Thread(target=approvals.serve_browser, args=(a.browser_dir / "open.sock",
                                                                    a.control_dir / "approvals", watching),
                              kwargs={"auto": asks_nobody(a)}, daemon=True).start()
@@ -8661,8 +9040,10 @@ def launch(argv, floor_by=None):
         record_home_manifest(a, home)
         tools = tool_dirs_state(a)
         activity, status = start_activity(a, home, log_name, cfg), None
+        # Every safeguard that refuses or ends something: a record and a desktop warning (safeguards.py).
+        safeguard_watch = start_safeguards(a, log_name, cfg)
         # Not "memory": that name holds the project memory (save_memory below).
-        memory_watch = start_memory_watch(a, session)
+        memory_watch = start_memory_watch(a, session, safeguard_watch.report if safeguard_watch else None)
         try:
             status = run_pod(a, session, home) if a.backend == "podman" else run_bwrap(a, session, home)
             return status
@@ -8675,6 +9056,11 @@ def launch(argv, floor_by=None):
                     print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
             except Exception as exc:  # noqa: BLE001
                 print(f"agent-sandbox: memory watch: {printable(str(exc))}", file=sys.stderr)
+            try:
+                for line in safeguard_watch.stop() if safeguard_watch is not None else []:
+                    print(f"agent-sandbox: {printable(line)}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - the agent's exit status matters more
+                print(f"agent-sandbox: safeguards: the last read failed: {printable(str(exc))[:300]}", file=sys.stderr)
             try:
                 for note in tool_dirs_changed(tools):
                     print(f"agent-sandbox: warning: {printable(note)}", file=sys.stderr)

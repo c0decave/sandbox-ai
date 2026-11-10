@@ -54,17 +54,23 @@ class Kind:
 
 
 KINDS = {kind.key: kind for kind in (
-    Kind("workspace", N_("Workspace"), single=False, column=0,
-         help=N_("A folder the agent works in: the first at /work, further ones at /workspaces/NAME")),
-    Kind("mount", N_("Mount"), single=False, column=0,
-         help=N_("A further host folder or file at /work, /mnt or /opt, read-only or writable")),
+    # Project folder (--workspace) and extra folder (--mount): both give the sandbox a folder of this machine; a
+    # project folder is where the agent works (git, the push check, /work), an extra folder is data at a path you
+    # choose.
+    Kind("workspace", N_("Project folder"), single=False, column=0,
+         help=N_("Your project: the agent works in it (the first at /work, more at /workspaces/NAME); git and the "
+                 "push check see it")),
+    Kind("mount", N_("Extra folder"), single=False, column=0,
+         help=N_("Another folder or file of this machine at a path you choose (e.g. /mnt/data), read-only or "
+                 "writable: data, models, caches - not where the agent works")),
     Kind("home", N_("HOME and login"), ("--state-dir", "--copy", "--copy-auth", "--no-auth", "--auth-file",
                                         "--import-codex-auth"), column=0,
          help=N_("The sandbox HOME (kept between runs or not) and the agent's login")),
     Kind("kits", N_("Kits, memory, plugins"), ("--kit", "--kit-dir", "--no-default-kit", "--no-memory",
                                                "--no-plugins"), column=0,
          help=N_("Kits copied into HOME, project memory and plugins")),
-    Kind("agent", N_("Agent"), ("--dangerously-skip-permissions", "--local-config", "--env", "--secret-env"),
+    Kind("agent", N_("Agent"), ("--dangerously-skip-permissions", "--local-config", "--env", "--secret-env",
+                                "--api-key"),
          required=True, column=1, help=N_("The coding agent and how it runs")),
     Kind("approvals", N_("Approvals and rules"), ("--ask", "--rules"), column=1,
          help=N_("Ask before what the options do not allow; rulesets allow, ask or deny each request and MCP "
@@ -243,6 +249,33 @@ class Board:
         board.edges = {tuple(e) for e in state["edges"]}
         board.extra, board.document_extra = list(state["extra"]), json.loads(json.dumps(state["document_extra"]))
         board._ids = itertools.count(max([n.id for n in board.nodes] or [0]) + 1)
+        return board
+
+    @classmethod
+    def checked(cls, state, sai=None, policy=None):
+        """The board of STATE when the app can show and use it, else ValueError: for a state that did not come from
+        this app's own Undo (a draft in the app's state file, which anyone with the user's rights may have edited, or
+        one of another version). Known kinds, settings as objects, places as finite numbers, edges between its parts,
+        and what the board computes from it (titles, command line, problems, badges) computed without an error."""
+        try:
+            board = cls.from_state(state)
+            ids = [n.id for n in board.nodes]
+            sound = all(type(i) is int for i in ids) and len(set(ids)) == len(ids) and \
+                all(n.kind in KINDS and isinstance(n.props, dict) and
+                    all(type(v) in (int, float) and abs(v) < 1e9 for v in (n.x, n.y)) for n in board.nodes) and \
+                all(len(e) == 2 and e[0] in ids and e[1] in ids for e in board.edges) and \
+                all(isinstance(t, str) for t in board.extra) and isinstance(board.document_extra, dict)
+            if not sound:
+                raise ValueError("not a board of this app")
+            for node in board.nodes:
+                node.title()
+            command_line(sai, board)
+            problems(sai, board, policy)
+            badges(board, policy)
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - whatever a foreign state makes fail: not shown
+            raise ValueError(f"not a board of this app: {exc!r}") from None
         return board
 
     # -- layout --
@@ -501,7 +534,7 @@ def rules_copy(rules):
     folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "app" / "rules"
     target = folder / f"{hashlib.sha256(data).hexdigest()}.json"
     if not (target.is_file() and not target.is_symlink() and target.read_bytes() == data):
-        backend.write_private_json(target, json.loads(data))
+        backend.write_private_text(target, data.decode())  # (the bytes it is named by: written once)
     return target
 
 

@@ -1320,6 +1320,8 @@ def set_limits(record, memory=None, cpus=None, pids=None, out=print, finder=sand
         if wider:
             raise ValueError("; ".join(f"{given}: {why} (security mode {mode['name']})" for given, why in wider))
     properties, files = limit_properties(memory, cpus, pids)
+    if sys.platform == "darwin" and module("agent_sandbox").machine_record(record):
+        return machine_set_limits(record, memory, cpus, pids, out=out, runner=runner)
     group = limits_cgroup(record, finder)
     unit = group.rsplit("/", 1)[-1]
     runner = runner or subprocess.run
@@ -1339,6 +1341,53 @@ def set_limits(record, memory=None, cpus=None, pids=None, out=print, finder=sand
                          "you? a systemd user session does that)") from None
     out(f"limits of {record.get('run')}: {', '.join(f'{k}={v}' for k, v in files.items())} (cgroup {directory})")
     return "cgroup"
+
+
+def machine_set_limits(record, memory=None, cpus=None, pids=None, out=print, runner=None):
+    """macOS: the limits of the run's container in podman machine's VM, through `podman update` (its cgroups are the
+    VM's, not this host's). NONE: no limit (-1; --cpus 0)."""
+    l = module("agent_sandbox")
+    values = l.resource_limits(argparse.Namespace(memory=memory or "none", cpus=cpus or "none", pids=pids or "none"))
+    args = []
+    if memory:
+        size = "-1" if memory == "none" else str(values.get("memory", memory))
+        args += ["--memory", size, "--memory-swap", size]  # no swap beyond it, as MemorySwapMax on Linux
+    if cpus:
+        args += ["--cpus", "0" if cpus == "none" else str(values.get("cpus", cpus))]
+    if pids:
+        args += ["--pids-limit", "-1" if pids == "none" else str(values.get("pids", pids))]
+    container = l.run_container(record)
+    command = ["podman", *(["--remote", "--url", record["podman_url"]] if record.get("podman_url") else []),
+               "update", *args, container]
+    try:
+        result = (runner or subprocess.run)(command, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"podman update did not run: {exc}") from None
+    if result.returncode != 0:
+        why = (result.stderr or "").strip().splitlines()[-1:] or [f"status {result.returncode}"]
+        raise ValueError(f"podman update refused the limits of {container}: {l.printable(why[0][:300])}")
+    out(f"limits of {record.get('run')}: {' '.join(args)} (podman update {container}, in podman machine)")
+    return "podman"
+
+
+def machine_current_limits(record, runner=None):
+    """macOS: the limits of the run's container as `podman inspect` reports them (None: no limit)."""
+    l = module("agent_sandbox")
+    container = l.run_container(record)
+    command = ["podman", *(["--remote", "--url", record["podman_url"]] if record.get("podman_url") else []),
+               "inspect", "--format", "json", container]
+    try:
+        result = (runner or subprocess.run)(command, capture_output=True, text=True, timeout=60)
+        data = json.loads(result.stdout or "null") if result.returncode == 0 else None
+        host = data[0]["HostConfig"]
+    except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError):
+        raise ValueError(f"the sandbox's container {container} was not found (has it ended?)") from None
+    def positive(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+    nano, quota, period = positive(host.get("NanoCpus")), positive(host.get("CpuQuota")), positive(host.get("CpuPeriod"))
+    cpus = nano / 1e9 if nano else (quota / period if quota and period else None)
+    return {"memory": positive(host.get("Memory")), "memory_high": None,
+            "cpus": round(cpus, 3) if cpus is not None else None, "pids": positive(host.get("PidsLimit"))}
 
 
 def limits_cgroup(record, finder=sandbox_processes):
@@ -1373,7 +1422,9 @@ def cgroup_value(directory, name, cgroup_root=CGROUP_ROOT):
 
 def current_limits(record, finder=sandbox_processes, cgroup_root=CGROUP_ROOT):
     """{"memory": bytes, "memory_high": bytes, "cpus": float, "pids": int} the run has now (None: no limit), read
-    from the cgroup `limits` writes, and above it; nothing is changed."""
+    from the cgroup `limits` writes, and above it; nothing is changed. macOS: from podman inspect."""
+    if sys.platform == "darwin" and module("agent_sandbox").machine_record(record):
+        return machine_current_limits(record)
     directory = Path(cgroup_root) / limits_cgroup(record, finder).lstrip("/")
     if not directory.is_dir():
         raise ValueError(f"the sandbox's cgroup {directory} was not found (has it ended?)")

@@ -65,6 +65,18 @@ def test_problems_name_what_is_wrong():
         assert any(text in problem for problem in p.problems(document)), (document, p.problems(document))
 
 
+def test_a_preset_whose_agents_hold_objects_is_damaged_not_a_crash(own_config):
+    """Bug hunt: "agents": [{}] made problems() fail with TypeError (a set of unhashable items), which no caller
+    catches: sandbox-ai presets list and every --preset start ended in a traceback over one damaged file."""
+    for agents in ([{}], [["claude"]], [None], ["claude", 3]):
+        assert any("agents is a list" in problem for problem in p.problems(minimal(agents=agents))), agents
+    own_config.mkdir(parents=True)
+    (own_config / "odd.json").write_text(json.dumps(minimal(id="odd", agents=[{"name": "claude"}])))
+    damaged = []
+    assert "odd" not in p.catalog(damaged)
+    assert len(damaged) == 1 and "agents is a list" in damaged[0]
+
+
 def test_values_are_checked_filled_in_and_optional_ones_drop_their_flag(tmp_path):
     preset = {**minimal(options=["--mount", "{folder}:/mnt/x:ro", "--gpu", "{gpu}", "--allow-host-port", "{port}"],
                         values={"folder": {"label": "F", "kind": "folder"}, "gpu": {"label": "G", "optional": True},

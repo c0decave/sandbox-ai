@@ -326,9 +326,24 @@ def test_stop_and_list(tmp_path, monkeypatch, capsys):
     assert "sandbox-ai mcp: MCP server demo is not running" in capsys.readouterr().err
 
 
+def test_a_server_that_ends_right_after_the_check_is_stopped_without_an_error(tmp_path, monkeypatch, capsys):
+    """Bug hunt: the supervisor ended between status() and the SIGTERM; os.kill raised ProcessLookupError and
+    sandbox-ai mcp stop failed with "No such process" for a server that had stopped."""
+    m.save_state("demo", {"pid": 88})
+    states = iter(["running"])
+    monkeypatch.setattr(m, "status", lambda name: next(states, "stopped"))
+
+    def gone(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+    monkeypatch.setattr(m.os, "kill", gone)
+    monkeypatch.setattr(m.time, "sleep", lambda _: None)
+    assert m.stop("demo") == 0
+    assert "MCP server demo stopped" in capsys.readouterr().err
+
+
 def test_wrapper_script(tmp_path):
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "st"), "XDG_CONFIG_HOME": str(tmp_path / "c")}
-    result = subprocess.run([str(ROOT / "sandbox-mcp"), "list"], capture_output=True, text=True, env=env, timeout=30)
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "list"], capture_output=True, text=True, env=env, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[1].split()[:2] == ["demo", "stopped"]
 
@@ -913,6 +928,20 @@ def test_a_server_that_ignores_the_end_of_its_input_gives_its_slot_back(tmp_path
         answer = talk()  # refused (closed at once) while the first instance still holds the slot
         time.sleep(0.1)
     assert answer == ping, "the slot of the instance that ignored its end of input never came back"
+    # Nothing outlives the test (bug hunt: the last instance ran on for its 30 s after the test, past pytest's end):
+    # its connection is closed, so it is stopped after the grace time too.
+    def running():
+        found = False
+        for path in Path("/proc").glob("[0-9]*/cmdline"):
+            try:
+                found = found or os.fsencode(str(server)) in path.read_bytes()
+            except OSError:
+                pass
+        return found
+    deadline = time.monotonic() + 10
+    while running() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not running(), "an instance outlived its connection"
 
 
 def test_a_thread_that_cannot_start_does_not_end_the_mcp_server(monkeypatch):

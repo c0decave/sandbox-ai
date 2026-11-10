@@ -17,31 +17,79 @@ import time
 
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QContextMenuEvent, QCursor, QDrag, QFont, QFontMetricsF, QKeySequence, QPainter, QPainterPath,
+    QBrush, QShortcut, QColor, QContextMenuEvent, QCursor, QDrag, QFont, QFontMetricsF, QKeySequence, QPainter, QPainterPath,
     QPainterPathStroker, QPen, QPixmap, QPolygonF, QTextLayout, QTextOption, QTransform, QUndoCommand, QUndoGroup,
     QUndoStack,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGraphicsEllipseItem,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGraphicsEllipseItem,
     QGraphicsItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QTableWidgetItem,
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import backend, board as B
+from . import applog, backend, board as B
 from . import help_view, labels as OL, project_trust as PT, rules_tools, tables, theme
 from .files import printable
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
 from .i18n import tr
-from .widgets import MONO, ElidedLabel, ask_first, background, disclosure, flow, inform, plain_label, safe_tooltip, warn
+from .widgets import (
+    MONO, ElidedLabel, StartControls, ask_first, background, disclosure, flow, inform, plain_label, safe_tooltip, warn,
+)
 
 NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 REMOTE_CHECK_DELAY = 2000  # ms after an edit before another host's launcher checks the board (a dry run over SSH)
 HOST_RETRY = 60  # seconds before another host's launcher options are asked for again after a failed read
+
+
+HISTORY_STEPS = 20  # steps of Undo kept per project in the state file (with its draft)
+# Steps of Undo per project in this run (each holds the board before and after it, some KB): without a limit a day of
+# work on a board grew the app by megabytes, for good.
+UNDO_LIMIT = 500
+BOARDS_BUDGET = 1 << 20  # characters of the state file for the boards of every project (within_budget)
+
+
+def history_of(stack):
+    """{"steps": [{"text", "before", "after"}], "index"}: the last HISTORY_STEPS steps of Undo of STACK (those that
+    can be redone too) and where it stands among them; None when there are none. The states are copies, scrubbed
+    like a draft."""
+    # Only the last steps are copied: this runs at every write of the state (each change of the board), and copying
+    # every step of the stack made each write take longer with every change (a third of a second after 10000).
+    first = max(0, stack.count() - HISTORY_STEPS)
+    kept = []
+    for index in range(first, stack.count()):
+        command = stack.command(index)
+        if not isinstance(command, Snapshot):
+            return None
+        kept.append({"text": command.text(), "before": scrub_board(json.loads(json.dumps(command.before))),
+                     "after": scrub_board(json.loads(json.dumps(command.after)))})
+    if not kept:
+        return None
+    return {"steps": kept, "index": max(0, stack.index() - first)}
+
+
+def within_budget(boards, shown=None, budget=None):
+    """BOARDS (keep_boards' entries, changed in place) within BOARDS_BUDGET characters of the state file: the steps of
+    Undo kept with the drafts go first - the largest first, the board SHOWN last; the drafts themselves (what was not
+    applied) and the views stay. Kept without a bound, the drafts of a few dozen projects (those not opened for months
+    too) made the state file larger than state.LIMIT: the next start read none of it, and every draft was lost."""
+    budget = BOARDS_BUDGET if budget is None else budget
+    sizes = {key: len(json.dumps(entry, separators=(",", ":"))) for key, entry in boards.items()}
+    total = sum(sizes.values())
+    if total <= budget:
+        return boards
+    histories = sorted((key for key, entry in boards.items() if isinstance(entry, dict) and "history" in entry),
+                       key=lambda key: (key == shown, -sizes[key]))
+    for key in histories:
+        history = boards[key].pop("history")
+        total -= len(json.dumps(history, separators=(",", ":")))
+        if total <= budget:
+            break
+    return boards
 
 
 def scrub_board(state):
@@ -77,6 +125,7 @@ def same_folder(a, b):
 
 NODE_W, NODE_H, PORT_R = 210.0, 66.0, 6.0  # NODE_H: the least height; a node with more text grows (NodeItem)
 HEADER_H = 26.0  # the title band of a node (a title of two lines makes it taller)
+CLOSE_SIZE = 16.0  # the [x] of a node that may be removed
 NODE_PAD = 10.0  # the text's margin inside a node
 TEXT_LINES, TITLE_LINES = 3, 2  # a node shows at most 3 lines of text, at most 2 of them for its title
 
@@ -161,7 +210,7 @@ class NodeHelpMark(QGraphicsItem):
         return QRectF(0, 0, help_view.SIZE, help_view.SIZE)
 
     def paint(self, painter, option, widget=None):
-        help_view.paint_mark(painter, self.boundingRect(), self.hovered)
+        painter.drawPixmap(0, 0, help_view.mark_pixmap(help_view.SIZE, self.hovered))  # (drawn once, kept)
 
     def hoverEnterEvent(self, event):  # noqa: N802
         self.hovered = True
@@ -186,6 +235,60 @@ class NodeHelpMark(QGraphicsItem):
         return help_view.show_tip(f"kind.{self.kind}", owner, point or QPoint(0, 0))
 
 
+class NodeCloseMark(QGraphicsItem):
+    """The [x] at a node's top right corner (parts that may be removed): a click asks first (unless the setting
+    board_confirm_remove is off), then removes the part (one step of Undo)."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.hovered = False
+        self.setPos(NODE_W - CLOSE_SIZE - 5, (HEADER_H - CLOSE_SIZE) / 2)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tr("Remove this part"))
+        self.setZValue(3)
+
+    def boundingRect(self):  # noqa: N802
+        return QRectF(0, 0, CLOSE_SIZE, CLOSE_SIZE)
+
+    def paint(self, painter, option, widget=None):
+        colors = theme.colors()
+        rect = self.boundingRect()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bad = QColor(theme.color("bad"))
+        painter.setPen(QPen(bad if self.hovered else QColor(colors["secondary"]), 1.3))
+        painter.setBrush(bad if self.hovered else Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(1.0, 1.0, -1.0, -1.0), 3.0, 3.0)
+        cross = QPen(QColor(colors.get("accent_text", "#ffffff")) if self.hovered else QColor(colors["secondary"]), 1.6)
+        cross.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(cross)
+        inset = 5.0
+        painter.drawLine(QPointF(inset, inset), QPointF(CLOSE_SIZE - inset, CLOSE_SIZE - inset))
+        painter.drawLine(QPointF(CLOSE_SIZE - inset, inset), QPointF(inset, CLOSE_SIZE - inset))
+        painter.restore()
+
+    def hoverEnterEvent(self, event):  # noqa: N802
+        self.hovered = True
+        self.update()
+
+    def hoverLeaveEvent(self, event):  # noqa: N802
+        self.hovered = False
+        self.update()
+
+    def mousePressEvent(self, event):  # noqa: N802
+        event.accept()  # not a move or a selection of the node
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        event.accept()  # not the node's properties
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        event.accept()
+        node = self.parentItem()
+        if node is not None and self.boundingRect().contains(event.pos()):
+            QTimer.singleShot(0, lambda node_id=node.node_id, page=node.page: page.ask_remove(node_id))
+
+
 class NodeItem(QGraphicsRectItem):
     """A part on the board: its title in the title band and what it sets below, wrapped to the node's width in at
     most TEXT_LINES lines (the node grows for them, the last one shown ends in "…" when more is left); the whole
@@ -207,12 +310,22 @@ class NodeItem(QGraphicsRectItem):
         self.inport = PortItem(self, "in") if has_in else None
         self.outport = PortItem(self, "out") if has_out else None
         self.help_mark = NodeHelpMark(self, node.kind)
+        removable = not B.KINDS[node.kind].required
+        self.close_mark = NodeCloseMark(self) if removable else None
+        if removable:  # the (?) moves left of the [x]
+            self.help_mark.setPos(NODE_W - CLOSE_SIZE - help_view.SIZE - 9, (HEADER_H - help_view.SIZE) / 2)
         self.setPos(node.x, node.y)
         self.update_from(node, None, True)
 
     def update_from(self, node, level, included):
-        self.set_text(node.title(), summary(node), tr(B.KINDS[node.kind].help))
+        """The node's texts, the colour of its worst problem and whether it counts; nothing is done again when none
+        of them changed (every step of the board updates every node)."""
         color = {"error": theme.color("bad"), "warning": theme.color("warn")}.get(level, theme.colors()["border"])
+        shown = (node.title(), summary(node), tr(B.KINDS[node.kind].help), color, bool(level), bool(included))
+        if shown == getattr(self, "shown", None):
+            return
+        self.shown = shown
+        self.set_text(*shown[:3])
         self.setPen(QPen(QColor(color), 2.5 if level else 1.2))
         self.setOpacity(1.0 if included else 0.45)
 
@@ -221,7 +334,8 @@ class NodeItem(QGraphicsRectItem):
         and the edges after them; the whole text in the tooltip."""
         title_lines = QFontMetricsF(self.title_font).lineSpacing()
         detail_lines = QFontMetricsF(self.detail_font).lineSpacing()
-        self.titles = wrapped(title, self.title_font, NODE_W - 2 * NODE_PAD - help_view.SIZE - 6, TITLE_LINES)
+        room = NODE_W - 2 * NODE_PAD - help_view.SIZE - 6 - (CLOSE_SIZE + 4 if getattr(self, "close_mark", None) else 0)
+        self.titles = wrapped(title, self.title_font, room, TITLE_LINES)
         self.details = wrapped(detail, self.detail_font, NODE_W - 2 * NODE_PAD, TEXT_LINES - max(1, len(self.titles)))
         self.header_h = max(HEADER_H, 10.0 + len(self.titles) * title_lines)
         height = max(NODE_H, self.header_h + 9.0 + len(self.details) * detail_lines + 9.0)
@@ -380,7 +494,7 @@ class BoardScene(QGraphicsScene):
     def target_at(self, point):
         """The node a connection dragged from self.dragging would go to at POINT (or None)."""
         for item in self.items(point):
-            node = item.parentItem() if isinstance(item, (PortItem, NodeHelpMark)) else item
+            node = item.parentItem() if isinstance(item, (PortItem, NodeHelpMark, NodeCloseMark)) else item
             if isinstance(node, NodeItem) and node.node_id != self.dragging.node_id \
                     and self.page.board.can_connect(self.dragging.node_id, node.node_id):
                 return node
@@ -400,10 +514,21 @@ class BoardScene(QGraphicsScene):
             event.accept()
             return
         self.pressed = self.page.board.state()
-        super().mousePressEvent(event)
-        nodes = [i for i in self.selectedItems() if isinstance(i, NodeItem)]
-        if len(nodes) == 1 and nodes[0].sceneBoundingRect().contains(event.scenePos()):
-            self.page.show_inspector()  # also a click on the part selected already (its panel folded)
+        super().mousePressEvent(event)  # a click selects; held down, the part moves with the pointer
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        """A double click on a part opens its properties (a single click only selects it, and moves it while held)."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            for item in self.items(event.scenePos()):
+                if isinstance(item, (NodeCloseMark, NodeHelpMark)):
+                    event.accept()
+                    return
+                node = item.parentItem() if isinstance(item, PortItem) else item
+                if isinstance(node, NodeItem):
+                    event.accept()
+                    self.page.show_properties(node.node_id)
+                    return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if self.dragging is not None:
@@ -458,6 +583,9 @@ class BoardView(QGraphicsView):
         self.pan = None  # while the right or middle button is down: {"button", "start", "last", "panning"}
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        # The grid of dots is drawn once into a cache and again only when the view scrolls, zooms or changes size
+        # (every repaint drew it anew: a few ms each, under every move of a part).
+        self.setCacheMode(QGraphicsView.CacheModeFlag.CacheBackground)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setAcceptDrops(True)
@@ -656,7 +784,8 @@ class PartsDelegate(QStyledItemDelegate):
                                  option.rect.height())
         super().paint(painter, text_option, index)
         hovered = self.parts.hovered == (index.row(), True)
-        help_view.paint_mark(painter, QRectF(mark), hovered, option.font)
+        painter.drawPixmap(mark.topLeft(), help_view.mark_pixmap(mark.width(), hovered, option.font,
+                                                                painter.device().devicePixelRatioF()))
 
     def sizeHint(self, option, index):  # noqa: N802
         hint = super().sizeHint(option, index)
@@ -1047,9 +1176,7 @@ class BoardPage(QWidget):
         # One undo stack per project: the board of each project (its tab) keeps its changes, undo and zoom
         # while another project is shown (sessions, keyed by folder).
         self.undo_group = QUndoGroup(self)
-        self.undo = QUndoStack(self)
-        self.undo_group.addStack(self.undo)
-        self.undo_group.setActiveStack(self.undo)
+        self.new_stack()
         self.sessions = {}
         undo = QToolButton()
         undo.setText(tr("Undo"))
@@ -1079,18 +1206,28 @@ class BoardPage(QWidget):
         self.score_button.setToolTip(tr("Show or hide the security score and the findings"))
         self.score_button.clicked.connect(lambda on: self.show_findings(on))
         self.score_request = None  # the window: show (True) or hide (False) the findings' panel
-        layout.addWidget(flow(QLabel(tr("Project")), self.folder, open_button, new_button, wizard_button,
-                              undo, redo, arrange, zoom_out, zoom_in, fit, self.score_button))
+        # The command line the board stands for, behind a button: rarely needed in the app, it took two lines.
+        self.cli_button = disclosure(QToolButton())  # an arrow: open or folded, never a button stuck pressed
+        self.cli_button.setText(tr("CLI command"))
+        self.cli_button.setToolTip(tr("Show the sandbox-ai command this board starts (to copy it into a terminal)"))
+        self.cli_button.toggled.connect(lambda on: self.show_cli(on))
+        # The project and its folder are named at the top of the window (its project chooser): not again here, the
+        # row keeps its room for the buttons. (self.folder is still the board's record of its folder.)
+        layout.addWidget(flow(open_button, new_button, wizard_button, undo, redo, arrange, zoom_out, zoom_in, fit,
+                              self.cli_button, self.score_button))
+        # The board's notes (a project file not trusted yet, placeholders to fill in, restored changes) go to the
+        # window's log window, one place for every message; the last one is kept here (not shown).
+        # (Not in a layout, so given the page as their parent: a widget of no parent whose signal holds the page
+        # would keep both alive for good - a cycle through C++ that Python's collector cannot see.)
         self.notice = plain_label(role="secondary")
+        self.notice.setParent(self)
         self.notice.hide()
-        self.discard_button = QPushButton(tr("Discard"))
-        self.discard_button.setToolTip(tr("Drop the restored changes: the board as the project's file says"))
+        self.folder.setParent(self)
+        self.folder.hide()
+        self.logged_notice = ""
+        self.discard_button = QPushButton(tr("Discard"), self)  # (kept for callers; the canvas menu offers it now)
         self.discard_button.clicked.connect(lambda _=False: self.discard_draft())
         self.discard_button.hide()
-        notice_row = QHBoxLayout()
-        notice_row.addWidget(self.notice, 1)
-        notice_row.addWidget(self.discard_button)
-        layout.addLayout(notice_row)
         split = QSplitter(Qt.Orientation.Horizontal)
         # The parts: dragged onto the board (where they are dropped), or added with a double-click or Enter.
         self.palette = PartsList()
@@ -1161,6 +1298,7 @@ class BoardPage(QWidget):
         self.preview.setFont(MONO)
         self.preview.setMaximumHeight(64)
         self.preview.setAccessibleName(tr("Command line"))
+        self.preview.hide()  # until CLI command is pressed
         layout.addWidget(self.preview)
         # One line under the board (the page does not scroll): a long refusal is cut there, whole in the tooltip.
         self.verdict = ElidedLabel(role="secondary")
@@ -1171,17 +1309,10 @@ class BoardPage(QWidget):
         self.apply_button.clicked.connect(lambda: self.apply())
         self.dry_button = QPushButton(tr("Dry run"))
         self.dry_button.clicked.connect(lambda: self.dry_run())
-        start_app = QPushButton(tr("Start in the app"))
-        start_app.setProperty("role", "primary")  # the main action of the page
-        start_app.clicked.connect(lambda: self.start(embedded=True))
-        start_window = QPushButton(tr("Start in a terminal window"))
-        start_window.clicked.connect(lambda: self.start(embedded=False))
-        self.session = QLineEdit()
-        self.session.setPlaceholderText(tr("session name"))
-        self.session.setAccessibleName(tr("Session name"))
-        self.session.setMaximumWidth(160)
-        start_session = QPushButton(tr("Start as session"))
-        start_session.clicked.connect(lambda: self.start(session=self.session.text().strip()))
+        # One Start: where, and whether as a session (a codename unless one is typed) - widgets.StartControls.
+        self.start_controls = StartControls(lambda embedded, session: self.start(embedded=embedded, session=session),
+                                            sai, self.settings())
+        self.session = self.start_controls.name
         # Where it starts: this machine or a host (its own launcher checks and starts it; paths are that host's).
         self.host_choice = HostCombo(sai)
         self.host_choice.chosen.connect(lambda _host: self.host_changed())
@@ -1195,14 +1326,38 @@ class BoardPage(QWidget):
         self.host_note = plain_label(role="secondary")
         self.host_note.hide()
         layout.addWidget(self.host_note)
-        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, start_app, start_window,
-                              self.session, start_session))
+        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, self.start_controls))
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self.check)
         self.set_board(B.with_backend(B.from_argv(sai, self.default_agent(), []),
                                       self.settings().get("default_backend")), None)
         help_view.on_shown_changed(self.show_help_marks)
+        # Ctrl+S saves the board: Apply (it shows the project file and what changes, then writes and trusts it).
+        save = QShortcut(QKeySequence(QKeySequence.StandardKey.Save), self)
+        save.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        save.activated.connect(lambda: self.apply())
+        self.edit_node, self.edit_index = None, 0  # the part whose properties are open, and Undo's index then
+
+    def show_cli(self, shown):
+        """CLI command: the command line of the board under it (SHOWN) or not; kept in the app's state."""
+        self.preview.setVisible(bool(shown))
+        if self.cli_button.isChecked() != bool(shown):
+            self.cli_button.setChecked(bool(shown))
+        if self.state is not None:
+            self.state.set("board_cli", bool(shown))
+
+    @property
+    def session_suggestion(self):
+        return self.start_controls.suggestion
+
+    def new_session_name(self):
+        self.start_controls.new_name()
+
+    def start_session(self):
+        """As a session, where the Start controls say (kept for callers)."""
+        self.start_controls.as_session.setChecked(True)
+        return self.start_controls.start()
 
     def show_help_marks(self, shown):
         """The (?) in each node's title band follows the setting help_buttons."""
@@ -1267,6 +1422,7 @@ class BoardPage(QWidget):
 
     def new_stack(self):
         self.undo = QUndoStack(self)
+        self.undo.setUndoLimit(UNDO_LIMIT)  # (the oldest steps go; a board whose first step went is not clean again)
         self.undo_group.addStack(self.undo)
         self.undo_group.setActiveStack(self.undo)
 
@@ -1277,6 +1433,7 @@ class BoardPage(QWidget):
         if key == self.key_of(self.directory):
             return
         session = self.sessions.get(key)
+        self.autosave()  # the board shown until now is kept at once
         if session is None:
             self.open_project(directory, quiet=True)  # load() keeps the board shown until now
             return
@@ -1320,22 +1477,41 @@ class BoardPage(QWidget):
                          tr("Drop the changes"), reject=tr("Keep them"))
 
     def show_notice(self, text, role="secondary"):
-        draft = getattr(self, "draft_notice", "")
-        if text and draft and text != draft and not self.discard_button.isHidden():
-            text, role = f"{draft}\n{text}", "notice-warn"  # the restored changes stay announced
+        """A note about the board: into the log window (a warning or an error by ROLE, else information), once per
+        text; the last one is kept in self.notice. Nothing is shown above the board any more."""
         self.notice.setText(text)
         self.notice.setProperty("role", role)
-        self.notice.style().unpolish(self.notice)
-        self.notice.style().polish(self.notice)
-        self.notice.setVisible(bool(text))
+        if text and text != self.logged_notice:
+            level = {"notice-error": "ERROR", "notice-warn": "WARNING"}.get(role, "INFO")
+            applog.log(level, "board", text)
+        self.logged_notice = text
 
     def restore(self, state):
+        """The board as STATE says (a step of Undo or Redo): its parts updated where they are when only their
+        properties or places changed - the usual step, which made the whole scene again before (a few ms each,
+        with every item made anew) - else the scene made again."""
         self.restoring = True
         try:
-            self.board = B.Board.from_state(state)
-            self.rebuild()
+            board = B.Board.from_state(state)
+            same = bool(self.items) and {node.id for node in board.nodes} == set(self.items) and \
+                sorted(board.edges) == sorted(getattr(edge, "ids", ()) for edge in self.edges)
+            self.board = board
+            if same:
+                self.update_in_place()
+            else:
+                self.rebuild()
         finally:
             self.restoring = False
+
+    def update_in_place(self):
+        """The items of the parts (and their edges) follow self.board: places, texts, problems; the selection stays."""
+        for node in self.board.nodes:
+            item = self.items[node.id]
+            if (item.pos().x(), item.pos().y()) != (node.x, node.y):
+                item.setPos(node.x, node.y)  # (itemChange moves its edges)
+        self.scene.setSceneRect(self.scene.itemsBoundingRect().adjusted(-200, -200, 400, 400))
+        self.refresh()
+        self.inspect_timer.start()
 
     def change(self, text, function):
         """Apply FUNCTION to the model as one undo step."""
@@ -1364,10 +1540,14 @@ class BoardPage(QWidget):
         if getattr(self, "restyle_pending", False):
             self.restyle_pending = False
             self.rebuild()
+            self.view.resetCachedContent()  # the grid in the new theme's colours
             self.view.viewport().update()
 
     def rebuild(self):
         selected = self.inspected
+        # A connection being dragged ends here: its port and its dashed line go with the scene's items (a Delete, a
+        # new theme or another project meanwhile), and every later move of the mouse raised on the deleted port.
+        self.scene.cancel_connect()
         self.scene.blockSignals(True)
         self.scene.clear()
         self.scene.blockSignals(False)
@@ -1629,6 +1809,30 @@ class BoardPage(QWidget):
                 self.board.remove(node_id)
         self.change(tr("Delete"), delete)
 
+    def remove_node(self, node_id):
+        """Remove the part NODE_ID (and its connections) as one step of Undo; the agent, the proxy and the network
+        stay."""
+        node = self.board.node(node_id)
+        if node is None or B.KINDS[node.kind].required:
+            return False
+        if self.edit_node == node_id:
+            self.edit_node = None
+        self.change(tr("Remove"), lambda: self.board.remove(node_id))
+        return self.board.node(node_id) is None
+
+    def ask_remove(self, node_id):
+        """The [x] of a part: asked first (Remove / Keep, Keep the default) unless the setting board_confirm_remove
+        is off; then removed."""
+        node = self.board.node(node_id)
+        if node is None or B.KINDS[node.kind].required:
+            return False
+        ask = self.settings().get("board_confirm_remove", True) is not False
+        if not ask_first(self, "board-remove-part", tr("Remove the part"),
+                         tr("Remove {title} from the board? Undo brings it back.", title=printable(node.title())),
+                         tr("Remove"), detail={"ask": ask}, reject=tr("Keep")):
+            return False
+        return self.remove_node(node_id)
+
     def arrange(self):
         self.change(tr("Arrange"), lambda: self.board.layout(self.grid()))
         self.fit()
@@ -1652,7 +1856,7 @@ class BoardPage(QWidget):
         menu = QMenu(self.view)
         hit = None
         for item in self.scene.items(point):
-            item = item.parentItem() if isinstance(item, (PortItem, NodeHelpMark)) else item
+            item = item.parentItem() if isinstance(item, (PortItem, NodeHelpMark, NodeCloseMark)) else item
             if isinstance(item, NodeItem) or (isinstance(item, EdgeItem) and item.near(point) and item.flags()
                                               & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
                 hit = item
@@ -1700,6 +1904,8 @@ class BoardPage(QWidget):
         menu.addAction(tr("Zoom 100 %"), self.view.zoom_reset)
         menu.addAction(tr("Arrange"), self.arrange)
         menu.addSeparator()
+        discard = menu.addAction(tr("Discard the changes not applied"), lambda: self.discard_changes())
+        discard.setEnabled(bool(self.directory) and self.dirty())
         undo = menu.addAction(tr("Undo"), self.undo_group.undo)
         undo.setEnabled(self.undo_group.canUndo())
         redo = menu.addAction(tr("Redo"), self.undo_group.redo)
@@ -1952,11 +2158,12 @@ class BoardPage(QWidget):
         except RuntimeError:  # the scene is being destroyed: the app quits
             return
         nodes = [i for i in selected if isinstance(i, NodeItem)]
-        self.inspected = nodes[0].node_id if len(nodes) == 1 else None
-        self.inspect_timer.start()
-        if len(nodes) == 1:
-            self.show_inspector()
-        elif not selected:  # a click on the empty canvas: its docked panel folds
+        inspected = nodes[0].node_id if len(nodes) == 1 else None
+        if inspected != self.inspected:
+            self.commit_lists()  # a list typed into a moment ago belongs to the part shown until now
+        self.inspected = inspected
+        self.inspect_timer.start()  # an open inspector follows the selection; a double click opens it
+        if not selected:  # a click on the empty canvas: its docked panel folds
             self.fold_inspector()
 
     def show_inspector(self):
@@ -1986,9 +2193,51 @@ class BoardPage(QWidget):
         self.clear_inspector()
         self.live_token = getattr(self, "live_token", 0) + 1  # a live row still being looked up is for another look
         if node is None:
-            self.inspector_title.setText(tr("Select a part to change it"))
+            self.edit_node = None
+            self.inspector_title.setText(tr("Double-click a part to change it"))
             self.inspector_help.set_tip("board.inspector")
             return
+        if node.id != self.edit_node or self.undo is not getattr(self, "edit_stack", None):
+            # another part's properties (or another project's board): what Cancel goes back to starts now
+            self.edit_node, self.edit_index, self.edit_stack = node.id, self.undo.index(), self.undo
+        self.inspect_rows(node)
+        self.edit_buttons(node)
+
+    def edit_buttons(self, node):
+        """OK (keep the changes made here), Cancel (back to the part as it was when its properties opened: those
+        steps undone) and Remove (the part, at once: Undo brings it back)."""
+        changed = self.undo.index() != self.edit_index
+        box = QDialogButtonBox()
+        ok = box.addButton(tr("OK"), QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        ok.setToolTip(tr("Keep the changes and close the properties"))
+        cancel.setToolTip(tr("Undo the changes made since the properties were opened"))
+        cancel.setEnabled(changed)
+        ok.clicked.connect(lambda _=False: self.edit_done(True))
+        cancel.clicked.connect(lambda _=False: self.edit_done(False))
+        row = QHBoxLayout()
+        if not B.KINDS[node.kind].required:
+            remove = QPushButton(tr("Remove"))
+            remove.setToolTip(tr("Remove this part from the board (Undo brings it back)"))
+            remove.clicked.connect(lambda _=False, node_id=node.id: self.remove_node(node_id))
+            row.addWidget(remove)
+        row.addStretch(1)
+        row.addWidget(box)
+        holder = QWidget()
+        holder.setLayout(row)
+        self.inspector.addRow(holder)
+        self.edit_box = box
+
+    def edit_done(self, keep):
+        """OK (KEEP) or Cancel of the inspector: Cancel undoes what was changed since the part's properties opened;
+        both close (fold) the properties."""
+        if not keep and self.undo is getattr(self, "edit_stack", None) and self.undo.index() != self.edit_index:
+            self.undo.setIndex(self.edit_index)
+        self.edit_index = self.undo.index()
+        self.fold_inspector()
+        self.inspect_timer.start()
+
+    def inspect_rows(self, node):
         self.inspector_title.setText(node.title())
         self.inspector_help.set_tip(f"kind.{node.kind}")
         node_id = node.id
@@ -2029,11 +2278,7 @@ class BoardPage(QWidget):
             mode.currentIndexChanged.connect(lambda _: self.set_prop(node_id, "mode", mode.currentData()))
             self.inspector.addRow(tr("Mode"), mode)
         elif kind == "mcp":
-            name = QComboBox()
-            name.setEditable(True)
-            name.addItems(self.mcp_names())
-            name.setCurrentText(node.props.get("name", ""))
-            name.currentTextChanged.connect(lambda text: self.set_prop(node_id, "name", text.strip()))
+            name = self.mcp_chooser(node)
             self.inspector.addRow(tr("Server"), name)
             self.disable_if_forbidden(name, "--mcp")
             definition = node.props.get("definition")  # the project's own server
@@ -2468,6 +2713,61 @@ class BoardPage(QWidget):
         except Exception:  # noqa: BLE001
             return []
 
+    def mcp_chooser(self, node):
+        """Every MCP server there is to choose from: those defined here (sandbox-ai mcp list, the built-in ones),
+        the project's own (.sandbox-ai.json) and, once read, the catalogs' entries not added yet (marked: they are
+        added on the MCP page first). A name may still be typed (a server of another host)."""
+        node_id = node.id
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.lineEdit().setPlaceholderText(tr("Choose a server…"))
+        names = self.mcp_names()
+        own = sorted(name for name in B.project_servers(self.board) if name not in names)
+        for name in names:
+            combo.addItem(name, name)
+        for name in own:
+            combo.addItem(tr("{name} (the project's own)", name=name), name)
+        catalog = getattr(self, "mcp_catalog_names", None)
+        if catalog is None:
+            self.load_mcp_catalog()
+        for name in sorted(set(catalog or ()) - set(names) - set(own)):
+            index = combo.count()
+            combo.addItem(tr("{name} (catalog: add it on the MCP page first)", name=name), name)
+            combo.setItemData(index, tr("Not added yet: the MCP page adds it from its catalog"),
+                              Qt.ItemDataRole.ToolTipRole)
+        current = node.props.get("name", "")
+        index = combo.findData(current)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setCurrentIndex(-1)
+            combo.setEditText(current)
+
+        def chosen(_index=None):
+            data = combo.currentData()
+            text = data if isinstance(data, str) and combo.currentText() == combo.itemText(combo.currentIndex()) \
+                else combo.currentText()
+            self.set_prop(node_id, "name", str(text or "").strip())
+        combo.activated.connect(chosen)
+        combo.lineEdit().editingFinished.connect(chosen)
+        return combo
+
+    def load_mcp_catalog(self):
+        """The catalogs' entries (sandbox-ai mcp catalog: a command, so in the background), once."""
+        if getattr(self, "mcp_catalog_loading", False):
+            return
+        self.mcp_catalog_loading = True
+
+        def done(result, error):
+            self.mcp_catalog_loading = False
+            entries = result[0] if isinstance(result, tuple) and result else []
+            self.mcp_catalog_names = sorted({str(entry.get("name")) for _prefix, entry in entries
+                                             if isinstance(entry, dict) and entry.get("name")}) if not error else []
+            if self.inspected in self.items and self.board.node(self.inspected).kind == "mcp":
+                self.inspect_timer.start()
+        background(self.sai.mcp_catalog, owner=self, done=done, timeout=60)
+
     # -- projects --
 
     def open_project(self, directory=None, quiet=False):
@@ -2576,6 +2876,7 @@ class BoardPage(QWidget):
         self.host_choice.chosen.connect(lambda _host: state.schedule())
         self.undo_group.cleanChanged.connect(lambda _clean: state.schedule())
         self.undo_group.indexChanged.connect(lambda _index: state.schedule())
+        self.show_cli(state.get("board_cli", False) is True)
 
     def keep_boards(self):
         """Per project: zoom and scroll position, and the board itself while it has changes not applied (so a
@@ -2593,10 +2894,14 @@ class BoardPage(QWidget):
                 entry["draft"] = scrub_board(session["board"].state())
                 if self.sources.get(key):
                     entry["source"] = dict(self.sources[key])
+                history = history_of(session["stack"])  # Undo comes back with the draft
+                if history is not None:
+                    entry["history"] = history
             boards[key] = entry
         for key, entry in self.saved_boards.items():
             if key not in boards and key not in self.restored:
                 boards[key] = entry
+        within_budget(boards, self.key_of(self.directory))
         self.state.data["boards"] = boards
         self.state.data["board_host"] = self.host()
 
@@ -2611,28 +2916,95 @@ class BoardPage(QWidget):
         draft = entry.get("draft")
         if isinstance(draft, dict):
             try:
-                B.Board.from_state(draft)
-            except (KeyError, TypeError, ValueError):
+                B.Board.checked(draft, self.sai, self.policy())
+            except ValueError as exc:
+                applog.log("WARNING", "board", f"{printable(directory or key)}: the changes kept in the app's state "
+                           f"file were left out ({printable(exc)})")
                 draft = None
             before = self.board.state()
-            if draft and draft != before:
+            if draft and draft != before and not self.restore_history(entry.get("history"), before, draft):
                 self.undo.push(Snapshot(self, tr("Restore the changes not applied"), before, draft))
+            if draft and draft != before:
                 self.draft_notice = tr("Restored the changes not applied when the app was last closed: Undo goes "
                                        "back to the project's file, Discard drops them.")
-                self.show_notice(self.draft_notice, "notice-warn")
-                self.discard_button.show()
+                applog.log("INFO", "board", f"{printable(directory or key)}: {self.draft_notice}")
                 source, now = entry.get("source"), self.sources.get(key)
                 if key and directory and not (isinstance(source, dict) and source == now and source.get("trusted")):
                     self.untrusted[key] = PT.path_text(directory)
-                    self.reasked = self.draft_notice + "\n" + tr(
+                    self.reasked = tr(
                         "These changes were made to a version of the project file that is not trusted or no longer "
                         "there: Apply (it shows everything that will be trusted and asks) before you start them.")
         zoom, center = entry.get("zoom"), entry.get("center")
         if isinstance(zoom, (int, float)) and 0.05 <= zoom <= 20:
             self.fitted = True  # not fitted again when first shown
             self.view.setTransform(QTransform.fromScale(zoom, zoom))
-            if isinstance(center, list) and len(center) == 2 and all(isinstance(v, (int, float)) for v in center):
+            if isinstance(center, list) and len(center) == 2 and all(isinstance(v, (int, float)) and abs(v) < 1e9
+                                                                     for v in center):
                 self.view.centerOn(QPointF(*center))
+
+    def restore_history(self, history, before, draft):
+        """The steps of Undo kept with a draft (history_of), back on the stack: the file's board BEFORE first, then
+        each step, Undo's place where it was. True when it ends at DRAFT (else nothing is kept of it)."""
+        try:
+            steps, index = history["steps"], int(history["index"])
+            states = [(str(step["text"]), step["before"], step["after"]) for step in steps]
+            for _text, older, newer in states:
+                B.Board.checked(older, self.sai, self.policy())
+                B.Board.checked(newer, self.sai, self.policy())
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
+        if not states or not 0 <= index <= len(states):
+            return False
+        reached = states[index - 1][2] if index else states[0][1]
+        if reached != draft:
+            return False
+        self.undo.clear()
+        if states[0][1] != before:
+            self.undo.push(Snapshot(self, tr("Restore the changes not applied"), before, states[0][1]))
+        offset = self.undo.count()
+        for text, older, newer in states:
+            self.undo.push(Snapshot(self, text, older, newer))
+        self.undo.setIndex(offset + index)
+        if self.board.state() != draft:
+            self.undo.setIndex(0)
+            self.undo.clear()
+            return False
+        return True
+
+    def autosave(self):
+        """The board's changes kept now (state file: the draft, its Undo, zoom), not after the usual delay: when the
+        page is left, another project is shown or the window goes; a crash then loses nothing."""
+        if self.state is not None:
+            try:
+                self.state.flush(wait=False)  # (the writer thread syncs it to the disk; the switch goes on)
+            except Exception as exc:  # noqa: BLE001 - never stops the switch
+                applog.log("WARNING", "board", f"the board could not be saved: {exc}")
+
+    def commit_edits(self):
+        """What is being typed in the inspector, taken now as leaving the field would take it (a list: without the
+        pause): before quitting keeps the draft."""
+        focused = QApplication.focusWidget()
+        if focused is not None and (self.isAncestorOf(focused) or self.inspector_holder.isAncestorOf(focused)):
+            focused.clearFocus()  # (a line edit's editingFinished)
+        self.commit_lists()
+
+    def commit_lists(self):
+        """A list field of the inspector takes what was typed 600 ms after the typing stops: taken now (another part
+        selected, quitting), not lost."""
+        for edit in self.inspector_holder.findChildren(LinesEdit) + self.findChildren(LinesEdit):
+            if edit.timer.isActive():
+                edit.timer.stop()
+                edit.changed.emit(edit.values())
+
+    def hideEvent(self, event):  # noqa: N802
+        self.autosave()
+        super().hideEvent(event)
+
+    def discard_changes(self):
+        """The board as the project's file says, after asking (what is not applied is lost)."""
+        if self.directory and self.may_discard():
+            self.undo.setClean()  # (asked already: open_project need not ask again)
+            self.discard_draft()
 
     def discard_draft(self):
         """Drop the restored changes: the project's board as its file says."""
@@ -2768,31 +3140,44 @@ class BoardPage(QWidget):
         # Trusted, the file's options apply at every later start of the project: asked first (Cancel the default).
         if not ask_first(self, "project-trust", tr("Write and trust"), question, tr("Write and trust"), details=details):
             return False
+        at = (self.undo, self.undo.index())  # what is written: the board as it is now (it may change meanwhile)
         background(self.sai.write_project, main, document, owner=self, work=True, source=self.apply_button, timeout=60,
-                   done=lambda result, error: self.applied(main, result, error, then))
+                   done=lambda result, error: self.applied(main, result, error, then, at))
         return True
 
-    def applied(self, main, result, error, then=None):
+    def applied(self, main, result, error, then=None, at=None):
+        """The project file was written (ERROR: not). AT: (the undo stack, its index) of the board written - a board
+        changed since, or another project's shown by now, is not marked as applied (what changed is no draft then,
+        and would be lost)."""
         if error is not None:
             warn(self, tr("Not written"), printable(error))
             if then is not None:
                 warn(self, tr("Not started"), tr("The project file was not written, so the start that needs it "
                                                  "did not happen."))
             return
+        stack, index = at or (self.undo, self.undo.index())
+        shown = stack is self.undo
+        if shown:
+            try:
+                B.write_layout(main, self.board)
+            except OSError:
+                pass  # the layout is a convenience
+            self.directory = main
+            self.show_folder()
         try:
-            B.write_layout(main, self.board)
-        except OSError:
-            pass  # the layout is a convenience
-        self.directory = main
-        self.show_folder()
-        self.undo.setClean()
-        self.show_notice("")
+            if stack.index() == index:
+                stack.setClean()
+        except RuntimeError:  # the project's tab was closed meanwhile: its stack is gone
+            pass
+        if shown:
+            self.show_notice("")
         self.untrusted.pop(self.key_of(main), None)
         try:  # the file just written and trusted is the source of the board's next draft
             self.sources[self.key_of(main)] = {"digest": self.sai.review_project(main).digest, "trusted": True}
         except (OSError, ValueError):
             self.sources.pop(self.key_of(main), None)
-        self.opened.emit(str(main))
+        if shown:  # (another project shown meanwhile stays shown)
+            self.opened.emit(str(main))
         if then is not None:  # the start waited for the file: it goes on now (no second message in between)
             then()
             return
@@ -2905,13 +3290,13 @@ class BoardPage(QWidget):
                     return False
                 argv = self.sai.host_launch_argv(host, agent, options, agent_args, session or None)
                 title = f"{printable(host)}: {agent}" + (f" ({session})" if session else "")
-                self.terminal(argv, title, embedded=None if session else embedded, cwd=None)
+                self.terminal(argv, title, embedded=embedded, cwd=None)
                 return True
             argv = self.sai.launch_argv(agent, options, agent_args, session or None)
             workspaces = self.board.of_kind("workspace")
             cwd = workspaces[0].props.get("path") if workspaces else None
             title = agent + (f" ({session})" if session else "")
-            self.terminal(argv, title, embedded=None if session else embedded, cwd=cwd)
+            self.terminal(argv, title, embedded=embedded, cwd=cwd)
         except Exception as exc:  # noqa: BLE001 - the window stays; the reason is shown
             warn(self, tr("Not started"), printable(exc))
             return False

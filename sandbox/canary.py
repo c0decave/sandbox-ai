@@ -550,10 +550,23 @@ def run_state(run):
     return state_root() / "runs" / f"{run}.json"
 
 
+_procinfo = None
+LOADING = threading.RLock()
+
+
 def process_start(pid):
+    """PID's start time (procinfo.py: /proc on Linux, sysctl on macOS), or None."""
+    global _procinfo
+    if _procinfo is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_procinfo_for_canary", HERE / "procinfo.py")
+        with LOADING:  # published only once loaded: another thread never sees a half-made module
+            if _procinfo is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _procinfo = loaded
     try:
-        return int(Path(f"/proc/{int(pid)}/stat").read_text().rpartition(")")[2].split()[19])
-    except (OSError, IndexError, ValueError, TypeError):
+        return _procinfo.start_time(int(pid))
+    except (ValueError, TypeError):
         return None
 
 

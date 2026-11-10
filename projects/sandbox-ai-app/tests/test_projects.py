@@ -165,10 +165,10 @@ def test_switching_the_project_drives_the_pages_and_is_kept(window, env, monkeyp
     one, two = project(env, "one"), project(env, "two")
     (two / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--offline"]}))
     assert window.set_project(one)
-    assert window.project == str(one) and window.project_bar.name.text() == "one"
-    assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.text())  # read in a thread
+    assert window.project == str(one) and window.project_bar.name() == "one"
+    assert wait(lambda: "no .sandbox-ai.json yet" in window.project_bar.state.toolTip())  # read in a thread
     assert window.launch.form.values()["--workspace"] == [str(one)]
-    assert window.board.directory == str(one) and window.board.notice.isVisibleTo(window.board)
+    assert window.board.directory == str(one) and "no .sandbox-ai.json yet" in window.board.notice.text()
     assert wait(lambda: window.files.roots.currentData() == str(one))  # read in a thread
     log_dir = str(window.sai.launcher.default_log_dir(one))
     assert wait(lambda: window.connections.directory.currentData() == log_dir)  # listed in a thread
@@ -181,7 +181,7 @@ def test_switching_the_project_drives_the_pages_and_is_kept(window, env, monkeyp
     assert wait(lambda: bar.combo.findData(str(two)) >= 0)
     bar.activated(bar.combo.findData(str(two)))
     assert window.project == str(two) and window.board.board.first("agent").props["agent"] == "codex"
-    assert wait(lambda: "not trusted yet" in bar.state.text() and window.launch.review_button.isVisibleTo(window.launch))
+    assert wait(lambda: "not trusted yet" in bar.state.toolTip() and window.launch.review_button.isVisibleTo(window.launch))
     assert window.sai.settings()["project"] == str(two)
     assert window.sai.recent_projects()[:2] == [str(two), str(one)]
     # The next start opens it again.
@@ -226,7 +226,7 @@ def test_open_folder_and_new_project_from_the_switcher(window, env, monkeypatch)
     monkeypatch.setattr(window.board, "open_wizard", wizard)
     bar.activated(bar.combo.findData(bar.NEW))
     assert opened == [False] and window.project == str(made) and window.current_page() == "board"
-    assert window.project_bar.name.text() == "made"
+    assert window.project_bar.name() == "made"
 
 
 def test_applying_the_board_trusts_and_shows_the_project_state(window, env, wait):
@@ -235,7 +235,51 @@ def test_applying_the_board_trusts_and_shows_the_project_state(window, env, wait
     window.board.add_node("limits", **{"--memory": "4g"})
     assert window.board.apply()
     assert wait(lambda: (folder / ".sandbox-ai.json").exists() and not window.board.dirty(), 20)
-    assert wait(lambda: ".sandbox-ai.json trusted" in window.project_bar.state.text(), 10)
+    assert wait(lambda: ".sandbox-ai.json trusted" in window.project_bar.state.toolTip(), 10)
+
+
+def test_the_project_name_is_the_switcher_and_shown_once(window, env, wait):
+    """The project bar shows the project once: its name, large, is the drop-down that switches (no "Project" label,
+    no second name and path at the right end); its path is below it and in the tooltip, the list names the paths."""
+    one = project(env, "one")
+    window.set_project(one)
+    bar = window.project_bar
+    assert bar.findChildren(QtWidgets.QComboBox) == [bar.combo], "one switcher"
+    texts = [label.text() for label in bar.findChildren(QtWidgets.QLabel)]
+    assert "Project" not in texts and not any(t.startswith("one") for t in texts), "the name is not shown twice"
+    assert bar.combo.objectName() == "projectName" and bar.combo.accessibleName() == "Project"
+    assert bar.name() == "one" and str(one) not in bar.name(), "the name, not the path"
+    assert str(one) in bar.combo.toolTip() and bar.where.text() == str(one)
+    assert bar.combo.currentText().startswith("one  —  /"), "the list names each project with its path"
+    width = bar.combo.sizeHint().width()
+    assert width < bar.combo.fontMetrics().horizontalAdvance(bar.combo.currentText()), "as wide as the name"
+    items = [bar.combo.itemData(i) for i in range(bar.combo.count())]
+    assert bar.OPEN in items and bar.NEW in items, "open folder and the wizard stay in the switcher"
+
+
+def test_the_trust_state_is_an_icon_that_says_what_it_means(window, env, wait):
+    """The state of the project's .sandbox-ai.json: an icon per state (theme.TRUST_GLYPHS); hovering names the state
+    and what it means for a start; a screen reader gets the name."""
+    from sandbox_ai_app.ui import PROJECT_STATE_MEANINGS, PROJECT_STATES
+    folder = project(env, "p")
+    window.set_project(folder)
+    bar = window.project_bar
+    assert wait(lambda: bar.state_key == "none", 10)
+    assert bar.state.text() == "" and not bar.state.pixmap().isNull() and bar.state.isVisibleTo(bar)
+    assert bar.state.accessibleName() == "no .sandbox-ai.json yet"
+    assert "only the options you give it" in bar.state.toolTip()
+    images = set()
+    for state in PROJECT_STATES:
+        bar.show_state(state, "Permission denied" if state == "unreadable" else "")
+        assert PROJECT_STATES[state] in bar.state.toolTip() and PROJECT_STATE_MEANINGS[state] in bar.state.toolTip()
+        assert bar.state.accessibleName() == PROJECT_STATES[state] and bar.state.accessibleDescription()
+        images.add(bar.state.pixmap().toImage().bits().tobytes())
+    assert "Permission denied" in bar.state.toolTip(), "why it cannot be read"
+    assert len(images) == len(PROJECT_STATES), "a different icon per state"
+    bar.restyle()  # another theme: drawn again in its colours
+    assert bar.state_key == "unreadable" and not bar.state.pixmap().isNull()
+    window.project_bar.show_project(None)
+    assert bar.state.isHidden() and bar.name() == "No project"
 
 
 def test_approvals_of_the_current_project_stand_out(window, env):

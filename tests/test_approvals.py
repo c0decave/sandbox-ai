@@ -251,6 +251,19 @@ def test_desktop_notification_escapes_markup(monkeypatch):
     assert "<img" not in body and "&lt;img" in body and "\x1b" not in body and "\nline" in body
 
 
+def test_a_notify_send_that_hangs_ends_no_watch(monkeypatch, tmp_path):
+    """Bug hunt: notify-send waits for a notification daemon that is not there; its timeout (TimeoutExpired) went up
+    out of desktop_notification and ended the thread that called it: the watch of the questions (approvals.watch)
+    or the browser listener (serve_browser) stopped for the rest of the run."""
+    def hangs(argv, **kwargs):
+        raise ap.subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+    monkeypatch.setattr(ap.shutil, "which", lambda name: "/usr/bin/notify-send")
+    monkeypatch.setattr(ap.subprocess, "run", hangs)
+    ap.desktop_notification("sandbox-ai asks", "look up pypi.org")
+    monkeypatch.setattr(ap.subprocess, "run", lambda argv, **kwargs: (_ for _ in ()).throw(OSError(7, "E2BIG")))
+    ap.desktop_notification("sandbox-ai asks", "look up pypi.org")
+
+
 def test_questions_cannot_inject_lines_or_escapes(run, capsys):
     """What the agent chose (a TLS name, a push URL, refs) is escaped wherever it is printed."""
     ident = "1-1-1"
@@ -617,3 +630,23 @@ def test_allow_no_open_answers_a_browser_question_without_opening_it_here(run, m
         ap.answer("1-1-2", "deny", runs=run, no_open=True, out=lambda line: None)
     ask(run, "1-1-3", kind="browser", url="https://example.org/")
     assert ap.main(["allow", "1-1-3"], out=lines.append) == 0 and opened == ["https://example.org/"]  # as before
+
+
+def test_the_policy_file_is_the_launchers_and_without_it_the_launcher_is_not_loaded(monkeypatch, tmp_path):
+    """Performance round 6: without a policy file `sandbox-ai approvals` does not load the launcher for the widest
+    scope (a third of every such command); the path is the launcher's own, and with a file the launcher decides."""
+    launcher = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+        "agent_sandbox_policy_check", ROOT / "sandbox/agent_sandbox.py"))
+    launcher.__spec__.loader.exec_module(launcher)
+    assert ap.POLICY_FILE == launcher.POLICY_FILE
+    loaded = []
+    real = importlib.util.spec_from_file_location
+    monkeypatch.setattr(ap.importlib.util, "spec_from_file_location",
+                        lambda *a, **k: loaded.append(a[0]) or real(*a, **k))
+    monkeypatch.setattr(ap, "POLICY_FILE", tmp_path / "policy.json")
+    assert ap.policy_scope() == "always" and loaded == []
+    (tmp_path / "policy.json").write_text('{"version": 1}')
+    (tmp_path / "policy.json").chmod(0o666)  # (writable by others: refused also when the tests run as root)
+    with pytest.raises(ValueError):  # not root's: the launcher refuses it (fail closed), as before
+        ap.policy_scope()
+    assert loaded[0] == "agent_sandbox_for_approvals"

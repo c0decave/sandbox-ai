@@ -605,6 +605,23 @@ class ServerDialog(QDialog):
         self.vpn.lineEdit().setPlaceholderText(tr("none"))
         self.vpn.setToolTip(tr("The VPN profile the server is reached through (optional)"))
         self.anthropic = QCheckBox(tr("It also offers the Anthropic Messages API (Claude Code)"))
+        # Finding one: this machine's loopback and the addresses given, one read-only request per usual port.
+        self.addresses = QLineEdit("127.0.0.1")
+        self.addresses.setAccessibleName(tr("Addresses to look at"))
+        self.addresses.setToolTip(tr("Comma-separated IP addresses (this machine's loopback, LAN addresses): one "
+                                     "read-only request for the model list per usual port (Ollama 11434, LM Studio "
+                                     "1234, llama.cpp 8080, vLLM 8000), short timeouts; no range is scanned"))
+        self.find_button = QPushButton(tr("Find servers"))
+        self.find_button.setToolTip(tr("Look for LLM servers at these addresses (sandbox-ai llm detect)"))
+        self.find_button.clicked.connect(lambda: self.find())
+        self.found = QComboBox()
+        self.found.setAccessibleName(tr("Servers found"))
+        self.found.activated.connect(lambda _index: self.take_found())
+        finding = QHBoxLayout()
+        finding.addWidget(self.addresses, 1)
+        finding.addWidget(self.find_button)
+        form.addRow(tr("Look at"), finding)
+        form.addRow(tr("Found"), self.found)
         form.addRow(tr("Kind"), self.kind)
         form.addRow(tr("URL"), self.url)
         form.addRow(tr("Name"), self.name)
@@ -629,7 +646,55 @@ class ServerDialog(QDialog):
         layout.addWidget(buttons)
         self.kind.currentIndexChanged.connect(lambda _index: self.kind_changed())
         self.kind_changed()
+        self.form.setRowVisible(self.found, False)
         background(sai.vpn_profiles, owner=self, timeout=90, done=self.vpns_read)
+
+    def find(self):
+        """Look for servers at the addresses given (in the background); the ones found are offered to choose."""
+        try:
+            addresses = [a.strip() for a in self.addresses.text().split(",") if a.strip()]
+            WL.detect_argv(addresses)  # checked before anything runs
+        except ValueError as exc:
+            self.note.setText(printable(exc))
+            self.note.show()
+            return
+        self.note.hide()
+        sai = self.sai
+        background(lambda: WL.detect(sai, addresses), owner=self, source=self.find_button,
+                   timeout=WL.DETECT_SECONDS + 30, done=self.detected)
+
+    def detected(self, result, error):
+        try:
+            self.found.clear()
+        except RuntimeError:  # closed meanwhile
+            return
+        if error is not None or not result:
+            self.form.setRowVisible(self.found, False)
+            self.note.setText(printable(error) if error is not None else
+                              tr("No LLM server answered there: give its kind and URL."))
+            self.note.show()
+            return
+        for entry in result:
+            count = len(entry["models"])
+            self.found.addItem(tr("{kind} at {url}, {count} models", kind=WL.kind_label(entry["kind"]),
+                                  url=printable(entry["url"]), count=count), entry)
+        self.form.setRowVisible(self.found, True)
+        self.found.setCurrentIndex(0)
+        self.take_found()
+
+    def take_found(self):
+        """The server chosen of the ones found: its kind and URL (and a name not taken, unless one was typed)."""
+        entry = self.found.currentData()
+        if not isinstance(entry, dict):
+            return
+        self.kind.blockSignals(True)
+        self.kind.setCurrentIndex(max(0, self.kind.findData(entry["kind"])))
+        self.kind.blockSignals(False)
+        self.url.setText(entry["url"])
+        self.url_typed = True
+        if not self.name_typed:
+            self.name.setText(WL.free_name(entry["kind"], self.taken))
+        self.form.setRowVisible(self.anthropic, entry["kind"] == "openai-compatible")
 
     def kind_changed(self):
         """The URL and name follow the kind until they were typed."""

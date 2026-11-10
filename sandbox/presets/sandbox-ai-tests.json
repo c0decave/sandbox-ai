@@ -1,0 +1,26 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "sandbox-ai-tests",
+  "title": "sandbox-ai tests",
+  "description": "Runs sandbox-ai's own test suites (core, desktop app offscreen, packages) and fixes what fails: PyPI and GitHub open for the test environments, memory and processes for the long runs.",
+  "category": "testing",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-github",
+    "--memory",
+    "12g",
+    "--pids",
+    "8192"
+  ],
+  "prompt": "This workspace is a checkout of sandbox-ai. Test it and fix what fails, file by file, with a test for every fix:\n1. Core: python3 -m venv /tmp/core && /tmp/core/bin/pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt, then /tmp/core/bin/python -m pytest -q -p no:cacheprovider tests (the whole suite takes over an hour: start with the files that changed, `git log -p -5`).\n2. Desktop app (Qt offscreen; PySide6 6.12 needs Python 3.12): uv python install 3.12 && uv venv -p 3.12 /tmp/app && VIRTUAL_ENV=/tmp/app uv pip install --require-hashes -r packaging/requirements-app-test.txt -r packaging/requirements-ci.txt, then in projects/sandbox-ai-app: SANDBOX_AI_HOME=$PWD/../.. QT_QPA_PLATFORM=offscreen /tmp/app/bin/python -X faulthandler -m pytest -p no:cacheprovider tests > /tmp/app-tests.txt 2>&1 (into a file: a native crash names the test it happened in).\n3. Packages: python3 scripts/make_dist.py --allow-dirty --skip-python --out /tmp/dist, then scripts/e2e_package.sh pyz /tmp/dist/sandbox-ai.pyz.\nNever add an event filter to the whole QApplication (with QtWebEngine it crashes). Tests with a real Podman or Bubblewrap cannot run in a sandbox (the engine's socket is never mounted): say which ones need scripts/live_check.py on the host.",
+  "notes": [
+    "The desktop app's tests need Qt's libraries in the agent image (libEGL, libGL, xcb): images built by sandbox-ai 0.1.92 or later have them (sandbox-ai build).",
+    "Live tests against Podman and Bubblewrap run on the host, not in a sandbox: scripts/live_check.py."
+  ]
+}

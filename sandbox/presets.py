@@ -73,9 +73,10 @@ def refused_flags(origin=None):
 # A value of these kinds is checked before it goes into an option.
 CHECKS = {"port": re.compile(r"[1-9][0-9]{0,4}"), "number": re.compile(r"[0-9]+(?:\.[0-9]+)?"),
           "host": re.compile(r"[A-Za-z0-9.:\[\]_-]{1,255}"), "secret": re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}"),
-          # An LLM server as --llm takes it: NAME or NAME:MODEL (llm.py's NAME and MODEL_NAME; qwen2.5-coder:7b,
-          # org/Model-GGUF).
-          "llm": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200})?", re.ASCII),
+          # An LLM server as --llm takes it: NAME, NAME:MODEL or NAME:MODEL,MODEL... (llm.py's NAME and MODEL_NAME;
+          # qwen2.5-coder:7b, org/Model-GGUF).
+          "llm": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200}(?:,[\w.:/@+-]{1,200}){0,49})?",
+                            re.ASCII),
           "vpn": re.compile(r"[A-Za-z0-9_.-]{1,64}")}
 
 
@@ -213,7 +214,9 @@ def problems(document, where="preset", origin=None):
     if document.get("category", "simple") not in CATEGORIES:
         found.append(f"{where}: category is one of {', '.join(CATEGORIES)}")
     agents = document.get("agents", list(AGENTS))
-    if not isinstance(agents, list) or not agents or set(agents) - set(AGENTS):
+    # Compared one by one: an object or a list among them is no agent (a set of them would fail on it).
+    if not isinstance(agents, list) or not agents or not all(isinstance(agent, str) and agent in AGENTS
+                                                             for agent in agents):
         found.append(f"{where}: agents is a list of {', '.join(AGENTS)}")
     for key in ("options", "mcp", "notes", "needs"):
         value = document.get(key, [])

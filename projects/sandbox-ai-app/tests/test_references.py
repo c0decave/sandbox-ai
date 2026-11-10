@@ -3,6 +3,7 @@ NAME`, `sai.NAME` and `self.sai.NAME` in the package must exist in backend.py, a
 attribute of SandboxAI. A merge once left pages calling backend.SECRET_NAME and sai.load_project, which no
 longer existed; the Qt tests that would notice cannot run everywhere."""
 import ast
+import re
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[1] / "sandbox_ai_app"
@@ -87,11 +88,13 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "secrets", "login_status", "remembered", "forget_remembered", "question_context", "run_log",
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
                 "workspaces", "add_workspace", "remove_workspace",
+                "safeguards",  # sandbox-ai safeguards --json: a process, also over SSH
                 "host_version_known",  # one short SSH command (review 6 A-N3)
                 "write_project",
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
                 "host_run", "host_json", "host_instances", "host_questions", "host_test", "host_update",
                 "limits_shown", "review_home", "host_remembered", "host_net_options", "ended_starts", "start_history",
+                "restore_home", "rules_check", "rules_show", "rules_reload",
                 "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "host_devices_added",
                 "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
                 "recent_folders", "host_install",
@@ -125,7 +128,10 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 # is gone still runs (up to its timeout) and removes the directories of runs that ended; the sessions'
                 # rows ask Podman about stopped ones: so does everything that reads them
                 "runs", "sessions", "instances", "run_for", "file_roots", "known_projects", "sandbox_folders",
-                "rw_mounts", "autostart_risk"}
+                "rw_mounts", "autostart_risk",
+                # a session to another host: sandbox-ai session copy|move (a dry run and a start over SSH, minutes),
+                # and its plan (the session's files and its project file, read in the session's directory)
+                "session_copy", "session_move", "session_transfer_plan"}
 # (approvals_snapshot and questions read the registry with live_runs: files and /proc only, never Podman.)
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # Slow, but on the GUI thread on purpose (each call site says so with a comment "on the GUI thread on purpose"):
@@ -141,10 +147,11 @@ BLOCKING_BACKEND = {"read_connections"}
 # files.py: copies (up to 1 GiB), moves, deletes and owner changes of whole trees, podman unshare (the Files page
 # runs them in Task.thread). Called as root.NAME(...) or files.NAME(...): matched by the name alone.
 BLOCKING_FILES = {"copy_out", "copy_in", "copy_entry", "move_entry", "delete_entry", "chown_entry", "take_ownership"}
-# wizard_llm's functions that run `sandbox-ai llm list|add|check|models` (called as WL.NAME or wizard_llm.NAME), and
+# wizard_llm's functions that run `sandbox-ai llm list|add|check|models|detect` (called as WL.NAME or
+# wizard_llm.NAME), and
 # presets' host_documents (`sandbox-ai presets list --json` on a host: PR.NAME or presets.NAME).
-BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models"},
-                    "wizard_llm": {"list_endpoints", "add_and_check", "list_models"},
+BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models", "detect"},
+                    "wizard_llm": {"list_endpoints", "add_and_check", "list_models", "detect"},
                     "PR": {"host_documents"}, "presets": {"host_documents"},
                     # chromium.check: a child process tries Chromium's namespaces (up to its timeout)
                     "chromium": {"check", "probe"},
@@ -157,7 +164,8 @@ WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change"
 # wrapper (files.py, wizard_llm.py, presets.py, name_fields.py, chromium.py: BLOCKING_FILES, BLOCKING_HELPERS) or that
 # start a terminal's command (pty_bridge.py: a fork and exec, read with a QSocketNotifier).
 HELPER_MODULES = {"backend.py", "widgets.py", "files.py", "wizard_llm.py", "presets.py", "pty_bridge.py",
-                  "name_fields.py", "chromium.py"}
+                  "name_fields.py", "chromium.py",
+                  "crashguard.py"}  # (the kernel's log is read in a thread of its own: Guard(wait=False))
 
 
 def call_name(node):
@@ -423,6 +431,9 @@ MUTATIONS = {
     "web-user-reset": [("reset",)],
     "web-cert-renew": ["host_web_cert"],
     "web-listen": [("serve",)],
+    "session-move": ["session_move", ("session", "move")],
+    "home-restore": ["restore_home"],
+    "rules-reload": ["rules_reload"],
 }
 
 # The actions of the web interface's table (backend.NEEDS_CONFIRM is the same set) that no page of the app does yet:
@@ -518,3 +529,18 @@ class Page:
             self.sai.set_limits(run, "16g")
 '''
     assert unasked(source) == [(4, "net-allow"), (5, "limits-raise"), (16, "limits-raise")]
+
+
+def test_no_event_filter_on_the_whole_application():
+    """An event filter in Python on the QApplication sees every event of every object, QtWebEngine's own included:
+    a terminal tab opened while one was installed ended the app with a segmentation fault (the Board's Start soon
+    after the app started, while the pages were still made under an input watch). Filters go on the window's own
+    QWindow or on the widgets concerned; keys on QShortcuts."""
+    found = []
+    for path in sorted(PACKAGE.glob("*.py")):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if re.search(r"(QApplication\\.instance\\(\\)|\\bapp|qApp|QCoreApplication\\.instance\\(\\))\\.installEventFilter",
+                         code):
+                found.append(f"{path.name}:{number}: {line.strip()}")
+    assert found == []

@@ -7,8 +7,9 @@
 
 The keys are the launcher's: telemetry (off, strict, on), mode (lax ... paranoid), canaries (false or a list of
 categories), keep_days, subnet, subnet6, preset_dirs (extra preset directories; `sandbox-ai presets dirs add DIR`
-checks where each lies), name_style (codename: new starts are named like brisk-otter-lantern, the default; project:
-AGENT-PROJECT-xxxx). A value is checked by the launcher itself before the file is replaced
+checks where each lies), safeguard_mute (kinds of safeguard warnings never announced: `sandbox-ai safeguards kinds`),
+name_style (codename: new starts are named like brisk-otter-lantern, the default; project: AGENT-PROJECT-xxxx).
+A value is checked by the launcher itself before the file is replaced
 (atomically, mode 0600); the other keys stay as they are. An option given at a start wins over the file.
 The web interface and the desktop app change other hosts' defaults through this command.
 
@@ -119,7 +120,10 @@ def describe():
     canary = L.load_canary_module()
     return {"keys": keys(), "telemetry_levels": list(getattr(L, "TELEMETRY_LEVELS", ())),
             "modes": list(L.MODES.NAMES), "canary_categories": list(canary.CATEGORIES),
-            "canary_default": list(canary.DEFAULT_CATEGORIES), "name_styles": list(L.NAME_STYLES)}
+            "canary_default": list(canary.DEFAULT_CATEGORIES), "name_styles": list(L.NAME_STYLES),
+            **({"safeguard_kinds": [{"kind": k, "level": v[0], "title": v[1]}
+                                    for k, v in L.load_safeguards_module().KINDS.items()]}
+               if hasattr(L, "load_safeguards_module") else {})}
 
 
 def cli(argv, out=print):

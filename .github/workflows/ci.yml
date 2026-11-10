@@ -62,13 +62,47 @@ jobs:
         run: |
           python -m venv /tmp/venv
           /tmp/venv/bin/pip install dist/*.whl
-          for c in sandbox-ai claude-sandbox codex-sandbox opencode-sandbox sandbox-session sandbox-mcp sandbox-wizard sandbox-build-image; do
-            /tmp/venv/bin/$c --version
+          for c in "sandbox-ai --version" "sandbox-ai build --help" "sandbox-ai wizard --help" "sandbox-ai mcp --help"; do
+            /tmp/venv/bin/$c >/dev/null
           done
       - name: sandbox-ai.pyz (the release workflow checks it and the app packages in full)
         run: scripts/e2e_package.sh pyz dist/sandbox-ai.pyz --python python
       - name: The package build scripts parse
         run: bash -n scripts/build_appimage.sh scripts/build_macos_app.sh scripts/e2e_package.sh
+
+  # The host side on a real Mac (TODO.md: macOS support): the macOS tests against the real kernel (sysctl, F_GETPATH,
+  # LOCAL_PEERPID; the Linux suite simulates them) and install.sh with the Mac's bash 3.2 and BSD tools. No Podman
+  # here: podman machine needs nested virtualisation, which GitHub's macOS runners do not have.
+  macos:
+    runs-on: macos-14  # arm64
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0, published 2026-10-22
+        with:
+          python-version: "3.12"
+      - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
+      - name: Tests of the host side (macOS)
+        run: |
+          status=0; python -X faulthandler -m pytest -v -rfE -o faulthandler_timeout=300 \
+            tests/test_macos_host.py tests/test_macos_integration.py tests/test_doctor_macos.py \
+            tests/test_secret_store.py tests/test_textout.py tests/test_codenames.py > pytest.txt 2>&1 || status=$?
+          tail -n 300 pytest.txt
+          if [ "$status" -ne 0 ]; then
+            failed=$(grep -E '^(FAILED|ERROR) ' pytest.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=macOS tests failed::exit $status%0A$failed"
+          fi
+          exit "$status"
+      - name: install.sh from this checkout into a scratch HOME, then its commands
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          /bin/bash install.sh --from . --user --no-app-deps --no-app-terminal
+          "$HOME/.local/bin/sandbox-ai" --version
+          test ! -e "$HOME/.local/bin/claude-sandbox"  # the old single commands are gone (0.1.92)
+          grep -q "sandbox-ai" "$HOME/.zshrc"
 
   # The desktop app (projects/sandbox-ai-app), tested against the sandbox-ai of the same commit.
   app:
@@ -98,7 +132,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libopengl0 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
             libnss3 libasound2t64 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxshmfence1 libgbm1 \
-            libdrm2 libxkbfile1 libxcb-cursor0 fonts-dejavu-core
+            libdrm2 libxkbfile1 libxcb-cursor0 fonts-dejavu-core gdb
       - name: Install PySide6 (with Addons and WebEngine) and pytest
         working-directory: .
         run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-app-test.txt -r packaging/requirements-ci.txt"
@@ -119,6 +153,20 @@ jobs:
             echo "::error title=app tests failed::$text"
           fi
           exit "$status"
+      - name: The board's drop tests, repeated under gdb (a native crash shows its backtrace)
+        run: |
+          # It crashed now and then on these runners before 0.1.90 (TODO.md, "The app"): 15 runs of the file, each
+          # under gdb, which prints every thread's native stack when the process gets a fatal signal.
+          for run in $(seq 1 15); do
+            gdb -q -batch -ex "handle SIGPIPE nostop noprint" -ex run -ex "thread apply all bt 40" \
+              --args python -X faulthandler -m pytest -q -p no:cacheprovider tests/test_board_dnd.py > gdb.txt 2>&1 || true
+            if grep -qE "received signal (SIGSEGV|SIGABRT|SIGBUS|SIGILL|SIGTRAP)" gdb.txt; then
+              grep -E -A200 "received signal" gdb.txt | head -300
+              echo "::error title=board drop tests crashed (run $run)::see the backtrace in the log"
+              exit 1
+            fi
+            grep -qE "[0-9]+ passed" gdb.txt && ! grep -qE "[0-9]+ (failed|error)" gdb.txt || { tail -n 80 gdb.txt; exit 1; }
+          done
       - name: No Qt test was skipped
         run: |
           if grep -E "SKIPPED.*(PySide6|QtWebEngine|QtCore|QtWidgets|SANDBOX_AI_HOME)" tests.txt; then

@@ -1,6 +1,8 @@
 """Help beside a field of ruleset files (--rules FILE, on the Board and the Start page): what to enter (a
 placeholder and an example in the tooltip), New from example… (a starter ruleset written to a file outside every
-workspace, then added) and Check (the launcher's own dry run reads the files: their rules, or why it refuses them).
+workspace, then added), Check (`sandbox-ai rules check`: their rules, or why each is refused; one inside a workspace
+is refused here, as the start refuses it) and All rules… (`sandbox-ai rules show`: every ruleset the start would have,
+in order, with where it comes from - the policy's, the mode's, yours, these files, the project's).
 
 A ruleset allows, asks or denies each HTTP request and MCP tool call (README, "Rulesets"). The launcher refuses a
 ruleset inside a workspace (the agent could change its own rules), so the starter is written outside them."""
@@ -8,15 +10,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import tempfile
 
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from .files import printable
 from .i18n import tr
 from .state import choose_save, current
-from .widgets import background, plain_label, safe_tooltip, warn
+from .widgets import background, plain_label, safe_tooltip, show_text, warn
 
 # The README's example: --allow-github opens every request to api.github.com, these keep out gists and issue writes
 # and ask before a release; the MCP rules show the format for a server named "files" (they hold only when it runs).
@@ -85,6 +85,26 @@ def write_example(path):
     return path
 
 
+def all_rules_text(result):
+    """`sandbox-ai rules show --json` (RESULT) as text: each ruleset with where it comes from and its rules, in the
+    order the start reads them. Everything escaped (a project file is the agent's to write)."""
+    sources = [s for s in (result or {}).get("rulesets") or [] if isinstance(s, dict)]
+    if not sources:
+        return tr("This start has no rulesets: its options alone decide what it may do.")
+    lines = [tr("Each ruleset decides on its own; the strictest decision of all of them wins.")]
+    for source in sources:
+        lines += ["", f"{printable(source.get('name'))} — {tr('from')} {printable(source.get('from') or '?')}"]
+        defaults = source.get("defaults") if isinstance(source.get("defaults"), dict) else {}
+        strict = [f"{printable(key)}: {printable(value)}" for key, value in defaults.items() if value != "allow"]
+        if strict:
+            lines.append("  " + tr("defaults: {defaults}", defaults=", ".join(strict)))
+        for section in ("http", "mcp", "devices", "tool"):
+            for rule in source.get(section) or []:
+                if isinstance(rule, dict):
+                    lines.append(f"  {section:<8}{printable(rule.get('id'))}: {printable(rule.get('decision'))}")
+    return "\n".join(lines)
+
+
 class RulesetTools(QWidget):
     """New from example… and Check below a field of ruleset files. PATHS() gives the files listed, ADD(path) adds one,
     WORKSPACES() the start's workspaces (a ruleset must lie outside them); LOCAL() whether the start is on this
@@ -101,10 +121,17 @@ class RulesetTools(QWidget):
                                       "outside every workspace and add it"))
         self.new_button.clicked.connect(lambda _=False: self.new_from_example())
         self.check_button = QPushButton(tr("Check"))
-        self.check_button.setToolTip(tr("Ask the launcher (a dry run) whether it reads these ruleset files"))
+        self.check_button.setToolTip(tr("Check these ruleset files: their rules, or why one is refused "
+                                        "(sandbox-ai rules check)"))
         self.check_button.clicked.connect(lambda _=False: self.check())
+        self.show_button = QPushButton(tr("All rules…"))
+        self.show_button.setToolTip(tr("Every ruleset this start would have, in order, with where each comes from: "
+                                       "the administrator's policy, the security mode, yours, these files, the "
+                                       "project's (sandbox-ai rules show)"))
+        self.show_button.clicked.connect(lambda _=False: self.show_all())
         row.addWidget(self.new_button)
         row.addWidget(self.check_button)
+        row.addWidget(self.show_button)
         row.addStretch(1)
         layout.addLayout(row)
         self.result = plain_label(role="secondary")
@@ -166,31 +193,53 @@ class RulesetTools(QWidget):
                           source=self.check_button, owner=self, timeout=120, done=self.checked)
 
     def run_check(self, paths, workspaces, agent="claude"):
-        """(ok, text) of the launcher's dry run with the ruleset files PATHS (and WORKSPACES, so that one inside a
-        workspace is refused as at the start; without, an empty folder of its own stands in)."""
-        scratch = None
-        if not workspaces:
-            scratch = tempfile.mkdtemp(prefix="sandbox-ai-rules-")
-            workspaces = [scratch]
-        try:
-            argv = [token for path in paths for token in ("--rules", str(path))] + ["--no-config"]
-            argv += [token for folder in workspaces for token in ("--workspace", str(folder))]
-            plan, message = self.sai.dry_run(agent, argv)
-        finally:
-            if scratch:
-                shutil.rmtree(scratch, ignore_errors=True)
-        if plan is None:
-            return False, message or tr("The launcher refused them, without saying why.")
-        lines = []
-        for source in plan.get("rulesets") or []:
-            name = str(source.get("name", ""))
-            if not name.startswith("--rules "):  # the files given here ("--rules NAME"), not the policy's or mode's
+        """(ok, text) of `sandbox-ai rules check` of the ruleset files PATHS; one inside one of WORKSPACES is refused
+        here, as the start refuses it (the agent could change its own rules there). AGENT: unused (the files are the
+        same for every agent)."""
+        lines, ok = [], True
+        for path in paths:
+            workspace = inside(path, workspaces)
+            if workspace is not None:
+                ok = False
+                lines.append(tr("{path}: inside the workspace {workspace}; the start refuses it (the agent could "
+                                "change its own rules there)", path=printable(path), workspace=printable(workspace)))
+        result = self.sai.rules_check(paths)
+        for entry in result.get("rulesets") or []:
+            if not isinstance(entry, dict):
                 continue
-            lines.append(tr("{name}: {http} HTTP and {mcp} MCP rules", name=printable(name),
-                            http=len(source.get("http") or []), mcp=len(source.get("mcp") or [])))
-        return True, "\n".join([tr("The launcher reads them:")] + (lines or [tr("(no rules of their own)")]))
+            name = printable(entry.get("path") or entry.get("name") or "?")
+            if entry.get("ok"):
+                counts = entry.get("counts") if isinstance(entry.get("counts"), dict) else {}
+                lines.append(tr("{name}: {http} HTTP and {mcp} MCP rules", name=name, http=counts.get("http", 0),
+                                mcp=counts.get("mcp", 0)))
+            else:
+                ok = False
+                lines.append(f"{name}: {printable(entry.get('error') or '?')}")
+        head = tr("The launcher reads them:") if ok else tr("Not every file can be used:")
+        return ok, "\n".join([head] + (lines or [tr("(no rules of their own)")]))
+
+    def show_all(self):
+        """Every ruleset of the start (`sandbox-ai rules show`), in a window of text."""
+        if not self.local():
+            self.show_result(tr("The start is on another host: sandbox-ai rules show there lists its rulesets."),
+                             "notice-warn")
+            return None
+        paths, workspaces = list(self.paths()), list(self.workspaces() or [])
+        argv = [token for path in paths for token in ("--rules", os.path.abspath(os.path.expanduser(str(path))))]
+        argv += [token for folder in workspaces[:1] for token in ("--workspace", str(folder))]
+        self.show_result(tr("The launcher reads the rulesets…"))
+        return background(self.sai.rules_show, self.agent() or "claude", argv, workspaces[0] if workspaces else None,
+                          source=self.show_button, owner=self, timeout=90, done=self.shown_all)
+
+    def shown_all(self, result, error):
+        if error is not None:
+            self.show_result(tr("Not read: {error}", error=printable(error)), "notice-error")
+            return
+        self.result.hide()
+        show_text(self, tr("All rules of this start"), all_rules_text(result))
 
     def checked(self, result, error):
+        """Check's answer below the buttons."""
         if error is not None:
             self.show_result(tr("Not checked: {error}", error=printable(error)), "notice-error")
             return

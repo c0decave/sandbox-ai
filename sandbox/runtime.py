@@ -168,6 +168,100 @@ def relay_terminal(connection, command):
         child.wait()
 
 
+def attach_frame(kind, payload):
+    """Host-to-sandbox terminal frame: b"d" input bytes or b"r" (rows, columns)."""
+    return kind + struct.pack("!I", len(payload)) + payload
+
+
+def connect_relay(client, socket_path):
+    """Connect CLIENT to the terminal relay's SOCKET_PATH. The directory is writable from the sandbox: a symlink
+    there could point at another socket of the user (on the host; in the container, the supervisor's) and receive
+    the keystrokes. Opened without following one, checked to be a socket of this user, connected through it."""
+    fd = os.open(socket_path, os.O_PATH | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError(errno.EPERM, "not a socket owned by you")
+        client.connect(f"/proc/self/fd/{fd}")
+    finally:
+        os.close(fd)
+
+
+def attach_probe(socket_path):
+    """--internal-attach-probe (macOS: through podman exec): 0 while the terminal relay accepts, else 1."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(2)
+        try:
+            connect_relay(client, socket_path)
+        except OSError:
+            return 1
+    return 0
+
+
+def attach_client(socket_path, stdin=0, stdout=1):
+    """The client of an attach: a dumb byte pipe. Nothing from the sandbox is executed. It runs on the host (Linux),
+    or, on macOS, in the container (--internal-attach-client through `podman exec`: the socket is in podman
+    machine's VM, and a Unix socket does not cross its shared folders)."""
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connect_relay(client, socket_path)
+    except OSError as exc:
+        client.close()
+        raise RuntimeError(f"Session terminal relay not reachable: {socket_path}: {exc}") from None
+    interactive = os.isatty(stdin)
+    def send_size():
+        size = os.get_terminal_size(stdin) if interactive else os.terminal_size((80, 24))
+        client.sendall(attach_frame(b"r", struct.pack("!HH", size.lines, size.columns)))
+    send_size()
+    # The SIGWINCH handler only wakes the loop: a frame sent from the handler could land
+    # inside a partially sent input frame and corrupt the stream.
+    wake_read, wake_write = os.pipe()
+    os.set_blocking(wake_write, False)
+    def resized(*_):
+        try:
+            os.write(wake_write, b"r")
+        except BlockingIOError:
+            pass
+    saved = termios.tcgetattr(stdin) if interactive else None
+    previous = signal.signal(signal.SIGWINCH, resized) if interactive else None
+    if interactive:
+        import tty
+        tty.setraw(stdin)
+    sources = [stdin, client, wake_read]
+    try:
+        while True:
+            ready, _, _ = select.select(sources, [], [])
+            if wake_read in ready:
+                os.read(wake_read, 4096)
+                send_size()
+            if stdin in ready:
+                data = os.read(stdin, 65536)
+                if data:
+                    client.sendall(attach_frame(b"d", data))
+                else:
+                    sources = [client, wake_read]
+            if client in ready:
+                data = client.recv(65536)
+                if not data:
+                    break
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(stdout, view):]
+    except (ConnectionResetError, BrokenPipeError):
+        pass  # the relay went (the agent ended) while keys were still being sent: the end of the attach, as EOF is
+    finally:
+        if interactive:
+            termios.tcsetattr(stdin, termios.TCSADRAIN, saved)
+            signal.signal(signal.SIGWINCH, previous)
+            # Drop terminal answers to queries the sandbox sent just before it closed,
+            # so they do not reach the host shell as typed input.
+            termios.tcflush(stdin, termios.TCIFLUSH)
+        os.close(wake_read)
+        os.close(wake_write)
+        client.close()
+    return 0
+
+
 def shortened(value, budget=None):
     """VALUE with strings cut to 500 characters and at most 200 items in all, for the tool-call log."""
     budget = budget if budget is not None else [200]
@@ -264,6 +358,8 @@ class McpGateway:
             return {"process": {"unknown": "the client runs in another sandbox (its process is not visible here)",
                                 "uid": uid}}
         info = self.who.process(pid)
+        if info is None and sys.platform == "darwin":  # a relay on a Mac: no /proc to say more than the kernel did
+            return {"process": {"pid": pid, "uid": uid}}
         return {"process": info or {"unknown": "the client process ended", "pid": pid, "uid": uid}}
 
     def emit(self, kind, record):
@@ -808,17 +904,21 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                     else:
                         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=cwd,
                                                    stderr=subprocess.PIPE)
-                        threading.Thread(target=relay_server_stderr, args=(process.stderr,), daemon=True).start()
                 except OSError as exc:
                     print(f"agent-sandbox: MCP server failed: {exc}", file=sys.stderr)
                     slots.release()
                     if relay is not None:  # never kept until the detach: the agent's end is closed here
                         relay.discard(connection)
                     return
-                session = McpConnection(gate, connection, process)
-                pump = threading.Thread(target=session.pump, daemon=True)
-                pump.start()
+                pump = None
                 try:
+                    # Inside the try: a thread that cannot start (the sandbox's process limit) ends this connection
+                    # with its server instance and gives its slot back, instead of keeping both for good.
+                    if isinstance(process, subprocess.Popen):
+                        threading.Thread(target=relay_server_stderr, args=(process.stderr,), daemon=True).start()
+                    session = McpConnection(gate, connection, process)
+                    pump = threading.Thread(target=session.pump, daemon=True)
+                    pump.start()
                     stream = connection.makefile("rb")
                     while True:
                         line = stream.readline(MCP_LINE_LIMIT + 1)
@@ -829,7 +929,7 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                                   file=sys.stderr)
                             break
                         session.client_line(line)
-                except (OSError, ValueError):
+                except (OSError, ValueError, RuntimeError):
                     pass
                 finally:
                     try:
@@ -840,7 +940,8 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                             stop_process(process, grace=MCP_EOF_GRACE)
                         else:
                             process.wait()
-                        pump.join(30)  # the server's last answers reach the agent before the connection closes
+                        if pump is not None and pump.ident is not None:
+                            pump.join(30)  # the server's last answers reach the agent before the connection closes
                         getattr(process, "close", lambda: None)()
                     finally:
                         slots.release()
@@ -905,6 +1006,10 @@ def wait_child(child):
     def forward(sig, _frame):
         if child.poll() is None:
             child.send_signal(sig)
+            # A frozen child (a canary's pause, sandbox-ai pause) would hold the signal until thawed, and this wait
+            # with it: Ctrl-C or sandbox-ai net stop would hang. Thawed, it ends (and takes its namespace along).
+            with contextlib.suppress(ProcessLookupError):
+                child.send_signal(signal.SIGCONT)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         previous[sig] = signal.signal(sig, forward)
     try:
@@ -948,6 +1053,9 @@ def inner_bootstrap():
     broker = ApprovalBroker(CONTROL_DIR / "approvals", network, max_scope=scope, blocked=cfg.get("ask_blocked"),
                             no_inspect=proxy_config.get("no_inspect", [])) \
         if cfg.get("ask") and CONTROL_DIR.is_dir() else None
+    if broker is not None:  # who caps an answer's scope, for the safeguard record of a capped answer
+        broker.capped_by = ("policy" if narrowest_scope(cfg.get("ask_max_scope", "always")) == scope else "mode",
+                            (mode or {}).get("name"))
     # Which process a connection, lookup or dropped packet belongs to: read here, where /proc shows them all.
     env = cfg.get("env", {})
     who = Attribution(sandbox=cfg.get("sandbox"), debug=bool(cfg.get("log_debug")),
@@ -959,6 +1067,14 @@ def inner_bootstrap():
     # the relayed ports go through it (the relay chain of the firewall).
     network.relay_dir = CONTROL_DIR if CONTROL_DIR.is_dir() else None
     network.proxied = bool(cfg.get("proxy"))
+    machine = cfg.get("machine") if isinstance(cfg.get("machine"), dict) else None
+    host_relays = []
+    if machine:  # macOS (see VM_CONTROL_DIR): the control socket in the VM's own /run, the Mac's ports by its address
+        VM_CONTROL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        network.upstream_host = str(ipaddress.ip_address(machine["host"]))
+        # pasta's -T would reach the VM's loopback, not the Mac's: the ports of the start are relayed here instead.
+        host_relays = [PortRelay(port, CONTROL_DIR, upstream=(network.upstream_host, int(port)))
+                       for port in base.get("loopback", [])]
     held_loopback = hold_unserved_loopback(base.get("loopback", []))  # before the agent starts; kept for the run
     # The run's taint (see Taint): the proxy reads its mirror; its events go to the connection log.
     taint = Taint(mirror=PROXY_RUN / "taint.json" if cfg.get("proxy") else None,
@@ -981,13 +1097,19 @@ def inner_bootstrap():
             proxy = start_proxy(cfg["proxy"], broker, who, taint)
         if CONTROL_DIR.is_dir():
             control = threading.Event()
+            rules = RunRules(proxy_config, PROXY_RUN / RELOADED_RULES if cfg.get("proxy") else None,
+                             policy.get("forbid", []))
             threading.Thread(target=control_server, daemon=True,
-                             args=(CONTROL_DIR / "control.sock", network, control, policy.get("forbid", []),
-                                   mode, taint, relays, True)).start()
+                             args=((VM_CONTROL_DIR if machine else CONTROL_DIR) / "control.sock", network, control,
+                                   policy.get("forbid", []), mode, taint, relays, True, rules),
+                             kwargs={"token_file": CONTROL_DIR / EXEC_TOKEN if machine else None}).start()
+        if machine and machine.get("browser") and CONTROL_DIR.is_dir():
+            threading.Thread(target=browser_relay, kwargs={"stop": control}, daemon=True).start()
         start_mcp_relays(cfg.get("mcp_relay") or {}, broker, taint, who, registry=relays)
         problem = hook_problem(cfg)
         if problem:
             print(f"agent-sandbox: {problem}", file=sys.stderr)
+            safeguard_event("guard", "the run's tool rules (the agent's hooks)", problem)
             return 1
         if cfg.get("hooks") is not None:  # the agent's hooks: their rules, the human's questions, tools.jsonl
             start_hook_server(cfg["hooks"], broker, taint,
@@ -1115,6 +1237,30 @@ def log_event(name, record):
     record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}
     with open(LOG_DIR / name, "a") as stream:
         stream.write(json.dumps(record) + "\n")
+
+
+SAFEGUARD_FILE = "safeguard-events.jsonl"
+SAFEGUARD_LIMIT = 4 << 20
+
+
+def safeguard_event(kind, what, why, directory=None, **fields):
+    """A safeguard the supervisor applied (KIND "mode", "policy" or "guard"; WHAT was refused, WHY), for the
+    launcher's safeguard watch (safeguards.py, which says the fix): a line of CONTROL_DIR/safeguard-events.jsonl,
+    which the agent cannot see. Plain text, bounded; never raises."""
+    directory = Path(directory) if directory is not None else CONTROL_DIR
+    with contextlib.suppress(Exception):
+        if not directory.is_dir():
+            return
+        path = directory / SAFEGUARD_FILE
+        with contextlib.suppress(FileNotFoundError):
+            if path.stat().st_size >= SAFEGUARD_LIMIT:
+                return
+        entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": str(kind)[:20],
+                 "what": printable_text(str(what), 300), "why": printable_text(redact_text(str(why)), 500),
+                 **{key: printable_text(str(value), 200) for key, value in fields.items() if value is not None}}
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with open(fd, "a") as stream:
+            stream.write(json.dumps(entry) + "\n")
 
 
 def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
@@ -1891,11 +2037,13 @@ class MemoryGuard:
 def firejail_command(before):
     help_text = subprocess.run(["firejail", "--help"], check=True, text=True, capture_output=True).stdout
     command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs", "--seccomp"]
-    for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR):
+    for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR, VM_CONTROL_DIR):
         if private.is_dir():
             command.append(f"--blacklist={private}")
     # The supervisor's sockets for the agent: reachable, not replaceable (the agent runs as the same user).
-    for shared in (MCP_RUN_DIR, HOOK_DIR):
+    # macOS (VM_CONTROL_DIR made): the browser socket is the supervisor's too (browser_relay), on a tmpfs.
+    machine = (Path(BROWSER_SOCKET).parent,) if VM_CONTROL_DIR.is_dir() else ()
+    for shared in (MCP_RUN_DIR, HOOK_DIR, *machine):
         if shared.is_dir():
             command.append(f"--read-only={shared}")
     # New releases always exec directly and reject the former shell option.
@@ -2393,6 +2541,13 @@ def header(headers, name):
     return values[-1] if values else None
 
 
+def no_delay(sock):
+    """TCP_NODELAY on SOCK: the proxy passes on what it has as soon as it has it (a request's head and its body come in
+    separate writes; with Nagle's algorithm the second waited for the peer's delayed ACK, up to 40 ms per request)."""
+    with contextlib.suppress(OSError, AttributeError):
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+
 def send_all(sock, data):
     """sendall that also works on a non-blocking (TLS) socket. A peer that takes nothing for IDLE_TIMEOUT
     seconds (a zero window) raises socket.timeout, an OSError: a broken connection to the callers."""
@@ -2791,6 +2946,70 @@ def basic_with_key(value, entries):
     return (b" Basic " + base64.b64encode(decoded), added) if added else (value, [])
 
 
+ADDED_API_KEYS = "api-keys-added.json"  # in PROXY_RUN: --api-key given during the run (sandbox-ai net allow)
+API_KEYS_LIMIT = 64
+_added_api_keys = {"stamp": None, "entries": []}
+
+
+def checked_api_keys(entries):
+    """The well-formed ones of ENTRIES ([{host, port, name, placeholder, key}], as `sandbox-ai net allow --api-key`
+    sends them): host in lower case, a key usable in a header, the placeholder of sandbox-ai's form."""
+    found = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        host, name, placeholder, key = (entry.get(k) for k in ("host", "name", "placeholder", "key"))
+        if not all(isinstance(v, str) and v and len(v) <= 4096 for v in (host, name, placeholder, key)) or \
+                not isinstance(entry.get("port"), int) or isinstance(entry.get("port"), bool) or \
+                any(ord(c) < 33 or ord(c) == 127 for c in key) or \
+                placeholder != f"sandbox-ai-api-key-placeholder-{name}":
+            continue
+        found.append({"host": host.lower(), "port": entry["port"], "name": name, "placeholder": placeholder,
+                      "key": key})
+    return found[:API_KEYS_LIMIT]
+
+
+def give_api_keys(entries, path=None, owner=None):
+    """Control op "api-keys": ENTRIES (every key given during the run, the whole list) for the proxy, in PATH (its
+    run directory, which only it and the supervisor reach), 0600 and owned by the proxy's user (OWNER, by default
+    the directory's owner): the proxy runs as that user and reads it again when it changes. Returns the names."""
+    path = Path(path) if path else PROXY_RUN / ADDED_API_KEYS
+    if not path.parent.is_dir():
+        raise ValueError("this sandbox runs without the connection proxy: it takes no API key")
+    if not isinstance(entries, list) or len(entries) > API_KEYS_LIMIT:
+        raise ValueError(f"api-keys: a list of at most {API_KEYS_LIMIT} keys")
+    checked = checked_api_keys(entries)
+    if len(checked) != len(entries):
+        raise ValueError("api-keys: every key has a host, port, name, its placeholder and a value usable in a header")
+    if owner is None:  # the run directory's owner: the proxy's user, to whom the supervisor gave it at the start
+        info = path.parent.stat()
+        owner = (info.st_uid, info.st_gid)
+    write_new(path, json.dumps({"version": 1, "api_keys": checked}), 0o600, owner=owner)
+    return [entry["name"] for entry in checked]
+
+
+def added_api_keys(path=None):
+    """The --api-key entries given while the run goes on (give_api_keys wrote them into the proxy's run directory):
+    [{host, port, name, placeholder, key}], read again whenever the file changes; [] without one. An entry that is
+    not well-formed is left out."""
+    path = Path(path) if path else PROXY_RUN / ADDED_API_KEYS
+    try:
+        info = path.stat()
+    except OSError:
+        _added_api_keys.update(stamp=None, entries=[])
+        return []
+    stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
+    if stamp == _added_api_keys["stamp"]:
+        return _added_api_keys["entries"]
+    try:
+        document = json.loads(path.read_text()[:1 << 20])
+    except (OSError, ValueError):
+        document = {}
+    entries = checked_api_keys(document.get("api_keys") if isinstance(document, dict) else None)
+    _added_api_keys.update(stamp=stamp, entries=entries)
+    return entries
+
+
 def api_key_head(entries, scheme, origin, port, head):
     """--api-key and --publish: (HEAD, [names]) with each key in place of its placeholder, in a credential header of
     an HTTPS request to the key's verified host and port only (inside a Basic login for an entry marked "basic");
@@ -2914,6 +3133,11 @@ class ProxyServer:
             for rule in legacy:
                 pinned[rule["host"]] = [*pinned.get(rule["host"], []), *rule.get("addresses", [])]
         self.rules = Ruleset(sources, pinned, config.get("providers", []))
+        # `sandbox-ai rules reload`: the supervisor writes the run's rulesets anew (rules_file, re-read on change);
+        # --allow-http, the addresses and the providers stay as they were at the start.
+        self.rules_file = Path(config["rules_file"]) if config.get("rules_file") else None
+        self.rules_extra, self.rules_pinned = sources[len(config.get("rules", [])):], pinned
+        self.rules_providers, self.rules_mtime, self.rules_checked = config.get("providers", []), None, 0.0
         # The run's taint, as the supervisor keeps it (taint_file, re-read on change); without a supervisor (tests)
         # the proxy keeps its own.
         self.taint_file = Path(config["taint_file"]) if config.get("taint_file") else None
@@ -2942,7 +3166,16 @@ class ProxyServer:
             found = {form for value in values if isinstance(value, str) and len(value) >= 4
                      for form in (value, json.dumps(value, ensure_ascii=False)[1:-1])}
             self._own_secrets = sorted(found, key=len, reverse=True)
-        return self._own_secrets
+        added = added_api_keys()
+        if not added:
+            return self._own_secrets
+        # Given during the run: merged again only when the file changed (added_api_keys keeps its list until then).
+        cached = getattr(self, "_own_with_added", None)
+        if cached is None or cached[0] is not added:
+            extra = {form for entry in added for form in (entry["key"], json.dumps(entry["key"], ensure_ascii=False)[1:-1])
+                     if len(entry["key"]) >= 4}
+            self._own_with_added = cached = (added, sorted(set(self._own_secrets) | extra, key=len, reverse=True))
+        return cached[1]
 
     def attribute(self, client):
         """The supervisor's lookup of the process behind CLIENT (Attribution), started now and read when a
@@ -3070,6 +3303,32 @@ class ProxyServer:
         self.local_taint = {"tainted": True, "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "source": source, "sources": 1, "_mirror": self.taint_mtime}
 
+    @property
+    def rules(self):
+        """The run's rulesets, re-read (at most every RULES_CHECK_SECONDS) when `sandbox-ai rules reload` had the
+        supervisor write them anew; a file that does not compile leaves the rules as they were."""
+        path = getattr(self, "rules_file", None)
+        if path is not None and time.monotonic() - self.rules_checked >= RULES_CHECK_SECONDS:
+            self.rules_checked = time.monotonic()
+            try:
+                mtime = path.stat().st_mtime_ns
+                if mtime != self.rules_mtime:
+                    written = json.loads(path.read_text())
+                    sources = written.get("rulesets", []) if isinstance(written, dict) else written
+                    pinned = dict(self.rules_pinned)
+                    if isinstance(written, dict) and isinstance(written.get("pinned"), dict):
+                        for name, addresses in written["pinned"].items():  # names allowed during the run
+                            pinned.setdefault(name, addresses)
+                    self._rules = Ruleset([*sources, *self.rules_extra], pinned, self.rules_providers)
+                    self.rules_mtime = mtime
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+        return self._rules
+
+    @rules.setter
+    def rules(self, value):
+        self._rules = value
+
     def allow(self):
         """The allow-list, re-read when `sandbox-ai net` changed it during the run."""
         if self.allow_file:
@@ -3151,6 +3410,7 @@ class ProxyServer:
         started = time.monotonic()
         record = {"connection": number}
         upstream = None
+        no_delay(client)
         try:
             address, port = self.destination(client)
             record["destination"] = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
@@ -3196,6 +3456,7 @@ class ProxyServer:
                 return
             try:
                 upstream = socket.create_connection((address, port), timeout=30)
+                no_delay(upstream)
             except OSError as exc:
                 self.log({**record, "event": "error", "error": f"connect: {exc}"})
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -3650,7 +3911,9 @@ class ProxyServer:
                 if llm:
                     entry["llm"] = llm  # its key went in on the wire; the log keeps the agent's headers
                 llm_added = bool(llm) and head != before
-                head, keys = api_key_head(self.config.get("api_keys"), scheme, origin, port, head)
+                # Those given during the run first: a key given again under a name of the start replaces it.
+                head, keys = api_key_head(added_api_keys() + (self.config.get("api_keys") or []), scheme, origin,
+                                          port, head)
                 if keys:
                     entry["api_keys"] = keys  # the keys went in on the wire; the log keeps the placeholders
                 refusal = self.credential_host_refusal(scheme, origin, port, headers, bool(token),
@@ -3962,6 +4225,7 @@ def proxy_main(log_fd, ready_fd, ask_fd=None, asking=True):
     allow.chmod(0o644)
     config["allow_file"] = str(allow)
     config["taint_file"] = str(PROXY_RUN / "taint.json")  # written by the supervisor (Taint)
+    config["rules_file"] = str(PROXY_RUN / RELOADED_RULES)  # written by the supervisor (RunRules)
     for root, dirs, files in os.walk(PROXY_RUN):
         for name in [*dirs, *files]:
             os.chown(os.path.join(root, name), PROXY_UID, PROXY_UID)
@@ -4329,7 +4593,16 @@ class Attribution:
     @staticmethod
     def peer(connection):
         """(pid, uid, gid) of the process at the other end of a Unix socket (SO_PEERCRED), as the kernel
-        reports it: pid 0 when that process is not in this PID namespace's view."""
+        reports it: pid 0 when that process is not in this PID namespace's view. macOS (the relay of an MCP server
+        on the host) has no SO_PEERCRED: LOCAL_PEERPID and LOCAL_PEERCRED (level SOL_LOCAL, 0) tell the same; an
+        OSError where neither is there."""
+        if not hasattr(socket, "SO_PEERCRED"):
+            if sys.platform != "darwin":
+                raise OSError(errno.ENOPROTOOPT, "no peer credentials on this system")
+            pid = struct.unpack("i", connection.getsockopt(0, 2, 4))[0]  # SOL_LOCAL, LOCAL_PEERPID
+            # struct xucred: cr_version, cr_uid, cr_ngroups (short, padded), cr_groups[16]; the first group is the gid.
+            uid, _, gid = struct.unpack_from("IhxxI", connection.getsockopt(0, 1, 76), 4)  # LOCAL_PEERCRED
+            return pid, uid, gid
         data = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         return struct.unpack("3i", data)
 
@@ -5489,7 +5762,7 @@ def hook_problem(cfg, run=subprocess.run):
                        "update the image (sandbox-ai build team)"
         return None
     what = "the rules for the agent's own tools" if cfg.get("hooks") is not None else "the kits' approved hooks"
-    return f"{what} cannot hold: {problem}; update the agent (sandbox-build-image)"
+    return f"{what} cannot hold: {problem}; update the agent (sandbox-ai build)"
 
 
 def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout=HOOK_TIMEOUT):
@@ -5568,16 +5841,28 @@ def kit_hook(agent, timeout, command, stdin=None, stdout=None, stderr=None, chec
     if len(data) > HOOK_READ_LIMIT:
         return refuse("the hook message is too large")
     try:
-        done = subprocess.run(["/bin/sh", "-c", command], input=data, stdout=subprocess.PIPE, timeout=float(timeout))
-    except subprocess.TimeoutExpired:  # what the agent does with a hook that runs too long: not an answer
-        stderr.write(f"sandbox-ai: the kit hook ran longer than {timeout} s and was stopped\n")
-        stderr.flush()
-        return 1
+        # A process group of its own: a hook that runs too long is stopped with everything it started (the shell's
+        # children would run on, and hold the agent's pipes of this hook open).
+        limit = float(timeout)
+        done = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                start_new_session=True)
     except (OSError, ValueError) as exc:
         stderr.write(f"sandbox-ai: the kit hook did not start ({type(exc).__name__}: {printable_text(str(exc), 200)})\n")
         stderr.flush()
         return 1
-    out = done.stdout or b""
+    try:
+        out, _ = done.communicate(data, timeout=limit)
+    except subprocess.TimeoutExpired:  # what the agent does with a hook that runs too long: not an answer
+        with contextlib.suppress(OSError):
+            os.killpg(done.pid, signal.SIGKILL)
+        done.wait()  # not its output: a process that left the group could hold that pipe for good
+        for stream in (done.stdin, done.stdout):
+            with contextlib.suppress(OSError):
+                stream.close()
+        stderr.write(f"sandbox-ai: the kit hook ran longer than {timeout} s and was stopped\n")
+        stderr.flush()
+        return 1
+    out = out or b""
     if done.returncode == 0 and b"updatedInput" in out:  # the agents read updatedInput only after status 0
         if len(out) > HOOK_READ_LIMIT:
             return refuse("the kit hook's answer is too large to be checked")
@@ -5744,6 +6029,21 @@ class HookServer:
 
 CONTROL_DIR = Path("/sandbox/control")
 
+# macOS: the container runs in podman machine's Linux VM, and a Unix socket made on one side of its shared folders
+# (virtiofs) cannot be connected from the other. The launcher marks such a run (config.json "machine": {"host": the
+# Mac's address as the VM reaches it}); then the supervisor listens in VM_CONTROL_DIR (the container's own /run, hidden
+# from the agent as the control directory is), and the host's commands reach it through `podman exec ... runtime.py
+# --internal-control-client`. That client runs in the sandbox's PID namespace, where control_peer_refused refuses every
+# peer: a request of it is taken only with the token the launcher wrote into the run's directory (EXEC_TOKEN, 0600,
+# never mounted for the agent), which `sandbox-ai net` reads on the host and sends along.
+VM_CONTROL_DIR = Path("/run/sandbox-control")
+EXEC_TOKEN = "exec.token"
+CONTROL_REQUEST_LIMIT = 65536
+# The supervisor's own connections to the Mac's host ports (PortRelay upstream): marked, so the firewall lets them
+# through to the Mac's address and the proxy's redirect leaves them alone. Only a process with CAP_NET_ADMIN can mark
+# a socket; the agent has none.
+HOST_RELAY_MARK = 0x5a1d
+
 
 def runtime_rules(state):
     """nft commands that replace the runtime chain with STATE's permissions."""
@@ -5809,11 +6109,15 @@ class PortRelay:
     """The sandbox's end of a host port relayed during the run (`sandbox-ai net allow --allow-host-port PORT`):
     listens on 127.0.0.1:PORT (and [::1]:PORT) in the sandbox and joins each connection to the host relay's
     Unix socket in the run's control directory (DIRECTORY/relay-PORT.sock), which the host side (net.py) serves
-    and which connects only to the host's 127.0.0.1:PORT. The agent cannot reach that directory."""
+    and which connects only to the host's 127.0.0.1:PORT. The agent cannot reach that directory.
+    UPSTREAM (macOS, where that socket would not cross podman machine's shared folders): (address, port) of the
+    Mac as the VM reaches it (gvproxy forwards it to the Mac's loopback), connected with HOST_RELAY_MARK; for the
+    ports of the start (--allow-host-port, --llm) and those added during the run alike."""
 
-    def __init__(self, port, directory, limit=RELAY_CONNECTIONS, listen_port=None):
+    def __init__(self, port, directory, limit=RELAY_CONNECTIONS, listen_port=None, upstream=None):
         # LISTEN_PORT differs from PORT only in tests, where the host's port and the sandbox's share one network.
         self.port, self.path, self.limit = int(port), Path(directory) / f"relay-{int(port)}.sock", limit
+        self.upstream = upstream
         self.listen_port = int(listen_port or port)
         self.slots = threading.BoundedSemaphore(limit)
         self.listeners = []
@@ -5854,10 +6158,14 @@ class PortRelay:
 
     def handle(self, connection):
         try:
-            upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            upstream = socket.socket(socket.AF_UNIX if self.upstream is None else socket.AF_INET, socket.SOCK_STREAM)
             try:
                 upstream.settimeout(10)
-                upstream.connect(str(self.path))
+                if self.upstream is None:
+                    upstream.connect(str(self.path))
+                else:
+                    upstream.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), HOST_RELAY_MARK)
+                    upstream.connect(tuple(self.upstream))
                 upstream.settimeout(None)
             except OSError:
                 upstream.close()
@@ -5914,14 +6222,17 @@ def merged_allow(base, state, no_ssh=()):
     return allow
 
 
-def write_new(path, text, mode):
+def write_new(path, text, mode, owner=None):
     """Write PATH by replacing it with a new file; the temporary file is created exclusively and never
-    through a symlink (the directory may be writable by a less trusted user, such as the proxy's)."""
+    through a symlink (the directory may be writable by a less trusted user, such as the proxy's). OWNER: (uid,
+    gid) given to the file before it takes PATH's place (its reader is never shown a file it cannot read)."""
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
     with contextlib.suppress(FileNotFoundError):
         os.unlink(temporary)
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     try:
+        if owner is not None:
+            os.fchown(fd, *owner)
         os.fchmod(fd, mode)  # whatever the umask
         with os.fdopen(fd, "w") as stream:
             stream.write(text)
@@ -5961,6 +6272,8 @@ class RuntimeNetwork:
         # Host ports relayed during the run ({port: PortRelay}); the supervisor sets RELAY_DIR (the control
         # directory, where the host relays listen) and PROXIED (the agent's TCP goes through the proxy).
         self.relays, self.relay_dir, self.proxied, self.relay_factory = {}, None, False, PortRelay
+        # macOS (podman machine): the Mac's address the relays connect to instead of the host relay's socket.
+        self.upstream_host = None
 
     def _commit(self, state, once):
         effective = dict(state, tcp=state["tcp"] | once)
@@ -5990,7 +6303,8 @@ class RuntimeNetwork:
                     raise ValueError(f"host port {port} is forwarded since the start already")
                 if len(self.relays) >= RELAY_PORTS:
                     raise ValueError(f"at most {RELAY_PORTS} host ports are relayed at a time")
-                self.relays[port] = self.relay_factory(port, self.relay_dir)
+                self.relays[port] = self.relay_factory(port, self.relay_dir) if self.upstream_host is None else \
+                    self.relay_factory(port, self.relay_dir, upstream=(self.upstream_host, port))
                 started.append(port)
         except BaseException:
             for port in started:
@@ -6091,8 +6405,128 @@ def mode_refusal(mode, request):
     return None
 
 
+# --- sandbox-ai rules reload: the HTTP rules of a running sandbox, read anew ---------------------------------------
+#
+# The human's rulesets (rules.json, --rules files, the trusted project file's "rules") are read again on the host and
+# sent over the control socket; the supervisor keeps the start's own (the administrator's policy, the security mode,
+# --publish, --telemetry, --allow-http) as they were, puts the new ones between them and writes the result for the
+# proxy (RELOADED_RULES in PROXY_RUN, re-read on change). Each ruleset decides on its own and the strictest decision
+# wins, so no reload gets past the policy's or the mode's rules. MCP, tool and device rules stay as the run started.
+
+RELOADED_RULES = "rules.json"
+RULES_CHECK_SECONDS = 1.0
+# A ruleset's name, as the launcher gives it (--rules FILE: the file's name, whatever it is): any printable text.
+RULESET_NAME = re.compile(r"[^\x00-\x1f\x7f-\x9f]{1,300}")
+RELOAD_LIMIT = 64  # rulesets in one reload
+
+
+def http_sources(sources):
+    """The rulesets the proxy holds (as the launcher's proxy_rules writes them): their HTTP part, the ones with HTTP
+    rules, a default for HTTP other than allow, or untrusted hosts."""
+    return [{"name": source["name"], "version": 1, "defaults": {"http": source["defaults"]["http"]},
+             "http": source["http"], "untrusted": [entry for entry in source.get("untrusted", []) if "host" in entry]}
+            for source in sources
+            if source["name"] != "--allow-http" and (source["http"] or source["defaults"]["http"] != "allow"
+                                                      or any("host" in entry for entry in source.get("untrusted", [])))]
+
+
+class RunRules:
+    """The rulesets of the run's proxy (proxy.json's "rules" at the start), and their reload. PATH: where the proxy
+    reads them anew (None without the proxy); FORBID: the options the administrator's policy forbids."""
+
+    def __init__(self, proxy_config, path=None, forbid=()):
+        self.started = list(proxy_config.get("rules", []))
+        self.current, self.reloaded = list(self.started), None
+        self.pinned, self.providers = dict(proxy_config.get("pinned", {})), list(proxy_config.get("providers", []))
+        self.no_inspect = list(proxy_config.get("no_inspect", []))
+        self.path, self.forbid, self.lock = path, list(forbid), threading.Lock()
+
+    @staticmethod
+    def own(name):
+        """NAME is one of the start's own rulesets, which a reload keeps as they were."""
+        return name in ("policy", "publish", "telemetry", "--allow-http") or name.startswith("mode ")
+
+    def shown(self):
+        return {"rules": [{"name": source["name"], "defaults": source["defaults"],
+                           "http": [rule["id"] for rule in source["http"]],
+                           "untrusted": [entry["id"] for entry in source.get("untrusted", [])],
+                           "kept": self.own(source["name"])} for source in self.current],
+                "reloaded": self.reloaded, "proxy": self.path is not None}
+
+    def reload(self, sources, pinned=None):
+        """Put SOURCES ([{"name", ...ruleset}], the human's rulesets read anew) in place of the ones the run started
+        with, the start's own kept around them; checked and compiled before anything is written. PINNED: {name:
+        [addresses]} of the names allowed during the run (the start's stay), so that a host's rules hold for its
+        bare address too."""
+        extra = {}
+        for name, addresses in (pinned or {}).items() if isinstance(pinned, dict) else ():
+            if not (isinstance(name, str) and 0 < len(name) <= 253 and isinstance(addresses, list)):
+                continue
+            kept = []
+            for address in addresses[:64]:  # each on its own: one that is no address drops only itself
+                with contextlib.suppress(ValueError, TypeError):
+                    kept.append(str(ipaddress.ip_address(address)))
+            if kept:
+                extra[name.lower()] = kept
+        if self.path is None:
+            raise ValueError("this sandbox runs without the connection proxy (--no-proxy): it holds no HTTP rules to "
+                             "reload")
+        if not isinstance(sources, list) or len(sources) > RELOAD_LIMIT:
+            raise ValueError(f"rules: a list of at most {RELOAD_LIMIT} rulesets")
+        incoming, names = [], set()
+        for source in sources:
+            name = source.get("name") if isinstance(source, dict) else None
+            if not isinstance(name, str) or not RULESET_NAME.fullmatch(name) or name in names:
+                raise ValueError("every ruleset has a name of its own (printable, at most 300 characters)")
+            names.add(name)
+            if self.own(name):
+                raise ValueError(f"{name} is the start's own ruleset: a reload keeps it as it was")
+            if name.startswith("--rules") and "--rules" in self.forbid:
+                safeguard_event("policy", "sandbox-ai rules reload --rules",
+                                "--rules is not allowed by the administrator's policy", option="--rules")
+                raise ValueError("--rules is not allowed by the administrator's policy")
+            incoming.append({"name": name, **Ruleset.validated({k: v for k, v in source.items() if k != "name"},
+                                                               name)})
+        http = http_sources(incoming)
+        started = {source["name"]: json.dumps(source, sort_keys=True) for source in self.started}
+        # The policy as it is now joins the start's (it can only narrow), unless it is the same.
+        http = [source for source in http if not (source["name"] == "policy (now)" and started.get("policy") ==
+                                                  json.dumps({**source, "name": "policy"}, sort_keys=True))]
+        for source in http:
+            hosts = [host for rule in source["http"] for host in rule["host"]]
+            hosts += ["*"] if source["defaults"]["http"] != "allow" else []
+            for value in self.no_inspect:
+                for host in hosts:
+                    if host == "*" or self.same_server(host, value):
+                        raise ValueError(f"--no-inspect {value}: the HTTP rules of {source['name']} ({host}) cannot "
+                                         "hold for requests the proxy does not open")
+        composed = [s for s in self.started if s["name"] == "policy" or s["name"].startswith("mode ")] + http + \
+            [s for s in self.started if s["name"] in ("publish", "telemetry")]
+        pins = {**extra, **self.pinned}  # the start's names keep their addresses
+        Ruleset(composed, pins, self.providers)  # compiles, or the reload is refused (RuleError)
+        with self.lock:
+            # The proxy reads {"rulesets", "pinned"} (a bare list: a supervisor before 0.1.92 wrote that).
+            write_new(self.path, json.dumps({"rulesets": composed, "pinned": extra}), 0o644)
+            self.current, self.reloaded = composed, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return {**self.shown(), "not_reloaded": sorted(
+            source["name"] for source in incoming
+            if source["mcp"] or source["tool"] or source["devices"]
+            or source["defaults"]["mcp"] != "allow" or source["defaults"]["tool"] != "allow"
+            or source["defaults"]["devices"] != "allow")}
+
+    @staticmethod
+    def same_server(host, pattern):
+        """HOST (a name or *.DOMAIN) and PATTERN (the same) can name the same server (the launcher's
+        host_matches_any)."""
+        host, pattern = host.lower(), pattern.lower()
+        bare = lambda value: value[2:] if value.startswith("*.") else value  # noqa: E731
+        return host == pattern or bare(host).endswith("." + bare(pattern)) or \
+            bare(pattern).endswith("." + bare(host)) or bare(host) == bare(pattern)
+
+
 MCP_OPS = ("mcp-open", "mcp-close", "mcp-list")
 CONTROL_FDS = 4  # descriptors a request may carry (SCM_RIGHTS): mcp-open hands over one
+CONTROL_LIMIT = 4 << 20  # bytes of one request (rules reload sends the human's rulesets; up to 1 MiB each file)
 
 
 def detached_root(fd):
@@ -6162,7 +6596,47 @@ def control_peer_refused(connection, sandboxed=None):
     return f"process {pid} of the sandbox may not use the control socket"
 
 
-def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, relays=None, sandboxed=None):
+def exec_token(path):
+    """The token of the run's directory (EXEC_TOKEN, see VM_CONTROL_DIR), or None when there is none."""
+    if path is None:
+        return None
+    try:
+        token = Path(path).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return token if re.fullmatch(r"[0-9a-f]{32,128}", token) else None
+
+
+def control_client(source=None, out=None, paths=None, timeout=60):
+    """--internal-control-client (macOS: `podman exec` runs it in the container for `sandbox-ai net`, `workspace`
+    and `mcp`): one request line from SOURCE (stdin) to the supervisor's control socket, its answer to OUT (stdout).
+    Only bytes are passed on; the supervisor checks the request's token (control_server)."""
+    source = source or sys.stdin.buffer
+    out = out or sys.stdout.buffer
+    paths = paths or (VM_CONTROL_DIR / "control.sock", CONTROL_DIR / "control.sock")
+    # As much as the control server takes (CONTROL_LIMIT: a rules reload sends the human's rulesets).
+    line = source.readline(CONTROL_LIMIT + 1)
+    if not line.endswith(b"\n") or len(line) > CONTROL_LIMIT:
+        print(f"agent-sandbox: one request line of at most {CONTROL_LIMIT >> 20} MiB is expected", file=sys.stderr)
+        return 2
+    path = next((p for p in paths if Path(p).exists()), paths[0])
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        client.connect(str(path))
+        client.sendall(line)
+        answer = b""
+        while not answer.endswith(b"\n") and len(answer) <= CONTROL_REQUEST_LIMIT * 64:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            answer += chunk
+    out.write(answer)
+    out.flush()
+    return 0
+
+
+def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, relays=None, sandboxed=None,
+                   rules=None, token_file=None):
     """Serve `sandbox-ai net` requests (allow, revoke, show, untaint; watch: a workspace added during the run, for
     the file log) and `sandbox-ai mcp ... --live` requests (MCP_OPS, see mcp_control; RELAYS: the run's McpRelays)
     on the Unix socket PATH until STOP is set.
@@ -6172,7 +6646,9 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
     reaches this socket, and a peer inside the sandbox is refused (control_peer_refused; SANDBOXED as there).
     Descriptors a request carries are taken with close-on-exec, and closed unless taken over. Whatever fails for one
     request (a thread that cannot be started at the sandbox's pids limit, say) refuses that one; the socket keeps
-    serving."""
+    serving. RULES: the run's RunRules (op "rules": show them, or reload them with the human's rulesets read anew).
+    TOKEN_FILE (macOS, see VM_CONTROL_DIR): a peer control_peer_refused refuses is heard when its request carries
+    that file's token ("exec_token") and no descriptors."""
     listener = listen_unix(path)
     listener.settimeout(0.5)
     while stop is None or not stop.is_set():
@@ -6187,10 +6663,11 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
             try:
                 connection.settimeout(10)
                 refused = control_peer_refused(connection, sandboxed)
-                if refused:
+                token = exec_token(token_file) if refused else None
+                if refused and token is None:
                     raise PermissionError(refused)
                 data = b""
-                while not data.endswith(b"\n") and len(data) < 65536:
+                while not data.endswith(b"\n") and len(data) < CONTROL_LIMIT:
                     chunk, received, _, _ = socket.recv_fds(connection, 4096, CONTROL_FDS,
                                                             getattr(socket, "MSG_CMSG_CLOEXEC", 0))
                     fds += received
@@ -6198,6 +6675,10 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                         break
                     data += chunk
                 request = json.loads(data)
+                if refused:  # heard only as the host's request through podman exec (macOS)
+                    given = request.pop("exec_token", None) if isinstance(request, dict) else None
+                    if fds or not isinstance(given, str) or not secrets.compare_digest(given.encode(), token.encode()):
+                        raise PermissionError(refused)
                 if request.get("op") in MCP_OPS:
                     answer = mcp_control(request, relays, fds, forbid, mode)
                     with contextlib.suppress(OSError):
@@ -6205,6 +6686,27 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                     continue
                 if request.get("op") == "wildcards":
                     answer = {"ok": True, "wildcards": change_wildcards(request, forbid, mode)}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "api-keys":
+                    # `sandbox-ai net allow|revoke --api-key`: as the start option, within the policy and the mode.
+                    if "--api-key" in forbid:
+                        safeguard_event("policy", "sandbox-ai net allow --api-key",
+                                        "--api-key is not allowed by the administrator's policy", option="--api-key")
+                        raise ValueError("--api-key is not allowed by the administrator's policy")
+                    if request.get("api_keys") and mode and "--api-key" in (mode.get("refuses") or []):
+                        raise ValueError(f"--api-key widens the security mode {mode.get('name')} of this run")
+                    answer = {"ok": True, "api_keys": give_api_keys(request.get("api_keys"))}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "rules":
+                    if rules is None:
+                        raise ValueError("this sandbox keeps no rules to show or reload")
+                    answer = {"ok": True, **(rules.reload(request.get("rules"), request.get("pinned"))
+                                             if request.get("action") == "reload"
+                                             else rules.shown())}
                     with contextlib.suppress(OSError):
                         connection.sendall((json.dumps(answer) + "\n").encode())
                     continue
@@ -6219,9 +6721,14 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                                                    or (field == "nets" and "--egress-all-allow" in forbid
                                                                         and any(ipaddress.ip_network(n, strict=False).prefixlen == 0
                                                                                 for n in request[field]))):
+                            safeguard_event("policy", f"sandbox-ai net allow {option}",
+                                            f"{option} is not allowed by the administrator's policy", option=option)
                             raise ValueError(f"{option} is not allowed by the administrator's policy")
                 refused = mode_refusal(mode, request)
                 if refused:
+                    asked = [option for field, option in NET_OPTIONS if request.get(field)]
+                    safeguard_event("mode", f"sandbox-ai net allow {' '.join(asked)}", refused,
+                                    mode=(mode or {}).get("name"), option=" ".join(asked))
                     raise ValueError(refused)
                 if request.get("op") == "untaint":
                     if taint is None:
@@ -6390,11 +6897,34 @@ class ApprovalBroker:
         scope = answer.get("scope", "once")
         scope = scope if scope in SCOPES else "once"
         if SCOPES.index(scope) > SCOPES.index(self.max_scope):
+            if answer["decision"] == "allow":  # a wider allow than the mode or the policy lets through
+                by, mode = getattr(self, "capped_by", ("policy", None))
+                capper = f"the security mode {mode}" if by == "mode" else "the administrator's policy"
+                safeguard_event(by, f"the answer \"allow {scope}\" to question {ident}",
+                                f"answers are capped to \"{self.max_scope}\" by {capper}",
+                                directory=self.directory.parent, mode=mode, target="approval scope")
             scope = self.max_scope
         return {"decision": answer["decision"], "scope": scope,
                 "reason": answered_reason(answer), "addresses": answer.get("addresses", [])}
 
     def _wait(self, key, kind, details, waiting):
+        try:
+            self._settle(key, kind, details, waiting)
+        except OSError:  # the .done file not written (a full disk): refused below, the thread ends quietly
+            pass
+        finally:
+            if not waiting["event"].is_set():
+                # Something failed on the way (a damaged answer, a full disk): the asker is refused now, not after
+                # its timeout, and the question is open no more (it would hold one of OPEN_QUESTIONS for good, and
+                # every later ask of it would wait in vain).
+                with self.lock:
+                    if self.pending.get(key) is waiting:
+                        self.pending.pop(key, None)
+                waiting["answer"] = waiting["answer"] or {"decision": "deny", "scope": "once",
+                                                          "reason": "the answer could not be handled"}
+                waiting["event"].set()
+
+    def _settle(self, key, kind, details, waiting):
         deadline = self.clock() + self.timeout
         answer = None
         while self.clock() < deadline:
@@ -6408,7 +6938,7 @@ class ApprovalBroker:
         if answer["decision"] == "allow":
             try:
                 self._apply(kind, details, answer)
-            except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+            except (ValueError, TypeError, KeyError, OSError, subprocess.CalledProcessError) as exc:
                 answer = {"decision": "deny", "scope": "once", "reason": f"could not be applied: {exc}"}
         remember = None
         if kind == "connect" and answer["decision"] == "allow" and answer["scope"] == "always":
@@ -6644,6 +7174,78 @@ class AskChannel:
 
 
 BROWSER_SOCKET = "/sandbox/browser/open.sock"
+# macOS (config.json "machine"): the host's browser socket would not cross podman machine's shared folders. The
+# supervisor listens at BROWSER_SOCKET itself (a tmpfs the agent may not write) and hands each request to the host as
+# a file in CONTROL_DIR/BROWSER_REQUESTS (approvals.serve_browser_files), the answer coming back the same way.
+BROWSER_REQUESTS = "browser"
+BROWSER_REQUEST_LIMIT = 8192
+BROWSER_WAIT = 10
+
+
+BROWSER_AT_ONCE = 8
+
+
+def browser_relay(socket_path=BROWSER_SOCKET, directory=None, stop=None, wait=BROWSER_WAIT):
+    """macOS: serve the sandbox's xdg-open on SOCKET_PATH through request files in DIRECTORY (see BROWSER_REQUESTS)
+    until STOP is set."""
+    directory = Path(directory or CONTROL_DIR / BROWSER_REQUESTS)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    server = listen_unix(socket_path)
+    server.settimeout(0.5)
+    counter = itertools.count(1)
+    # A few at once: each holds a request file in the host's run directory until the host answers (a flood of them
+    # by the agent stays this small).
+    slots = threading.BoundedSemaphore(BROWSER_AT_ONCE)
+
+    def forward(connection, number):
+        try:
+            browser_forward(connection, directory, number, wait)
+        finally:
+            slots.release()
+    while stop is None or not stop.is_set():
+        try:
+            connection, _ = server.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        if not slots.acquire(blocking=False):
+            connection.close()  # too many waiting already: this one is refused
+            continue
+        try:
+            threading.Thread(target=forward, args=(connection, next(counter)), daemon=True).start()
+        except RuntimeError:  # no thread to be had (the sandbox's process limit): this request only
+            slots.release()
+            connection.close()
+    server.close()
+
+
+def browser_forward(connection, directory, number, wait=BROWSER_WAIT):
+    """One request of the sandbox's xdg-open: its line to DIRECTORY/ID.request, the host's DIRECTORY/ID.reply back."""
+    with connection:
+        reply = b'{"ok": false, "message": "sandbox-ai: the host did not take the request"}\n'
+        try:
+            connection.settimeout(3)
+            line = connection.makefile("rb").readline(BROWSER_REQUEST_LIMIT + 1)
+            if not line.endswith(b"\n") or len(line) > BROWSER_REQUEST_LIMIT:
+                raise ValueError("request too long or cut off")
+            ident = f"{os.getpid()}-{number}-{secrets.token_hex(4)}"
+            write_new(directory / f"{ident}.request", line.decode("utf-8", "replace"), 0o600)
+            answer, deadline = directory / f"{ident}.reply", time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if answer.exists():
+                    with open(answer, "rb") as stream:
+                        reply = stream.read(BROWSER_REQUEST_LIMIT).split(b"\n", 1)[0] + b"\n"
+                    answer.unlink()
+                    break
+                time.sleep(0.1)
+            else:
+                with contextlib.suppress(OSError):
+                    (directory / f"{ident}.request").unlink()
+        except (OSError, ValueError) as exc:
+            reply = (json.dumps({"ok": False, "message": f"sandbox-ai: {str(exc)[:200]}"}) + "\n").encode()
+        with contextlib.suppress(OSError):
+            connection.sendall(reply)
 
 
 def open_request(arguments, socket_path=BROWSER_SOCKET, out=None):
@@ -7063,6 +7665,13 @@ if __name__ == "__main__":
             result = git_credential(sys.argv[2])
         elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-relay":
             result = attach_relay(sys.argv[2], ["tmux", "attach", "-t", "sandbox"])
+        # macOS: the host's sandbox-ai reaches the sockets in podman machine's VM through `podman exec`.
+        elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-client":
+            result = attach_client(sys.argv[2])
+        elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-probe":
+            result = attach_probe(sys.argv[2])
+        elif len(sys.argv) == 2 and sys.argv[1] == "--internal-control-client":
+            result = control_client()
         else:
             print("sandbox-ai runtime: internal entry point; use sandbox-ai", file=sys.stderr)
             result = 2

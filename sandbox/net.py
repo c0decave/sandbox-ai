@@ -7,6 +7,7 @@
                        [--dns] [--nameserver IP]           real DNS lookups (as --dns at the start)
                        [--git-token-env|--git-token-file|--git-token-secret URL=REF]   a Git login
                        [--allow-host-port PORT]            the host's 127.0.0.1:PORT, through a relay
+                       [--api-key HOST=NAME[=SECRET]]      an API key the proxy puts in (runs from 0.1.92)
   sandbox-ai net revoke [RUN] (the same options)       take back what `allow` gave
   sandbox-ai net untaint [RUN]                         take back the run's taint (untrusted content entered it)
 
@@ -121,12 +122,21 @@ def ours(path):
     return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
 
 
+def own_runs_dir():
+    """launcher().runs_dir(), without loading the launcher: `sandbox-ai approvals`, `list` and the app read the run
+    directories often, and the launcher's load was half of such a command (a test keeps both the same)."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    base = Path(runtime) / "sandbox-ai" if runtime and Path(runtime).is_dir() else \
+        Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
+    return base / "runs"
+
+
 def run_dirs():
     """Every place a run of this user may have registered, also one started with another XDG_RUNTIME_DIR
     (or none): launcher().runs_dir() first, then $XDG_RUNTIME_DIR/sandbox-ai/runs, /run/user/UID/sandbox-ai/runs
     and the state directory's runs; each real directory once."""
     state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "runs"
-    candidates = [launcher().runs_dir()]
+    candidates = [own_runs_dir()]
     if os.environ.get("XDG_RUNTIME_DIR"):
         candidates.append(Path(os.environ["XDG_RUNTIME_DIR"]) / "sandbox-ai" / "runs")
     user = USER_RUNTIME / str(os.getuid())
@@ -360,6 +370,29 @@ def resolve(hosts):
     return result
 
 
+def vpn_resolver(record):
+    """For a run started with --vpn: a resolver NAME -> [addresses] through the VPN's own resolvers (in its running
+    container), else None: a name allowed during such a run is never looked up past the VPN."""
+    if not (isinstance(record, dict) and record.get("vpn_container")):
+        return None
+    return launcher().load_vpn_module().resolver_for_run(record)
+
+
+def resolve_with(one):
+    """resolve() with ONE (name -> [addresses]) instead of this machine's resolver."""
+    def resolve_all(hosts):
+        result = {}
+        for host in hosts:
+            try:
+                result[host] = one(host)
+            except OSError as exc:
+                raise ValueError(f"cannot resolve {host}: {exc}") from None
+            if not result[host]:
+                raise ValueError(f"{host} has no address")
+        return result
+    return resolve_all
+
+
 def request_for(args, op, resolver=resolve):
     """(request for the supervisor, {host: addresses} for /etc/hosts) from the command line."""
     l = launcher()
@@ -492,11 +525,54 @@ def ask(directory, request, timeout=ASK_SECONDS, fds=()):
         except (OSError, ValueError, AttributeError):
             name = "NAME"
         raise ValueError(f"the sandbox is paused: resume it first (sandbox-ai resume {name}), then change it")
+    if sys.platform == "darwin":  # podman machine: the control socket is in its VM
+        try:
+            record = json.loads((Path(directory) / "run.json").read_text())
+        except (OSError, ValueError):
+            record = {}
+        if launcher().machine_record(record):
+            return ask_machine(directory, record, request, timeout, fds)
     try:
         return ask_socket(directory, request, timeout, fds)
     except (OSError, TimeoutError) as exc:  # socket.timeout is an OSError
         raise ValueError(f"the sandbox did not answer ({getattr(exc, 'strerror', None) or exc or 'timed out'}); "
                          "see sandbox-ai net show") from None
+
+
+def ask_machine(directory, record, request, timeout, fds=(), runner=None):
+    """macOS: REQUEST to the supervisor in podman machine's VM, where its control socket is (a Unix socket does not
+    cross the VM's shared folders): runtime.py --internal-control-client through `podman exec`, the request with the
+    run's token (runtime.VM_CONTROL_DIR) on its stdin, the answer on its stdout. Descriptors cannot go along."""
+    if fds:
+        raise ValueError("handing a socket to a running sandbox is not possible on macOS (podman machine's VM does "
+                         "not share them); attach the server at the next start instead")
+    try:
+        token = (Path(directory) / launcher().RUNTIME.EXEC_TOKEN).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        raise ValueError(f"the run has no token for podman exec ({Path(directory) / 'exec.token'}): it was started "
+                         "by an older sandbox-ai; start it again") from None
+    command = launcher().machine_exec(record, ["--internal-control-client"])
+    try:
+        done = (runner or subprocess.run)(command, input=json.dumps({**request, "exec_token": token}) + "\n",
+                                          capture_output=True, text=True, timeout=timeout + 15, check=False)
+    except subprocess.TimeoutExpired:
+        raise ValueError("the sandbox did not answer (timed out); see sandbox-ai net show") from None
+    except OSError as exc:
+        raise ValueError(f"podman exec did not run ({exc.strerror or exc})") from None
+    lines = (done.stdout or "").strip().splitlines()
+    if done.returncode != 0 or not lines:
+        why = launcher().printable((done.stderr or "").strip().splitlines()[-1][:300]) if (done.stderr or "").strip() \
+            else f"status {done.returncode}"
+        raise ValueError(f"the sandbox did not answer through podman machine ({why}); see sandbox-ai net show")
+    try:
+        result = json.loads(lines[-1])
+    except ValueError:
+        raise ValueError("the sandbox's answer was not readable") from None
+    if not isinstance(result, dict):
+        raise ValueError("the sandbox's answer was not readable")
+    if not result.get("ok"):
+        raise ValueError(f"the sandbox refused: {result.get('error', 'no answer')}")
+    return result
 
 
 def ask_socket(directory, request, timeout, fds=()):
@@ -562,6 +638,100 @@ def write_git_logins(record, logins):
         with contextlib.suppress(OSError):
             temporary.unlink()
         raise
+
+
+def api_keys_file(record):
+    """The run's list of the API keys given during the run, on the host (its run directory: yours, hidden from the
+    agent): what `revoke` and a later `allow` start from. The proxy gets the keys from the supervisor."""
+    directory = record.get("directory")
+    return Path(directory) / "api-keys.json" if isinstance(directory, str) and directory else None
+
+
+def added_api_keys(record):
+    """[{host, port, name, placeholder, key}] given during the run."""
+    path = api_keys_file(record)
+    try:
+        data = json.loads(path.read_text()) if path else {}
+    except (OSError, ValueError):
+        return []
+    entries = data.get("api_keys") if isinstance(data, dict) else None
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("name"), str)] \
+        if isinstance(entries, list) else []
+
+
+@contextlib.contextmanager
+def api_keys_lock(record):
+    """The run's lock for its API keys (a file of its own: hosts_lock is taken inside the network change)."""
+    fd = os.open(Path(record["directory"]) / "api-keys.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def write_api_keys(record, entries):
+    """Give the run's proxy ENTRIES (the whole list) through its supervisor (control op "api-keys": the proxy runs
+    as a user of its own, which reads them in its run directory), then keep the list here: 0600, written whole and
+    renamed into place. Both go when the run ends."""
+    path = api_keys_file(record)
+    if path is None or not ours(path.parent):
+        raise ValueError("the run's directory is gone or not yours")
+    try:
+        ask(record["directory"], {"op": "api-keys", "api_keys": entries})
+    except ValueError as exc:
+        if "op" in str(exc) and "allow" in str(exc):  # a supervisor before 0.1.92 knows no "api-keys"
+            raise ValueError(f"{launcher().printable(record.get('run', '?'))} takes no API key during the run: it "
+                             "was started by a sandbox-ai older than 0.1.92; start it again with --api-key") from None
+        raise
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"version": 1, "api_keys": entries}, stream)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
+def api_key_requests(args, record):
+    """[(host, NAME, SECRET)] of --api-key, checked as a start checks them: well-formed, not a variable of the
+    sandbox's own, the policy's forbid, a run whose proxy takes keys during the run. For revoke only NAME counts."""
+    l = launcher()
+    if "--api-key" in (l.load_policy().get("forbid") or []):
+        raise ValueError("--api-key is forbidden by the administrator's policy")
+    if args.command == "revoke":
+        names = [value.split("=")[1] if "=" in value else value for value in args.api_key]
+        given = {entry["name"] for entry in added_api_keys(record)}
+        missing = [name for name in names if name not in given]
+        if missing:
+            raise ValueError(f"no API key {', '.join(missing)} was given during this run")
+        return [(None, name, None) for name in names]
+    keys = l.api_key_values(argparse.Namespace(api_key=args.api_key))
+    run = l.printable(record.get("run", args.run))
+    if not record.get("proxy") or api_keys_file(record) is None:
+        raise ValueError(f"{run} takes no API key during the run: it runs without the connection proxy (which puts "
+                         "keys in on the wire); start it again with --api-key")
+    version = re.findall(r"\d+", str(record.get("version") or "0"))
+    if tuple(int(v) for v in version[:3]) < (0, 1, 92):
+        # Refused before anything changes (its supervisor knows no "api-keys"; the host would be opened for nothing).
+        raise ValueError(f"{run} takes no API key during the run: it was started by a sandbox-ai older than 0.1.92; "
+                         "start it again with --api-key")
+    uninspected = [host for host, _, _ in keys
+                   if any(l.host_matches_any(host, value) for value in record.get("no_inspect") or [])]
+    if uninspected:
+        raise ValueError(f"--api-key: {run} was started with --no-inspect {uninspected[0]}: the proxy does not open its "
+                         "requests, so a key would never be put in")
+    names = [name for _, name, _ in keys]
+    for _, name, _ in keys:
+        if names.count(name) > 1:
+            raise ValueError(f"--api-key: the variable {name} is given twice")
+        if name in l.SANDBOX_OWNED:
+            raise ValueError(f"Sandbox-owned variable cannot be overridden: {name}")
+    return keys
 
 
 def git_requests(args):
@@ -762,21 +932,16 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
 
 
 def process_state(pid):
-    """(state letter, start time in clock ticks after boot) of PID from /proc/PID/stat, or None if gone."""
-    try:
-        # comm (field 2) may contain spaces and parentheses: the fields after it follow the last ')'.
-        fields = (PROC / str(pid) / "stat").read_text().rpartition(")")[2].split()
-        return fields[0], int(fields[19])
-    except (OSError, IndexError, ValueError):
-        return None
+    """(state letter, start time) of PID (/proc/PID/stat; sysctl on macOS: procinfo.py), or None if gone."""
+    return launcher().procinfo().state(pid, PROC)
 
 
-def started_at(ticks):
-    """Seconds since the epoch of a process start given in clock ticks after boot."""
-    for line in (PROC / "stat").read_text().splitlines():
-        if line.startswith("btime "):
-            return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
-    raise ValueError("cannot tell when this machine booted (no btime in /proc/stat)")
+def started_at(pid):
+    """Seconds since the epoch at which PID started."""
+    found = launcher().procinfo().started_epoch(pid, PROC)
+    if found is None:
+        raise ValueError("cannot tell when this process started (no btime in /proc/stat)")
+    return found
 
 
 def launcher_process(record):
@@ -786,10 +951,9 @@ def launcher_process(record):
     name, pid = record.get("run"), record.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
         raise ValueError(f"{name}: its record names no usable PID")
-    try:
-        owner = os.stat(PROC / str(pid)).st_uid
-    except OSError:
-        raise ValueError(f"{name} has ended (PID {pid} is gone)") from None
+    owner = launcher().procinfo().owner(pid, PROC)
+    if owner is None:
+        raise ValueError(f"{name} has ended (PID {pid} is gone)")
     if owner != os.getuid():
         raise ValueError(f"PID {pid} of {name} belongs to another user; not stopping it")
     start = record.get("pid_start")
@@ -807,7 +971,7 @@ def launcher_process(record):
             raise ValueError(f"{name}: its record has no start time to check PID {pid} against; not stopping it") from None
         cmdline = launcher().process_cmdline(pid, None, PROC)
         state = process_state(pid)
-        if state is None or started_at(state[1]) > registered + START_SLACK:
+        if state is None or started_at(pid) > registered + START_SLACK:
             raise ValueError(f"PID {pid} started after {name} registered: it is another process now; not stopping it")
         start = state[1]
     if not any(arg.endswith(b"agent_sandbox.py") for arg in cmdline):
@@ -1076,6 +1240,12 @@ def parser():
                                       "sandbox's Git uses it at once (runs started with sandbox-ai 0.1.37 or newer, "
                                       "without --token-proxy)" if name == "allow" else
                                       f"take back the Git login for URL (the {ref} part is not read)")
+        command.add_argument("-ky", "--api-key", action="append", default=[], metavar="HOST=NAME[=SECRET]",
+                             help="an API key for HTTPS requests to HOST, from the secret SECRET (default NAME) of "
+                                  "sandbox-ai secrets: as at a start, the connection proxy puts it in on the wire "
+                                  "where the agent sends the placeholder $NAME stands for; the agent never sees "
+                                  "it; HOST is allowed too (runs started with sandbox-ai 0.1.92 or newer)"
+                             if name == "allow" else "take back the API key NAME given during the run")
         for preset, hosts in launcher().PRESETS.items():
             short = [launcher().SHORT_OPTIONS[f"--allow-{preset}"]] if f"--allow-{preset}" in launcher().SHORT_OPTIONS else []
             command.add_argument(*short, f"--allow-{preset}", action="append_const", const=preset, dest="presets",
@@ -1098,6 +1268,7 @@ def kept_options(args, ports):
     tokens += [token for port in ports for token in ("--allow-host-port", str(port))]
     tokens += [token for kind in GIT_KINDS for value in getattr(args, f"git_token_{kind}", None) or []
                for token in (f"--git-token-{kind}", value)]
+    tokens += [token for value in getattr(args, "api_key", None) or [] for token in ("--api-key", value)]
     return tokens
 
 
@@ -1453,13 +1624,23 @@ def main(argv, out=print, resolver=resolve):
                                  "again with the --git-token-* option")
             if args.command == "allow":
                 notes = git_network(args, logins)
-        request, names, hosts = request_for(args, args.command, resolver)
+        keys = api_key_requests(args, record) if args.api_key else []
+        if keys and args.command == "allow":
+            # Read every key before anything changes: a missing secret refuses the whole command. Its host is allowed
+            # with it (a key for a host the sandbox cannot reach would go nowhere).
+            key_entries = launcher().api_key_entries(argparse.Namespace(api_key=args.api_key))
+            if len(launcher().RUNTIME.checked_api_keys(key_entries)) != len(key_entries):  # as the supervisor checks
+                raise ValueError("--api-key: a key of at most 4096 characters, usable in a header")
+            args.allow_host = list(dict.fromkeys(args.allow_host + [host for host, _, _ in keys
+                                                                    if host not in remembered(record)]))
+        through = vpn_resolver(record) if resolver is resolve else None
+        request, names, hosts = request_for(args, args.command, resolve_with(through) if through else resolver)
         wildcards = request.pop("wildcards", [])
         ports = request.get("host_ports", [])
         network = request["nets"] or request["https"] or request["tcp"] or request.get("dns") or hosts or ports
-        if not (network or logins or wildcards):
+        if not (network or logins or wildcards or keys):
             raise ValueError(f"nothing to {args.command}: give --allow-host, --allow-tcp, --allow, --dns, "
-                             "--allow-host-port, a preset or a --git-token-* login")
+                             "--allow-host-port, a preset, a --git-token-* login or an --api-key")
         if ports and args.command == "allow":
             if "--allow-host-port" in (launcher().load_policy().get("forbid") or []):
                 raise ValueError("--allow-host-port is forbidden by the administrator's policy")
@@ -1476,7 +1657,8 @@ def main(argv, out=print, resolver=resolve):
             # supervisor checks it as well.
             wanted = (["--allow"] if args.allow else []) + (["--allow-host"] if args.allow_host else []) + \
                 (["--allow-tcp"] if args.allow_tcp else []) + [f"--allow-{p}" for p in dict.fromkeys(args.presets)] + \
-                (["--dns"] if request.get("dns") else []) + (["--allow-host-port"] if ports else [])
+                (["--dns"] if request.get("dns") else []) + (["--allow-host-port"] if ports else []) + \
+                (["--api-key"] if keys else [])
             refused = launcher().MODES.runtime_refusal(record.get("mode"), wanted, record.get("run", args.run))
             if refused:
                 raise ValueError(refused)
@@ -1499,19 +1681,22 @@ def main(argv, out=print, resolver=resolve):
         if logins and args.command == "allow":
             # Read every token before anything changes: a missing variable or secret refuses the whole command.
             tokens = {credential["url"]: launcher().git_token_value(credential, kind) for kind, credential in logins}
-        if ports and args.command == "allow":
-            for port in ports:
+        # macOS: the supervisor in podman machine's VM connects to the Mac's port itself (runtime.PortRelay
+        # upstream); no host relay, whose socket would not cross the VM's shared folders.
+        relayed = [] if launcher().machine_record(record) else ports
+        if relayed and args.command == "allow":
+            for port in relayed:
                 start_relay(record, port)  # the host end first: the sandbox's end connects to its socket
         try:
             result = ask(record["directory"], request if network else {"op": "show"})
         except ValueError:
-            if ports and args.command == "allow":
-                for port in ports:
+            if relayed and args.command == "allow":
+                for port in relayed:
                     if port not in (ask(record["directory"], {"op": "show"}).get("host_ports") or []):
                         stop_relay(record, port)
             raise
-        if ports and args.command == "revoke":
-            for port in ports:
+        if relayed and args.command == "revoke":
+            for port in relayed:
                 stop_relay(record, port)
         if args.command == "allow":
             update_hosts(record, names)
@@ -1536,6 +1721,18 @@ def main(argv, out=print, resolver=resolve):
             else:
                 write_git_logins(record, kept + [{"url": credential["url"], "user": credential["user"],
                                                   "token": tokens[credential["url"]]} for _, credential in logins])
+        if keys:
+            names_given = {name for _, name, _ in keys}
+            with api_keys_lock(record):  # read, give and keep as one step: two at once lose no key
+                kept_keys = [entry for entry in added_api_keys(record) if entry["name"] not in names_given]
+                write_api_keys(record, kept_keys + (key_entries if args.command == "allow" else []))
+            for host, name, _ in keys:
+                if args.command == "allow":
+                    out(f"{record.get('run', args.run)}: API key {name} for {host}: in the sandbox, "
+                        f"export {name}={launcher().API_KEY_PLACEHOLDER.format(name=name)} (the placeholder; the "
+                        "proxy puts the key in on the wire, the agent never sees it)")
+                else:
+                    out(f"{record.get('run', args.run)}: API key {name} taken back")
         show(result, out, names=remembered(record), run=record.get("run"), logins=git_logins(record),
              wildcards=run_wildcards(record))
         for note in notes:
@@ -1549,6 +1746,7 @@ def main(argv, out=print, resolver=resolve):
                        + "".join(f" --allow-host-port {v}" for v in ports)
                        + "".join(f" --git-token-{kind} {value}" for kind in GIT_KINDS
                                  for value in getattr(args, f"git_token_{kind}", None) or [])
+                       + "".join(f" --api-key {value}" for value in args.api_key)
                        ).strip()
             if getattr(args, "keep", False):
                 path, added = keep_in_project(record, kept_options(args, ports))

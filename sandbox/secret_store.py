@@ -4,12 +4,12 @@
   sandbox-ai secrets list                  names (never values) and where they are kept
   sandbox-ai secrets set NAME              read the value from stdin (or --from-env VARIABLE)
   sandbox-ai secrets delete NAME
-  sandbox-ai secrets backend               keyring or file
+  sandbox-ai secrets backend               keyring, keychain (macOS) or file
 
-Secrets go to the Secret Service (GNOME Keyring, KWallet, KeePassXC; through secret-tool) when it is
-there, else to private files (0600) in ~/.local/share/sandbox-ai/secrets. Sandboxes get them only when
-named: --secret-env NAME (an environment variable for the agent), --git-token-secret URL=NAME, or an
-MCP server's variable (sandbox-ai mcp add ... --env NAME). Values are never printed.
+Secrets go to the Secret Service (GNOME Keyring, KWallet, KeePassXC; through secret-tool) when it is there, on macOS
+to the login Keychain (through security), else to private files (0600) in ~/.local/share/sandbox-ai/secrets.
+Sandboxes get them only when named: --secret-env NAME (an environment variable for the agent), --git-token-secret
+URL=NAME, or an MCP server's variable (sandbox-ai mcp add ... --env NAME). Values are never printed.
 
 Standard library only.
 """
@@ -114,6 +114,52 @@ class KeyringStore:
         return self.tool("clear", "service", "sandbox-ai", "name", check_name(name)).returncode == 0
 
 
+class KeychainStore:
+    """macOS: the login Keychain through security(1); generic passwords of service sandbox-ai, account NAME. The
+    value never goes on a command line (other users' `ps` would show it): `security -i` reads the command that adds
+    it from stdin, the value in it as hex (-X)."""
+    name = "keychain"
+    SERVICE = "sandbox-ai"
+
+    def __init__(self, run=subprocess.run):
+        self.run = run
+
+    def tool(self, *args, data=None):
+        return self.run(["/usr/bin/security", *args], input=data, capture_output=True, text=True, timeout=30,
+                        stdin=None if data is not None else subprocess.DEVNULL)
+
+    def names(self):
+        """The accounts of this service, from `security dump-keychain` (attributes only, never the values)."""
+        result = self.tool("dump-keychain")
+        found = set()
+        for item in result.stdout.split("keychain: ")[1:]:
+            account = re.search(r'"acct"<blob>="([^"]*)"', item)
+            service = re.search(r'"svce"<blob>="([^"]*)"', item)
+            if account and service and service[1] == self.SERVICE and NAME.fullmatch(account[1]):
+                found.add(account[1])
+        return sorted(found)
+
+    def get(self, name):
+        result = self.tool("find-generic-password", "-s", self.SERVICE, "-a", check_name(name), "-w")
+        return result.stdout.rstrip("\n") if result.returncode == 0 and result.stdout else None
+
+    def set(self, name, value):
+        command = f"add-generic-password -U -s {self.SERVICE} -a {check_name(name)} -X {value.encode().hex()}\n"
+        result = self.tool("-i", data=command)
+        if result.returncode != 0 or "error" in result.stderr.lower() or self.get(name) != value:
+            raise ValueError(f"the Keychain refused the secret: {result.stderr.strip()[:200]} (keep it in "
+                             f"sandbox-ai's private files instead: SANDBOX_AI_SECRETS=file sandbox-ai secrets set "
+                             f"{name})")
+
+    def delete(self, name):
+        return self.tool("delete-generic-password", "-s", self.SERVICE, "-a", check_name(name)).returncode == 0
+
+
+def keychain_usable():
+    """macOS with its security tool."""
+    return sys.platform == "darwin" and os.path.exists("/usr/bin/security")
+
+
 def keyring_usable(run=subprocess.run):
     """True if secret-tool is there and a Secret Service answers on the session bus."""
     if not shutil.which("secret-tool") or not os.environ.get("DBUS_SESSION_BUS_ADDRESS") and not \
@@ -131,7 +177,10 @@ def keyring_usable(run=subprocess.run):
 
 
 def store():
-    """The keyring if it works here, else the private files (SANDBOX_AI_SECRETS=file forces the files)."""
+    """The keyring (macOS: the Keychain) if it works here, else the private files (SANDBOX_AI_SECRETS=file forces
+    the files)."""
+    if os.environ.get("SANDBOX_AI_SECRETS") != "file" and keychain_usable():
+        return KeychainStore()
     if os.environ.get("SANDBOX_AI_SECRETS") != "file" and keyring_usable():
         return KeyringStore()
     return FileStore()
@@ -157,7 +206,7 @@ def main(argv, stdin=sys.stdin, out=print):
     setting = commands.add_parser("set")
     setting.add_argument("name")
     setting.add_argument("-e", "--from-env", metavar="VARIABLE", help="take the value from this variable")
-    commands.add_parser("delete").add_argument("name")
+    commands.add_parser("delete", aliases=["remove"]).add_argument("name")  # remove: as vpn, llm and hosts say
     args = parser.parse_args(argv)
     try:
         backend = store()
@@ -174,7 +223,19 @@ def main(argv, stdin=sys.stdin, out=print):
             else:
                 out("no secrets")
         elif args.command == "set":
-            value = os.environ.get(args.from_env, "") if args.from_env else stdin.readline().rstrip("\n")
+            if args.from_env:
+                if args.from_env not in os.environ:
+                    raise ValueError(f"the variable {args.from_env} is not set")
+                value = os.environ[args.from_env]
+            elif stdin is sys.stdin and sys.stdin.isatty():
+                import getpass  # typed at a terminal: not shown, not in the scrollback
+                value = getpass.getpass(f"value of {args.name} (not shown): ")
+            else:
+                text = stdin.read(LIMIT + 2)
+                value = text[:-1] if text.endswith("\n") else text
+                if "\n" in value:  # a PEM key, JSON over lines: refused, never cut to its first line
+                    raise ValueError("the value must be one line (it had several; a multi-line value such as a key "
+                                     "file: keep it as a file of mode 0600 instead)")
             if not value or len(value) > LIMIT or any(ord(c) < 32 for c in value):
                 raise ValueError("the value must be one line of 1-8192 characters")
             backend.set(check_name(args.name), value)

@@ -265,7 +265,9 @@ def test_stop_of_an_old_record_checks_the_start_time(child):
     with pytest.raises(ValueError, match="no start time"):
         net.launcher_process(dict(record, started=None))
     lines = []
-    assert net.stop(record, 0, out=lines.append) == 0 and "asked its launcher" in lines[0]
+    # Asked (or, on a busy machine, already ended by the time stop looks again): signalled either way.
+    assert net.stop(record, 0, out=lines.append) == 0
+    assert "asked its launcher" in lines[0] or "cleaned up and ended" in lines[0], lines
     assert process.wait(5) == -signal.SIGTERM
 
 
@@ -1314,3 +1316,260 @@ def test_allow_keep_is_refused_when_the_policy_caps_approvals(sandbox, tmp_path,
     assert net.main(["allow", "codex-1234abcd", "--allow-host", "pypi.org", "--keep"], out=lambda line: None,
                     resolver=fake_resolver) == 0
     assert "pypi.org" in json.loads((app / ".sandbox-ai.json").read_text())["options"]
+
+
+def test_an_answer_that_cannot_be_handled_frees_the_question(tmp_path):
+    """Bug hunt: an error while the broker handled an answer (addresses that are no list; the .done file not
+    written on a full disk) ended its waiting thread: the asker waited out its whole timeout, and a question that
+    stayed open held one of OPEN_QUESTIONS for good, every later ask of it waiting in vain."""
+    rules = []
+    broker = rt.ApprovalBroker(tmp_path / "a", rt.RuntimeNetwork({}, None, rules.append), timeout=30, poll=0.02)
+
+    def answer_first(decision="allow", **extra):
+        deadline = time.monotonic() + 5
+        while not list((tmp_path / "a").glob("*.json")) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        question = json.loads(sorted((tmp_path / "a").glob("*.json"))[0].read_text())
+        (tmp_path / "a" / f"{question['id']}.answer").write_text(json.dumps({"decision": decision, **extra}))
+        return question
+    results = []
+    thread = threading.Thread(target=lambda: results.append(broker.ask("dns", {"name": "pypi.org"})), daemon=True)
+    thread.start()
+    answer_first(scope="run", addresses=5)
+    thread.join(5)
+    assert results and results[0]["decision"] == "deny" and "could not be applied" in results[0]["reason"]
+    assert broker.pending == {}
+    for path in (tmp_path / "a").iterdir():
+        path.unlink()
+
+    def full(name, data):
+        if name.endswith(".done"):
+            raise OSError(28, "No space left on device")
+        rt.ApprovalBroker._write(broker, name, data)
+    broker._write = full
+    started = time.monotonic()
+    thread = threading.Thread(target=lambda: results.append(broker.ask("connect", {
+        "destination": "192.0.2.7:8443", "address": "192.0.2.7", "port": 8443})), daemon=True)
+    thread.start()
+    answer_first(scope="run")
+    thread.join(10)
+    assert not thread.is_alive() and time.monotonic() - started < 10, "the asker waited out its timeout"
+    assert results[1]["decision"] in ("allow", "deny") and broker.pending == {}
+
+
+def test_a_pump_that_cannot_start_gives_the_mcp_slot_back(monkeypatch):
+    """Bug hunt: at the process limit the thread that carries a server's answers (McpConnection.pump) may not start;
+    that RuntimeError went up out of the connection's thread before its cleanup, so the server instance kept
+    running and its slot (one of MCP_INSTANCE_LIMIT) was never given back: after that many, every connection was
+    refused for the rest of the run."""
+    import io
+    import socket as _socket
+    real, left = threading.Thread, [1]
+
+    class Failing(real):
+        def start(self):
+            if getattr(self._target, "__name__", "") == "pump" and left[0]:
+                left[0] -= 1
+                raise RuntimeError("can't start new thread")
+            return super().start()
+    monkeypatch.setattr(threading, "Thread", Failing)
+    monkeypatch.setattr(rt, "MCP_INSTANCE_LIMIT", 1)
+    directory = Path(tempfile.mkdtemp(prefix="mcp-", dir="/tmp"))
+    upstream = _socket.socket(_socket.AF_UNIX)
+    upstream.bind(str(directory / "up.sock"))
+    upstream.listen()
+    served = []
+
+    def serve_upstream():
+        while True:
+            try:
+                connection, _ = upstream.accept()
+            except OSError:
+                return
+            served.append(connection)
+            with connection:
+                for _ in connection.makefile("rb"):
+                    connection.sendall(b'{"jsonrpc": "2.0", "id": 1, "result": {}}\n')
+    threading.Thread(target=serve_upstream, daemon=True).start()
+    gate = rt.McpGateway({}, io.StringIO(), plain=True)
+    threading.Thread(target=rt.mcp_serve, args=(str(directory / "server.sock"), None), daemon=True,
+                     kwargs={"gateway": gate, "spawn": lambda: rt.McpSocket(directory / "up.sock")}).start()
+    deadline = time.monotonic() + 5
+    while not (directory / "server.sock").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    def ask():
+        with _socket.socket(_socket.AF_UNIX) as client:
+            client.settimeout(5)
+            client.connect(str(directory / "server.sock"))
+            client.sendall(b'{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n')
+            try:
+                return client.recv(1000)
+            except ConnectionError:
+                return b""
+    try:
+        assert ask() == b"", "closed: no thread to carry its answers"
+        assert b'"result"' in ask(), "the next connection is served: the slot was given back"
+        assert len(served) == 2
+    finally:
+        upstream.close()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+# --- API keys during the run (sandbox-ai net allow --api-key) ------------------------------------------------------
+
+KEY = "sk-live-0123456789abcdef"
+
+
+def proxy_ready(sandbox, tmp_path, monkeypatch=None, **fields):
+    """A run with the proxy: its supervisor (the control_server thread) gives keys to the proxy's run directory
+    (PROXY_RUN, here a directory of the test). Returns the proxy's file of them."""
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    proxy = tmp_path / "proxy-run"
+    proxy.mkdir(mode=0o700, exist_ok=True)
+    if monkeypatch is not None:
+        monkeypatch.setattr(rt, "PROXY_RUN", proxy)
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "proxy": True, "version": "0.1.92", **fields}))
+    return proxy / rt.ADDED_API_KEYS
+
+
+def test_allow_api_key_gives_the_running_sandboxs_proxy_a_key(sandbox, tmp_path, monkeypatch, capsys):
+    keys = proxy_ready(sandbox, tmp_path, monkeypatch)
+    monkeypatch.setattr(net.launcher(), "load_secret_store_module",
+                        lambda: type("S", (), {"get": staticmethod(lambda name: {"OPENROUTER": KEY}.get(name))}))
+    status, lines = run_net(["allow", "--api-key", "openrouter.ai=OPENROUTER_API_KEY=OPENROUTER"])
+    text = "\n".join(lines)
+    assert status == 0, capsys.readouterr().err
+    assert KEY not in text and "export OPENROUTER_API_KEY=sandbox-ai-api-key-placeholder-OPENROUTER_API_KEY" in text
+    assert "start with: --allow-host openrouter.ai --api-key openrouter.ai=OPENROUTER_API_KEY=OPENROUTER" in text
+    assert keys.stat().st_mode & 0o777 == 0o600
+    entries = json.loads(keys.read_text())["api_keys"]
+    assert entries == [{"host": "openrouter.ai", "port": 443, "name": "OPENROUTER_API_KEY",
+                        "placeholder": "sandbox-ai-api-key-placeholder-OPENROUTER_API_KEY", "key": KEY}]
+    # The host is allowed with it (resolved, opened on 443, pinned).
+    assert "192.0.2.50 openrouter.ai" in sandbox["hosts"].read_text()
+    # The proxy reads the file and puts the key in where the agent sends the placeholder, to that host only.
+    assert rt.added_api_keys(keys) == entries
+    head = (b"GET /api/v1/models HTTP/1.1\r\nHost: openrouter.ai\r\n"
+            b"Authorization: Bearer sandbox-ai-api-key-placeholder-OPENROUTER_API_KEY\r\n\r\n")
+    swapped, names = rt.api_key_head(rt.added_api_keys(keys), "https", "openrouter.ai", 443, head)
+    assert KEY.encode() in swapped and names == ["OPENROUTER_API_KEY"]
+    assert rt.api_key_head(rt.added_api_keys(keys), "https", "evil.example", 443, head) == (head, [])
+    assert rt.api_key_head(rt.added_api_keys(keys), "http", "openrouter.ai", 443, head) == (head, [])
+    # Taken back: the file keeps the others; a second revoke says there is none.
+    status, lines = run_net(["revoke", "--api-key", "OPENROUTER_API_KEY"])
+    assert status == 0 and json.loads(keys.read_text())["api_keys"] == [] and rt.added_api_keys(keys) == []
+    assert run_net(["revoke", "--api-key", "OPENROUTER_API_KEY"])[0] == 1
+    assert "no API key OPENROUTER_API_KEY was given during this run" in capsys.readouterr().err
+
+
+def test_allow_api_key_refusals(sandbox, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(net.launcher(), "load_secret_store_module",
+                        lambda: type("S", (), {"get": staticmethod(lambda name: None)}))
+    # A run without the proxy's directory in run.json (older, or no proxy): said, nothing written.
+    assert run_net(["allow", "--api-key", "openrouter.ai=OPENROUTER_API_KEY"])[0] == 1
+    assert "takes no API key during the run" in capsys.readouterr().err
+    keys = proxy_ready(sandbox, tmp_path, monkeypatch)
+    for value, message in (("openrouter.ai=PATH", "Sandbox-owned variable"),
+                           ("192.0.2.9=KEY", "--api-key expects HOST=NAME"),
+                           ("openrouter.ai=OPENROUTER_API_KEY", "no secret OPENROUTER_API_KEY")):
+        assert run_net(["allow", "--api-key", value])[0] == 1
+        assert message in capsys.readouterr().err
+    assert not keys.exists() and sandbox["applied"] == [], "a refused key changes nothing"
+    monkeypatch.setattr(net.launcher(), "load_policy", lambda *a, **k: {"forbid": ["--api-key"]})
+    assert run_net(["allow", "--api-key", "openrouter.ai=K"])[0] == 1
+    assert "forbidden by the administrator's policy" in capsys.readouterr().err
+
+
+def test_the_proxy_reads_only_well_formed_added_keys(tmp_path):
+    path = tmp_path / rt.ADDED_API_KEYS
+    good = {"host": "API.example.org", "port": 443, "name": "K", "placeholder": "sandbox-ai-api-key-placeholder-K",
+            "key": "abc123"}
+    path.write_text(json.dumps({"api_keys": [good, {**good, "key": "with space"}, {**good, "port": "443"},
+                                             {**good, "placeholder": "anything"}, "junk"]}))
+    assert rt.added_api_keys(path) == [{**good, "host": "api.example.org"}]
+    path.write_text("not json")
+    assert rt.added_api_keys(path) == []
+    path.unlink()
+    assert rt.added_api_keys(path) == []
+
+
+def test_allow_api_key_keeps_to_the_mode_of_the_run(sandbox, tmp_path, monkeypatch, capsys):
+    keys = proxy_ready(sandbox, tmp_path, monkeypatch, mode={"name": "high", "origin": "test", "refuses": ["--api-key"]})
+    monkeypatch.setattr(net.launcher(), "load_secret_store_module",
+                        lambda: type("S", (), {"get": staticmethod(lambda name: KEY)}))
+    assert run_net(["allow", "--api-key", "openrouter.ai=OPENROUTER_API_KEY"])[0] == 1
+    assert "--api-key widens the security mode high" in capsys.readouterr().err
+    assert not keys.exists() and sandbox["applied"] == []
+
+
+@pytest.mark.parametrize("runtime", ["dir", "missing", "unset"])
+def test_the_run_directory_is_found_as_the_launcher_finds_it(runtime, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    if runtime == "unset":
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    else:
+        (tmp_path / "rt").mkdir(exist_ok=runtime == "dir") if runtime == "dir" else None
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / ("rt" if runtime == "dir" else "gone")))
+    assert net.own_runs_dir() == net.launcher().runs_dir()
+
+
+def test_the_supervisor_refuses_keys_the_policy_forbids(tmp_path, monkeypatch):
+    """A request written by hand reaches the control socket too: the supervisor checks --api-key against the policy
+    and the mode itself."""
+    short = Path(tempfile.mkdtemp(prefix="net-", dir="/tmp"))
+    monkeypatch.setattr(rt, "PROXY_RUN", tmp_path)
+    stop = threading.Event()
+    network = rt.RuntimeNetwork({"loopback": []}, tmp_path / "allow.json", lambda *a: None)
+    entry = {"host": "api.x.org", "port": 443, "name": "K", "placeholder": "sandbox-ai-api-key-placeholder-K",
+             "key": "abc"}
+    for forbid, mode, expected in ((["--api-key"], None, "not allowed by the administrator's policy"),
+                                   ((), {"name": "high", "refuses": ["--api-key"]}, "widens the security mode high")):
+        socket_path = short / f"control-{len(expected)}.sock"
+        thread = threading.Thread(target=rt.control_server, args=(socket_path, network, stop, forbid, mode),
+                                  daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not socket_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with net.socket.socket(net.socket.AF_UNIX) as client:
+            client.connect(str(socket_path))
+            client.sendall(json.dumps({"op": "api-keys", "api_keys": [entry]}).encode() + b"\n")
+            answer = json.loads(client.makefile().readline())
+        assert answer["ok"] is False and expected in answer["error"], answer
+    assert not (tmp_path / rt.ADDED_API_KEYS).exists()
+    stop.set()
+    shutil.rmtree(short, ignore_errors=True)
+
+
+def test_a_key_that_cannot_be_given_opens_nothing(sandbox, tmp_path, monkeypatch, capsys):
+    """Refused before the network changes: a run of an older sandbox-ai (its supervisor knows no "api-keys"), a host
+    the run does not inspect, a key the supervisor would refuse."""
+    monkeypatch.setattr(net.launcher(), "load_secret_store_module",
+                        lambda: type("S", (), {"get": staticmethod(lambda name: {"LONG": "x" * 5000}.get(name, KEY))}))
+    for fields, value, message in (({"version": "0.1.91"}, "openrouter.ai=K", "older than 0.1.92"),
+                                   ({"no_inspect": ["openrouter.ai"]}, "openrouter.ai=K", "--no-inspect openrouter.ai"),
+                                   ({"no_inspect": []}, "openrouter.ai=K=LONG", "at most 4096 characters")):
+        keys = proxy_ready(sandbox, tmp_path, monkeypatch, **fields)
+        assert run_net(["allow", "--api-key", value])[0] == 1
+        assert message in capsys.readouterr().err
+        assert sandbox["applied"] == [] and "openrouter.ai" not in sandbox["hosts"].read_text() and not keys.exists()
+
+
+def test_a_key_given_during_the_run_replaces_the_starts_of_that_name():
+    start = [{"host": "dev.to", "port": 443, "name": "K", "placeholder": "sandbox-ai-api-key-placeholder-K",
+              "key": "OLD-KEY"}]
+    added = [{**start[0], "key": "NEW-KEY"}]
+    head = b"GET / HTTP/1.1\r\nHost: dev.to\r\napi-key: sandbox-ai-api-key-placeholder-K\r\n\r\n"
+    swapped, _ = rt.api_key_head(added + start, "https", "dev.to", 443, head)
+    assert b"NEW-KEY" in swapped and b"OLD-KEY" not in swapped
+    assert "added_api_keys() + (self.config.get(\"api_keys\") or [])" in (ROOT / "sandbox/runtime.py").read_text()
+
+
+
+def test_a_key_for_a_host_below_an_uninspected_wildcard_is_refused(sandbox, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(net.launcher(), "load_secret_store_module",
+                        lambda: type("S", (), {"get": staticmethod(lambda name: KEY)}))
+    keys = proxy_ready(sandbox, tmp_path, monkeypatch, no_inspect=["*.example.com"])
+    assert run_net(["allow", "--api-key", "api.example.com=K"])[0] == 1
+    assert "--no-inspect api.example.com" in capsys.readouterr().err and not keys.exists()

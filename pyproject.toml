@@ -31,13 +31,6 @@ Issues = "https://github.com/c0decave/sandbox-ai/issues"
 
 [project.scripts]
 sandbox-ai = "sandbox_ai.cli:main"
-claude-sandbox = "sandbox_ai.cli:claude"
-codex-sandbox = "sandbox_ai.cli:codex"
-opencode-sandbox = "sandbox_ai.cli:opencode"
-sandbox-session = "sandbox_ai.cli:session"
-sandbox-mcp = "sandbox_ai.cli:mcp"
-sandbox-wizard = "sandbox_ai.cli:wizard"
-sandbox-build-image = "sandbox_ai.cli:build_image"
 
 [tool.setuptools]
 # The checkout keeps its directory name "sandbox"; installed it is "sandbox_ai".

@@ -15,16 +15,19 @@ Qt (tested without a display).
   models with their sizes, VRAM/RAM, KV cache, requests - what its API reports; parse_status, status_text),
 - the Model choice beside the agent on the launch page and the board's agent node (model_choices, form_values,
   apply): the agent's provider, or a registered server as NAME or NAME:MODEL,
-- what goes on the board: --llm NAME[:MODEL] for whichever agent (Claude Code needs a server with the Anthropic
+- servers found on this machine's loopback and at the addresses named (`sandbox-ai llm detect --json`: one read-only
+  request for the model list per usual port, short timeouts; detect_argv, parse_detected),
+- what goes on the board: --llm NAME[:MODEL[,MODEL...]] for whichever agent (Claude Code needs a server with the Anthropic
   Messages API; Codex and OpenCode take any OpenAI-compatible one), --no-provider-defaults for "only this server",
   and no --model (the launcher refuses --model with --llm: the model is the server's).
 
-The functions that run a command (list_endpoints, add_and_check, list_models) block: the pages hand them to
+The functions that run a command (list_endpoints, add_and_check, list_models, detect) block: the pages hand them to
 widgets.background (tests/test_references.py knows them). Values that go back to sandbox-ai as arguments are checked
 as sandbox-ai llm checks them, and none may read as an option.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import unicodedata
@@ -43,6 +46,8 @@ AGENTS = ("claude", "codex", "opencode")
 KINDS = (("lmstudio", N_("LM Studio"), 1234), ("ollama", N_("Ollama"), 11434), ("llamacpp", N_("llama.cpp"), 8080),
          ("vllm", N_("vLLM"), 8000), ("openai-compatible", N_("OpenAI-compatible API"), None))
 LIST_SECONDS, ADD_SECONDS, CHECK_SECONDS, MODELS_SECONDS = 60, 90, 150, 120
+DETECT_SECONDS = 60
+MODELS_MAX = 50  # --llm NAME:MODEL,MODEL...: at most this many (llm.parse_models)
 
 
 def kind_label(kind):
@@ -82,6 +87,15 @@ def valid_name(name):
 
 def valid_model(model):
     return model if isinstance(model, str) and not model.startswith("-") and MODEL.fullmatch(model) else None
+
+
+def valid_models(text):
+    """TEXT if it is one model or several, comma-separated (--llm NAME:MODEL,MODEL...: the first is the agent's,
+    OpenCode offers exactly these), each a valid_model; else None."""
+    if not isinstance(text, str):
+        return None
+    parts = text.split(",")
+    return text if 1 <= len(parts) <= MODELS_MAX and all(valid_model(part) for part in parts) else None
 
 
 # -- the commands --
@@ -185,6 +199,51 @@ def add_and_check(sai, fields, agent=None, keep_key=None):
         kept = keep_key() if keep_key is not None else None
         checked = sai.call(*check_argv(args[2], agent), timeout=CHECK_SECONDS)
     return {"name": args[2], "added": added, "kept": kept, "checked": checked}
+
+
+def detect_argv(addresses=()):
+    """`sandbox-ai llm detect --json` with --address for each of ADDRESSES besides this machine's loopback (always
+    looked at); ValueError for one that is not an IP address (a name is never resolved for a look)."""
+    args = ["llm", "detect", "--json"]
+    for address in dict.fromkeys(a.strip() for a in addresses if a and a.strip()):
+        try:
+            ipaddress.ip_address(address)
+        except ValueError:
+            raise ValueError(tr("Not an IP address: {value}", value=printable(address))) from None
+        if address != "127.0.0.1":
+            args += ["--address", address]
+    return args
+
+
+def parse_detected(out):
+    """[{kind, url, models: [model names]}] of `sandbox-ai llm detect --json`, each checked (a server's answer is
+    untrusted): a kind this wizard knows, a URL `llm add` takes, model names that may go back as arguments."""
+    try:
+        data = json.loads(out or "")
+    except ValueError:
+        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    if not isinstance(data, list):
+        raise ValueError(tr("not a list of servers"))
+    kinds = [key for key, _, _ in KINDS]
+    found = []
+    for entry in data:
+        if not isinstance(entry, dict) or entry.get("kind") not in kinds or not isinstance(entry.get("url"), str) \
+                or not URL.fullmatch(entry["url"]):
+            continue
+        models = [m.get("name") for m in entry.get("models") or [] if isinstance(m, dict)] \
+            if isinstance(entry.get("models"), list) else []
+        found.append({"kind": entry["kind"], "url": entry["url"],
+                      "models": [m for m in models if valid_model(m)][:500]})
+    return found
+
+
+def detect(sai, addresses=()):
+    """The servers found on this machine's loopback and at ADDRESSES (blocking; see detect_argv, parse_detected);
+    ValueError with the CLI's message (an older sandbox-ai knows no llm detect)."""
+    status, out, err = sai.call(*detect_argv(addresses), timeout=DETECT_SECONDS)
+    if status != 0:
+        raise ValueError(message(status, out, err))
+    return parse_detected(out)
 
 
 def parse_models(out):
@@ -477,18 +536,19 @@ def endpoint_detail(endpoint):
 # -- what goes on the board --
 
 def llm_value(name, model=""):
-    """--llm's value NAME[:MODEL] (ValueError for a name or model that cannot be passed on)."""
+    """--llm's value NAME[:MODEL[,MODEL...]] (ValueError for a name or model that cannot be passed on)."""
     if valid_name(name) is None:
         raise ValueError(tr("Not a server's name: {name}", name=printable(name)))
-    if model and valid_model(model) is None:
+    if model and valid_models(model) is None:
         raise ValueError(tr("Not a model name: {model}", model=printable(model)))
     return f"{name}:{model}" if model else name
 
 
 def parse_value(value):
-    """(name, model) of --llm NAME[:MODEL] (a model may hold ':' itself: qwen2.5-coder:7b); ("", "") if invalid."""
+    """(name, model) of --llm NAME[:MODEL[,MODEL...]] (a model may hold ':' itself: qwen2.5-coder:7b; MODEL is all
+    the models named, comma-separated); ("", "") if invalid."""
     name, _, model = str(value or "").partition(":")
-    if valid_name(name) is None or (model and valid_model(model) is None):
+    if valid_name(name) is None or (model and valid_models(model) is None):
         return "", ""
     return name, model
 
@@ -498,7 +558,7 @@ def chosen_model(endpoint, model, listed=()):
     only one listed; ValueError when a start would not know which (the launcher asks for NAME:MODEL then)."""
     model = (model or "").strip()
     if model:
-        if valid_model(model) is None:
+        if valid_models(model) is None:
             raise ValueError(tr("Not a model name: {model}", model=printable(model)))
         return model
     if (endpoint or {}).get("model"):
