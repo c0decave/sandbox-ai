@@ -134,7 +134,7 @@ class RulesetTools(QWidget):
         row.addWidget(self.show_button)
         row.addStretch(1)
         layout.addLayout(row)
-        self.result = plain_label(role="secondary")
+        self.result = plain_label(role="secondary", selectable=True)
         self.result.setWordWrap(True)
         self.result.hide()
         layout.addWidget(self.result)

@@ -221,9 +221,19 @@ SECTIONS = (
          "keep_days, on this machine or the host chosen; it shows what it would remove first and asks, and removes "
          "only that: when the list changed meanwhile, nothing is removed. While a command runs, these buttons "
          "wait.\n"
-         "- Stop… asks first. A session keeps its HOME; a one-off run's launcher cleans up.\n\n"
+         "- Report… writes one report of the selected starts of this machine, running or stopped, each with all "
+         "its runs and (unless you say no) its MCP servers, helpers and team: a summary, the statistics, every "
+         "destination and why it was allowed or refused, and a security report of everything tried or done that "
+         "was not allowed, the most severe first, with links (`sandbox-ai report`). Choose PDF, HTML or Markdown, "
+         "the file and, if you like, from when; it is written in the background and opened. It holds no secret, "
+         "but names hosts, paths and commands: share it with care.\n"
+         "- Stop… asks first. A session keeps its HOME; a one-off run's launcher cleans up.\n"
+         "- Kill switch cuts the network of the selected sandboxes at once, also of several, with their MCP "
+         "servers, helpers and team, without a question: the internet, the local network and host ports, all but "
+         "the model API, or everything; Lift the cut gives it back (`sandbox-ai net cut`). The State column says "
+         "what is cut. File › Emergency stop (Ctrl+Shift+X) cuts every sandbox's network, here and on every host.\n\n"
          "A launcher that has not registered can only be ended in its own terminal. Connections already open "
-         "stay open after a revoke.",
+         "stay open after a revoke (a cut closes them).",
          "Diese Seite listet jede Instanz von sandbox-ai Ihres Kontos als Baum, alle paar Sekunden neu gelesen: "
          "jeden Host (wie viele Starts, wie viele laufen, ob er antwortet), darunter seine Starts - einmalige Läufe "
          "(hier, in einem Terminal, von einem Skript oder einer anderen App gestartet), Sitzungen (laufend, "
@@ -285,17 +295,29 @@ SECTIONS = (
          "aufbewahrte Starts, die länger als keep_days ungenutzt sind, auf diesem Rechner oder dem gewählten Host; "
          "es zeigt zuerst, was es entfernen würde, fragt und entfernt nur das: Hat sich die Liste inzwischen "
          "geändert, wird nichts entfernt. Solange ein Befehl läuft, warten diese Knöpfe.\n"
-         "- Stoppen… fragt zuerst. Eine Sitzung behält ihr HOME; der Launcher eines einmaligen Laufs räumt auf.\n\n"
+         "- Bericht… schreibt einen Bericht über die gewählten Starts dieses Rechners, laufend oder gestoppt, "
+         "jeweils mit allen Läufen und (wenn Sie nicht nein sagen) ihren MCP-Servern, Helfern und ihrem Team: eine "
+         "Zusammenfassung, die Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und einen "
+         "Sicherheitsbericht über alles, was versucht oder getan wurde und nicht erlaubt war, das Schwerste zuerst, "
+         "mit Links (`sandbox-ai report`). Wählen Sie PDF, HTML oder Markdown, die Datei und, wenn Sie möchten, ab "
+         "wann; er wird im Hintergrund geschrieben und geöffnet. Er enthält keine Geheimnisse, nennt aber Hosts, "
+         "Pfade und Befehle: geben Sie ihn mit Bedacht weiter.\n"
+         "- Stoppen… fragt zuerst. Eine Sitzung behält ihr HOME; der Launcher eines einmaligen Laufs räumt auf.\n"
+         "- Kill-Switch kappt das Netz der gewählten Sandboxen sofort, auch mehrerer, mit ihren MCP-Servern, Helfern "
+         "und ihrem Team, ohne Rückfrage: das Internet, das lokale Netz und die Host-Ports, alles außer der "
+         "Modell-API, oder alles; Kappung aufheben gibt es zurück (`sandbox-ai net cut`). Die Spalte Zustand sagt, "
+         "was gekappt ist. Datei › Notaus (Ctrl+Shift+X) kappt das Netz jeder Sandbox, hier und auf jedem Host.\n\n"
          "Ein nicht angemeldeter Launcher lässt sich nur in seinem eigenen Terminal beenden. Schon offene "
-         "Verbindungen bleiben nach dem Zurücknehmen offen."),
+         "Verbindungen bleiben nach dem Zurücknehmen offen (eine Kappung schließt sie)."),
         cli=("sandbox-ai list", "sandbox-ai list --all", "sandbox-ai list --history NAME", "sandbox-ai rename OLD NEW",
              "sandbox-ai rules reload NAME", "sandbox-ai resume NAME --restore-home",
-             "sandbox-ai gc --dry-run", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
-             "sandbox-ai net untaint RUN", "sandbox-ai net stop RUN", "sandbox-ai session stop NAME",
+             "sandbox-ai report NAME -o FILE.pdf", "sandbox-ai gc --dry-run", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
+             "sandbox-ai net untaint RUN", "sandbox-ai net cut RUN MODE", "sandbox-ai net stop RUN",
+             "sandbox-ai session stop NAME",
              "sandbox-ai mcp stop NAME", "sandbox-ai devices", "sandbox-ai limits", "sandbox-ai workspace add",
              "sandbox-ai mcp attach NAME START --live", "sandbox-ai mcp detach NAME START --live",
              "sandbox-ai resume NAME"),
-        see=("sessions", "network", "taint", "devices", "limits", "page-hosts", "page-terminals", "mcp",
+        see=("sessions", "network", "killswitch", "taint", "devices", "limits", "page-hosts", "page-terminals", "mcp",
              "workspaces-mounts"),
         tours=("area:sandboxes",)),
     section(
@@ -503,7 +525,10 @@ SECTIONS = (
          "tables with simple bars.\n\n"
          "Pick a project's log directory, then compare two runs, for example before and after a change of "
          "options. A host you do not expect, or a credential header sent to it, is a reason to look at "
-         "Connections. The tokens come from what the model APIs reported in their answers.",
+         "Connections. The tokens come from what the model APIs reported in their answers.\n\n"
+         "Report… writes one report of every run of the log folder shown, as PDF, HTML or Markdown: the runs, the "
+         "statistics, every destination and why it was allowed or refused, and the security report of what was "
+         "not allowed (`sandbox-ai report --log-dir`). For a host's logs, run `sandbox-ai report` there.",
          "Statistik fasst das Protokollverzeichnis eines Projekts zusammen: Modellaufrufe und Tokens pro Lauf und pro "
          "Agent, HTTP-Anfragen pro Host, gesendete Anmelde-Header pro Host (nur Namen, nie Werte), geprüfte und "
          "abgewiesene Pushes, abgewiesene Verbindungen, gestartete Programme und die Werkzeugaufrufe der "
@@ -511,8 +536,12 @@ SECTIONS = (
          "Wählen Sie das Protokollverzeichnis eines Projekts und vergleichen Sie zwei Läufe, etwa vor und nach einer "
          "Änderung der Optionen. Ein unerwarteter Host oder ein an ihn gesendeter Anmelde-Header ist ein Grund, "
          "auf Verbindungen nachzusehen. Die Tokens stammen aus dem, was die Modell-APIs in ihren Antworten "
-         "meldeten."),
-        cli=("sandbox-ai logs", "sandbox-ai logs --project PATH"),
+         "meldeten.\n\n"
+         "Bericht… schreibt einen Bericht über jeden Lauf des gezeigten Protokollverzeichnisses, als PDF, HTML oder "
+         "Markdown: die Läufe, die Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und den "
+         "Sicherheitsbericht über das, was nicht erlaubt war (`sandbox-ai report --log-dir`). Für die Protokolle "
+         "eines Hosts führen Sie `sandbox-ai report` dort aus."),
+        cli=("sandbox-ai logs", "sandbox-ai logs --project PATH", "sandbox-ai report --log-dir DIR -o FILE.pdf"),
         see=("logs", "page-connections"),
         tours=("area:statistics",)),
     section(
@@ -1428,8 +1457,58 @@ SECTIONS = (
         cli=("--profile", "--allow-host", "--allow-tcp", "--allow", "--allow-host-port", "--dns", "--offline",
              "--egress-all-allow", "--no-provider-defaults", "--subnet", "sandbox-ai net allow",
              "sandbox-ai net revoke", "sandbox-ai net show", "sandbox-ai logs"),
-        see=("proxy", "approvals", "vpn-tor", "page-connections", "page-sandboxes"),
+        see=("proxy", "approvals", "vpn-tor", "page-connections", "page-sandboxes", "killswitch"),
         tours=("approvals-network",)),
+    section(
+        "killswitch", "concepts", ("Kill switch and emergency stop", "Kill-Switch und Notaus"),
+        ("The kill switch cuts a running sandbox's network down at once, for every preset and agent, without a "
+         "restart (`sandbox-ai net cut RUN MODE`; on the Sandboxes page: Kill switch, also for several selected):\n\n"
+         "- Cut the internet (`remote`): only the local network and the host's ports the run may reach stay.\n"
+         "- Cut the local network and host ports (`local`): only the internet the run may reach stays.\n"
+         "- Only the model API (`api`): its provider's hosts with the addresses the start pinned (TLS must name "
+         "one of them: another name behind the same CDN is refused), or its `--llm` server.\n"
+         "- Cut everything (`all`): the model API too.\n"
+         "- Lift the cut (`off`): it reaches again exactly what it may reach.\n\n"
+         "A cut only takes away: it never opens anything the run may not reach otherwise, and lookups count as the "
+         "internet. It holds out of the agent's reach - in the sandbox's firewall (connections already open stop "
+         "too), in the connection proxy (which closes them) and in the supervisor's relays and DNS stub - and for "
+         "the run's MCP servers, helpers and team members as well, also those that join it later. An MCP server two "
+         "runs share holds both cuts and stays cut while one of them is; a paused sandbox is cut as it resumes. "
+         "Behind Tor `api` is the provider through Tor; "
+         "nothing is opened past Tor or a VPN. The State column says what is cut.\n\n"
+         "The emergency stop (File › Emergency stop, Ctrl+Shift+X from every window, the button in the header) cuts "
+         "every running sandbox's network at once, here and on every host of `sandbox-ai hosts`, without a question; "
+         "a notification says what was cut and names every host it did not reach. File › Lift every cut (asked "
+         "first), or Kill switch › Lift the cut, gives it back. Runs started by a "
+         "sandbox-ai older than 0.1.94 have no kill switch: stop them.",
+         "Der Kill-Switch kappt das Netz einer laufenden Sandbox sofort, für jedes Preset und jeden Agenten, ohne "
+         "Neustart (`sandbox-ai net cut LAUF MODUS`; auf der Seite Sandboxen: Kill-Switch, auch für mehrere "
+         "gewählte):\n\n"
+         "- Internet kappen (`remote`): Nur das lokale Netz und die Ports des Hosts, die der Lauf erreichen darf, "
+         "bleiben.\n"
+         "- Lokales Netz und Host-Ports kappen (`local`): Nur das Internet, das der Lauf erreichen darf, bleibt.\n"
+         "- Nur die Modell-API (`api`): die Hosts ihres Anbieters mit den Adressen, die der Start festgelegt hat "
+         "(TLS muss einen davon nennen: ein anderer Name hinter demselben CDN wird abgelehnt), oder ihr "
+         "`--llm`-Server.\n"
+         "- Alles kappen (`all`): auch die Modell-API.\n"
+         "- Kappung aufheben (`off`): Sie erreicht wieder genau, was sie erreichen darf.\n\n"
+         "Eine Kappung nimmt nur weg: Sie öffnet nie etwas, das der Lauf sonst nicht erreichen darf, und "
+         "Namensauflösungen zählen als Internet. Sie gilt außerhalb der Reichweite des Agenten - in der Firewall der "
+         "Sandbox (auch schon offene Verbindungen stehen still), im Verbindungs-Proxy (der sie schließt) und in den "
+         "Relays und dem DNS-Stub des Supervisors - und auch für die MCP-Server, Helfer und Team-Mitglieder des "
+         "Laufs, auch für die, die später dazukommen. Ein MCP-Server, den zwei Läufe teilen, hält beide Kappungen und "
+         "bleibt gekappt, solange einer von ihnen es ist; eine pausierte Sandbox wird beim Fortsetzen gekappt. "
+         "Hinter Tor ist `api` der Anbieter durch Tor; nichts wird an Tor oder einem VPN vorbei geöffnet. Die "
+         "Spalte Zustand sagt, was gekappt ist.\n\n"
+         "Der Notaus (Datei › Notaus, Ctrl+Shift+X aus jedem Fenster, der Knopf in der Kopfleiste) kappt das Netz "
+         "jeder laufenden Sandbox sofort, hier und auf jedem Host von `sandbox-ai hosts`, ohne Rückfrage; eine "
+         "Benachrichtigung sagt, was gekappt wurde, und nennt jeden Host, den er nicht erreichte. Datei › Jede "
+         "Kappung aufheben (mit Rückfrage) oder Kill-Switch › Kappung aufheben gibt es zurück. Läufe, "
+         "die ein sandbox-ai vor 0.1.94 gestartet hat, haben keinen Kill-Switch: Stoppen Sie sie."),
+        cli=("sandbox-ai net cut RUN remote", "sandbox-ai net cut RUN local", "sandbox-ai net cut RUN api",
+             "sandbox-ai net cut RUN all", "sandbox-ai net cut RUN off", "sandbox-ai net cut --all-runs all",
+             "sandbox-ai net list --json"),
+        see=("network", "page-sandboxes", "proxy", "vpn-tor", "mcp")),
     section(
         "proxy", "concepts", ("Connection proxy", "Verbindungs-Proxy"),
         ("Every TCP connection of the agent passes a proxy that starts with the sandbox. It is on by default; "
@@ -1847,7 +1926,9 @@ SECTIONS = (
          "network (each behind the same VPN in a container of its own; with Tor a server with a VPN of another type is "
          "refused). Names allowed during the run are looked up through it. With Tor nothing of the start reaches your "
          "own address: no URL of the agent opens in your browser, the host's ports (`--allow-host-port`, an LLM server "
-         "on this machine, a Git server on localhost) are refused unless `--vpn-bypass-host-ports` lets them in, and "
+         "on this machine, a Git server on localhost) are refused unless `--vpn-bypass-host-ports` lets them in, a "
+         "model server in your own network only with `--vpn-bypass-tcp ADDRESS:PORT` (exactly that address and port "
+         "past Tor, the rest of your network stays closed), and "
          "an exit that is no Tor exit ends the run (checked a minute after the start, then every 10 minutes). With "
          "another VPN the host's ports are reached past the tunnel, as asked.",
          "Ein VPN kann vor einer Sandbox sitzen (Podman-Backend). Der Tunnel läuft in einem eigenen Container im "
@@ -1869,11 +1950,13 @@ SECTIONS = (
          "abgelehnt). Während des Laufs erlaubte Namen werden durch es aufgelöst. Mit Tor erreicht nichts des Starts "
          "Ihre eigene Adresse: keine URL des Agenten öffnet sich in Ihrem Browser, die Ports des Hosts "
          "(`--allow-host-port`, ein LLM-Server auf diesem Rechner, ein Git-Server auf localhost) werden abgelehnt, "
-         "außer `--vpn-bypass-host-ports` lässt sie zu, und ein Ausgang, der kein Tor-Ausgang ist, beendet den Lauf "
+         "außer `--vpn-bypass-host-ports` lässt sie zu, ein Modellserver im eigenen Netz nur mit "
+         "`--vpn-bypass-tcp ADRESSE:PORT` (genau diese Adresse und dieser Port am Tor vorbei, der Rest Ihres Netzes "
+         "bleibt zu), und ein Ausgang, der kein Tor-Ausgang ist, beendet den Lauf "
          "(geprüft eine Minute nach dem Start, dann alle 10 Minuten). Mit einem anderen VPN werden die Ports des Hosts "
          "am Tunnel vorbei erreicht, wie verlangt."),
         cli=("sandbox-ai build vpn", "sandbox-ai build tor", "sandbox-ai vpn add", "sandbox-ai vpn list", "sandbox-ai vpn check NAME", "sandbox-ai vpn rotate NAME",
-             "sandbox-ai vpn remove NAME", "--vpn", "--vpn-check", "--vpn-bypass-host-ports"),
+             "sandbox-ai vpn remove NAME", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp"),
         see=("network", "page-credentials", "secrets", "mcp", "llm"),
         tours=()),
     section(

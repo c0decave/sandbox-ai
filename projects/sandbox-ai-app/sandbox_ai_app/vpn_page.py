@@ -406,7 +406,7 @@ class VpnBox(QGroupBox):
             row.addWidget(widget)
         row.addStretch()
         layout.addLayout(row)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         layout.addWidget(self.message)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Show and Check one
         multi_select(self.profiles)

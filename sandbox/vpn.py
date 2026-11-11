@@ -932,8 +932,9 @@ def describe(profile):
 
 # --- the VPN container ------------------------------------------------------------------------------------------
 
-def payload(profile, action, names=()):
-    """The VPN container's standard input: the profile, its secrets, the names to resolve, the checks."""
+def payload(profile, action, names=(), bypass=()):
+    """The VPN container's standard input: the profile, its secrets, the names to resolve, the checks; BYPASS (a Tor
+    profile's --vpn-bypass-tcp targets, "ADDRESS:PORT") for the kill switch."""
     store, kind, values = secret_store(), profile["type"], {}
 
     def secret(name, what):
@@ -966,7 +967,9 @@ def payload(profile, action, names=()):
             values["tailscale_auth_key"] = secret(profile["tailscale"]["auth_key_secret"], "the auth key")
     public = {key: value for key, value in profile.items() if key not in ("created",)}
     return {"version": 1, "action": action, "profile": public, "secrets": values, "resolve": list(names),
-            "checks": check_settings(profile)}
+            "checks": check_settings(profile),
+            **({"bypass": [dict(zip(("address", "port"), runtime().bypass_target(value))) for value in bypass]}
+               if bypass else {})}
 
 
 def image(profile):
@@ -991,9 +994,10 @@ def container_command(podman, name, profile, action="serve", pod=None, network=N
                "--security-opt=no-new-privileges",
                "--log-driver=none", "--tmpfs=/run:rw,nosuid,nodev,mode=0755", "--tmpfs=/tmp:rw,nosuid,nodev"]
     if tor:
-        uid = runtime().TOR_UID
-        command += ["--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=NET_BIND_SERVICE",
-                    f"--tmpfs=/var/lib/tor:rw,nosuid,nodev,mode=0700,uid={uid},gid={uid}"]
+        # The data directory: a tmpfs of its own that the runtime gives to debian-tor (CHOWN) before tor starts -
+        # Podman's --tmpfs takes no uid= or gid= option ("unknown mount option").
+        command += ["--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=NET_BIND_SERVICE", "--cap-add=CHOWN",
+                    "--tmpfs=/var/lib/tor:rw,nosuid,nodev,noexec,mode=0700"]
     if profile["type"] == "tailscale":
         command.append("--cap-add=NET_RAW")
         if profile["tailscale"].get("ephemeral"):
@@ -1220,10 +1224,12 @@ def tor_agent_rules(dns_open, proxy_uid):
     return rules
 
 
-def bring_up(profile, command, names, say, action="serve", log_dir=None, run=None, warn_only=False, podman=None):
+def bring_up(profile, command, names, say, action="serve", log_dir=None, run=None, warn_only=False, podman=None,
+             bypass=()):
     """Start the container, wait for the tunnel, run the checks: (tunnel, ready event, verdict). Raises when a
-    check fails, unless WARN_ONLY. PODMAN: the engine's command (a remote one: its own address is the baseline)."""
-    data = payload(profile, action, names)
+    check fails, unless WARN_ONLY. PODMAN: the engine's command (a remote one: its own address is the baseline).
+    BYPASS: the addresses of the local network a Tor start reaches past Tor (--vpn-bypass-tcp)."""
+    data = payload(profile, action, names, bypass)
     tailnet = profile["type"] == "tailscale" and not profile["tailscale"].get("exit_node")
     baseline = in_background(lambda: {} if tailnet else baseline_of(data["checks"], podman))
     tunnel = Tunnel(command, data, say)
@@ -1285,6 +1291,8 @@ def validate(a):
     if not getattr(a, "vpn", None):
         if getattr(a, "vpn_bypass_host_ports", False):
             raise ValueError("--vpn-bypass-host-ports goes with --vpn (a Tor profile)")
+        if getattr(a, "vpn_bypass_tcp", None):
+            raise ValueError("--vpn-bypass-tcp goes with --vpn (a Tor profile)")
         return
     check_name(a.vpn)
     # An LLM endpoint's VPN (llm.apply_vpn) is named with where it came from.
@@ -1308,6 +1316,8 @@ def validate(a):
     if profile["type"] == "tor":
         validate_tor(a, profile, option, l)
         return
+    if getattr(a, "vpn_bypass_tcp", None):
+        raise ValueError(f"--vpn-bypass-tcp goes with a Tor profile; {option} {a.vpn} is a {profile['type']} profile")
     a.vpn_dns = list(profile.get("dns") or ([runtime().QUAD100] if profile["type"] == "tailscale" else []))
     if a.dns or a.egress_all_allow:
         for server in a.vpn_dns:
@@ -1334,6 +1344,7 @@ def validate_tor(a, profile, option, l):
     for port in sorted(ports & set(l.host_ports(a))):
         raise ValueError(f"--allow-host-port {port}: Tor listens there in the sandbox ({option} {a.vpn})")
     check_tor_host_ports(a, option, l.host_ports(a))
+    check_tor_bypass(a, l)
     check_tor_llm(a, option, l)
     a.vpn_dns = [rt.TOR_DNS]  # on loopback, inside the sandbox: no network to hold against the policy
     a.vpn_firewall = tor_agent_rules(bool(a.dns or a.egress_all_allow), l.PROXY_UID)
@@ -1357,6 +1368,35 @@ def check_tor_host_ports(a, option, ports):
         raise ValueError(host_ports_past_tor(ports, option, a.vpn))
 
 
+def bypass_targets(a):
+    """The --vpn-bypass-tcp values of A as "ADDRESS:PORT", checked and without repeats."""
+    rt, found = runtime(), []
+    for value in getattr(a, "vpn_bypass_tcp", None) or []:
+        target = "%s:%d" % rt.bypass_target(value)
+        if target not in found:
+            found.append(target)
+    return found
+
+
+def check_tor_bypass(a, l):
+    """--vpn-bypass-tcp: addresses of the local network reached past Tor, each opened as --allow-tcp (the connection
+    proxy still checks and logs every connection), within the administrator's policy."""
+    a.vpn_bypass_tcp = bypass_targets(a)
+    # It opens what --allow-tcp opens: a policy that forbids that forbids this too (the policy's check ran before).
+    forbidden = (getattr(a, "policy", None) or {}).get("forbid", [])
+    if a.vpn_bypass_tcp and "--allow-tcp" in forbidden:
+        raise ValueError("--vpn-bypass-tcp opens TCP ports as --allow-tcp does, which the administrator's policy "
+                         "forbids")
+    for target in a.vpn_bypass_tcp:
+        if f"--allow-tcp={target}" in forbidden:
+            raise ValueError(f"--vpn-bypass-tcp {target}: the administrator's policy forbids --allow-tcp={target}")
+        address = target.rpartition(":")[0]
+        if not l.within_ceiling(a, network=address):
+            raise ValueError(f"--vpn-bypass-tcp {target} lies outside the networks the administrator's policy allows")
+        if target not in a.allow_tcp:
+            a.allow_tcp.append(target)
+
+
 def check_tor_llm(a, option, l):
     """An --llm server at an address of your local network cannot be reached from a Tor start: Tor's exits refuse
     private addresses, and nothing else leaves the sandbox. Said before the start, not as a failing agent."""
@@ -1369,10 +1409,19 @@ def check_tor_llm(a, option, l):
         return  # llm.validate says why
     parsed = found["parsed"]
     if parsed["address"] and not parsed["loopback"] and llm.address_kind(parsed["address"]) == "local":
+        target = f"{parsed['address']}:{parsed['port']}"
+        if target in (getattr(a, "vpn_bypass_tcp", None) or []):
+            return
+        try:
+            runtime().bypass_target(target)
+            past = (f"Reach exactly this server past Tor with --vpn-bypass-tcp {target} (the rest of your network "
+                    "stays closed; whatever listens there could reach the internet from your own address), use ")
+        except ValueError:  # IPv6 or carrier-grade NAT: not past Tor
+            past = "Use "
         raise ValueError(f"--llm {found['name']}: {found['url']} lies in your local network, which a Tor start "
-                         f"cannot reach ({option} {a.vpn}: everything leaves through Tor, and Tor's exits refuse "
-                         "private addresses). Use a server on this host's loopback with --vpn-bypass-host-ports, one "
-                         "on the internet, or start without Tor")
+                         f"cannot reach through Tor ({option} {a.vpn}: everything leaves through Tor, and Tor's exits "
+                         f"refuse private addresses). {past}a server on this host's loopback with "
+                         "--vpn-bypass-host-ports, one on the internet, or start without Tor")
 
 
 def check_policy(a, policy, where=""):
@@ -1409,7 +1458,10 @@ def plan(a):
                 "kill_switch": f"only tor's own connections leave (user {rt.TOR_USER}, meta skuid {rt.TOR_UID}), over "
                                "IPv4 TCP" + (" to its bridges" if profile["tor"].get("bridges") else "") +
                                "; every other TCP connection goes to its TransPort, port 53 to its DNSPort; other "
-                               "UDP and all IPv6 are dropped",
+                               "UDP and all IPv6 are dropped" + (
+                                   "; past Tor, from your own address, only TCP to " +
+                                   ", ".join(a.vpn_bypass_tcp) + " (--vpn-bypass-tcp)"
+                                   if getattr(a, "vpn_bypass_tcp", None) else ""),
                 "checks": {"on_failure": a.vpn_check, "ip_echo": settings["urls"],
                            "tor": f"bootstrapped to 100% within {rt.BOOTSTRAP_TIMEOUT} s; the address seen outside "
                                   'is a Tor exit ("IsTor": true)',
@@ -1447,7 +1499,8 @@ def agent_up(a, session, home, names, cleanup):
     cleanup.callback(remove_pod)
     command = container_command(podman, container_name(a.vpn_pod), profile, pod=a.vpn_pod)
     tunnel, ready, _ = bring_up(profile, command, names, say, log_dir=a.log_dir, run=getattr(a, "run_id", None),
-                                warn_only=a.vpn_check == "warn", podman=podman)
+                                warn_only=a.vpn_check == "warn", podman=podman,
+                                bypass=getattr(a, "vpn_bypass_tcp", None) or ())
     cleanup.callback(tunnel.close)  # before the pod goes (callbacks run last in, first out)
 
     def follow(event):

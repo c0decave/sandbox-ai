@@ -696,13 +696,18 @@ def test_image_servers_obey_the_policy(monkeypatch):
     m.check_image_policy("bw", {"image": "x"})  # no network: fine
 
 
-def test_the_catalog_in_sandbox_ais_own_tree_comes_first(tmp_path):
+def test_the_published_catalogs_are_read_and_a_local_copy_only_when_asked(tmp_path):
+    """0.1.93: an installation carried an old unsigned copy of the catalog in its tree and took it before the
+    published, signed one ("its catalog is not signed by a trusted key ... catalog.json.sig cannot be read")."""
     (tmp_path / "projects" / "sandbox-ai-mcp").mkdir(parents=True)
     local = tmp_path / "projects" / "sandbox-ai-mcp" / "catalog.json"
     local.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [{"name": "x"}]}))
-    chosen = dict(m.default_catalogs(tmp_path))
+    chosen = dict(m.default_catalogs(tmp_path, environ={}))
+    assert chosen["mcp"].startswith("https://") and chosen["hub"].startswith("https://")
+    chosen = dict(m.default_catalogs(tmp_path, environ={"SANDBOX_AI_LOCAL_CATALOGS": "1"}))
     assert chosen["mcp"] == str(local) and chosen["hub"].startswith("https://")
-    assert dict(m.default_catalogs(tmp_path / "elsewhere"))["mcp"].startswith("https://")
+    assert dict(m.default_catalogs(tmp_path / "elsewhere", environ={"SANDBOX_AI_LOCAL_CATALOGS": "1"}))[
+        "mcp"].startswith("https://")
 
 
 def test_an_unpublished_catalog_is_named_as_such():

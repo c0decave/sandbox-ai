@@ -780,6 +780,10 @@ def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None,
                 # Your browser would reach the agent's URL from your own address, past the run's Tor.
                 notes.append("not opened: this run goes through Tor, and your browser would open the URL from your "
                              "own address; open it in Tor Browser if you mean to")
+            elif net().cut_state(record["directory"]) in ("remote", "api", "all"):
+                # The run's kill switch cuts the internet: your browser would reach it for the agent.
+                notes.append(f"not opened: the run's network is cut (sandbox-ai net cut: "
+                             f"{net().cut_state(record['directory'])}); lift the cut first if you mean to open it")
             else:
                 (opener or open_browser)(url)
         path = Path(record["directory"]) / "approvals" / f"{ident}.answer"

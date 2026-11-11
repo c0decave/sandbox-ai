@@ -40,6 +40,7 @@ ROUND_TRIPS = [
     ["--git-credentials", "/tmp/creds"],
     ["-m", "/data:/mnt/data:rw", "-m", "/etc/ssl:/opt/ssl:ro", "--mcp", "files", "--mcp", "web"],
     ["--device", "/dev/video0", "--gpu", "dri", "--memory", "4g", "--cpus", "2", "--pids", "512"],
+    ["--nested-containers", "--tmp-size", "6g", "--memory", "12g"],
     ["--gui", "--gui-screen", "1280x720x24", "--gui-vnc", "/tmp/vnc", "--gui-wayland"],
     ["--tmux", "--log-dir", "/tmp/logs", "--kit", "a", "--kit-dir", "/tmp/kit", "--no-default-kit", "--no-memory",
      "--no-plugins"],
@@ -145,6 +146,20 @@ def test_the_administrators_policy(sai):
     assert any("allow_hosts" in t for t in errors(["--allow-host", "evil.example"]))
     score, badges = B.badges(B.from_argv(sai, "claude", ["--no-proxy"]), policy)
     assert any(b.level == "bad" and "forbids --no-proxy" in b.text for b in badges)
+
+
+def test_nested_containers_cost_points_and_say_why(sai):
+    """--nested-containers lowers the score (more of the kernel within reach); the network stays the sandbox's, so
+    nothing is added to what the agent reaches. --tmp-size alone costs nothing."""
+    plain, _ = B.badges(B.from_argv(sai, "claude", []))
+    nested, badges = B.badges(B.from_argv(sai, "claude", ["--nested-containers"]))
+    assert nested == plain - 10
+    found = [b for b in badges if "Nested containers" in b.text]
+    assert len(found) == 1 and found[0].level == "warn" and found[0].cost == 10
+    board = B.from_argv(sai, "claude", ["--nested-containers", "--tmp-size", "6g"])
+    assert board.first("engine").props.get("--nested-containers") is True
+    assert board.first("limits").props.get("--tmp-size") == "6g"
+    assert B.badges(B.from_argv(sai, "claude", ["--tmp-size", "2g"]))[0] == plain
 
 
 def test_badges_and_score(sai):

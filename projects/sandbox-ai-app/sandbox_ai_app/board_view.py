@@ -166,6 +166,10 @@ PARTS_FORMAT = "sandbox-ai-board-parts"  # the same as JSON text, for a clipboar
 CLIP_LIMIT = 256 * 1024  # bytes of copied parts read back at most (the clipboard may hold anything)
 
 
+
+# The launcher's refusal of a model server in the local network behind Tor names the option that lets it in.
+BYPASS_OFFER = re.compile(r"--vpn-bypass-tcp ((?:\d{1,3}\.){3}\d{1,3}:\d{1,5})")
+
 class Snapshot(QUndoCommand):
     """One change of the board: the state before and after it (redo restores after, undo before)."""
 
@@ -1230,7 +1234,7 @@ class BoardPage(Prerequisites, QWidget):
         # window's log window, one place for every message; the last one is kept here (not shown).
         # (Not in a layout, so given the page as their parent: a widget of no parent whose signal holds the page
         # would keep both alive for good - a cycle through C++ that Python's collector cannot see.)
-        self.notice = plain_label(role="secondary")
+        self.notice = plain_label(role="secondary", selectable=True)
         self.notice.setParent(self)
         self.notice.hide()
         self.folder.setParent(self)
@@ -1315,15 +1319,32 @@ class BoardPage(Prerequisites, QWidget):
         self.preview.setAccessibleName(tr("Command line"))
         self.preview.hide()  # until CLI command is pressed
         layout.addWidget(self.preview)
-        # One line under the board (the page does not scroll): a long refusal is cut there, whole in the tooltip.
+        # One line under the board (the page does not scroll): a long refusal is cut there, whole in the tooltip,
+        # copied with its context menu or Ctrl+C, shown whole on a double click.
         self.verdict = ElidedLabel(role="secondary")
-        layout.addWidget(self.verdict)
+        verdict_row = QHBoxLayout()
+        verdict_row.setContentsMargins(0, 0, 0, 0)
+        verdict_row.addWidget(self.verdict, 1)
+        # A model server of the local network refused behind Tor: the launcher names the --vpn-bypass-tcp it needs.
+        self.bypass_target = None
+        self.bypass_button = QPushButton()
+        self.bypass_button.hide()
+        self.bypass_button.clicked.connect(lambda: self.allow_past_tor())
+        verdict_row.addWidget(self.bypass_button)
+        layout.addLayout(verdict_row)
         self.apply_button = QPushButton(tr("Apply…"))
         self.apply_button.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
                                         "it and what changes"))
         self.apply_button.clicked.connect(lambda: self.apply())
         self.dry_button = QPushButton(tr("Dry run"))
         self.dry_button.clicked.connect(lambda: self.dry_run())
+        # Clone: this setup as a new project (another folder, its own .sandbox-ai.json) or as a new session.
+        self.clone_button = QPushButton(tr("Clone"))
+        self.clone_button.setToolTip(tr("This setup as a new project (another folder) or as a new session"))
+        clone_menu = QMenu(self.clone_button)
+        clone_menu.addAction(tr("As a new project…"), lambda: self.clone_to_project())
+        clone_menu.addAction(tr("As a new session"), lambda: self.clone_to_session())
+        self.clone_button.setMenu(clone_menu)
         # One Start: where, and whether as a session (a codename unless one is typed) - widgets.StartControls.
         self.start_controls = StartControls(lambda embedded, session: self.start(embedded=embedded, session=session),
                                             sai, self.settings())
@@ -1341,7 +1362,8 @@ class BoardPage(Prerequisites, QWidget):
         self.host_note = plain_label(role="secondary")
         self.host_note.hide()
         layout.addWidget(self.host_note)
-        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, self.start_controls))
+        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, self.clone_button,
+                              self.start_controls))
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self.check)
@@ -2156,6 +2178,11 @@ class BoardPage(Prerequisites, QWidget):
             said = " ".join(printable((message or "").strip()[-400:]).split())
             self.verdict.setText(tr("The launcher refuses: {message}", message=said))
             self.verdict.setProperty("role", "notice-error")
+        offered = BYPASS_OFFER.search(message or "") if plan is None else None
+        self.bypass_target = offered.group(1) if offered else None
+        if offered:
+            self.bypass_button.setText(tr("Reach {target} past Tor…", target=self.bypass_target))
+        self.bypass_button.setVisible(bool(offered))
         self.verdict.style().unpolish(self.verdict)
         self.verdict.style().polish(self.verdict)
         self.launcher_ok = plan is not None
@@ -2212,7 +2239,68 @@ class BoardPage(Prerequisites, QWidget):
         while self.inspector.rowCount():
             self.inspector.removeRow(0)
 
+    def focus_memo(self):
+        """Where the keyboard is in the inspector, to bring it back after the inspector is made again (a list field
+        takes what was typed after a pause, and the change makes the rows anew): (row, role, index of the widget of
+        its kind in that row's widget, the text as typed, the cursor), or None when the keyboard is elsewhere."""
+        focused = QApplication.focusWidget()
+        if focused is None or not self.inspector_holder.isAncestorOf(focused):
+            return None
+        for row in range(self.inspector.rowCount()):
+            for role in (QFormLayout.ItemRole.FieldRole, QFormLayout.ItemRole.SpanningRole,
+                         QFormLayout.ItemRole.LabelRole):
+                item = self.inspector.itemAt(row, role)
+                holder = item.widget() if item is not None else None
+                if holder is None or not (holder is focused or holder.isAncestorOf(focused)):
+                    continue
+                kind = type(focused)
+                index = -1 if holder is focused else holder.findChildren(kind).index(focused)
+                if isinstance(focused, QPlainTextEdit):
+                    text, cursor = focused.toPlainText(), focused.textCursor().position()
+                elif isinstance(focused, QLineEdit):
+                    text, cursor = focused.text(), focused.cursorPosition()
+                else:
+                    text, cursor = None, None
+                return row, role, kind, index, text, cursor
+        return None
+
+    def restore_focus(self, memo):
+        """The keyboard back in the field it was in (focus_memo), with the text as typed when only the committed
+        form differs (a list's last empty line, spaces at the ends) and the cursor where it was."""
+        if memo is None:
+            return
+        row, role, kind, index, text, cursor = memo
+        if row >= self.inspector.rowCount():
+            return
+        item = self.inspector.itemAt(row, role)
+        holder = item.widget() if item is not None else None
+        if holder is None:
+            return
+        if index < 0:
+            widget = holder if isinstance(holder, kind) else None
+        else:
+            found = holder.findChildren(kind)
+            widget = found[index] if index < len(found) else None
+        if widget is None or not widget.isEnabled():
+            return
+        if text is not None and isinstance(widget, QPlainTextEdit):
+            if widget.toPlainText() != text and widget.toPlainText().split() == text.split():
+                widget.blockSignals(True)
+                widget.setPlainText(text)
+                widget.blockSignals(False)
+            moved = widget.textCursor()
+            moved.setPosition(min(cursor, len(widget.toPlainText())))
+            widget.setTextCursor(moved)
+        elif text is not None and isinstance(widget, QLineEdit):
+            if widget.text() != text and widget.text().strip() == text.strip():
+                widget.blockSignals(True)
+                widget.setText(text)
+                widget.blockSignals(False)
+            widget.setCursorPosition(min(cursor, len(widget.text())))
+        widget.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def inspect(self, node):
+        memo = self.focus_memo() if node is not None and node.id == self.edit_node else None
         self.clear_inspector()
         self.live_token = getattr(self, "live_token", 0) + 1  # a live row still being looked up is for another look
         if node is None:
@@ -2225,6 +2313,7 @@ class BoardPage(Prerequisites, QWidget):
             self.edit_node, self.edit_index, self.edit_stack = node.id, self.undo.index(), self.undo
         self.inspect_rows(node)
         self.edit_buttons(node)
+        self.restore_focus(memo)
 
     def edit_buttons(self, node):
         """OK (keep the changes made here), Cancel (back to the part as it was when its properties opened: those
@@ -2425,6 +2514,73 @@ class BoardPage(Prerequisites, QWidget):
             box.toggled.connect(toggled)
         self.disable_if_forbidden(holder, "--kit")
         self.inspector.addRow(OL.shown(tr("Kits (--kit)")), holder)
+
+    def allow_past_tor(self):
+        """The launcher refused a model server of the local network behind Tor and named the --vpn-bypass-tcp it
+        needs: after one question, exactly that address and port go into the VPN part."""
+        target = self.bypass_target
+        if not target:
+            return
+        if not confirm(self, tr("Past Tor"), tr(
+                "Reach {target} directly, past Tor? Only this address and port of your network: the rest of your "
+                "network stays closed, everything else still goes through Tor, and the connection proxy still checks "
+                "and logs it. Whatever listens there (a model server, your machine) could reach the internet from "
+                "your own address.", target=target), tr("Allow")):
+            return
+
+        def update():
+            vpn = self.board.first("vpn")
+            if vpn is None:  # Tor from a preset or the project file: the option still goes with the VPN part
+                vpn = self.board.add("vpn")
+                vpn.x, vpn.y = B.snap(40.0, self.grid()), B.snap(40.0 + 110.0 * len(self.board.nodes) % 700,
+                                                                self.grid())
+            values = list(vpn.props.get("--vpn-bypass-tcp") or [])
+            if target not in values:
+                vpn.props["--vpn-bypass-tcp"] = values + [target]
+        self.change(tr("Reach {target} past Tor", target=target), update)
+
+    def clone_to_project(self, directory=None):
+        """The board shown now as the board of another project folder DIRECTORY (asked for): the same parts and
+        options, its workspace that folder instead of this one; not applied yet (Apply writes its .sandbox-ai.json
+        after showing it). A folder that has a project file already is opened, never overwritten."""
+        if directory is None:
+            directory = choose_folder(self, tr("Folder of the new project"), "project")
+        if not directory:
+            return False
+        directory = os.path.abspath(os.path.expanduser(str(directory)))
+        if self.key_of(directory) == self.key_of(self.directory):
+            inform(self, tr("Clone"), tr("Choose another folder than this project's."))
+            return False
+        if os.path.exists(os.path.join(directory, ".sandbox-ai.json")):
+            warn(self, tr("Clone"), tr("{path} has a project file already: open it instead (Open project folder…).",
+                                       path=printable(directory)))
+            return False
+        old_directory = self.directory
+        board = B.Board.from_state(self.board.state())
+        for node in board.of_kind("workspace"):
+            if old_directory and self.key_of(node.props.get("path")) == self.key_of(old_directory):
+                node.props["path"] = directory
+        key = self.key_of(directory)
+        self.restored.add(key)  # a draft once kept for that folder does not replace the clone
+        self.sources[key] = {"digest": None, "trusted": True}
+        self.untrusted.pop(key, None)
+        self.load(board, directory, positioned=True)
+        self.undo.resetClean()  # not applied: Apply writes the project file
+        self.show_notice(tr("A clone of {old}: Apply writes .sandbox-ai.json into {new}.",
+                            old=printable(old_directory or tr("this board")), new=printable(directory)), "notice-ok")
+        return True
+
+    def clone_to_session(self):
+        """The next Start starts this setup as a new session: as a session, under a new codename (or the name
+        typed)."""
+        controls = self.start_controls
+        controls.as_session.setChecked(True)
+        controls.name.clear()
+        controls.new_name()
+        controls.name.setFocus()
+        self.show_notice(tr("Start now starts this setup as the new session {name} (or the name you type).",
+                            name=controls.suggestion or "…"), "notice-ok")
+        return True
 
     def enable_kit(self, directory, name):
         """Use kit NAME in the project DIRECTORY: the board of that project gets it in its kits node, and Apply

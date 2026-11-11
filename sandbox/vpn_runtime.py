@@ -28,6 +28,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import stat
 import secrets
 import select
 import shutil
@@ -618,12 +619,49 @@ def tor_config(tor, bridges=()):
     return "\n".join(lines) + "\n"
 
 
-def tor_rules(uid=TOR_UID, bridges=()):
+# The networks a Tor start may reach past Tor (--vpn-bypass-tcp): the local network's, never one on the internet,
+# which would see your own address. Carrier-grade NAT (100.64.0.0/10) lies outside your network.
+BYPASS_NETWORKS = tuple(ipaddress.IPv4Network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                                                           "169.254.0.0/16"))
+
+
+METADATA_ADDRESSES = (ipaddress.IPv4Address("169.254.169.254"), ipaddress.IPv4Address("169.254.170.2"))
+
+
+def bypass_target(value):
+    """(address, port) of one --vpn-bypass-tcp value, an IPv4 ADDRESS:PORT in the local network."""
+    if isinstance(value, dict):
+        address, port = value.get("address"), value.get("port")
+    else:
+        address, sep, port = str(value).rpartition(":")
+        if not sep:
+            raise ValueError(f"--vpn-bypass-tcp {value}: give ADDRESS:PORT, e.g. 192.168.1.20:1234")
+    try:
+        ip = ipaddress.IPv4Address(str(address))
+        port = int(port)
+    except ValueError:
+        raise ValueError(f"--vpn-bypass-tcp {value}: give an IPv4 address and a port, e.g. 192.168.1.20:1234") from None
+    if not 0 < port < 65536:
+        raise ValueError(f"--vpn-bypass-tcp {value}: the port must lie between 1 and 65535")
+    if ip in METADATA_ADDRESSES:
+        raise ValueError(f"--vpn-bypass-tcp {value}: {ip} is a cloud's metadata service (instance credentials), "
+                         "never reached past Tor")
+    if not any(ip in network for network in BYPASS_NETWORKS):
+        raise ValueError(f"--vpn-bypass-tcp {value}: only an address of your local network (10.0.0.0/8, "
+                         "172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16) may be reached past Tor; one on the internet "
+                         "would see your own address")
+    return str(ip), port
+
+
+def tor_rules(uid=TOR_UID, bridges=(), bypass=()):
     """The kill switch for tor: only tor's own TCP over IPv4 leaves (to its bridges alone when it has some); every
     other TCP connection is redirected to its TransPort and every lookup on port 53 to its DNSPort, before the
     filter sees them; other UDP (QUIC included) and all IPv6 are dropped. The redirect runs after the agent's own
-    to its connection proxy (priority -100): what that one redirects reaches tor through the proxy."""
+    to its connection proxy (priority -100): what that one redirects reaches tor through the proxy. BYPASS
+    (--vpn-bypass-tcp): TCP to exactly these addresses and ports of the local network leaves directly, neither
+    redirected nor dropped; the agent reaches them through its connection proxy only, as everything else."""
     uid = int(uid)
+    targets = [bypass_target(value) for value in bypass]
     lines = [f"table inet {TABLE} {{",
              " chain output { type filter hook output priority -5; policy drop;",
              '  oifname "lo" accept',
@@ -634,12 +672,14 @@ def tor_rules(uid=TOR_UID, bridges=()):
                      f"{int(bridge['port'])} accept")
     if not bridges:
         lines.append(f"  meta skuid {uid} meta nfproto ipv4 meta l4proto tcp accept")
+    lines += [f"  ip daddr {address} tcp dport {port} accept" for address, port in targets]
     lines += ["  reject with icmpx type admin-prohibited", " }",
               " chain input { type filter hook input priority -5; policy drop;",
               '  iifname "lo" accept', "  ct state established,related accept", " }",
               " chain forward { type filter hook forward priority -5; policy drop; }",
               " chain divert { type nat hook output priority -90; policy accept;",
               f"  meta skuid {uid} return", "  ip daddr 127.0.0.0/8 return", "  meta nfproto ipv6 return",
+              *[f"  ip daddr {address} tcp dport {port} return" for address, port in targets],
               f"  udp dport 53 dnat ip to {TOR_DNS}:53", f"  meta l4proto tcp redirect to :{TOR_TRANS_PORT}", " }",
               "}", ""]
     return "\n".join(lines)
@@ -696,6 +736,20 @@ def tor_uid(name=TOR_USER):
         raise RuntimeError(f"the Tor image has no user {name}: rebuild it with sandbox-ai build tor") from None
 
 
+TOR_DATA = Path("/var/lib/tor")
+
+
+def own_data_directory(uid, path=None):
+    """Tor's data directory (the container's tmpfs, root's at first) becomes debian-tor's alone (0700), as tor wants
+    it once it has become that user; a link or anything but a directory there is refused."""
+    path = Path(path or TOR_DATA)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"{path} is no directory in the Tor container")
+    os.chmod(path, 0o700)  # first: once it is debian-tor's, root (no CAP_FOWNER here) may not change its mode
+    os.chown(path, uid, uid, follow_symlinks=False)
+
+
 def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
     """tor behind its kill switch: the rules first, then the torrc (private, with the bridges), then tor, which
     binds its ports as root and becomes debian-tor; ready once it has bootstrapped."""
@@ -707,7 +761,8 @@ def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
     if uid != TOR_UID:
         raise RuntimeError(f"{TOR_USER} has the uid {uid} in the Tor image, not {TOR_UID}: rebuild it with "
                            "sandbox-ai build tor")
-    load_killswitch(runner, tor_rules(uid, bridges))
+    load_killswitch(runner, tor_rules(uid, bridges, payload.get("bypass") or ()))
+    own_data_directory(uid)
     RUN.mkdir(mode=0o700, exist_ok=True)
     config, defaults = RUN / "torrc", RUN / "torrc-defaults"
     write_private(config, tor_config(tor, bridges))

@@ -4496,9 +4496,15 @@ TEXTS = {
     'MCP server': {
         'en': 'MCP server',
         'de': 'MCP-Server'},
-    'Memory, CPUs and processes': {
-        'en': 'Memory, CPUs and processes',
-        'de': 'Speicher, CPUs und Prozesse'},
+    'Nested containers: the agent is root of a user namespace of its own and runs containers (more of your '
+    'host\'s kernel within reach)': {
+        'en': 'Nested containers: the agent is root of a user namespace of its own and runs containers (more of '
+              'your host\'s kernel within reach)',
+        'de': 'Verschachtelte Container: Der Agent ist root eines eigenen User-Namespace und startet Container '
+              '(mehr vom Kernel Ihres Hosts in Reichweite)'},
+    'Memory, CPUs, processes and the size of /tmp': {
+        'en': 'Memory, CPUs, processes and the size of /tmp',
+        'de': 'Speicher, CPUs, Prozesse und die Größe von /tmp'},
     'Mount': {
         'en': 'Mount',
         'de': 'Einbindung'},
@@ -6524,6 +6530,61 @@ TEXTS = {
     'Rulesets allow, ask or deny each request and tool call ({count})': {
         'en': 'Rulesets allow, ask or deny each request and tool call ({count})',
         'de': 'Regelsätze erlauben, fragen nach oder verweigern jede Anfrage und jeden Tool-Aufruf ({count})'},
+    # == the board: a model server of the local network past Tor (--vpn-bypass-tcp) ==
+    'Reach {target} past Tor…': {
+        'en': 'Reach {target} past Tor…',
+        'de': '{target} am Tor vorbei erreichen…'},
+    'Reach {target} past Tor': {
+        'en': 'Reach {target} past Tor',
+        'de': '{target} am Tor vorbei erreichen'},
+    'Past Tor': {
+        'en': 'Past Tor',
+        'de': 'Am Tor vorbei'},
+    'Reach {target} directly, past Tor? Only this address and port of your network: the rest of your network stays closed, everything else still goes through Tor, and the connection proxy still checks and logs it. Whatever listens there (a model server, your machine) could reach the internet from your own address.': {
+        'en': 'Reach {target} directly, past Tor? Only this address and port of your network: the rest of your network stays closed, everything else still goes through Tor, and the connection proxy still checks and logs it. Whatever listens there (a model server, your machine) could reach the internet from your own address.',
+        'de': '{target} direkt erreichen, am Tor vorbei? Nur diese Adresse und dieser Port Ihres Netzes: der Rest Ihres Netzes bleibt zu, alles andere geht weiter durch Tor, und der Verbindungs-Proxy prüft und protokolliert die Verbindung weiterhin. Was dort lauscht (ein Modellserver, Ihr Rechner), könnte das Internet von Ihrer eigenen Adresse aus erreichen.'},
+    # == the board: Clone (this setup as a new project or a new session) ==
+    'Clone': {
+        'en': 'Clone',
+        'de': 'Klonen'},
+    'This setup as a new project (another folder) or as a new session': {
+        'en': 'This setup as a new project (another folder) or as a new session',
+        'de': 'Dieses Setup als neues Projekt (anderer Ordner) oder als neue Sitzung'},
+    'As a new project…': {
+        'en': 'As a new project…',
+        'de': 'Als neues Projekt…'},
+    'As a new session': {
+        'en': 'As a new session',
+        'de': 'Als neue Sitzung'},
+    'Folder of the new project': {
+        'en': 'Folder of the new project',
+        'de': 'Ordner des neuen Projekts'},
+    "Choose another folder than this project's.": {
+        'en': "Choose another folder than this project's.",
+        'de': 'Wählen Sie einen anderen Ordner als den dieses Projekts.'},
+    '{path} has a project file already: open it instead (Open project folder…).': {
+        'en': '{path} has a project file already: open it instead (Open project folder…).',
+        'de': '{path} hat schon eine Projektdatei: öffnen Sie es stattdessen (Projektordner öffnen…).'},
+    'A clone of {old}: Apply writes .sandbox-ai.json into {new}.': {
+        'en': 'A clone of {old}: Apply writes .sandbox-ai.json into {new}.',
+        'de': 'Ein Klon von {old}: Übernehmen schreibt .sandbox-ai.json nach {new}.'},
+    'this board': {
+        'en': 'this board',
+        'de': 'dieser Tafel'},
+    'Start now starts this setup as the new session {name} (or the name you type).': {
+        'en': 'Start now starts this setup as the new session {name} (or the name you type).',
+        'de': 'Starten startet dieses Setup jetzt als neue Sitzung {name} (oder unter dem Namen, den Sie eintippen).'},
+    # == the preset gallery: its categories on the left, above the description ==
+    'Categories': {
+        'en': 'Categories',
+        'de': 'Kategorien'},
+    # == status lines and refusals: marked and copied (widgets.ElidedLabel, show_text_window) ==
+    'Whole text': {
+        'en': 'Whole text',
+        'de': 'Ganzer Text'},
+    'Show the whole text…': {
+        'en': 'Show the whole text…',
+        'de': 'Ganzen Text zeigen…'},
     'Approvals and rules': {
         'en': 'Approvals and rules',
         'de': 'Freigaben und Regeln'},
@@ -8069,9 +8130,6 @@ TEXTS = {
     'Image variant {names}: no recipe of that name - make it on the Images page (sandbox-ai images new NAME --from {agent}).': {
         'en': 'Image variant {names}: no recipe of that name - make it on the Images page (sandbox-ai images new NAME --from {agent}).',
         'de': 'Image-Variante {names}: kein Rezept dieses Namens - legen Sie sie auf der Seite Images an (sandbox-ai images new NAME --from {agent}).'},
-    'Preparing what the start needs…': {
-        'en': 'Preparing what the start needs…',
-        'de': 'Was der Start braucht, wird vorbereitet…'},
     'VPN profile {name}': {
         'en': 'VPN profile {name}',
         'de': 'VPN-Profil {name}'},
@@ -8117,6 +8175,21 @@ TEXTS = {
     'A dialog of this page is open: answer it first': {
         'en': 'A dialog of this page is open: answer it first',
         'de': 'Ein Dialog dieser Seite ist offen: zuerst beantworten'},
+    'image variant {name} (made and built: some minutes)': {
+        'en': 'image variant {name} (made and built: some minutes)',
+        'de': 'Image-Variante {name} (angelegt und gebaut: einige Minuten)'},
+    'image variant {name}': {
+        'en': 'image variant {name}',
+        'de': 'Image-Variante {name}'},
+    'Tor profile {name}': {
+        'en': 'Tor profile {name}',
+        'de': 'Tor-Profil {name}'},
+    'Preparing what the start needs: {list}. A notification says when it is done.': {
+        'en': 'Preparing what the start needs: {list}. A notification says when it is done.',
+        'de': 'Was der Start braucht, wird vorbereitet: {list}. Eine Benachrichtigung sagt, wenn es fertig ist.'},
+    'Not everything could be made for the start.': {
+        'en': 'Not everything could be made for the start.',
+        'de': 'Nicht alles für den Start ließ sich anlegen.'},
     'Own window': {
         'en': 'Own window',
         'de': 'Eigenes Fenster'},
@@ -10801,4 +10874,197 @@ TEXTS = {
     'Belongs to {name}': {
         'en': 'Belongs to {name}',
         'de': 'Gehört zu {name}'},
+    'Cut the internet': {
+        'en': 'Cut the internet',
+        'de': 'Internet kappen'},
+    "Only the local network and the host's ports the sandbox may reach stay reachable": {
+        'en': "Only the local network and the host's ports the sandbox may reach stay reachable",
+        'de': 'Nur das lokale Netz und die Ports des Hosts, die die Sandbox erreichen darf, bleiben erreichbar'},
+    'Cut the local network and host ports': {
+        'en': 'Cut the local network and host ports',
+        'de': 'Lokales Netz und Host-Ports kappen'},
+    'Only the internet the sandbox may reach stays reachable': {
+        'en': 'Only the internet the sandbox may reach stays reachable',
+        'de': 'Nur das Internet, das die Sandbox erreichen darf, bleibt erreichbar'},
+    'Only the model API': {
+        'en': 'Only the model API',
+        'de': 'Nur die Modell-API'},
+    "Only its model API stays reachable: its provider's hosts as the start opened them, or its --llm server": {
+        'en': "Only its model API stays reachable: its provider's hosts as the start opened them, or its --llm server",
+        'de': 'Nur ihre Modell-API bleibt erreichbar: die Hosts ihres Anbieters, wie der Start sie geöffnet hat, oder ihr --llm-Server'},
+    'Cut everything': {
+        'en': 'Cut everything',
+        'de': 'Alles kappen'},
+    'Everything is cut, the model API too: the emergency stop': {
+        'en': 'Everything is cut, the model API too: the emergency stop',
+        'de': 'Alles wird gekappt, auch die Modell-API: der Notaus'},
+    'Lift the cut': {
+        'en': 'Lift the cut',
+        'de': 'Kappung aufheben'},
+    'It reaches again what it may reach': {
+        'en': 'It reaches again what it may reach',
+        'de': 'Sie erreicht wieder, was sie erreichen darf'},
+    'internet cut': {
+        'en': 'internet cut',
+        'de': 'Internet gekappt'},
+    'local network cut': {
+        'en': 'local network cut',
+        'de': 'lokales Netz gekappt'},
+    'only the model API': {
+        'en': 'only the model API',
+        'de': 'nur die Modell-API'},
+    'network cut': {
+        'en': 'network cut',
+        'de': 'Netz gekappt'},
+    'Cut the network of every running sandbox at once, the model API too, on this machine and on every host (sandbox-ai net cut --all-runs all); no question. File › Lift every cut gives it back.': {
+        'en': 'Cut the network of every running sandbox at once, the model API too, on this machine and on every host (sandbox-ai net cut --all-runs all); no question. File › Lift every cut gives it back.',
+        'de': 'Das Netz jeder laufenden Sandbox sofort kappen, auch die Modell-API, auf diesem Rechner und auf jedem Host (sandbox-ai net cut --all-runs all); ohne Rückfrage. Datei › Jede Kappung aufheben gibt es zurück.'},
+    'Kill switch': {
+        'en': 'Kill switch',
+        'de': 'Kill-Switch'},
+    'This sandbox-ai has no kill switch (sandbox-ai net cut came with 0.1.94): update it.': {
+        'en': 'This sandbox-ai has no kill switch (sandbox-ai net cut came with 0.1.94): update it.',
+        'de': 'Dieses sandbox-ai hat keinen Kill-Switch (sandbox-ai net cut kam mit 0.1.94): Aktualisieren Sie es.'},
+    'Cut the network of the selected sandboxes at once, also of several, with their MCP servers, helpers and team (sandbox-ai net cut); Lift the cut gives back what they may reach': {
+        'en': 'Cut the network of the selected sandboxes at once, also of several, with their MCP servers, helpers and team (sandbox-ai net cut); Lift the cut gives back what they may reach',
+        'de': 'Das Netz der gewählten Sandboxen sofort kappen, auch mehrerer, mit ihren MCP-Servern, Helfern und ihrem Team (sandbox-ai net cut); Kappung aufheben gibt zurück, was sie erreichen dürfen'},
+    'Kill switch: {mode}': {
+        'en': 'Kill switch: {mode}',
+        'de': 'Kill-Switch: {mode}'},
+    "None of the selected runs: only a running sandbox's network can be cut.": {
+        'en': "None of the selected runs: only a running sandbox's network can be cut.",
+        'de': 'Keine der gewählten läuft: Nur das Netz einer laufenden Sandbox lässt sich kappen.'},
+    '{names}: {what}.': {
+        'en': '{names}: {what}.',
+        'de': '{names}: {what}.'},
+    'Kill switch › Lift the cut gives it back.': {
+        'en': 'Kill switch › Lift the cut gives it back.',
+        'de': 'Kill-Switch › Kappung aufheben gibt es zurück.'},
+    '{state}, {cut}': {
+        'en': '{state}, {cut}',
+        'de': '{state}, {cut}'},
+    'Its network is cut by the kill switch ({mode}): {what}. Kill switch › Lift the cut gives it back.': {
+        'en': 'Its network is cut by the kill switch ({mode}): {what}. Kill switch › Lift the cut gives it back.',
+        'de': 'Ihr Netz ist durch den Kill-Switch gekappt ({mode}): {what}. Kill-Switch › Kappung aufheben gibt es zurück.'},
+    "Emergency stop: cut every sandbox's network": {
+        'en': "Emergency stop: cut every sandbox's network",
+        'de': 'Notaus: das Netz jeder Sandbox kappen'},
+    'Lift every cut': {
+        'en': 'Lift every cut',
+        'de': 'Jede Kappung aufheben'},
+    'Emergency stop': {
+        'en': 'Emergency stop',
+        'de': 'Notaus'},
+    "Emergency stop: every sandbox's network is cut": {
+        'en': "Emergency stop: every sandbox's network is cut",
+        'de': 'Notaus: Das Netz jeder Sandbox ist gekappt'},
+    'Every cut lifted': {
+        'en': 'Every cut lifted',
+        'de': 'Jede Kappung aufgehoben'},
+    'It could not be done: {error}': {
+        'en': 'It could not be done: {error}',
+        'de': 'Es ging nicht: {error}'},
+    'Cut: {names}.': {
+        'en': 'Cut: {names}.',
+        'de': 'Gekappt: {names}.'},
+    'No sandbox runs.': {
+        'en': 'No sandbox runs.',
+        'de': 'Keine Sandbox läuft.'},
+    'Lifted: {names}.': {
+        'en': 'Lifted: {names}.',
+        'de': 'Aufgehoben: {names}.'},
+    'Not cut:': {
+        'en': 'Not cut:',
+        'de': 'Nicht gekappt:'},
+    'Not lifted:': {
+        'en': 'Not lifted:',
+        'de': 'Nicht aufgehoben:'},
+    'To lift it: File › Lift every cut, Kill switch › Lift the cut on the Sandboxes page, or sandbox-ai net cut --all-runs off.': {
+        'en': 'To lift it: File › Lift every cut, Kill switch › Lift the cut on the Sandboxes page, or sandbox-ai net cut --all-runs off.',
+        'de': 'Zum Aufheben: Datei › Jede Kappung aufheben, Kill-Switch › Kappung aufheben auf der Seite Sandboxen, oder sandbox-ai net cut --all-runs off.'},
+    'Show the sandboxes': {
+        'en': 'Show the sandboxes',
+        'de': 'Die Sandboxen zeigen'},
+    # == reports (reports.py, the Sandboxes and Statistics pages): sandbox-ai report ==
+    'Report': {
+        'en': 'Report',
+        'de': 'Bericht'},
+    'Report…': {
+        'en': 'Report…',
+        'de': 'Bericht…'},
+    'One report of the selected starts, running or stopped, with their MCP servers, helpers and team: statistics, every destination and why it was allowed or refused, and a security report of what was not allowed - as PDF, HTML or Markdown (sandbox-ai report)': {
+        'en': 'One report of the selected starts, running or stopped, with their MCP servers, helpers and team: statistics, every destination and why it was allowed or refused, and a security report of what was not allowed - as PDF, HTML or Markdown (sandbox-ai report)',
+        'de': 'Ein Bericht über die gewählten Starts, laufend oder gestoppt, mit ihren MCP-Servern, Helfern und ihrem Team: Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und ein Sicherheitsbericht über das, was nicht erlaubt war - als PDF, HTML oder Markdown (sandbox-ai report)'},
+    'One report of every run of this log folder: statistics, every destination and why it was allowed or refused, and a security report of what was not allowed - as PDF, HTML or Markdown (sandbox-ai report --log-dir)': {
+        'en': 'One report of every run of this log folder: statistics, every destination and why it was allowed or refused, and a security report of what was not allowed - as PDF, HTML or Markdown (sandbox-ai report --log-dir)',
+        'de': 'Ein Bericht über jeden Lauf dieses Log-Ordners: Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und ein Sicherheitsbericht über das, was nicht erlaubt war - als PDF, HTML oder Markdown (sandbox-ai report --log-dir)'},
+    "Only for this machine's sandboxes: on {host}, sandbox-ai report there writes it.": {
+        'en': "Only for this machine's sandboxes: on {host}, sandbox-ai report there writes it.",
+        'de': 'Nur für die Sandboxen dieses Rechners: auf {host} schreibt ihn sandbox-ai report dort.'},
+    "Only for this machine's logs: on {host}, sandbox-ai report there writes it.": {
+        'en': "Only for this machine's logs: on {host}, sandbox-ai report there writes it.",
+        'de': 'Nur für die Logs dieses Rechners: auf {host} schreibt ihn sandbox-ai report dort.'},
+    'This sandbox-ai writes no reports yet: update it (sandbox-ai update).': {
+        'en': 'This sandbox-ai writes no reports yet: update it (sandbox-ai update).',
+        'de': 'Dieses sandbox-ai schreibt noch keine Berichte: aktualisiere es (sandbox-ai update).'},
+    '{count} starts': {
+        'en': '{count} starts',
+        'de': '{count} Starts'},
+    'A report of {names}: each with all its runs, running or stopped.': {
+        'en': 'A report of {names}: each with all its runs, running or stopped.',
+        'de': 'Ein Bericht über {names}: jeweils mit allen Läufen, laufend oder gestoppt.'},
+    'A report of every run that logged into {path}.': {
+        'en': 'A report of every run that logged into {path}.',
+        'de': 'Ein Bericht über jeden Lauf, der in {path} protokolliert hat.'},
+    'PDF: bookmarks and links, to print or pass on': {
+        'en': 'PDF: bookmarks and links, to print or pass on',
+        'de': 'PDF: Lesezeichen und Links, zum Drucken oder Weitergeben'},
+    'HTML: one page for a browser, light and dark': {
+        'en': 'HTML: one page for a browser, light and dark',
+        'de': 'HTML: eine Seite für den Browser, hell und dunkel'},
+    'Markdown: text with links, for notes and tickets': {
+        'en': 'Markdown: text with links, for notes and tickets',
+        'de': 'Markdown: Text mit Links, für Notizen und Tickets'},
+    'Format': {
+        'en': 'Format',
+        'de': 'Format'},
+    'Choose the file': {
+        'en': 'Choose the file',
+        'de': 'Die Datei wählen'},
+    'From when': {
+        'en': 'From when',
+        'de': 'Ab wann'},
+    'everything recorded (or: 2h, 3d, 2026-11-10, 14:30)': {
+        'en': 'everything recorded (or: 2h, 3d, 2026-11-10, 14:30)',
+        'de': 'alles Aufgezeichnete (oder: 2h, 3d, 2026-11-10, 14:30)'},
+    'With its MCP servers, helpers and team': {
+        'en': 'With its MCP servers, helpers and team',
+        'de': 'Mit seinen MCP-Servern, Helfern und seinem Team'},
+    'Open it when it is written': {
+        'en': 'Open it when it is written',
+        'de': 'Öffnen, sobald er geschrieben ist'},
+    'The report holds no secret, but it names hosts, paths and commands of the runs: share it with care.': {
+        'en': 'The report holds no secret, but it names hosts, paths and commands of the runs: share it with care.',
+        'de': 'Der Bericht enthält keine Geheimnisse, nennt aber Hosts, Pfade und Befehle der Läufe: gib ihn mit Bedacht weiter.'},
+    'Write the report': {
+        'en': 'Write the report',
+        'de': 'Den Bericht schreiben'},
+    'Save the report': {
+        'en': 'Save the report',
+        'de': 'Den Bericht speichern'},
+    'Report of {name}': {
+        'en': 'Report of {name}',
+        'de': 'Bericht über {name}'},
+    'Not a file in an existing folder: {path}': {
+        'en': 'Not a file in an existing folder: {path}',
+        'de': 'Keine Datei in einem vorhandenen Ordner: {path}'},
+    'The report was not written: {error}': {
+        'en': 'The report was not written: {error}',
+        'de': 'Der Bericht wurde nicht geschrieben: {error}'},
+    'Written to {path}.': {
+        'en': 'Written to {path}.',
+        'de': 'Geschrieben nach {path}.'},
+    'Lift every cut, on this machine and on every host? Every sandbox reaches again what it may reach, also those you cut one by one.': {
+        'en': 'Lift every cut, on this machine and on every host? Every sandbox reaches again what it may reach, also those you cut one by one.',
+        'de': 'Jede Kappung aufheben, auf diesem Rechner und auf jedem Host? Jede Sandbox erreicht wieder, was sie erreichen darf, auch die, die Sie einzeln gekappt haben.'},
 }

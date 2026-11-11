@@ -181,6 +181,7 @@ def widening_options(m):
         (["--privacy-check", "off"], {"high", "paranoid"}, "medium"),
         (["--device", "/dev/kvm"], {"high", "paranoid"}, "medium"),
         (["--gpu", "dri"], {"high", "paranoid"}, "medium"),
+        (["--nested-containers"], {"high", "paranoid"}, "medium"),
         (["--gui-wayland"], {"high", "paranoid"}, "medium"),
         (["--mount", f"{data}:/mnt/data:rw"], {"high", "paranoid"}, "medium"),
         (["--memory", "none"], {"high", "paranoid"}, "medium"),

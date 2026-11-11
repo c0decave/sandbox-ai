@@ -76,9 +76,11 @@ OPTION_LABELS = {
     "--memory": ("Memory limit", "Speicherlimit"),
     "--cpus": ("CPU limit", "CPU-Limit"),
     "--pids": ("Process limit", "Prozesslimit"),
+    "--tmp-size": ("Size of /tmp", "Größe von /tmp"),
     "--backend": ("Sandbox backend", "Sandbox-Backend"),
     "--image": ("Podman image", "Podman-Image"),
     "--image-variant": ("Image variant (sandbox-ai images)", "Image-Variante (sandbox-ai images)"),
+    "--nested-containers": ("Containers inside the sandbox (podman)", "Container in der Sandbox (podman)"),
     "--podman-url": ("Podman service URL", "URL des Podman-Dienstes"),
     "--binary": ("Agent program", "Agent-Programm"),
     "--runtime": ("Runtime folders (bwrap)", "Laufzeitverzeichnisse (bwrap)"),
@@ -102,6 +104,8 @@ OPTION_LABELS = {
     "--vpn-check": ("When a VPN check fails", "Wenn eine VPN-Prüfung fehlschlägt"),
     "--vpn-bypass-host-ports": ("Let host ports past the VPN (they leave from your address)",
                                 "Host-Ports am VPN vorbei (sie gehen von Ihrer Adresse aus)"),
+    "--vpn-bypass-tcp": ("Past Tor in your network (ADDRESS:PORT, e.g. a model server)",
+                         "Am Tor vorbei im eigenen Netz (ADRESSE:PORT, z. B. ein Modellserver)"),
     "--model": ("Model", "Modell"),
     "--effort": ("Effort", "Denkaufwand"),
     "--api-key": ("API keys kept out of the sandbox", "API-Schlüssel außerhalb der Sandbox"),
@@ -118,6 +122,7 @@ OPTION_LABELS = {
 }
 # Options that only widen or weaken the sandbox: shown with a warning colour when set.
 DANGEROUS = {"--dangerously-skip-permissions", "--egress-all-allow", "--no-proxy", "--gui-wayland", "--device",
+             "--nested-containers",
              "--no-inspect", "--no-canaries", "--copy-auth", "--git-credentials"}
 # Shown as one three-way choice instead of two check boxes.
 TMUX = ("--tmux", "--no-tmux")

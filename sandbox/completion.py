@@ -180,7 +180,7 @@ NAMED = {
     ("net", "*", "run"): run_names, ("devices", "*", "run"): run_names, ("workspace", "list", "run"): run_names,
     ("limits", None, "run"): run_names, ("usage", None, "run"): run_names,
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
-    ("safeguards", None, "run"): run_names,
+    ("safeguards", None, "run"): run_names, ("report", None, "name"): start_names,
     ("hosts", "*", "name"): host_names, ("mcp", "*", "name"): mcp_names, ("llm", "*", "name"): llm_names,
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,
     **{("kits", sub, "name"): plugin_kit_names for sub in ("add-plugin", "remove-plugin", "enable-plugin",

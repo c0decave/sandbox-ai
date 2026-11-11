@@ -171,7 +171,13 @@ class Prerequisites:
         elif problems:
             warn(self, tr("Preparing the start"), "\n".join(problems))
         busy.add(context)
-        self.prerequisite_notice(tr("Preparing what the start needs…"), "notice-warn")
+        steps = [*(tr("identity {name}", name=n) for n in identities),
+                 *(tr("image variant {name} (made and built: some minutes)", name=n) for n in to_build),
+                 *(tr("image variant {name}", name=n) for n in variants if n not in to_build),
+                 *(tr("Tor profile {name}", name=n) for n in tor_profiles),
+                 *(tr("MCP server {name}", name=n) for n in servers)]
+        self.prerequisite_notice(tr("Preparing what the start needs: {list}. A notification says when it is done.",
+                                    list=printable(", ".join(steps))), "secondary", toast=True)
 
         def work():
             def run(*args, timeout=600):
@@ -212,8 +218,10 @@ class Prerequisites:
             failed = [f"{words[kind]} {name}: {printable(text.splitlines()[-1] if text else '')[-300:]}"
                       for kind, name, status, text in said if status != 0]
             if ok:
-                self.prerequisite_notice(tr("Made for the start: {list}.", list=printable(", ".join(ok))), "notice-ok")
+                self.prerequisite_notice(tr("Made for the start: {list}.", list=printable(", ".join(ok))), "notice-ok",
+                                         toast=not failed)
             if failed:
+                self.prerequisite_notice(tr("Not everything could be made for the start."), "notice-error", toast=True)
                 warn(self, tr("Preparing the start"), tr("Not everything could be made (the log window has the output):") +
                      "\n" + "\n".join(failed))
                 return
@@ -242,9 +250,18 @@ class Prerequisites:
         return "tor" if box.clickedButton() is tor else None
 
 
-    def prerequisite_notice(self, text, role="notice-warn"):
+    def prerequisite_notice(self, text, role="notice-warn", toast=False):
+        """TEXT into the page's notes (and so the log window); with TOAST also as a notification: preparing a start
+        takes minutes and goes on in the background, its beginning and its end are told where they are seen."""
         shown = getattr(self, "show_notice", None)
         if callable(shown):
             shown(text, role)
         else:
-            applog.log("WARNING" if role == "notice-warn" else "INFO", "start", text)
+            applog.log({"notice-warn": "WARNING", "notice-error": "ERROR"}.get(role, "INFO"), "start", text)
+        notify = getattr(self.window(), "notify", None) if toast else None
+        if callable(notify):
+            level = {"notice-ok": "success", "notice-error": "error", "notice-warn": "warning"}.get(role, "info")
+            try:
+                notify(tr("Preparing the start"), text, level=level)
+            except Exception:  # noqa: BLE001 - a notification that cannot be shown: the log has it
+                pass

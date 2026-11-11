@@ -1790,7 +1790,7 @@ class WorkspaceDialog(QDialog):
         form.addRow(tr("Name under /workspaces"), self.name_edit)
         self.read_only = QCheckBox(tr("Read-only (the agent cannot change it)"))
         form.addRow("", self.read_only)
-        self.problem = plain_label(role="notice-warn")
+        self.problem = plain_label(role="notice-warn", selectable=True)
         self.problem.hide()
         form.addRow(self.problem)
         form.addRow(plain_label(tr("It appears at /workspaces/NAME until the sandbox ends; a session keeps a folder "
@@ -1971,6 +1971,23 @@ SESSION_ACTIONS = (("attach", N_("Attach")), ("attach-app", N_("Attach in the ap
                    ("resume", N_("Resume")), ("delete", N_("Delete")))
 ACTION_TITLES = {**dict(SESSION_ACTIONS), "stop": N_("Stop")}
 BULK_ACTIONS = ("stop", "pause", "resume", "delete")  # what acts on several starts at once (Ctrl, Shift)
+# The kill switch (sandbox-ai net cut): its modes as the Sandboxes page offers them (mode, the menu's text, what it
+# does), and what the State column says while one holds.
+CUT_CHOICES = (
+    ("remote", N_("Cut the internet"),
+     N_("Only the local network and the host's ports the sandbox may reach stay reachable")),
+    ("local", N_("Cut the local network and host ports"),
+     N_("Only the internet the sandbox may reach stays reachable")),
+    ("api", N_("Only the model API"),
+     N_("Only its model API stays reachable: its provider's hosts as the start opened them, or its --llm server")),
+    ("all", N_("Cut everything"), N_("Everything is cut, the model API too: the emergency stop")),
+    ("off", N_("Lift the cut"), N_("It reaches again what it may reach")),
+)
+CUT_STATES = {"remote": N_("internet cut"), "local": N_("local network cut"), "api": N_("only the model API"),
+              "all": N_("network cut")}
+EMERGENCY_KEYS = "Ctrl+Shift+X"  # the window's emergency stop: every sandbox's network cut at once
+EMERGENCY_HELP = N_("Cut the network of every running sandbox at once, the model API too, on this machine and on every "
+                    "host (sandbox-ai net cut --all-runs all); no question. File › Lift every cut gives it back.")
 REMOTE_WAIT = 60  # seconds one host may take to list its starts (the hosts are asked at the same time, each apart)
 # What hangs below a start on the Sandboxes page (start_tree.related), by its kind.
 PART_TITLES = {"mcp": N_("MCP server"), "helper": N_("Helper"), "pod": N_("Pod"), "companion": N_("Companion"),
@@ -2118,11 +2135,15 @@ class SandboxesPage(QWidget):
     updated = Signal(object)  # {key: Instance} after each read (the window's tabs follow it)
     fleet_changed = Signal(object)  # {host: {"running", "active", "seen", "problem"}} after each look at a host
     started_on = Signal(str)  # the page started something on that host (Resume): its questions are asked for at once
+    notice = Signal(str, str, str)  # level, title, text: a notification (what the kill switch cut)
 
     def __init__(self, sai, terminal):
         super().__init__()
         self.sai, self.terminal = sai, terminal
         self.project, self.instances, self.problems, self.stoppable = None, {}, [], None
+        self.cuttable = None  # this sandbox-ai has the kill switch (sandbox-ai net cut); None: not known yet
+        # The cuts on their way ({(host, run)}) and the one chosen meanwhile for each (sent once the first is done).
+        self.cut_flights, self.cut_waiting = set(), {}
         self.reading, self.read_again, self.added, self.devices_token = None, False, [], 0
         self.fresh = False  # the next read asks Podman afresh (refresh_soon(again=True): after an action)
         self.loaded = False  # the first read has come back (until then the summary says it reads)
@@ -2193,6 +2214,10 @@ class SandboxesPage(QWidget):
                                              "rename)"), self.rename),
                 ("history", tr("History…"), tr("What happened to the selected start: starts, ends, pauses, renames "
                                                "(sandbox-ai list --history)"), self.history),
+                ("report", tr("Report…"), tr("One report of the selected starts, running or stopped, with their MCP "
+                                             "servers, helpers and team: statistics, every destination and why it "
+                                             "was allowed or refused, and a security report of what was not allowed "
+                                             "- as PDF, HTML or Markdown (sandbox-ai report)"), self.report),
                 ("clean", tr("Clean up…"), tr("Remove leftovers and the kept starts unused for longer than its "
                                               "keep_days, on this machine or the host chosen above (sandbox-ai gc; "
                                               "shown first)"), self.clean_up)):
@@ -2204,9 +2229,29 @@ class SandboxesPage(QWidget):
         # By name too: the (?) and the area tour point at them.
         self.rename_button, self.history_button, self.clean_button = (self.manage_buttons[key] for key in (
             "rename", "history", "clean"))
+        # The kill switch (sandbox-ai net cut): the selected starts' network cut down at once (also several), with
+        # their MCP servers, helpers and team; Lift the cut gives back what they may reach.
+        self.cut_button = QPushButton(tr("Kill switch"))
+        self.cut_button.setAccessibleName(tr("Kill switch"))
+        self.cut_button.setProperty("role", "danger")
+        self.cut_menu = QMenu(self.cut_button)
+        self.cut_menu.setToolTipsVisible(True)
+        self.cut_actions = {}
+        for mode, text, tip in CUT_CHOICES:
+            if mode == "off":
+                self.cut_menu.addSeparator()
+            item = self.cut_menu.addAction(tr(text))
+            item.setToolTip(tr(tip))
+            item.triggered.connect(lambda _=False, m=mode: self.cut(m))
+            self.cut_actions[mode] = item
+        self.cut_button.setMenu(self.cut_menu)
         below.addWidget(self.detail, 1)
-        for button in self.manage_buttons.values():
-            below.addWidget(button)
+        for key, button in self.manage_buttons.items():
+            if key != "report":
+                below.addWidget(button)
+        # Report… above the list, beside Refresh (the row below is full): for the rows selected, running or ended.
+        top.insertWidget(top.indexOf(refresh), self.manage_buttons["report"])
+        below.addWidget(self.cut_button)
         below.addWidget(self.stop_wait)
         below.addWidget(self.stop_button)
         layout.addLayout(below)
@@ -2367,11 +2412,16 @@ class SandboxesPage(QWidget):
             if callable(forget):
                 forget()
         if self.stoppable is None:
-            try:
-                self.stoppable = "stop" in self.sai.net_commands()
-            except Exception:  # noqa: BLE001
-                self.stoppable = False
+            self.read_net_commands()
         return self.sai.instances()
+
+    def read_net_commands(self):
+        """Once: whether this sandbox-ai has `sandbox-ai net stop` and the kill switch (`net cut`)."""
+        try:
+            commands = self.sai.net_commands()
+        except Exception:  # noqa: BLE001
+            commands = set()
+        self.stoppable, self.cuttable = "stop" in commands, "cut" in commands
 
     def read_done(self, result, error):
         self.reading = None
@@ -2610,10 +2660,7 @@ class SandboxesPage(QWidget):
     def apply(self, result, error):
         self.loaded = True
         if self.stoppable is None:
-            try:
-                self.stoppable = "stop" in self.sai.net_commands()
-            except Exception:  # noqa: BLE001
-                self.stoppable = False
+            self.read_net_commands()
         if error is not None:
             found, self.problems = [], [str(error)]
         else:
@@ -2666,6 +2713,11 @@ class SandboxesPage(QWidget):
         allows_all = AC.allows_all(i.record) and i.state in ("running", "paused")  # --ask allow: nobody is asked
         if allows_all:
             state = f"{state}, {AC.WARN} {tr(AC.BADGE)}"
+        # The kill switch holds (sandbox-ai net cut): what is cut, at a glance.
+        cut = backend.cut_name((i.record or {}).get("cut")) if i.state in ("running", "paused") else None
+        if cut:  # several at once (a shared server): each said
+            state = tr("{state}, {cut}", state=state or "?",
+                       cut=" + ".join(tr(CUT_STATES[part]) for part in cut.split("+")))
         cells = [tr(KIND_TITLES.get(i.kind, i.kind)), printable(i.name), printable(i.project), printable(i.agent),
                  printable(i.backend), local_time(i.started), state,
                  "" if i.proxy is None else tr("on") if i.proxy else tr("off"),
@@ -2678,9 +2730,15 @@ class SandboxesPage(QWidget):
             color = "warn"
         if (asking or allows_all) and color != "bad":
             color = "warn"
+        if cut:
+            color = "bad" if cut == "all" else "warn" if color != "bad" else color
         if stale is not None or i.state in ENDED_STATES and i.key.startswith("ended:"):
             color = "muted"
         tip = [tr("Current project")] if self.mine(i) else []
+        if cut:
+            tip.append(tr("Its network is cut by the kill switch ({mode}): {what}. Kill switch › Lift the cut gives it "
+                          "back.", mode=cut, what="; ".join(tr(next(text for key, _, text in CUT_CHOICES if key == part))
+                                                            for part in cut.split("+"))))
         if belongs == "orphan":
             tip.append(tr(ORPHANS_HELP))
         elif belongs is not None:
@@ -2967,6 +3025,7 @@ class SandboxesPage(QWidget):
             set_enabled(button, bool(able), reason,
                         tooltip=tr("{action}: {count} of the {total} selected", action=tr(ACTION_TITLES[action]),
                                    count=len(able), total=len(starts)))
+        self.update_report_button()
         host = self.host_filter.currentData()
         set_enabled(self.manage_buttons["clean"], host is not None,
                     None if host is not None else tr("Choose a host above (or select a start of the host to clean up "
@@ -3040,6 +3099,119 @@ class SandboxesPage(QWidget):
         host = getattr(instance, "host", LOCAL)
         name = printable(instance.name)
         return name if host == LOCAL else tr("{name} on {host}", name=name, host=printable(host))
+
+    # -- the kill switch (sandbox-ai net cut) --
+
+    @staticmethod
+    def cut_run_of(instance):
+        """The run INSTANCE's kill switch is set for: its run on this machine, the run its host's listing names."""
+        if getattr(instance, "host", LOCAL) == LOCAL:
+            return instance.run
+        record = instance.record or {}
+        return record.get("run") if isinstance(record.get("run"), str) else instance.name
+
+    def cut_why(self, instance):
+        """Why the kill switch cannot act on INSTANCE (None: it can): only a sandbox that runs has a network to cut."""
+        if instance.key.startswith("ended:"):
+            return tr("It ended: History… shows what happened to it.")
+        if getattr(instance, "host", LOCAL) != LOCAL and self.stale(instance) is not None:
+            return tr("{host} does not answer.", host=printable(instance.host))
+        if instance.kind == "unregistered":
+            return tr("It has not registered with sandbox-ai (yet).")
+        if instance.state not in ("running", "paused") or not backend.valid_run(self.cut_run_of(instance) or ""):
+            return tr("It does not run.")
+        return None
+
+    def cut_targets(self):
+        """The starts selected (one or several) whose network the kill switch can cut."""
+        chosen = self.selected_starts() if self.several() else [i for i in [self.current()] if i is not None]
+        return [instance for instance in chosen if self.cut_why(instance) is None]
+
+    def update_cut_button(self):
+        if widgets.held(self.cut_button):
+            return  # its own cut runs: enabled again once it is done
+        if getattr(self, "cuttable", None) is False:
+            set_enabled(self.cut_button, False, tr("This sandbox-ai has no kill switch (sandbox-ai net cut came with "
+                                                   "0.1.94): update it."))
+            return
+        chosen = self.selected_starts() if self.several() else [i for i in [self.current()] if i is not None]
+        targets = [instance for instance in chosen if self.cut_why(instance) is None]
+        why = None if targets else self.cut_why(chosen[0]) if chosen else self.no_start()
+        set_enabled(self.cut_button, bool(targets), why,
+                    tooltip=tr("Cut the network of the selected sandboxes at once, also of several, with their MCP "
+                               "servers, helpers and team (sandbox-ai net cut); Lift the cut gives back what they "
+                               "may reach"))
+
+    def cut(self, mode):
+        """The kill switch MODE (CUT_CHOICES) for the selected starts that run, at once and without a question (it
+        only takes away; Lift the cut gives back): `sandbox-ai net cut RUN MODE` on each one's host, all at the same
+        time (a host that does not answer holds up none of the others). The button stays usable: another mode chosen
+        meanwhile follows the one still on its way for that sandbox (the later choice wins). What failed is said
+        together; what holds shows in the State column and in a notification."""
+        targets = self.cut_targets()
+        title = tr("Kill switch: {mode}", mode=tr(next(text for key, text, _ in CUT_CHOICES if key == mode)))
+        if not targets:
+            inform(self, title, self.no_start() if self.current() is None and not self.several() else
+                   tr("None of the selected runs: only a running sandbox's network can be cut."), modal=False)
+            return
+        batch = {"title": title, "mode": mode, "left": len(targets), "outcomes": [], "targets": targets}
+        for instance in targets:
+            self.cut_start(instance, mode, batch)
+
+    def cut_key(self, instance):
+        return getattr(instance, "host", LOCAL), self.cut_run_of(instance)
+
+    def cut_start(self, instance, mode, batch):
+        """One sandbox's cut, in a thread of its own; one after the other for the same sandbox (only the latest choice
+        waits: one chosen before it and not yet sent is dropped)."""
+        key = self.cut_key(instance)
+        if key in self.cut_flights:
+            dropped = self.cut_waiting.get(key)
+            if dropped is not None:
+                self.cut_finished(dropped[2], dropped[0], None, None)  # replaced before it was sent
+            self.cut_waiting[key] = (instance, mode, batch)
+            return
+        self.cut_flights.add(key)
+
+        def call():
+            result = self.sai.cut_run(key[1], mode, key[0])
+            report = backend.cut_report(result)
+            if report is None:
+                return result
+            failures = [f"{entry['name']}: {entry['error']}" for entry in report if not entry["ok"]]
+            done_ = [entry["name"] for entry in report if entry["ok"]]
+            return (1 if failures else 0, ", ".join(done_), "\n".join(failures))
+
+        def done(result, error):
+            self.cut_flights.discard(key)
+            self.cut_finished(batch, instance, result, error)
+            waiting = self.cut_waiting.pop(key, None)
+            if waiting is not None:
+                self.cut_start(*waiting)
+        background(call, owner=self, work=True, timeout=backend.CUT_WAIT + 30, done=done)
+
+    def cut_finished(self, batch, instance, result, error):
+        """One sandbox of BATCH (one choice in the menu) is done; once all are, what failed and what holds is said."""
+        batch["outcomes"].append((instance, result, error))
+        batch["left"] -= 1
+        if batch["left"]:
+            return
+        mode, outcomes = batch["mode"], batch["outcomes"]
+        failures = report_each(self, batch["title"], outcomes, self.bulk_name)
+        reached = []
+        for instance_, result_, error_ in outcomes:
+            if instance_ not in failures and error_ is None and isinstance(result_, tuple):
+                reached.append(printable(result_[1]) if result_[1] else self.bulk_name(instance_))
+        if reached:
+            text = tr("{names}: {what}.", names=", ".join(reached),
+                      what=tr(next(tip for key, _, tip in CUT_CHOICES if key == mode)))
+            if mode != "off":
+                text += " " + tr("Kill switch › Lift the cut gives it back.")
+            self.notice.emit("success" if mode == "off" else "warning", batch["title"], text)
+        self.refresh_soon(again=True)
+        hosts = sorted({getattr(target, "host", LOCAL) for target in batch["targets"]} - {LOCAL})
+        if hosts:
+            self.refresh_remote(hosts)
 
     # -- the groups: open or closed, kept per host and start --
 
@@ -3173,6 +3345,7 @@ class SandboxesPage(QWidget):
 
     def update_buttons(self):
         instance = self.current()
+        self.update_cut_button()  # never held back by another command: the kill switch must act at once
         if busy(self):
             # A command runs: its buttons stay greyed out until it is done; a row of another host never keeps
             # the buttons of the row chosen before (they would act on this machine). Rename, History and Clean up
@@ -3299,6 +3472,7 @@ class SandboxesPage(QWidget):
         if history_why is None and gone and self.stale(instance) is not None:
             history_why = gone
         set_enabled(self.manage_buttons["history"], history_why is None, history_why)
+        self.update_report_button()
         host = self.clean_host(instance)
         stale_host = host not in (None, LOCAL) and host in self.remote_problems
         why = tr("Choose a host above (or select a start of the host to clean up on).") if host is None else \
@@ -3363,6 +3537,57 @@ class SandboxesPage(QWidget):
                             printable(str(entry.get("run") or "-")), history_details(entry)]).rstrip()
                  for entry in found]
         show_text(self, title, "\n".join(lines) or tr("No history of {name}.", name=printable(name)), modal=False)
+
+    # -- reports (sandbox-ai report) --
+
+    @staticmethod
+    def report_name(instance):
+        """The name `sandbox-ai report` takes for INSTANCE: a start's name, an MCP server's run (mcp-NAME)."""
+        if instance.kind == "mcp":
+            if instance.run:
+                return instance.run
+            name = instance.mcp or instance.name
+            return name if str(name).startswith("mcp-") else f"mcp-{name}"
+        return instance.name
+
+    def report_why(self, instance):
+        """Why INSTANCE has no report here (None: it has)."""
+        if getattr(instance, "host", LOCAL) != LOCAL:
+            return tr("Only for this machine's sandboxes: on {host}, sandbox-ai report there writes it.",
+                      host=printable(instance.host))
+        if instance.kind == "unregistered":
+            return tr("It has not registered with sandbox-ai (yet).")
+        if not backend.valid_run(self.report_name(instance)):
+            return tr("Not a start's name: {ident}", ident=printable(instance.name)[:60])
+        return None
+
+    def report_targets(self):
+        """([instance], why): the selected starts a report covers; why none can."""
+        starts = self.selected_starts() if self.several() else [i for i in [self.current()] if i is not None]
+        able = [instance for instance in starts if self.report_why(instance) is None]
+        why = None if able else self.report_why(starts[0]) if starts else self.no_start()
+        return able, why
+
+    def update_report_button(self):
+        able, why = self.report_targets()
+        if able and not self.sai.has_report():
+            able, why = [], tr("This sandbox-ai writes no reports yet: update it (sandbox-ai update).")
+        set_enabled(self.manage_buttons["report"], bool(able), why)
+
+    def report(self):
+        """Report… for the selected starts of this machine: one report of all of them, with their runs and parts."""
+        able, why = self.report_targets()
+        if not able:
+            inform(self, tr("Report"), why or self.no_start(), modal=False)
+            return None
+        names = list(dict.fromkeys(self.report_name(instance) for instance in able))
+        label = names[0] if len(names) == 1 else tr("{count} starts", count=len(names))
+        what = tr("A report of {names}: each with all its runs, running or stopped.", names=", ".join(
+            printable(name) for name in names))
+        from .reports import make_report
+        return make_report(self, self.sai, label, what, names=names, owner=self,
+                           source=[self.manage_buttons["report"]],
+                           notice=lambda level, title, text: self.notice.emit(level, title, text))
 
     def host_title(self, host):
         return tr("this machine") if host in (None, LOCAL) else printable(host)
@@ -6241,16 +6466,28 @@ class InputWatch(QObject):
         return False
 
     def own_windows(self):
-        return [handle for widget in QApplication.topLevelWidgets() if widget.isVisible()
-                and (handle := widget.windowHandle()) is not None]
+        return [handle for widget in QApplication.topLevelWidgets() if alive(widget) and widget.isVisible()
+                and (handle := widget.windowHandle()) is not None and alive(handle)]
 
     def watch(self, window):
-        if window not in self.windows:
+        """Watch WINDOW (once). A window that goes is forgotten as it goes: dialogs are deleted when they close, and
+        a wrapper kept of one - its address taken by a new window - raised "already deleted" at every focus change."""
+        try:
+            if not alive(window) or any(seen is window for seen in self.windows):
+                return
             window.installEventFilter(self)
             self.windows.append(window)
+            window.destroyed.connect(lambda _=None, w=window: self.forget(w))
+        except RuntimeError:  # gone meanwhile
+            return
+
+    def forget(self, window):
+        self.windows = [seen for seen in self.windows if seen is not window]
 
     def focused(self, window):
-        if self.app is not None and not self.paused and window is not None and window in self.own_windows():
+        if self.app is None or self.paused or window is None or not alive(window):
+            return
+        if any(own is window for own in self.own_windows()):
             self.watch(window)
 
     def pause(self):
@@ -6291,11 +6528,14 @@ class SideButtons(QObject):
         self.window, self.watched = window, []
 
     def watch(self, handle):
-        if handle is None or any(seen is handle for seen in self.watched):
+        try:
+            if handle is None or not alive(handle) or any(seen is handle for seen in self.watched):
+                return
+            handle.installEventFilter(self)
+            self.watched.append(handle)
+            handle.destroyed.connect(lambda _=None, h=handle: self.forget(h))
+        except RuntimeError:  # gone meanwhile (see InputWatch.watch)
             return
-        handle.installEventFilter(self)
-        self.watched.append(handle)
-        handle.destroyed.connect(lambda _=None, h=handle: self.forget(h))
 
     def forget(self, handle):
         self.watched = [seen for seen in self.watched if seen is not handle]
@@ -6379,7 +6619,7 @@ class MainWindow(QMainWindow):
         problems = [p for p in (backend.settings_problem(), self.state.problem) if p]
         self.notice_bar = plain_label(tr("Saved settings could not be read; the app started with defaults: {problems}",
                                          problems=printable("; ".join(problems))) if problems else "",
-                                      role="notice-warn")
+                                      role="notice-warn", selectable=True)
         self.notice_bar.setVisible(bool(problems))
         outer.addWidget(self.notice_bar)
         layout = QHBoxLayout()
@@ -6555,6 +6795,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
         self.make_busy_indicator()
         self.tray, self.tray_timer = None, None
+        # The emergency stop and Lift every cut (request_cut): those on their way, the one to go after them.
+        self.cut_jobs, self.cut_next, self.cut_serial, self.lift_question = [], None, 0, None
         self.session_timer = QTimer(self)
         self.session_timer.setSingleShot(True)
         self.session_timer.timeout.connect(self.session_goes_on)
@@ -6722,6 +6964,7 @@ class MainWindow(QMainWindow):
             # Approvals page asks only the hosts where something runs for questions.
             page.fleet_changed.connect(self.fleet_changed)
             page.started_on.connect(lambda host: self.approvals.wake_hosts([host]))
+            page.notice.connect(lambda level, title, text: self.notify(title, text, level=level))
         elif key == "approvals":
             page.pending_changed.connect(self.questions_changed)
             sandboxes = self.built("sandboxes")
@@ -6933,7 +7176,13 @@ class MainWindow(QMainWindow):
             button.setIconSize(QSize(18, 18))
             button.clicked.connect(lambda _=False, s=slot: s())
             self.window_buttons[key] = button
-        self.project_bar.add_controls(list(self.window_buttons.values()))
+        # The emergency stop, always in sight (File menu and EMERGENCY_KEYS too).
+        self.emergency_button = QPushButton(tr("Emergency stop"))
+        self.emergency_button.setProperty("role", "danger")
+        self.emergency_button.setAccessibleName(tr("Emergency stop: cut every sandbox's network"))
+        self.emergency_button.setToolTip(safe_tooltip(tr(EMERGENCY_HELP) + f" ({EMERGENCY_KEYS})"))
+        self.emergency_button.clicked.connect(lambda _=False: self.emergency_cut())
+        self.project_bar.add_controls([self.emergency_button, *self.window_buttons.values()])
 
     def make_menus(self):
         """File, View, Go and Help: every action also has a button or a page; shortcuts that a terminal needs
@@ -6957,6 +7206,16 @@ class MainWindow(QMainWindow):
         self.switch_menu.aboutToShow.connect(self.fill_switch_menu)
         file_menu.addSeparator()
         action(file_menu, "close-tab", tr("Close tab"), self.close_current_tab, ["Ctrl+W"])
+        file_menu.addSeparator()
+        # The emergency stop: every sandbox's network cut at once, here and on every host; no question (it must be
+        # instant, and it only takes away). Also the header's button.
+        emergency = action(file_menu, "emergency-cut", tr("Emergency stop: cut every sandbox's network"),
+                           self.emergency_cut, [EMERGENCY_KEYS])
+        emergency.setToolTip(safe_tooltip(tr(EMERGENCY_HELP)))
+        # From every window of the app (the log, the questions, an editor), as Qt's own shortcut: no event filter.
+        emergency.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        action(file_menu, "lift-cut", tr("Lift every cut"), self.lift_every_cut)
+        file_menu.setToolTipsVisible(True)
         file_menu.addSeparator()
         action(file_menu, "quit", tr("Quit"), self.quit_app, ["Ctrl+Q"])
         view = bar.addMenu(tr("&View"))
@@ -7048,6 +7307,101 @@ class MainWindow(QMainWindow):
         action(help_menu, "readme", tr("Read the README"), self.readme)
         self.terminal_keys = {key: self.actions[key].shortcuts() for key in ("close-tab", "next-tab", "previous-tab",
                                                                          "back", "forward")}
+
+    # -- the kill switch for every sandbox (sandbox-ai net cut --all-runs) --
+
+    def emergency_cut(self):
+        """The emergency stop (File menu, EMERGENCY_KEYS from every window of the app, the header's button): every
+        running sandbox's network cut at once, the model API too, here and on every host of `sandbox-ai hosts` (read
+        afresh); no question - it must be instant, and it only takes away. A notification says what was cut, which
+        host or sandbox was not reached, and how to lift it."""
+        self.request_cut("all")
+
+    def lift_every_cut(self):
+        """File › Lift every cut: every sandbox reaches again what it may reach (sandbox-ai net cut --all-runs off), also
+        what was cut on purpose one by one - so asked first, in a question that blocks nothing."""
+        text = tr("Lift every cut, on this machine and on every host? Every sandbox reaches again what it may reach, "
+                  "also those you cut one by one.")
+        if widgets.AUTO_ANSWER is not None:  # the tests' answer
+            widgets.SHOWN.append((tr("Lift every cut"), text, None))
+            if widgets.AUTO_ANSWER:
+                self.request_cut("off")
+            return
+        box = QMessageBox(QMessageBox.Icon.Warning, tr("Lift every cut"), text, QMessageBox.StandardButton.NoButton,
+                          self)
+        lift = box.addButton(tr("Lift every cut"), QMessageBox.ButtonRole.AcceptRole)
+        lift.setProperty("role", "danger")
+        keep = box.addButton(tr("Cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        lift.clicked.connect(lambda _=False: self.request_cut("off"))
+        box.open()  # nothing waits for it: an emergency stop meanwhile goes ahead at once
+        self.lift_question = box
+
+    def request_cut(self, mode):
+        """MODE ("all": the emergency stop, "off": lift every cut) for every sandbox. In the order they were asked for,
+        so the later one holds in the end: an emergency stop goes at once, also while a lift is on its way, and runs
+        once more after it (that lift may reach a host after it); a lift waits for what is on its way."""
+        self.cut_serial += 1
+        job = {"serial": self.cut_serial, "mode": mode, "quiet": False}
+        if not self.cut_jobs:
+            self.start_every_cut(job)
+        elif mode == "all":
+            lifting = any(running["mode"] == "off" for running in self.cut_jobs)
+            self.start_every_cut(job)
+            self.cut_next = {**job, "quiet": True} if lifting else None  # no lift chosen before it goes after it
+        else:
+            self.cut_next = job
+
+    def start_every_cut(self, job):
+        page = self.sandboxes
+        mode = job["mode"]
+        self.cut_jobs.append(job)
+        title = tr("Emergency stop: every sandbox's network is cut") if mode == "all" else tr("Every cut lifted")
+
+        def where(name, host):
+            return printable(name) if host == LOCAL else tr("{name} on {host}", name=printable(name),
+                                                            host=printable(host))
+
+        def done(result, error):
+            self.cut_jobs.remove(job)
+            if not self.cut_jobs and self.cut_next is not None:
+                following, self.cut_next = self.cut_next, None
+                self.start_every_cut(following)
+            if error is not None:
+                self.notify(title, tr("It could not be done: {error}", error=printable(error)[:300]), level="error")
+                return
+            reached, failures = [], []
+            for host, outcome in sorted(result.items(), key=lambda item: item[0] != LOCAL):
+                report = backend.cut_report(outcome)
+                if report is None:
+                    said = [line for line in (str(outcome[2] or "") + str(outcome[1] or "")).splitlines() if line.strip()]
+                    failures.append(f"{tr('this machine') if host == LOCAL else printable(host)}: "
+                                    f"{printable(said[-1] if said else outcome[0])[:200]}")
+                    continue
+                for entry in report:
+                    if entry["ok"]:
+                        reached.append(where(entry["name"], host))
+                    else:
+                        failures.append(f"{where(entry['name'], host)}: {printable(entry['error'])[:200]}")
+            if job["quiet"] and not failures:
+                return  # the emergency stop once more, after a lift that was on its way: said already
+            if mode == "all":
+                text = tr("Cut: {names}.", names=", ".join(reached)) if reached else tr("No sandbox runs.")
+            else:
+                text = tr("Lifted: {names}.", names=", ".join(reached)) if reached else tr("No sandbox runs.")
+            if failures:
+                text += "\n" + (tr("Not cut:") if mode == "all" else tr("Not lifted:")) + " " + "; ".join(failures)
+            if mode == "all":
+                text += "\n" + tr("To lift it: File › Lift every cut, Kill switch › Lift the cut on the Sandboxes page, "
+                                  "or sandbox-ai net cut --all-runs off.")
+            self.notify(title, text, level="error" if failures else "warning" if mode == "all" else "success",
+                        action=(tr("Show the sandboxes"), lambda: self.show_page("sandboxes")))
+            page.refresh_soon(again=True)
+            page.refresh_remote()
+        background(self.sai.cut_every_host, mode, owner=page, work=True, timeout=backend.CUT_WAIT + 90, done=done)
 
     def show_log_file(self):
         """The end of the app's log (app.log): errors with time, component and versions; in debug mode every step."""
@@ -7577,6 +7931,8 @@ class MainWindow(QMainWindow):
         for name, title, _, area in DOCKS:
             dock = PanelDock(tr(title), self.workspace)
             dock.setObjectName(f"dock-{name}")
+            # Floating, a panel is a window of its own: it paints its whole area (never what lay on the screen there).
+            dock.setAutoFillBackground(True)
             if name in widgets:
                 dock.setWidget(widgets[name])
                 tip = widgets[name].toolTip()  # escaped when it was set (safe_tooltip)
@@ -7588,6 +7944,7 @@ class MainWindow(QMainWindow):
             dock.closed_by_user.connect(lambda n=name: self.panel_closed(n))
             escape_closes(dock)  # floating: Esc closes it
             dock.topLevelChanged.connect(lambda _floating: self.docks_changed())
+            dock.topLevelChanged.connect(lambda floating, d=dock: floating and self.settle_floating(d))
             # a floated panel is a window of its own: its side buttons too (its QWindow is there once it is shown)
             dock.topLevelChanged.connect(lambda floating, d=dock: floating and QTimer.singleShot(
                 0, lambda: alive(d) and self.side_buttons.watch(d.windowHandle())))
@@ -7618,6 +7975,26 @@ class MainWindow(QMainWindow):
                 lambda _i: self.state.set("log_level", window.panel.chosen()))
         window.bring_up()
         return window
+
+    def settle_floating(self, dock, tries=20):
+        """A panel floated out of the window ends up a window the window manager manages. While it is dragged Qt
+        makes it bypass the window manager (X11BypassWindowManagerHint); on spectrwm the drag's end could get lost
+        and the panel stayed so - a frameless window over every workspace, not to be moved or resized, painting
+        nothing ("Tafel: Eigenschaften" over a copy of the screen). Once no mouse button is held, the hint goes."""
+        def check(left=tries):
+            try:
+                if not dock.isFloating():
+                    return
+                if QApplication.mouseButtons() != Qt.MouseButton.NoButton and left > 0:
+                    QTimer.singleShot(250, lambda: check(left - 1))  # still dragged
+                    return
+                if dock.windowFlags() & Qt.WindowType.X11BypassWindowManagerHint:
+                    dock.setWindowFlag(Qt.WindowType.X11BypassWindowManagerHint, False)
+                    dock.show()
+                    dock.raise_()
+            except RuntimeError:  # gone meanwhile
+                return
+        QTimer.singleShot(250, check)
 
     def fold_inspector(self):
         """Esc or a click on the Board's empty canvas: its inspector folds if it is docked, shown and unfolded (never
@@ -7774,6 +8151,12 @@ class MainWindow(QMainWindow):
         try:
             if isinstance(state, str) and len(state) < 65536:
                 self.workspace.restoreState(QByteArray.fromBase64(state.encode()))
+            # A panel restored floating is a window the window manager manages (settle_floating): one saved while
+            # Qt's drag flag stuck came up on spectrwm unmanaged - over every workspace, not to be moved or resized,
+            # painting nothing ("Tafel: Eigenschaften" over a copy of the screen).
+            for dock in self.docks.values():
+                if dock.isFloating():
+                    self.settle_floating(dock)
             known = saved.get("known") if isinstance(saved.get("known"), list) else []
             known = [n for n in known if isinstance(n, str)]
             if isinstance(closed, list):

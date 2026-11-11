@@ -116,6 +116,8 @@ class Matrix:
             seen.device_rules = json.loads((a.control_dir / "device-rules.json").read_text())
             seen.env = seen.config["env"]
             seen.files = {p.name: p.read_text() for p in session.iterdir() if p.is_file()}
+            # --nested-containers: the engines' configuration inside (session/containers).
+            seen.containers = {p.name: p.read_text() for p in (session / "containers").glob("*")}
             seen.firewall = seen.files["firewall.nft"]
             proxy_dir = getattr(a, "proxy_dir", None)
             seen.proxy = json.loads((proxy_dir / "proxy.json").read_text()) if proxy_dir else None
@@ -295,6 +297,25 @@ def defaults(m):
     assert "redirect to :" in run.firewall  # every TCP connection passes the proxy
     if m.backend == "podman":
         assert run.create[run.create.index("--network") + 1] == s.POD_NETWORK
+
+
+@network
+def killswitch_knows_the_model_api_and_has_its_chain(m):
+    """What sandbox-ai net cut needs during the run: the provider's hosts with the addresses the start pinned, the
+    host's ports, the cut chain in the firewall, jumped to before anything of the output chain."""
+    run = m.run("--allow-pypi")
+    killswitch = run.config["killswitch"]
+    assert killswitch["api"]["names"] == provider(m) and "pypi.org" not in killswitch["api"]["names"]
+    assert killswitch["api"]["https"] == sorted({address(host) for host in provider(m)})
+    assert killswitch["api"]["tcp"] == killswitch["api"]["loopback"] == [] and killswitch["host_ports"] == []
+    assert killswitch["tor"] is False and killswitch["bypass"] == [] and killswitch["machine_host"] is None
+    settings = s.RUNTIME.cut_settings(killswitch)  # as the supervisor takes it
+    assert settings["api"]["https"] == killswitch["api"]["https"]
+    assert " chain cut {\n }" in run.firewall
+    output = run.firewall[run.firewall.index(" chain output {"):]
+    assert output.splitlines()[1] == "  jump cut"
+    # Without the provider's defaults there is no model API to keep: "api" keeps nothing then.
+    assert m.run("--no-provider-defaults").config["killswitch"]["api"]["https"] == []
 
 
 @network
@@ -1984,6 +2005,22 @@ def llm_on_the_hosts_loopback(m):
 
 
 @llm_case
+def llm_killswitch_keeps_exactly_the_server(m):
+    """sandbox-ai net cut RUN api: the supervisor learns the --llm server as the start opened it - its address and
+    port, or the host's port it listens on - and the provider's hosts only while the run reaches them."""
+    llm_endpoint(m)
+    killswitch = m.run("--llm", "gpu", "--no-provider-defaults").config["killswitch"]
+    assert killswitch["api"] == {"https": [], "tcp": [["10.0.0.5", 11434]], "loopback": [], "names": []}
+    killswitch = m.run("--llm", "gpu").config["killswitch"]
+    assert killswitch["api"]["tcp"] == [["10.0.0.5", 11434]] and killswitch["api"]["names"] == provider(m)
+    if m.backend == "podman":
+        llm_endpoint(m, url="http://localhost:11434")
+        killswitch = m.run("--llm", "gpu", "--no-provider-defaults").config["killswitch"]
+        assert killswitch["api"]["loopback"] == [11434] and killswitch["host_ports"] == [11434]
+        assert killswitch["api"]["tcp"] == []
+
+
+@llm_case
 def llm_refusals(m):
     llm_endpoint(m)
     m.refused("--llm", "gpu", "--no-proxy", match="drop --no-proxy")
@@ -2268,6 +2305,31 @@ def vpn_tor_sends_every_connection_through_tor(m):
     closed = f"  ip daddr {rt.TOR_DNS} drop"
     assert run.firewall.index(closed) < run.firewall.index('  oifname "lo" accept')
     assert rt.TOR_DNS not in run.files["resolv.conf"]  # the DNS stub's, which answers the pinned names only
+
+
+@vpn
+def vpn_tor_killswitch_counts_everything_past_tor(m):
+    """sandbox-ai net cut in a Tor run: only --vpn-bypass-tcp's target is the local network (everything else lies past
+    Tor), "api" keeps the provider through Tor, tor's own packets pass the cut chain (its transport)."""
+    rt, tunnel, inside = tor_vpn(m)
+    if m.backend == "bwrap":
+        return
+    m.fake_vpn(tunnel=tunnel, inside=inside)
+    run = m.run("--vpn", "anon", "--vpn-bypass-tcp", "192.168.1.20:1234")
+    killswitch = run.config["killswitch"]
+    assert killswitch["tor"] is True and killswitch["bypass"] == [["192.168.1.20", 1234]]
+    assert killswitch["vpn_mark"] == f"meta skuid {rt.TOR_UID}"
+    cut = {**s.RUNTIME.cut_settings(killswitch), "mode": "remote"}
+    assert s.RUNTIME.cut_allows(cut, "192.168.1.20", 1234)
+    assert not s.RUNTIME.cut_allows(cut, "192.168.1.21", 1234) and not s.RUNTIME.cut_allows(cut, "10.192.0.7", 443)
+    rules = [line for line in s.RUNTIME.cut_rules(cut, killswitch["vpn_mark"]).splitlines()
+             if line.startswith("add rule")]
+    assert rules[0] == f"add rule inet agent_sandbox cut meta skuid {rt.TOR_UID} return"  # tor's own: before any mode
+    api = {**cut, "mode": "api"}
+    for host in provider(m):
+        for found in run.config["killswitch"]["api"]["https"]:
+            assert s.RUNTIME.cut_allows(api, found, 443)
+        assert host in killswitch["api"]["names"]
 
 
 @vpn

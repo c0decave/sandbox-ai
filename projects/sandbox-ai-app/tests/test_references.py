@@ -89,6 +89,7 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
                 "workspaces", "add_workspace", "remove_workspace",
                 "safeguards",  # sandbox-ai safeguards --json: a process, also over SSH
+                "report",  # sandbox-ai report: reads the logs bounded, writes the file (seconds)
                 "host_version_known",  # one short SSH command (review 6 A-N3)
                 "write_project",
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
@@ -123,6 +124,7 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "host_preset", "host_presets", "host_start_choices", "host_project_show", "host_project_trust",
                 "host_trust_defaults", "host_web_users", "host_web_user_remove", "host_web_cert", "host_answer",
                 "host_mcp_detach", "stop_mcp", "stop_run", "secrets_backend", "add_login", "checked",
+                "cut_run", "cut_everywhere", "cut_every_host",  # the kill switch: sandbox-ai net cut, here or over SSH
                 "host_command_options", "require_options", "host_image_variants",
                 # sandbox-ai's registry of what runs (net.running) asks Podman whether the pod of a run whose launcher
                 # is gone still runs (up to its timeout) and removes the directories of runs that ended; the sessions'

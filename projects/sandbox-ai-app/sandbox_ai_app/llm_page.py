@@ -190,7 +190,7 @@ class LlmDialog(QDialog):
         self.test_button.setToolTip(tr("Ask the server for its models now, without saving it (sandbox-ai wizard "
                                        "models), and offer them as the default model"))
         self.test_button.clicked.connect(lambda _=False: self.test())
-        self.test_result = plain_label(role="secondary")
+        self.test_result = plain_label(role="secondary", selectable=True)
         self.test_result.setAccessibleName(tr("Result of the test"))
         self.test_row = QWidget()
         test = QHBoxLayout(self.test_row)
@@ -548,7 +548,7 @@ class LlmPage(QWidget):
         layout.addWidget(self.servers, 2)
         # What each server has loaded and uses now (`llm status --json` on that host): read in the background after
         # the list, on Refresh and every STATUS_REFRESH seconds while the page is shown - never on the GUI thread.
-        self.server_status = plain_label(role="secondary")
+        self.server_status = plain_label(role="secondary", selectable=True)
         self.server_status.setAccessibleName(tr("What the servers have loaded and use now"))
         self.server_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.server_status)
@@ -599,7 +599,7 @@ class LlmPage(QWidget):
         layout.addWidget(flow(self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
                               self.sort, self.show_button, self.remove_button, self.refresh_button))
         layout.addWidget(self.build_models(), 3)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.load_hosts()

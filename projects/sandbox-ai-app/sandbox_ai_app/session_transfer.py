@@ -78,7 +78,7 @@ class SessionTransferDialog(QDialog):
         scroll.setMaximumHeight(220)
         scroll.setAccessibleName(tr("Folders of the session"))
         layout.addWidget(scroll)
-        self.status = plain_label(tr("Reading the session's folders…"), role="secondary")
+        self.status = plain_label(tr("Reading the session's folders…"), role="secondary", selectable=True)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.status)
         self.output = QPlainTextEdit()

@@ -485,6 +485,30 @@ def test_the_tor_recipe(config):
     assert codex.index("RUN true") < codex.index("torbrowser-launcher")
 
 
+def test_the_dev_recipe(config):
+    """`images recipe dev`: what developing sandbox-ai needs with --nested-containers - Podman and its helpers, the
+    kernel tools of the kill switch tests, tor, a static busybox for local test images, the app tests' libraries -
+    all Debian packages of the image's release, no fragment (nothing from elsewhere); the validator accepts it."""
+    lines = []
+    assert im.main(["recipe", "dev", "--from", "claude"], out=lines.append) == 0
+    assert "sandbox-ai build dev" in lines[-1] and "--image-variant dev" in lines[-1]
+    document = json.loads((im.config_root() / "dev" / "image.json").read_text())
+    for package in ("podman", "fuse-overlayfs", "slirp4netns", "passt", "uidmap", "nftables", "iproute2", "tor",
+                    "git", "python3-venv", "busybox-static", "libegl1", "libgl1", "libxkbcommon0", "libfontconfig1",
+                    "libdbus-1-3", "xvfb", "spectrwm", "xdotool", "x11-apps"):
+        assert package in document["apt"], package
+    assert all("=" not in package for package in document["apt"])  # Debian's own versions of the release
+    assert not document.get("npm") and not document.get("pip") and not document.get("files")
+    path = im.config_root() / "dev" / im.FRAGMENT  # the agent's own fragment, copied (none here)
+    fragment = path.read_text() if path.exists() else ""
+    assert im.errors(im.check(document, fragment, {})) == []
+    text = im.containerfile("dev", document, fragment)
+    assert "apt-get install -y --no-install-recommends" in text and "podman" in text and "curl" not in text
+    assert "dev" in im.RECIPES and "Podman" in im.RECIPES["dev"]["description"]
+    with pytest.raises(ValueError, match="exists already"):
+        im.recipe("dev", "claude")
+
+
 
 # -- names during the build: Podman's own network, else the host's, else a clear stop --
 

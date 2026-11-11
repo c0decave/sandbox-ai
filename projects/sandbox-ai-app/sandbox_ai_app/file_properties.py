@@ -153,7 +153,7 @@ class PropertiesDialog(QDialog):
         self.note = plain_label("\n".join(why + problems), role="secondary")
         layout.addWidget(self.note)
         self.note.setVisible(bool(why or problems))  # (in the dialog first: no window of its own for a moment)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         layout.addWidget(self.message)
         buttons = QHBoxLayout()
         buttons.addStretch()

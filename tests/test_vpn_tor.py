@@ -346,6 +346,8 @@ class FakeRunner:
 
 def test_tor_comes_up_behind_the_kill_switch(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "RUN", tmp_path / "vpn")
+    given = []
+    monkeypatch.setattr(rt, "own_data_directory", lambda uid: given.append(uid))
     waited = []
     monkeypatch.setattr(rt, "wait_bootstrap", lambda log, process, timeout, out, secrets: waited.append(secrets) or 100)
     runner = FakeRunner()
@@ -358,6 +360,7 @@ def test_tor_comes_up_behind_the_kill_switch(tmp_path, monkeypatch):
     rules = dict((tuple(c), d) for c, d in runner.commands)[("nft", "-f", "-")]
     assert f"meta skuid {rt.TOR_UID} ip daddr 192.0.2.10 tcp dport 443 accept" in rules
     tor = next(c for c in commands if c[0] == "tor")
+    assert given == [rt.TOR_UID]  # the data directory is debian-tor's before tor starts
     assert tor == ["tor", "-f", str(tmp_path / "vpn" / "torrc"), "--defaults-torrc", str(tmp_path / "vpn" / "torrc-defaults")]
     torrc = tmp_path / "vpn" / "torrc"
     assert stat.S_IMODE(torrc.stat().st_mode) == 0o600 and f"cert={CERT_A}" in torrc.read_text()
@@ -507,10 +510,13 @@ def test_the_tor_container(home):
     command = v.container_command(["podman"], "agent-x-vpn", tor_profile(), pod="agent-x")
     assert "--cap-drop=ALL" in command and "--cap-add=NET_ADMIN" in command
     # tor binds port 53 on loopback, then becomes debian-tor (whose uid the kill switch knows).
-    for cap in ("SETUID", "SETGID", "NET_BIND_SERVICE"):
+    for cap in ("SETUID", "SETGID", "NET_BIND_SERVICE", "CHOWN"):
         assert f"--cap-add={cap}" in command
     assert "--cap-add=NET_RAW" not in command and "--device=/dev/net/tun" not in command
-    assert f"--tmpfs=/var/lib/tor:rw,nosuid,nodev,mode=0700,uid={rt.TOR_UID},gid={rt.TOR_UID}" in command
+    # Podman's --tmpfs knows no uid= or gid= ("unknown mount option"): the runtime gives it to debian-tor.
+    tmpfs = [c for c in command if c.startswith("--tmpfs=/var/lib/tor")]
+    assert tmpfs == ["--tmpfs=/var/lib/tor:rw,nosuid,nodev,noexec,mode=0700"]
+    assert not any("uid=" in c or "gid=" in c for c in command if c.startswith("--tmpfs"))
     # Tor is not a VPN: its own image, never the VPN image.
     assert command[-4:] == [v.TOR_IMAGE, "-I", "/vpn/vpn_runtime.py", "serve"] and v.VPN_IMAGE not in command
     assert v.image(tor_profile()) == v.TOR_IMAGE and v.build_command(tor_profile()) == "sandbox-ai build tor"
@@ -778,7 +784,7 @@ def test_the_agents_firewall_lets_the_marked_checks_pass_before_its_own_rules():
 # --- what a Tor start reaches past Tor: nothing, unless it says so -----------------------------------------------
 
 def tor_args(*extra):
-    v.main(["add", "anon", "--tor"])
+    v.main(["add", "anon", "--tor", "--force"])
     return s.parse_args(["codex", "--backend", "podman", "--vpn", "anon", *extra])
 
 
@@ -812,12 +818,24 @@ def test_an_llm_server_in_the_local_network_is_refused_behind_tor(home, monkeypa
     llm = s.load_llm_module()
     monkeypatch.setattr(s, "load_llm_module", lambda: llm)  # (a fresh module at each call; vpn.py sees these)
     found = {"name": "lan", "url": "http://192.168.1.20:8000",
-             "parsed": {"address": "192.168.1.20", "loopback": False, "host": "192.168.1.20"}}
+             "parsed": {"address": "192.168.1.20", "loopback": False, "host": "192.168.1.20", "port": 8000}}
     monkeypatch.setattr(llm, "selection", lambda a: (found, "m"))
     a = tor_args()
     a.llm = "lan"
-    with pytest.raises(ValueError, match="lies in your local network, which a Tor start cannot reach"):
+    with pytest.raises(ValueError, match="lies in your local network, which a Tor start cannot reach") as refused:
         v.validate(a)
+    assert "--vpn-bypass-tcp 192.168.1.20:8000" in str(refused.value)
+    a = tor_args()
+    a.llm = "lan"
+    a.vpn_bypass_tcp = ["192.168.1.20:8000"]
+    v.validate(a)  # exactly this server past Tor, as asked
+    assert a.vpn_bypass_tcp == ["192.168.1.20:8000"] and "192.168.1.20:8000" in a.allow_tcp
+    a = tor_args()
+    a.llm = "lan"
+    a.vpn_bypass_tcp = ["192.168.1.20:8001"]  # another port of it: not this server
+    with pytest.raises(ValueError, match="lies in your local network"):
+        v.validate(a)
+    a = tor_args()
     found.update(url="https://llm.example.org", parsed={"address": None, "loopback": False, "host": "llm.example.org"})
     v.validate(a)  # a server on the internet: through Tor like everything else
 
@@ -831,3 +849,110 @@ def test_the_host_does_not_ask_an_llm_server_for_its_context_beside_a_vpn_start(
     endpoint = {"kind": "ollama", "url": "https://llm.example.org", "contexts": {}, "vpn": None}
     assert llm.context_window(endpoint, "m", client=Client(), behind_vpn=True) is None
     assert llm.context_window(endpoint, "m", client=Client()) is None  # without a VPN it asks (and fails here)
+
+
+def test_bypass_targets_are_addresses_of_the_local_network_only():
+    assert rt.bypass_target("192.168.1.20:1234") == ("192.168.1.20", 1234)
+    assert rt.bypass_target({"address": "10.1.2.3", "port": 22}) == ("10.1.2.3", 22)
+    for value in ("1.1.1.1:443", "100.64.0.1:80", "127.0.0.1:8000", "[fd00::1]:80", "192.168.1.1", "192.168.1.1:0",
+                  "192.168.1.1:70000", "host.lan:80"):
+        with pytest.raises(ValueError, match="--vpn-bypass-tcp"):
+            rt.bypass_target(value)
+
+
+def test_the_kill_switch_lets_exactly_the_bypass_past_tor():
+    rules = rt.tor_rules(bypass=[{"address": "192.168.1.20", "port": 1234}])
+    output, divert = chain(rules, "output").splitlines(), chain(rules, "divert").splitlines()
+    accept = "  ip daddr 192.168.1.20 tcp dport 1234 accept"
+    assert accept in output and output.index(accept) < output.index("  reject with icmpx type admin-prohibited")
+    back = "  ip daddr 192.168.1.20 tcp dport 1234 return"
+    assert back in divert and divert.index(back) < next(i for i, line in enumerate(divert) if "redirect to" in line)
+    assert "192.168" not in rt.tor_rules()
+    with pytest.raises(ValueError):
+        rt.tor_rules(bypass=["8.8.8.8:53"])
+
+
+def test_bypass_needs_a_tor_profile_and_reaches_the_payload(home, monkeypatch):
+    a = tor_args()
+    a.vpn_bypass_tcp = ["192.168.1.20:1234", "192.168.1.20:1234"]
+    v.validate(a)
+    assert a.vpn_bypass_tcp == ["192.168.1.20:1234"]
+    assert v.payload(a.vpn_profile, "serve", (), a.vpn_bypass_tcp)["bypass"] == [
+        {"address": "192.168.1.20", "port": 1234}]
+    assert "bypass" not in v.payload(a.vpn_profile, "serve", ())
+    a = tor_args()
+    a.vpn = None
+    a.vpn_bypass_tcp = ["192.168.1.20:1234"]
+    with pytest.raises(ValueError, match="--vpn-bypass-tcp goes with --vpn"):
+        v.validate(a)
+    a = tor_args()
+    a.vpn_bypass_tcp = ["8.8.8.8:53"]
+    with pytest.raises(ValueError, match="only an address of your local network"):
+        v.validate(a)
+
+
+def test_the_data_directory_becomes_debian_tors(tmp_path, monkeypatch):
+    data = tmp_path / "tor"
+    data.mkdir(mode=0o755)
+    owned, real_chmod = [], rt.os.chmod
+
+    def chown(path, uid, gid, follow_symlinks=True):
+        owned.append((str(path), uid, gid, follow_symlinks))
+
+    def chmod(path, mode):  # as in the container: no CAP_FOWNER, so no chmod once the directory is debian-tor's
+        if owned:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        real_chmod(path, mode)
+    monkeypatch.setattr(rt.os, "chown", chown)
+    monkeypatch.setattr(rt.os, "chmod", chmod)
+    rt.own_data_directory(rt.TOR_UID, data)
+    assert owned == [(str(data), rt.TOR_UID, rt.TOR_UID, False)]
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path)
+    with pytest.raises(RuntimeError, match="no directory"):
+        rt.own_data_directory(rt.TOR_UID, link)
+
+
+def test_the_bypass_counts_as_opening_a_port_for_modes_policy_and_trust(home, monkeypatch):
+    """The review of 0.1.94: --vpn-bypass-tcp was added to --allow-tcp after the mode's and the policy's checks."""
+    a = tor_args("--mode", "high", "--vpn-bypass-tcp", "192.168.1.20:22")
+    a.mode_origin = "--mode"
+    with pytest.raises(ValueError, match="--vpn-bypass-tcp 192.168.1.20:22 widens the security mode high"):
+        s.MODES.check(s, a, {})
+    assert ("--vpn-bypass-tcp", "192.168.1.20:22") in s.MODES.weakening_options(s, ["--vpn-bypass-tcp",
+                                                                                    "192.168.1.20:22"])
+    a = tor_args("--vpn-bypass-tcp", "192.168.1.20:22")
+    a.policy = {"forbid": ["--allow-tcp"]}
+    with pytest.raises(ValueError, match="administrator's policy forbids"):
+        v.validate(a)
+    a = tor_args("--vpn-bypass-tcp", "192.168.1.20:22")
+    a.policy = {"forbid": ["--allow-tcp=192.168.1.20:22"]}
+    with pytest.raises(ValueError, match="forbids --allow-tcp=192.168.1.20:22"):
+        v.validate(a)
+    a = tor_args("--vpn-bypass-tcp", "192.168.1.20:22")
+    a.policy = {"forbid": ["--allow-tcp=10.0.0.5:22"]}
+    v.validate(a)  # another target forbidden: this one is not
+
+
+def test_the_metadata_service_is_never_past_tor():
+    for value in ("169.254.169.254:80", "169.254.170.2:80"):
+        with pytest.raises(ValueError, match="metadata"):
+            rt.bypass_target(value)
+    assert rt.bypass_target("169.254.10.10:80") == ("169.254.10.10", 80)
+
+
+def test_the_tor_researchers_search_servers_go_behind_its_tor(home, monkeypatch):
+    """The Tor researcher's search servers (duckduckgo with its allow-list, searxng with network full) reach the
+    network only through the start's Tor; a server without network needs none."""
+    v.main(["add", "anon", "--tor", "--force"])
+    mcp = load("sandbox_mcp_tor_search_test", "mcp.py")
+    image = "ghcr.io/c0decave/sandbox-ai-mcp-{}@sha256:" + "0" * 64
+    servers = {"duckduckgo": {"image": image.format("duckduckgo"), "network": "allowlist",
+                              "allow": ["html.duckduckgo.com:443"]},
+               "searxng": {"image": image.format("searxng"), "network": "full"},
+               "yara": {"image": "ghcr.io/c0decave/axross-mcp-yara@sha256:" + "1" * 64, "network": "none"}}
+    monkeypatch.setattr(mcp, "definitions", lambda document=None: servers)
+    a = tor_args()
+    behind = mcp.vpn_for_servers(a, list(servers))
+    assert behind == {"duckduckgo": "anon", "searxng": "anon", "yara": None}

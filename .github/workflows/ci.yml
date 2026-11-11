@@ -47,6 +47,68 @@ jobs:
           fi
           exit "$status"
 
+  # The Tor kill switch in the kernel (tests/test_tor_killswitch_live.py): nftables in a network namespace of its own,
+  # every way out tried; only --vpn-bypass-tcp's exact address and port may leave past Tor. The run's own kill switch
+  # (sandbox-ai net cut, tests/test_killswitch_live.py): the sandbox's firewall with each mode's cut chain, every way
+  # out tried; each mode keeps exactly its part, connections open before the cut stop. Skipped elsewhere when no
+  # namespace with CAP_NET_ADMIN can be made; here sudo makes it, and the job fails if it was skipped all the same.
+  killswitch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0, published 2026-10-22
+        with:
+          python-version: "3.12"
+      - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nftables iproute2
+      - name: Kill switch in the kernel
+        shell: bash  # with pipefail: pytest's status survives the tee
+        run: |
+          python -m pytest -v -rs tests/test_tor_killswitch_live.py tests/test_killswitch_live.py | tee killswitch.txt
+          ! grep -q SKIPPED killswitch.txt
+      # The Tor container as a start runs it (rootless Podman, its capabilities, its tmpfs): tor comes up, becomes
+      # debian-tor and owns its data directory; then a real Tor profile is brought up and checked through Tor.
+      - name: Tor container under Podman
+        shell: bash
+        env:
+          SANDBOX_AI_BUILD_TOR: "1"
+          SANDBOX_AI_LIVE_NETWORK: "1"
+        run: |
+          podman --version
+          python -m pytest -v -rs tests/test_tor_container_live.py | tee tor.txt
+          ! grep -q SKIPPED tor.txt
+
+  # --nested-containers in a real sandbox (tests/test_nested_containers_live.py): Podman inside the agent's sandbox
+  # runs a container and unshare -rn works, while what the containers send meets the sandbox's own firewall and
+  # connection proxy (a refused destination stays refused, and the proxy logs it). Builds the claude image and its dev
+  # variant first; the job fails if the test was skipped all the same.
+  nested:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0, published 2026-10-22
+        with:
+          python-version: "3.12"
+      - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends podman passt slirp4netns uidmap
+      # Ubuntu's AppArmor takes the capabilities of a user namespace an unconfined program makes (the supervisor
+      # makes the agent's); a host that runs sandboxes with --nested-containers needs the same.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: The claude image and its dev variant
+        run: |
+          podman --version
+          ./sandbox-ai images recipe dev --from claude
+          ./sandbox-ai build dev
+      - name: Podman inside a sandbox
+        shell: bash
+        run: |
+          python -m pytest -v -rs --agent-live tests/test_nested_containers_live.py | tee nested.txt
+          ! grep -q SKIPPED nested.txt
+
   package:
     runs-on: ubuntu-24.04  # ubuntu-latest is 26.04 since 2026-10-19: no Python 3.9 there
     steps:
@@ -74,7 +136,7 @@ jobs:
   # LOCAL_PEERPID; the Linux suite simulates them) and install.sh with the Mac's bash 3.2 and BSD tools. No Podman
   # here: podman machine needs nested virtualisation, which GitHub's macOS runners do not have.
   macos:
-    runs-on: macos-14  # arm64
+    runs-on: macos-15  # arm64 (macos-14 is retired: "configuration not supported")
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20

@@ -370,7 +370,7 @@ class ApprovalsPage(QWidget):
                  self.block_button)
         for first, second in zip(order, order[1:]):
             QWidget.setTabOrder(first, second)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         open_layout.addWidget(self.message)
         self.remote_note = plain_label(role="secondary")  # hosts that did not answer
         self.remote_note.hide()
@@ -438,7 +438,7 @@ class ApprovalsPage(QWidget):
             row.addWidget(widget)
         row.addStretch()
         always_layout.addLayout(row)
-        self.always_message = plain_label(role="secondary")
+        self.always_message = plain_label(role="secondary", selectable=True)
         always_layout.addWidget(self.always_message)
         split = self.split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(open_box)
@@ -1430,13 +1430,21 @@ class StatisticsPage(QWidget):
         browse.clicked.connect(self.browse)
         refresh = QPushButton(tr("Refresh"))
         refresh.clicked.connect(lambda: self.refresh_directories())
+        # A report of every run of the log folder shown: statistics, network and the security report (sandbox-ai
+        # report --log-dir DIR), as PDF, HTML or Markdown.
+        self.report_button = QPushButton(tr("Report…"))
+        self.report_button.setAccessibleName(tr("Report"))
+        self.report_button.setToolTip(tr("One report of every run of this log folder: statistics, every destination "
+                                         "and why it was allowed or refused, and a security report of what was not "
+                                         "allowed - as PDF, HTML or Markdown (sandbox-ai report --log-dir)"))
+        self.report_button.clicked.connect(lambda _=False: self.report())
         from PySide6.QtWidgets import QCheckBox
         self.project_folder = QCheckBox(tr("a project folder (its default log folder)"))
         self.project_folder.setToolTip(tr("sandbox-ai logs --project PATH: the log folder the wizard gives that "
                                           "project"))
         self.project_folder.setVisible(False)
         self.project_folder.toggled.connect(lambda _=False: self.load())
-        for widget in (QLabel(tr("Logs")), self.directory, browse, refresh, self.project_folder):
+        for widget in (QLabel(tr("Logs")), self.directory, browse, refresh, self.report_button, self.project_folder):
             top.addWidget(widget)
         top.addStretch()
         layout.addLayout(top)
@@ -1498,6 +1506,7 @@ class StatisticsPage(QWidget):
             self.summary.setText(tr("Type a folder on {host} and press Enter.", host=self.hosts.label()))
             for widget in self.tables.values():
                 fill(widget, [])
+            self.update_report_button()
         else:
             self.refresh_directories()
 
@@ -1539,7 +1548,32 @@ class StatisticsPage(QWidget):
             return
         self.refresh_directories(select=str(folder))
 
+    def report_folder(self):
+        """(log folder, why none): the folder of this machine whose runs Report… covers."""
+        if self.host() != LOCAL:
+            return None, tr("Only for this machine's logs: on {host}, sandbox-ai report there writes it.",
+                            host=self.hosts.label())
+        directory = self.directory.currentData()
+        if not directory or not os.path.isdir(directory):
+            return None, tr("No logs yet: they appear once a sandbox has run with its connection proxy.")
+        return directory, None
+
+    def update_report_button(self):
+        directory, why = self.report_folder()
+        set_enabled(self.report_button, directory is not None, why)
+
+    def report(self):
+        directory, why = self.report_folder()
+        if directory is None:
+            warn(self, tr("Report"), why, modal=False)
+            return None
+        from .reports import make_report
+        return make_report(self, self.sai, Path(directory).name,
+                           tr("A report of every run that logged into {path}.", path=printable(directory)),
+                           log_dir=directory, parts=False, owner=self, source=[self.report_button])
+
     def load(self):
+        self.update_report_button()
         if self.host() != LOCAL:
             self.load_remote()
             return

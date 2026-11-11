@@ -60,7 +60,7 @@ class LoginsBox(QGroupBox):
             row.addWidget(widget)
         row.addStretch()
         layout.addLayout(row)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         layout.addWidget(self.message)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; what acts on one login waits
         delete_key(self.list, self.remove)
@@ -415,7 +415,7 @@ class LoginDialog(QDialog):
         buttons.accepted.connect(self.check_and_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
-        self.problem = plain_label(role="notice-error")
+        self.problem = plain_label(role="notice-error", selectable=True)
         form.addRow(self.problem)
         self.typed.toggled.connect(lambda _on: self.show_choice())
         if self.kind is not None:
@@ -575,7 +575,7 @@ class CredentialsPage(QWidget):
             row.addWidget(widget)
         row.addStretch()
         secrets_layout.addLayout(row)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         secrets_layout.addWidget(self.message)
         self.add_tab("secrets", secrets)
 

@@ -143,14 +143,15 @@ Ohne Klonen: [sandbox-ai.pyz, das AppImage oder die macOS-App](#vier-wege-zur-in
 27. [Regelwerke](#regelwerke)
 28. [Köderdateien (Canaries)](#köderdateien-canaries)
 29. [Geheimnisse](#geheimnisse)
-30. [Ressourcenlimits](#ressourcenlimits)
-31. [Richtlinie des Administrators](#richtlinie-des-administrators)
-32. [Weboberfläche](#weboberfläche)
-33. [Desktop-App](#desktop-app)
-34. [Optionsübersicht](#optionsübersicht)
-35. [Tests](#tests)
-36. [Fehlersuche](#fehlersuche)
-37. [Grenzen und offene Arbeiten](#grenzen-und-offene-arbeiten)
+30. [Container in der Sandbox](#container-in-der-sandbox)
+31. [Ressourcenlimits](#ressourcenlimits)
+32. [Richtlinie des Administrators](#richtlinie-des-administrators)
+33. [Weboberfläche](#weboberfläche)
+34. [Desktop-App](#desktop-app)
+35. [Optionsübersicht](#optionsübersicht)
+36. [Tests](#tests)
+37. [Fehlersuche](#fehlersuche)
+38. [Grenzen und offene Arbeiten](#grenzen-und-offene-arbeiten)
 
 ## Voraussetzungen
 
@@ -392,13 +393,14 @@ und passen so immer zur installierten Version.
 | `sandbox-ai doctor [--backend podman\|bwrap\|both] [--plain] [--no-color] [--json]` | | eine Tabelle nach Bereichen (System, Engine, Agenten, Projekt), im Terminal farbig (ok grün, WARN orange, FAIL rot; ohne mit `--no-color` oder `NO_COLOR`; `--plain` eine Zeile je Prüfung); zuerst sandbox-ai selbst (seine Version, wo es installiert ist: eigene Installation des Benutzers oder Systeminstallation mit ihrem Präfix, ein Paket, pip oder ein Checkout, und das Python, mit dem es läuft; in `--json` der erste Eintrag, `"id": "sandbox-ai-version"` mit `version`, `kind`, `path`, `prefix`, `python`), dann Host prüfen: Benutzer, Python, User-Namespaces, Podman (rootless), pasta, subuid/subgid, Images mit Agent-Versionen, Bubblewrap-Werkzeuge, TIOCSTI, Host-Logins (nur Ablauf), Standard-Kit und Kits mit ihren Skills, Agents, Commands und Prompts, Claude-Plugins deklariert vs. installiert, das Memory des Projekts im aktuellen Verzeichnis, Git-Identität, Projekt-Vertrauen; zu jedem Problem der Befehl, der es behebt; Exit 1 bei einem Fehler |
 | `sandbox-ai logs [VERZ\|--project P] [--json]` | | blockierte Verbindungen und Dateizugriffe eines `--log-dir` zusammenfassen und je blockiertem Ziel die passende Option vorschlagen (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
 | `sandbox-ai activity [LAUF\|--session NAME\|--project P\|--log-dir VERZ] [-f] [--since Z] [-k ART] [--json]` | | was die Agenten getan haben: Eingaben, Antworten, Tool-Aufrufe, Befehle, Dateiänderungen, Netzwerk, Rückfragen, Tokens ([Aktivität der Agenten](#aktivität-der-agenten)) |
-| `sandbox-ai net list\|show\|allow\|revoke\|untaint …` | | ändern, was eine laufende Sandbox erreichen darf ([Netzwerkänderungen](#netzwerk-einer-laufenden-sandbox-ändern)); beendet wird sie mit `sandbox-ai stop NAME` |
+| `sandbox-ai net list\|show\|allow\|revoke\|untaint\|cut …` | | ändern, was eine laufende Sandbox erreichen darf ([Netzwerkänderungen](#netzwerk-einer-laufenden-sandbox-ändern)), es sofort kappen ([der Kill-Switch](#der-kill-switch-das-netz-einer-laufenden-sandbox-kappen)); beendet wird sie mit `sandbox-ai stop NAME` |
 | `sandbox-ai devices list\|add\|remove [LAUF] PFAD\|usb:VID:PID`, `sandbox-ai limits [LAUF] …` | | Geräte und Limits einer laufenden Sandbox ([Hardware](#hardware-geräte-und-gpus), [Limits](#ressourcenlimits)) |
 | `sandbox-ai usage [LAUF\|--all] [--json] [--follow]` | | was eine laufende Sandbox gerade verbraucht: CPU, Speicher, Prozesse, ihre größten Prozesse ([Limits](#ressourcenlimits)) |
 | `sandbox-ai workspace list\|add\|remove [LAUF] VERZ\|DATEI [--ro] [--name NAME] [--force]` | | ein Host-Verzeichnis (oder eine einzelne Datei), einer laufenden Sandbox unter `/workspaces/<name>` (oder `/workspaces/NAME`) hinzugefügt, mit den Prüfungen eines Starts, und wieder weggenommen |
 | `sandbox-ai approvals list\|allow\|deny\|history\|remembered\|forget …` | | beantworten, was laufende Sandboxen fragen; was immer erlaubt wurde ([Rückfragen](#rückfragen-und-browser-anfragen)) |
 | `sandbox-ai rules check\|show\|reload …` | | Regelwerk-Dateien prüfen, die Regelwerke eines Starts mit ihrer Herkunft zeigen, einen laufenden Start seine HTTP-Regeln neu lesen lassen ([Regelwerke](#regelwerke)) |
 | `sandbox-ai canaries list [LAUF]`, `sandbox-ai canaries resume LAUF` | | die Köderdateien der Läufe und was mit ihnen geschah; eine Sandbox fortsetzen, die ein Köder angehalten hat ([Köderdateien](#köderdateien-canaries)) |
+| `sandbox-ai report [NAME ...\|--all] [-f md\|html\|pdf] [-o DATEI]` | | ein Bericht über Läufe, laufend oder gestoppt: Statistik, Netzwerk und warum, der Sicherheitsbericht ([Berichte](#berichte)) |
 | `sandbox-ai secrets list\|set\|delete\|backend` | | API-Schlüssel und Tokens im System-Schlüsselbund ([Geheimnisse](#geheimnisse)) |
 | `sandbox-ai git-logins add\|list\|remove\|check …` | | die Logins Ihrer Git-Server, vom Verbindungs-Proxy eingesetzt, nie in einer Sandbox ([Git-Logins](#git-logins-im-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add\|list\|remove\|check\|kinds …` | | Ihre Logins für npm, PyPI, crates.io, GitLab und GitHub, für `--publish` ([Veröffentlichen](#veröffentlichen-in-registries-und-forges-sandbox-ai-publish-logins---publish)) |
@@ -721,8 +723,9 @@ Was „enger" heißt, Option für Option (in `high` und `paranoid`):
   ein `rw`-Mount weiter.
 - **Köderdateien**: `--no-canaries` macht beide strengen Modi weiter; ihre
   Kategorien (`credentials`, `home`) werden gelegt, was `--canaries` auch hinzufügt.
-- **Geräte und Anzeige**: `--device`, `--gpu` und `--gui-wayland` machen in
-  beiden strengen Modi weiter, `--gui` und `--gui-vnc` in `paranoid`.
+- **Geräte und Anzeige**: `--device`, `--gpu`, `--gui-wayland` und
+  `--nested-containers` machen in beiden strengen Modi weiter, `--gui` und
+  `--gui-vnc` in `paranoid`.
 - **Limits**: ein kleineres `--memory`, `--cpus` oder `--pids` macht enger, ein
   größeres oder `none` weiter.
 - **Agent**: `-D` (`--dangerously-skip-permissions`) macht `paranoid` weiter;
@@ -1925,6 +1928,65 @@ anderen `XDG_RUNTIME_DIR` (oder ohne, etwa aus cron oder `su`) gestartet
 wurden: Es liest auch `/run/user/UID/sandbox-ai/runs` und
 `~/.local/state/sandbox-ai/runs`.
 
+### Der Kill-Switch: das Netz einer laufenden Sandbox kappen
+
+`sandbox-ai net cut` kappt das Netz einer laufenden Sandbox sofort, für jedes
+Preset und jeden Agenten, ohne Neustart:
+
+```bash
+sandbox-ai net cut claude-1a2b3c4d remote   # das Internet kappen: nur lokales Netz und Host-Ports bleiben
+sandbox-ai net cut claude-1a2b3c4d local    # lokales Netz und Host-Ports kappen: nur das Internet bleibt
+sandbox-ai net cut claude-1a2b3c4d api      # nur die Modell-API bleibt (ihr Anbieter oder ihr --llm-Server)
+sandbox-ai net cut claude-1a2b3c4d all      # alles, auch die Modell-API
+sandbox-ai net cut claude-1a2b3c4d off      # aufgehoben: sie erreicht wieder, was sie erreichen darf
+sandbox-ai net cut --all-runs all           # der Notaus: jede laufende Sandbox von Ihnen auf einmal
+sandbox-ai net cut --all-runs off
+```
+
+Eine Kappung nimmt nur weg: Jeder Modus behält einen Teil dessen, was der Lauf
+erreichen darf (seine Startoptionen, was während des Laufs erlaubt wurde, was
+Rückfragen öffneten), nie mehr, und `off` gibt genau das zurück. `api` behält
+die Hosts des Anbieters mit den Adressen, die der Start für sie festgelegt hat
+(eine TLS-Verbindung zu so einer Adresse muss einen dieser Hosts nennen: ein
+anderer Name hinter demselben CDN wird abgelehnt), oder den `--llm`-Server über
+Adresse und Port oder über den Port des Hosts, an dem er lauscht. Namensauflösungen
+zählen als Internet: `remote`, `api` und `all` beenden sie, bis auf die Namen,
+die der Start festgelegt hat. Hinter Tor ist nur das Ziel von
+`--vpn-bypass-tcp` das lokale Netz, alles andere liegt hinter Tor, und `api`
+ist der Anbieter durch Tor wie zuvor; nie wird etwas an Tor oder einem VPN
+vorbei geöffnet.
+
+Die Kappung gilt außerhalb der Reichweite des Agenten, dreifach: Der Supervisor
+trägt sie in die Firewall der Sandbox ein (eine eigene Kette, vor jeder anderen
+Regel geprüft, die jedes Paket nach dem Ziel beurteilt, zu dem seine Verbindung
+geöffnet wurde, sodass auch schon offene Verbindungen stehen bleiben, UDP
+eingeschlossen), in den Verbindungs-Proxy (der neue Verbindungen ablehnt und die
+offenen schließt, die die Kappung verbietet) und in seine eigenen Relays von
+Host-Ports und seinen DNS-Stub; Rückfragen zu dem, was die Kappung verbietet,
+werden ohne Frage abgelehnt. Nur Sie erreichen den Steuer-Socket, die Firewall
+zu ändern braucht eine Fähigkeit, die der Agent nicht hat, und die Dateien des
+Proxys sind vor ihm verborgen. Die Kappung gilt auch für die MCP-Server, Helfer
+und Team-Mitglieder des Laufs (jeder hat eine eigene Sandbox mit eigenem
+Supervisor; `--only` lässt sie aus), auch für die, die später dazukommen (ein
+MCP-Server oder Helfer, der für ihn startet, `mcp attach --live`): Sie werden
+gekappt, bevor ihr Agent läuft. Eine Sandbox hält die Kappung jedes Laufs
+getrennt und alle zugleich: Ein MCP-Server, den zwei Läufe teilen, bleibt
+gekappt, solange einer von ihnen es ist (erreichbar bleibt nur, was jede
+Kappung behält, etwa `remote+api`), und wer die Kappung eines Laufs aufhebt,
+erfährt, welche andere dort noch gilt; `net cut --all-runs off` hebt jede auf.
+Eine pausierte Sandbox (nichts verlässt sie) behält die Kappung für ihr
+Fortsetzen, das sie setzt, bevor es zurückkehrt. Sie gilt, bis sie aufgehoben
+wird oder der Lauf endet; `net list` und `sandbox-ai list --json` zeigen sie
+(`cut`), `net show` nennt sie. Läufe, die ein sandbox-ai vor 0.1.94 gestartet
+hat, oder mit mehr als 64 Host-Ports oder 512 Adressen der Modell-API, haben
+keinen Kill-Switch (der Start sagt es): Stoppen Sie sie oder starten Sie sie
+neu. In der App: Sandboxen › Kill-Switch (auch für mehrere gewählte, alle auf
+einmal), und Datei › Notaus (`Ctrl+Shift+X` aus jedem Fenster der App, der
+Knopf in der Kopfleiste), der jede Sandbox hier und auf jedem Host von
+`sandbox-ai hosts` auf einmal kappt, ohne Rückfrage, und jeden Host und jede
+Sandbox nennt, die er nicht erreichte; Datei › Jede Kappung aufheben fragt
+zuerst.
+
 ## VPN
 
 Vor eine Sandbox lässt sich ein VPN setzen (Podman-Backend): Der Tunnel läuft
@@ -2101,7 +2163,11 @@ des Laufs, denn was dort lauscht (ein Proxy, Ihr eigener Tor- oder VPN-Client,
 ein Server, der URLs abruft), erreicht das Internet von Ihrer Adresse aus;
 `--vpn-bypass-host-ports` lässt sie zu, wenn Sie das wollen. Ein `--llm`-Server
 in Ihrem lokalen Netz wird abgelehnt (Tors Exits lehnen private Adressen ab, und
-sonst geht nichts hinaus). Von Ihrer eigenen Adresse kommen nur noch die
+sonst geht nichts hinaus), außer `--vpn-bypass-tcp ADRESSE:PORT` nennt ihn:
+genau diese IPv4-Adresse und dieser TCP-Port Ihres Netzes (10/8, 172.16/12,
+192.168/16, 169.254/16) wird dann am Tor vorbei erreicht, wie alles andere über
+den Verbindungs-Proxy; der Rest Ihres Netzes bleibt zu, und was dort lauscht,
+könnte das Internet von Ihrer Adresse aus erreichen. Von Ihrer eigenen Adresse kommen nur noch die
 Vergleichsmessung des Starts (eine Anfrage an check.torproject.org) und was Sie
 selbst ausführen: `sandbox-ai llm status` (der Status des `--llm`-Servers des
 Starts in der App; legen Sie einen Server im Internet mit `llm add ... --vpn
@@ -4537,6 +4603,56 @@ Safeguards. `"safeguard_mute"` in `~/.config/sandbox-ai/defaults.json` (`sandbox
 '["firewall","dns"]'`, in der App Einstellungen > Fenster, im Web Defaults) schaltet Arten stumm: weiter
 aufgezeichnet, nie gemeldet.
 
+## Berichte
+
+`sandbox-ai report` schreibt einen Bericht über einen Lauf, über einen Start mit allen seinen Läufen und Teilen
+(seinen MCP-Servern, Helfern und seinem Team), über mehrere Starts, über einen Log-Ordner oder über jeden Lauf -
+laufend oder gestoppt - als Markdown, HTML oder PDF, jeweils mit Inhaltsverzeichnis und Links:
+
+```bash
+sandbox-ai report web -o web.pdf                  # ein Start (sein Name oder eine Lauf-ID) mit seinen Teilen
+sandbox-ai report web api -f html -o zwei.html    # mehrere Starts in einem Bericht
+sandbox-ai report --session web --since 1d        # eine Session, ab vor einem Tag
+sandbox-ai report web --no-parts                  # der Start allein (Markdown auf die Standardausgabe)
+sandbox-ai report --all --until 2026-11-10 -o alle.md
+sandbox-ai report --project ~/src/web --json      # die gesammelten Daten, für Skripte
+```
+
+| Abschnitt | Was er enthält |
+|---|---|
+| Zusammenfassung | was der Bericht umfasst, wann er erstellt wurde, die sandbox-ai-Version, der Zeitraum; jeder Lauf mit Rolle, Agent, Zustand, Start, Dauer, Sicherheitsmodus, VPN oder Tor und Kill-Switch; die wichtigsten Zahlen; jeder Befund des Sicherheitsberichts, verlinkt |
+| Läufe | je Lauf: ID und Name, Rolle (ein Start, ein MCP-Server, ein Helfer, ein Team-Mitglied), Agent, Backend, Start, Ende, Dauer, Exit-Status, Workspaces (und die während des Laufs hinzugefügten), Log-Ordner, Sicherheitsmodus, Preset, `--ask`, VPN/Tor, LLM-Server, MCP-Server, Kill-Switch, Taint, Telemetrie, Limits, Geräte, die Hosts und Presets, die seine Optionen erlauben, seine Startoptionen (ohne geheime Werte) |
+| Statistik | Verbindungen, Anfragen und Bytes je Ziel, erlaubt, abgelehnt und fehlgeschlagen; die gestellten Fragen und wie sie beantwortet wurden; MCP-Tool-Aufrufe je Server; die von Regeln geprüften Tool-Aufrufe des Agenten; Pushes und was die Datenschutzprüfung sagte; Modellaufrufe und Tokens; die vom Agenten gesendeten Zugangsdaten (nur Namen) und die vom Proxy eingesetzten Logins; Prozesse, Dateiänderungen, Geräte, VPN-Prüfungen |
+| Netzwerk | jedes versuchte Ziel: erlaubt oder abgelehnt und warum - die Freigabe (und ihr Umfang), die Regel, `--allow-host`, das Preset, die Modell-API des Agenten, `--frontier`, `--no-inspect`, was während des Laufs erlaubt wurde, oder der Grund der Ablehnung - mit den Prozessen, die es versuchten; jede abgelehnte oder weitergeleitete Namensauflösung; bei einer laufenden Sandbox, was während ihres Laufs erlaubt wurde (`sandbox-ai net show`) |
+| Sicherheitsbericht | alles, was versucht oder getan wurde und nicht erlaubt war, das Schwerste zuerst: gelesene oder gesendete Köder, fehlgeschlagene VPN- und Tor-Prüfungen (ein Leck ist kritisch), fehlgeschlagene Sicherheitsprüfungen, von der Datenschutzprüfung abgelehnte Pushes, Ablehnungen durch Regeln, die Richtlinie des Administrators und den Sicherheitsmodus, mit Nein oder gar nicht beantwortete Fragen, der Taint, abgelehnte Geräte, der Kill-Switch (was er abgelehnt oder geschlossen hat, und die Kappung, die gilt), abgelehnte Verbindungen, Namensauflösungen und TLS-Handshakes. Jeder Befund: wann (zuerst und zuletzt, wie oft), der Lauf (verlinkt), durch welchen Prozess oder welches Tool, das Urteil, was zu tun ist, das Log, aus dem er stammt |
+| Anhang | jede gelesene Log-Datei (ihre Größe, wie viel davon gelesen wurde, wie viele ältere Zeilen ausgelassen wurden), was nicht gelesen werden konnte, und was sandbox-ai nicht aufzeichnet |
+
+Der Bericht entsteht aus dem, was sandbox-ai aufzeichnet: der Lauf-Registry (und, bei einer laufenden Sandbox,
+der Antwort ihres Supervisors auf `net show` und ihrem Kill-Switch), den Start-Verzeichnissen und ihrer
+Geschichte und dem Log-Ordner jedes Laufs (`activity.jsonl`, `safeguards.jsonl`, `connections-*.jsonl`,
+`egress-denied.jsonl`, `dns.jsonl`, `canaries.jsonl`, `vpn.jsonl`, `tools.jsonl`, `mcp-calls.jsonl`,
+`devices.jsonl`, `workspaces.jsonl`, `files.jsonl`, `processes.jsonl`) sowie den Aufruf-Logs der MCP-Server. Hat
+ein Lauf `safeguards.jsonl`, sind dessen Einträge die Befunde (mit ihrer Abhilfe); bei einem älteren Lauf werden
+sie auf dieselbe Weise aus den Logs selbst gebildet. Jedes Log wird von seinem Ende her und nur so weit gelesen
+(32 MiB eines Logs, 256 MiB aller): der Anhang sagt, was ausgelassen wurde. Jeder Text geht durch die Schwärzung
+des Aktivitätslogs (Token-Formate, Muster von Zugangsdaten, die Köder-Tokens des Laufs): in keinem Format
+erscheint ein Geheimnis. Die Datei wird mit Modus 0600 geschrieben; sie nennt Hosts, Pfade und Befehle der Läufe,
+geben Sie sie also mit Bedacht weiter.
+
+Die HTML-Seite bringt ihren Stil mit (hell und dunkel, druckbar) und lädt nichts nach. Das PDF schreibt sandbox-ai
+selbst (`sandbox/pdfdoc.py`, ohne Abhängigkeit, mit Helvetica und Courier des PDF-Readers): seine Lesezeichen sind
+die Abschnitte, die Läufe, die Schweregrade und jeder Befund, und das Inhaltsverzeichnis (mit Seitenzahlen) und die
+Links von der Zusammenfassung zu den Befunden sind Links innerhalb des Dokuments. In der Desktop-App: Sandboxen ›
+Bericht… für die gewählten Starts (einer oder mehrere dieses Rechners), Statistik › Bericht… für den gezeigten
+Log-Ordner; Format und Datei werden erfragt, der Bericht wird im Hintergrund geschrieben und geöffnet.
+
+Was nicht aufgezeichnet wird, kann kein Bericht zeigen: wann der Kill-Switch gesetzt oder aufgehoben wurde (nur die
+Kappung, die während eines Laufs gilt, und was sie abgelehnt oder geschlossen hat, stehen im Log); warum die
+Netzwerkoptionen eine Verbindung durchließen (der Proxy protokolliert keinen Grund: der Bericht nennt die Option,
+das Preset oder den Anbieter, zu dem sie passt); die Optionen eines nicht behaltenen Laufs, sobald er endete; was
+während eines Laufs erlaubt wurde, sobald er endete; der Lauf eines Firewall-Drops, einer Namensauflösung, einer
+Dateiänderung oder eines Prozesses (sie zählen für den Lauf, der zu der Zeit lief); Lesezugriffe auf Ihre Dateien.
+
 ## Köderdateien (Canaries)
 
 Ein Canary ist ein Köder: eine Datei, die wie eine Zugangsdatei aussieht und
@@ -4742,6 +4858,72 @@ der Befehl die Zeile für die Sandbox (`export NAME=sandbox-ai-api-key-placehold
 nimmt ihn zurück; die Desktop-App macht dasselbe aus dem Menü eines Geheimnisses (Zugangsdaten, Geheimnisse: An
 laufende Sandbox übergeben…).
 
+## Container in der Sandbox
+
+`--nested-containers` (`-ct`, nur Podman) lässt den Agenten selbst Container starten: `podman run`, `podman build`,
+`buildah` und `unshare -rn` funktionieren in seiner Sandbox (sandbox-ai selbst entwickeln, Images testen,
+MCP-Server in ihren Containern). Das Image braucht Podman: `sandbox-ai images recipe dev --from claude &&
+sandbox-ai build dev` macht die Variante `dev` mit Podman, crun, fuse-overlayfs, slirp4netns, passt, nftables, tor,
+busybox-static und den Bibliotheken, die die Tests der App ohne Bildschirm brauchen; gestartet mit
+`--image-variant dev --nested-containers`.
+
+**Wie.** Bevor Firejail startet, legt der Supervisor einen User-Namespace für den Agenten an; der Agent betritt
+ihn, sobald Firejail geprüft ist, mit einem eigenen Mount-Namespace (Firejails Mounts gesperrt hineinkopiert). Sein root ist das root der Sandbox (Ihr Benutzer auf dem Host: was der Agent
+schreibt, bleibt Ihres); seine übrigen IDs sind die untergeordneten IDs der Sandbox, bis auf drei, auf die drinnen
+nichts abgebildet wird: die des Verbindungs-Proxys (1), von PulseAudio (2) und von tor (950). Der Agent ist root
+mit allen Capabilities in diesem Namespace und in dem, was er darin anlegt, und hat sonst nirgends welche. Was der
+Container dafür bekommt:
+
+| Podman-Option | Warum |
+|---|---|
+| `--cap-add SETFCAP` | der Supervisor bildet das root der Sandbox in den Namespace des Agenten ab, was der Kernel nur damit erlaubt; Firejail nimmt sie mit allen anderen, bevor der Agent läuft |
+| `--device /dev/fuse` | fuse-overlayfs, der Speicher der Images drinnen (ohne: Kopien, `vfs`) |
+| `--device /dev/net/tun` | slirp4netns und pasta für Container mit eigenem Netz (nötig) |
+
+Firejails eigener Filter bleibt, lässt aber durch, was eine Container-Engine in ihren eigenen Namespaces braucht
+(`mount`, `umount2`, `pivot_root`, `chroot`, `sethostname`, `setdomainname` und die neuen Mount-Aufrufe);
+`ptrace`, `keyctl`, Module, `bpf` und der Rest bleiben gesperrt, `no_new_privs` bleibt gesetzt. Podman ist für die
+Sandbox eingerichtet (`/sandbox/session/containers/`, über `CONTAINERS_CONF` und `CONTAINERS_STORAGE_CONF`): die
+Container teilen den Netz-Namespace des Agenten, haben keine eigenen Cgroups (die Limits der Sandbox gelten für
+alle) und ihre Images liegen in `/var/tmp/containers` (ein tmpfs, `--tmp-size`), gehen also mit dem Lauf, und in
+keinem HOME bleibt etwas zurück, das Ihren untergeordneten IDs gehört. Der Probelauf zeigt alles
+(`nested_containers`).
+
+**Was weiter gilt.** Firewall und Verbindungs-Proxy gehören zum Netz-Namespace der Sandbox, der zum User-Namespace
+der Sandbox gehört, in dem der Agent keine Capabilities hat: er kann keine Regel ändern, kein Paket markieren
+(die Markierung des VPNs) und keine Schnittstelle verschieben. Jede Verbindung der Container verlässt diesen
+Namespace, direkt (sie teilen ihn) oder über slirp4netns oder pasta, die darin laufen: sie treffen auf dieselbe
+Erlaubnisliste und denselben Proxy wie die Verbindungen des Agenten. Die Umleitung zum Proxy lässt nur den
+Benutzer des Proxys aus, Tors Kill-Switch lässt nur den Benutzer von tor hinaus: keinen von beiden kann jemand
+annehmen, denn keiner ist im Namespace des Agenten abgebildet. Eine Bridge oder ein veth-Paar in den Namespace der
+Sandbox kann ein Container auch nicht anlegen (das braucht deren Capabilities). Firejails Mounts über den
+Verzeichnissen des Proxys, der Logs und der Steuerung sind in jedem Namespace, den der Agent anlegt, gesperrt: sie
+lassen sich nicht entfernen.
+
+**Was schwächer ist.** Der Agent erreicht mehr vom Kernel Ihres Hosts: eigene User-, Mount- und Netz-Namespaces
+mit allen Capabilities darin (nftables und Netzwerktreiber in seinen eigenen Namespaces, Dateisysteme, die sich
+dort einhängen lassen) und die Systemaufrufe, die dazugehören. Ein Fehler in diesem Code ist ein Weg nach draußen,
+den eine Sandbox ohne die Option nicht bietet. Die Bewertung auf dem Board sinkt um 10.
+
+**Dateien anderer IDs.** Als root seines Namespace kann der Agent Dateien in den Workspaces und den Ordnern, in
+die er schreiben darf, auch einer anderen seiner IDs geben - auf dem Host einer Ihrer untergeordneten IDs, die Sie
+ohne `podman unshare` nicht löschen können, und eine setuid-Datei liefe als diese ID. Deshalb ist in einem Lauf mit
+der Option jeder Ordner des Hosts in der Sandbox `nosuid` (und `nodev`) eingehängt, und am Ende des Laufs gibt der
+Supervisor Ihnen alles zurück (Ihr Benutzer und Ihre Gruppe, setuid- und setgid-Bits entfernt), was der Lauf dort
+einer anderen ID gehörend hinterlassen hat; er sagt, was er zurückgegeben hat, und schreibt `nested-owners.json` ins
+Log-Verzeichnis. Was vor dem Lauf schon da war, bleibt, wie es ist. Nach einem abgebrochenen Lauf tut
+`podman unshare chown -R 0:0 PFAD` dasselbe.
+
+**Wo es abgelehnt wird.** Mit dem Bubblewrap-Backend und mit `--podman-url`; hinter einem Tor-Profil (der
+Kill-Switch hielte, aber ein einziger Kernel-Fehler zeigte Ihre Adresse); in den Sicherheitsmodi `high` und
+`paranoid`; und durch die Richtlinie des Administrators (`"forbid": ["--nested-containers"]`). Es braucht
+`/dev/net/tun` auf dem Host. Ubuntu beschränkt User-Namespaces mit AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns=1`): der Start sagt es, und `unshare -r` schlägt drinnen fehl, bis
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+`tests/test_nested_containers_live.py` startet eine Sandbox damit und prüft all das mit echtem Podman (CI-Job
+`nested`).
+
 ## Ressourcenlimits
 
 Jede Sandbox läuft mit Limits für Speicher, CPU und Prozesse (während des Laufs
@@ -4800,7 +4982,12 @@ nicht lesen kann, zeigt es den letzten Eintrag des Launchers.
 Dateien in `/tmp` und `/var/tmp` (und ein HOME, das nicht aufbewahrt wird)
 liegen im Speicher (tmpfs) und zählen zum Limit; mit Limit fassen `/tmp` und
 `/var/tmp` je höchstens die Hälfte davon, ein volles `/tmp` ist also ein Fehler,
-den der Agent sieht („No space left on device“), nicht das Ende des Laufs. Seit
+den der Agent sieht („No space left on device“), nicht das Ende des Laufs.
+`--tmp-size GRÖSSE` (`-ts`, Podman; `6g`, `512m` oder
+Bytes) gibt jedem eine andere Größe, höchstens die Hälfte des Speicherlimits,
+denn beide zählen dazu (`--tmp-size 8g --memory 16g` für lange Testläufe); mit
+`--memory none` bekommt jedes ein Viertel des Speichers des Hosts, und höchstens
+das. Seit
 0.1.36 sind die Prozesse des Agenten außerdem die erste Wahl des Kernels
 (`oom_score_adj` 300 über dem des Supervisors). Der Wächter braucht eine lokale
 Engine unter Linux (nicht `--podman-url`).
@@ -5029,6 +5216,7 @@ Version, `-j` JSON, `-y` Ja, `-b` Backend; siehe deren `--help`).
 | `-b`, `--backend podman\|bwrap` | Sandbox-Backend (Standard: `podman`) |
 | `-i`, `--image IMAGE` | Fertiges Podman-Image (Standard: `localhost/<agent>-sandbox:latest`); wird nie implizit gezogen |
 | `-iv`, `--image-variant NAME` | Ihre Image-Variante NAME dieses Agenten (`sandbox-ai images new NAME --from AGENT`): `localhost/<agent>-sandbox-NAME:latest`; nur Podman, nicht mit `--image` |
+| `-ct`, `--nested-containers` | Der Agent startet selbst Container (Podman, Buildah, `unshare -rn`) als root eines eigenen User-Namespace; ihre Verbindungen gehen durch Firewall und Proxy der Sandbox; schwächt die Isolation ([Container in der Sandbox](#container-in-der-sandbox)) |
 | `-pu`, `--podman-url URL` | URL des Podman-Dienstes, z. B. `unix:///example/podman.sock` |
 | `-B`, `--binary PFAD` | Agent-Programm (Host-Pfad bei bwrap, Image-Pfad bei Podman) |
 | `-rt`, `--runtime DIR` | bwrap: Laufzeitverzeichnis schreibgeschützt am selben Pfad einblenden; mehrfach |
@@ -5161,6 +5349,7 @@ und [GUI](#gui-programme-und-browser).
 | `-d`, `--device PFAD\|usb:VID:PID[:SERIENNUMMER]` | Ein Gerät des Hosts an den Agenten geben: zeichenorientiertes Gerät unter `/dev`, `/dev/bus/usb`, `/dev/dri`, `/dev/snd` als Ganzes, oder ein USB-Gerät über seine IDs (nach dem Neuanstecken wieder eingehängt); mehrfach (schwächt die Isolation) |
 | `-G`, `--gpu nvidia\|dri\|rocm` | Die GPU-Geräte (NVIDIA mit Podman über CDI) |
 | `-me`, `--memory GRÖSSE`, `-cu`, `--cpus N`, `-pi`, `--pids N` | Ressourcenlimits (Standard `8g`, die Hälfte der CPUs, `4096`; `none` für keines; [Limits](#ressourcenlimits)) |
+| `-ts`, `--tmp-size GRÖSSE` | Größe von `/tmp` und von `/var/tmp`, je (Podman; Standard und höchstens: die Hälfte des Speicherlimits; mit `--memory none` ein Viertel des Speichers des Hosts) |
 
 Siehe [Hardware](#hardware-geräte-und-gpus); ein Dienst auf dem Host, erreicht
 über `--allow-host-port`, ist sicherer.
@@ -5191,6 +5380,7 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai net list\|show\|allow\|revoke [LAUF] [--allow-host H] [--allow-tcp IP:PORT] [--allow NETZ] [--allow-PRESET] [--dns] [--nameserver IP] [--allow-host-port PORT] [--git-token-env\|--git-token-file\|--git-token-secret URL=REF] [--api-key HOST=NAME[=GEHEIMNIS]]`, `allow ... --keep` | Ändern, was eine laufende Sandbox erreichen darf; `--keep` schreibt es auch in die `.sandbox-ai.json` des Projekts (siehe [Netzwerkregeln](#netzwerk-einer-laufenden-sandbox-ändern)) |
 | `sandbox-ai net stop LAUF [--wait SEKUNDEN]` | Die ältere Form von `sandbox-ai stop NAME` für einen Lauf: SIGTERM an ihren geprüften Launcher, der aufräumt |
 | `sandbox-ai net untaint [LAUF]` | Den Taint des Laufs zurücknehmen: Die Regeln für Läufe mit Taint gelten nicht mehr, bis wieder nicht vertrauenswürdiger Inhalt hineinkommt (siehe [Regelwerke](#regelwerke)) |
+| `sandbox-ai net cut [LAUF] remote\|local\|api\|all\|off [--only] [--json]`, `net cut --all-runs MODUS` | Der Kill-Switch: das Netz einer laufenden Sandbox (mit ihren MCP-Servern, Helfern und ihrem Team) sofort kappen, nur wegnehmend; `off` hebt es auf (siehe [Kill-Switch](#der-kill-switch-das-netz-einer-laufenden-sandbox-kappen)) |
 | `sandbox-ai devices list\|add\|remove [LAUF] PFAD\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [LAUF] [--memory GRÖSSE] [--cpus N] [--pids N]`, `limits [LAUF] --show [--json]` | Einer laufenden Sandbox Geräte geben und wieder nehmen; ihre Limits ändern oder die zeigen, mit denen sie gerade läuft |
 | `sandbox-ai usage [LAUF\|--all] [--json] [--follow] [--interval S] [--top N]` | Was eine laufende Sandbox gerade verbraucht: die CPUs (und wie oft `--cpus` sie gebremst hat), Speicher (und ihre Dateien in `/tmp` und HOME), Prozesse und Threads gegen `--pids`, ihre größten Prozesse |
 | `sandbox-ai workspace list [LAUF] [--json]`, `add [LAUF] VERZ\|DATEI [--ro] [--name NAME]`, `remove [LAUF] VERZ\|DATEI\|NAME [--force]` | Ein Host-Verzeichnis (oder eine einzelne Datei) in eine laufende Sandbox unter `/workspaces/<name>` (oder `/workspaces/NAME`) einhängen (die Prüfungen von `--workspace`; ein Verzeichnis bleibt für den nächsten Start einer Session, unter seinem Namen) und wieder wegnehmen |
@@ -5198,6 +5388,7 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai rules check [DATEI ...]`, `rules show [--agent A] [--project VERZ] [-- OPTIONEN]`, `rules show NAME`, `rules reload NAME` (jeweils `--json`) | Regelwerke prüfen; die Regelwerke eines Starts mit Herkunft; was ein laufender Start hält; seine HTTP-Regeln neu lesen (die der Richtlinie und des Modus bleiben) |
 | `sandbox-ai canaries list [LAUF] [--tokens] [--json]`, `canaries log [LAUF] [--json]`, `canaries resume LAUF` | Die [Köderdateien](#köderdateien-canaries) der Läufe und was mit ihnen geschah; jedes Ereignis mit Prozess, Tool-Aufruf und Modellanfragen; eine von einem Canary pausierte Sandbox fortsetzen |
 | `sandbox-ai safeguards [LAUF\|--all] [--follow] [--json] [--kind ART]`, `safeguards kinds` | Was die [Schutzmaßnahmen](#warnungen-der-schutzmaßnahmen) abgelehnt oder beendet haben, warum, und der Befehl, der es erlauben würde |
+| `sandbox-ai report [NAME ...\|--session NAME\|--all\|--project PFAD\|--log-dir VERZ] [-f md\|html\|pdf] [-o DATEI] [--since ZEIT] [--until ZEIT] [--no-parts] [--json]` | Ein [Bericht](#berichte) über Läufe, laufend oder gestoppt: Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und der Sicherheitsbericht |
 | `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Geheimnisse im System-Schlüsselbund, sonst in privaten Dateien |
 | `sandbox-ai git-logins add URL --secret NAME [--user USER]`, `list [--json]`, `remove URL`, `check [URL]` | Die Logins Ihrer Git-Server, vom Verbindungs-Proxy eingesetzt (siehe [Git-Logins](#git-logins-im-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add KIND --secret NAME [--url URL]`, `list [--json]`, `remove KIND`, `check [KIND]`, `kinds` | Logins für `--publish` (siehe [Veröffentlichen](#veröffentlichen-in-registries-und-forges-sandbox-ai-publish-logins---publish)) |
@@ -5279,6 +5470,20 @@ Playwright und ein lokales LLM ab. Optionen: `--agent-backend podman|bwrap`,
 `--free-model`, `--opencode-model`. Praktische Modellläufe schreiben ihre
 Berichte nach `evidence/` (nicht versioniert, damit Berichte immer zum Code
 passen, der sie erzeugt hat).
+
+`tests/devtools/` enthält Helfer für diese Tests, jeder optional
+(`tests/test_devtools.py`): `wm_check.py` startet ein Programm auf Xvfb unter
+spectrwm und schlägt fehl, wenn eines seiner Fenster am Fenstermanager vorbei
+geht (die herausgelösten Panels der App:
+`projects/sandbox-ai-app/tests/test_wm_live.py`); `fake_internet.py` ist ein
+HTTP- und HTTPS-Echo und ein DNS-Server mit festen Namen für Tests des
+ausgehenden Verkehrs ohne Internet; `model_mock.py` ein OpenAI- und
+Ollama-kompatibler Modellserver mit festen Antworten, Streams und Verbindungen,
+die im Leerlauf geschlossen werden; `distro_matrix.sh` führt den Installer (oder
+ein AppImage) auf Debian, Ubuntu, Fedora und Arch in Containern aus; `gitea.sh`
+startet ein Wegwerf-Gitea auf Loopback. Mit `--nested-containers` startet der
+Agent die Container-Helfer in seiner Sandbox
+([Container in der Sandbox](#container-in-der-sandbox)).
 
 `tests/test_hosts_ssh.py` testet `sandbox-ai hosts` durchgehend: der echte
 OpenSSH-Client gegen einen SSH-Server auf 127.0.0.1 (der von asyncssh, also
