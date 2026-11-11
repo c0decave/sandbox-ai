@@ -815,7 +815,7 @@ def test_an_ask_rule_waits_for_the_answer_in_the_approvals_directory(tmp_path):
         assert approvals.describe(question).startswith('call the MCP tool delete_file of files with {"path": "/work/a"}')
         calls = relay.records("call")
         assert calls[0]["question"] == question["id"] and calls[0]["approval"] == {
-            "decision": "allow", "scope": "run", "reason": "answered"}
+            "decision": "allow", "scope": "run", "reason": "answered", "question": question["id"]}
         assert "question" not in calls[1] and calls[1]["approval"]["scope"] == "run"  # asked once for the run
         assert relay.ran() == ["delete_file", "delete_file"]
         # Another rule's question is asked anew; a deny for once refuses this call only.

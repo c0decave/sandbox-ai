@@ -110,13 +110,18 @@ KIND_DOES = {
             "Öffnet nur Adresse und Port eines mit sandbox-ai llm eingetragenen Servers; sein Schlüssel bleibt "
             "beim Proxy."),
     "network": ("Always on the board: profiles, allowed hosts, addresses, ports and DNS. Nothing listed here is "
-                "reachable (except the agent's provider).",
+                "reachable (except the agent's provider). A host allowed here is reached; what a ruleset decides about "
+                "its requests (Approvals and rules) still holds: a request a ruleset asks about is asked all the same.",
                 "Immer auf der Tafel: Profile, erlaubte Hosts, Adressen, Ports und DNS. Was hier nicht steht, ist "
-                "nicht erreichbar (außer dem Anbieter des Agenten)."),
+                "nicht erreichbar (außer dem Anbieter des Agenten). Ein hier erlaubter Host wird erreicht; was ein "
+                "Regelwerk über seine Anfragen entscheidet (Freigaben und Regeln), gilt trotzdem: Eine Anfrage, nach "
+                "der ein Regelwerk fragt, wird dennoch gefragt."),
     "vpn": ("Every connection leaves through the profile's tunnel; a kill switch blocks the rest, and the start "
-            "checks addresses and DNS first.",
+            "checks addresses and DNS first. The VPN decides the way out, not what is allowed: hosts are opened in "
+            "Network, and rulesets still ask about or deny requests.",
             "Jede Verbindung geht durch den Tunnel des Profils; ein Kill-Switch sperrt den Rest, und der Start "
-            "prüft vorher Adressen und DNS."),
+            "prüft vorher Adressen und DNS. Das VPN bestimmt den Weg hinaus, nicht was erlaubt ist: Hosts werden "
+            "unter Netzwerk geöffnet, und Regelwerke fragen oder lehnen Anfragen weiterhin ab."),
     "devices": ("The devices you list are handed to the agent. Each one weakens the isolation: list only what "
                 "the task needs.",
                 "Die aufgeführten Geräte werden dem Agenten gegeben. Jedes schwächt die Isolation: Nennen Sie nur, "

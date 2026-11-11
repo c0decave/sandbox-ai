@@ -73,11 +73,15 @@ attempt() {  # NAME, then the command that fetches the page: reached, or refused
 python3 -I -c 'import sys; print("RESULT uid_map", sys.argv[1].replace("\n", ";"))' "$(cat /proc/self/uid_map)"
 python3 -I -c 'import sys; print("RESULT gid_map", sys.argv[1].replace("\n", ";"))' "$(cat /proc/self/gid_map)"
 result podman_version "$(podman version --format '{{.Client.Version}}' 2>/dev/null || echo unknown)"
+# What the Podman inside thinks it is (rootful in the agent's namespace), and where it keeps what; an error in full.
+result podman_info "$(podman info --format '{{.Host.Security.Rootless}} {{.Store.GraphDriverName}} {{.Store.GraphRoot}} {{.Host.NetworkBackend}}' 2>&1 | tr '\n' ' ' | head -c 600)"
+result caps "$(grep -E '^Cap(Eff|Bnd)' /proc/self/status | tr '\n' ' ')"
 unshare -rn true && result unshare ok || result unshare failed
-# A small local image: busybox-static alone, imported (nothing is pulled).
+# A small local image: busybox-static alone, imported from a file (nothing is pulled, no pipe to break).
 mkdir -p /tmp/rootfs/bin /tmp/rootfs/tmp && cp /bin/busybox /tmp/rootfs/bin/busybox \
-  && tar -C /tmp/rootfs -c . | podman import -q - localhost/nested-probe:latest >/dev/null 2>/tmp/import.err \
-  && result import ok || result import "failed:$(tail -c 300 /tmp/import.err | tr '\n' ' ')"
+  && tar -C /tmp/rootfs -cf /tmp/rootfs.tar . 2>/tmp/import.err \
+  && podman import -q /tmp/rootfs.tar localhost/nested-probe:latest >/dev/null 2>>/tmp/import.err \
+  && result import ok || result import "failed:$(tail -c 1500 /tmp/import.err | tr '\n' ' ')"
 IMG=localhost/nested-probe:latest
 podman run --rm $IMG /bin/busybox echo hello >/tmp/run.out 2>/tmp/run.err \
   && result run "$(cat /tmp/run.out)" || result run "failed:$(tail -c 400 /tmp/run.err | tr '\n' ' ')"
@@ -157,29 +161,38 @@ def test_podman_inside_the_sandbox_stays_behind_its_firewall_and_proxy(tmp_path)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=60)
-            pytest.fail(f"the nested sandbox timed out; stderr: {stderr[-4000:]}")
+            pytest.fail(f"the nested sandbox timed out\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
     finally:
         for started in servers.values():
             started["stop"]()
-    assert process.returncode == 0, f"exit {process.returncode}\n{stdout[-3000:]}\n{stderr[-5000:]}"
     found = results(stdout)
-    report = json.dumps(found, indent=1) + "\n" + stderr[-3000:]
+    # Everything, in full, with every failure: CI shows only the failure's lines (they become an annotation).
+    (tmp_path / "stdout.txt").write_text(stdout)
+    (tmp_path / "stderr.txt").write_text(stderr)
+    report = (f"exit {process.returncode}\nRESULTS:\n{json.dumps(found, indent=1)}\nSTDOUT:\n{stdout}\n"
+              f"STDERR:\n{stderr}")
+    if process.returncode != 0:
+        pytest.fail(f"the nested sandbox ended with {process.returncode}\n{report}")
     # The agent's own user namespace: root is the sandbox's root, the reserved IDs are mapped nowhere.
     for key in ("uid_map", "gid_map"):
         outside = covered_outside(found.get(key, ""))
-        assert 0 in outside and not outside & set(RESERVED), report
+        if not (0 in outside and not outside & set(RESERVED)):
+            pytest.fail(f"{key}: root not mapped or a reserved ID mapped\n{report}")
     for name, wanted in (("unshare", "ok"), ("import", "ok"), ("run", "hello"), ("loopback", "ok")):
-        assert found.get(name) == wanted, (name, report)
+        if found.get(name) != wanted:
+            pytest.fail(f"{name}: {found.get(name)!r}, not {wanted!r}\n{report}")
     required = ["agent", "shared", "user1", "slirp4netns"]
     if pasta_supported(found.get("podman_version")):
         required.append("pasta")
     elif not found.get("pasta", "").startswith("unavailable"):
         required.append("pasta")  # it ran after all: then it must be refused like the others
     for name in required:
-        assert found.get(name) == "refused", (name, report)  # "unavailable" fails here too
+        if found.get(name) != "refused":  # "unavailable" fails here too
+            pytest.fail(f"{name}: {found.get(name)!r}, not refused\n{report}")
     logged = "\n".join(p.read_text(errors="replace") for p in logs.rglob("connections-*.jsonl"))
     for name in required:
         port = servers[name]["http"]
-        assert f"{address}:{port}" in logged, (f"{name}: port {port} is not in the proxy's log", report)
-        assert not logs_of[name].exists() or not logs_of[name].read_text().strip(), \
-            (f"{name}: a request reached the server past the firewall", logs_of[name].read_text())
+        if f"{address}:{port}" not in logged:
+            pytest.fail(f"{name}: port {port} is not in the proxy's log\n{logged[-3000:]}\n{report}")
+        if logs_of[name].exists() and logs_of[name].read_text().strip():
+            pytest.fail(f"{name}: a request reached the server past the firewall: {logs_of[name].read_text()}")

@@ -286,8 +286,12 @@ def rule_fix(kind, run, rule, ruleset, reason, approval=None):
         return (f"sandbox-ai net untaint {run_word(run)} takes the taint back (only if you trust what entered); "
                 "otherwise it stays held", False)
     if kind == "approval-timeout":
-        return ("nobody answered in time: it is refused for the rest of the run; answer the next question in time "
-                "(sandbox-ai approvals list, the app, the web interface)", False)
+        question = approval.get("question") if isinstance(approval, dict) else None
+        question = question if isinstance(question, str) and re.fullmatch(r"[0-9-]{1,40}", question) else None
+        return ("nobody answered in time: it is refused for 2 minutes without asking, then asked again; allow it for "
+                "the run on the app's Approvals page (Blocked)" + (f" or with sandbox-ai approvals allow {question} "
+                                                                    "--scope run" if question else "")
+                + ", or answer the next question in time", False)
     if kind == "publish":
         return ("publishing is asked first: start with --ask on (the default) and answer the question; with --ask "
                 "off it stays refused", False)
@@ -470,7 +474,8 @@ def from_question(question, done, run, redact):
         return None  # connections, requests and tool calls: their logs name the refusal with this answer
     about = question.get("name") or question.get("url") or question.get("value") or question.get("path") or kind
     return record("approval-timeout", f"question about {kind} {about}", done.get("reason"),
-                  rule_fix("approval-timeout", run, None, None, "")[0], run, question.get("process"), str(about),
+                  rule_fix("approval-timeout", run, None, None, "", {"question": question.get("id")})[0], run,
+                  question.get("process"), str(about),
                   source="approvals", when=question.get("time"), redact=redact)
 
 

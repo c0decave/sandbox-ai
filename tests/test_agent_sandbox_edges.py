@@ -197,6 +197,7 @@ def test_an_attach_ends_quietly_when_the_relay_goes_while_keys_are_sent(tmp_path
     os.write(stdin_w, b"typed while it ended")
     try:
         assert s.attach_client(str(path), stdin_r, out_w) == 0
+        thread.join(5)  # (the client may see the relay go before it looks at the keys: the relay's close is racing)
         assert not thread.is_alive()
     finally:
         server.close()

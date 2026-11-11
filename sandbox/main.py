@@ -23,7 +23,7 @@
   sandbox-ai workspace list|add|remove [RUN] DIR|FILE [--ro] [--name NAME]  hand a host folder or file to a running sandbox
   sandbox-ai limits [RUN] --memory|--cpus|--pids ...                 change a running sandbox's limits
   sandbox-ai usage [RUN|--all] [--json] [--follow]                   what a running sandbox uses: CPU, memory, processes
-  sandbox-ai approvals list|allow|deny|history|remembered|forget ... answer what running sandboxes ask
+  sandbox-ai approvals list|allow|deny|ask-again|blocked|decided|history|remembered|forget ... answer what running sandboxes ask
   sandbox-ai rules check|show|reload ...                              check rulesets, show a start's, reload a running one's
   sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them
   sandbox-ai safeguards [RUN|--all] [--follow] [--json]               what the safeguards refused or ended, why, the fix

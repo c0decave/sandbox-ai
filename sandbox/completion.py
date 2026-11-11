@@ -167,6 +167,12 @@ def question_ids():
     return quietly(lambda: [q.get("id") for _, _, q in module("approvals").questions() if q.get("id")])
 
 
+def answered_ids():
+    """The answered questions of the running sandboxes (approvals ask-again ID)."""
+    return quietly(lambda: [q.get("id") for _, _, q in module("approvals").questions(answered=True)
+                            if q.get("id") and "result" in q])
+
+
 def team_names():
     return quietly(lambda: sorted(p.name for p in module("team").teams_dir().iterdir() if p.is_dir()))
 
@@ -193,6 +199,8 @@ NAMED = {
     ("plugins", "marketplaces", "name"): marketplace_names,
     ("approvals", "allow", "id"): question_ids, ("approvals", "deny", "id"): question_ids,
     ("team", "*", "name"): team_names, ("approvals", "history", "run"): run_names,
+    ("approvals", "ask-again", "id"): answered_ids, ("approvals", "blocked", "run"): run_names,
+    ("approvals", "decided", "run"): run_names,
     ("hosts", "update", "names"): host_names, ("mcp", "attach", "start"): start_names,
     ("mcp", "detach", "start"): start_names, ("rules", "show", "name"): start_names,
     ("rules", "reload", "name"): start_names, ("presets", "show", "name"): preset_names,

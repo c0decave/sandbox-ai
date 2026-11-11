@@ -58,24 +58,29 @@ KEPT = {
 }
 
 
+def mismatches(found, expected):
+    """Every attempt whose outcome is not the expected one, each with both: one CI run shows all of them."""
+    return [f"{name}: {found.get(name)!r}, expected {want!r}" for name, want in expected.items()
+            if found.get(name) != want] + [f"{name}: {outcome!r}, not expected at all" for name, outcome in found.items()
+                                            if name not in expected]
+
+
 def test_without_a_cut_the_run_reaches_what_it_may(report):
-    assert report["none"] == NONE
+    wrong = mismatches(report["none"], NONE)
+    assert not wrong, "without a cut:\n" + "\n".join(wrong)
 
 
 @pytest.mark.parametrize("mode", sorted(KEPT))
 def test_each_mode_keeps_exactly_its_part_and_never_widens(report, mode):
-    assert set(report[mode]) == set(NONE)
-    for name, outcome in report[mode].items():
-        if name in OWN:
-            assert outcome == OWN[name], (mode, name, outcome)  # never a cut's
-        elif name in KEPT[mode]:
-            assert outcome == NONE[name], (mode, name, outcome)  # as without a cut: nothing more
-        else:
-            assert outcome == "refused", (mode, name, outcome)
+    # What no cut takes stays as it is, what the mode keeps is as without a cut (nothing more), the rest is refused.
+    expected = {name: OWN[name] if name in OWN else NONE[name] if name in KEPT[mode] else "refused" for name in NONE}
+    wrong = mismatches(report[mode], expected)
+    assert not wrong, f"{mode}:\n" + "\n".join(wrong)
 
 
 def test_connections_open_before_the_cut_stop_at_once(report):
     held = {"host port": {"local", "api", "all"}, "lan": {"local", "api", "all"}, "provider": {"remote", "all"}}
-    for name, outcome in report["established"].items():
-        what, mode = name.rsplit(" ", 1)
-        assert outcome == ("held" if mode in held[what] else "delivered"), (name, outcome)
+    expected = {name: "held" if name.rsplit(" ", 1)[1] in held[name.rsplit(" ", 1)[0]] else "delivered"
+                for name in report["established"]}
+    wrong = mismatches(report["established"], expected)
+    assert not wrong, "connections open before the cut:\n" + "\n".join(wrong)

@@ -234,7 +234,11 @@ def test_the_other_pages_are_made_in_idle_time_and_never_under_the_hand(qapp, en
             qapp.processEvents()
             time.sleep(0.01)
         assert w.idle_build is not None
-        # Someone works with the window: nothing is made meanwhile.
+        # Someone works with the window: nothing is made meanwhile. (Marked first: a step of the build already due
+        # when the hand comes may still finish - on a slow CI runner one did - only none after it.)
+        if getattr(w, "input_watch", None) is not None:
+            w.input_watch.last = time.monotonic()
+        qapp.processEvents()
         before = [key for key, _ in ui.PAGES if w.built(key) is not None]
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:

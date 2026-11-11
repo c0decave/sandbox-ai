@@ -39,7 +39,15 @@ VPN_MARK = f"meta mark {MARK:#x}"
 
 
 def sh(*command, data=None):
-    subprocess.run(command, check=True, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    """Run COMMAND; one that fails ends the probe at once, loudly, with what it said and what it was given: a rule
+    the kernel refused must never pass for a cut that holds."""
+    done = subprocess.run(command, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if done.returncode != 0:
+        print(f"killswitch_probe: {' '.join(command)} failed ({done.returncode}): "
+              f"{done.stderr.decode(errors='replace')}\n--- its input:\n{(data or b'').decode(errors='replace')}",
+              file=sys.stderr)
+        sys.exit(3)
+    return done.stdout.decode(errors="replace")
 
 
 sh("ip", "link", "set", "lo", "up")
@@ -131,6 +139,15 @@ def cut(mode, settings=SETTINGS, modes=None):
     chosen = modes or ([mode] if mode else [])
     view = {**rt.cut_settings(settings), "mode": rt.cut_label(chosen), "modes": chosen} if chosen else None
     sh("nft", "-f", "-", data=rt.cut_rules(view, VPN_MARK).encode())
+    # The kernel holds what was loaded: the cut chain jumps to each mode's chain, which ends as cut_rules made it.
+    listed = sh("nft", "list", "chain", "inet", "agent_sandbox", "cut")
+    for chosen_mode in rt.cut_modes({"modes": chosen}):
+        if f"jump cut_{chosen_mode}" not in listed:
+            print(f"killswitch_probe: the cut chain does not jump to cut_{chosen_mode}:\n{listed}", file=sys.stderr)
+            sys.exit(3)
+    if not chosen and "jump" in listed:
+        print(f"killswitch_probe: the cut chain is not empty without a cut:\n{listed}", file=sys.stderr)
+        sys.exit(3)
 
 
 def established(family, address, port, mode):
@@ -191,4 +208,6 @@ report["established"] = {f"{name} {mode}": established(family, address, port, mo
                                                              ("lan", socket.AF_INET, "192.168.1.20", 22),
                                                              ("provider", socket.AF_INET, "192.0.2.10", 443))
                          for mode in rt.CUT_MODES}
-print(json.dumps({"table": table, "report": report}))
+print(json.dumps({"table": table, "report": report,
+                  "rules": {mode: rt.cut_rules({**rt.cut_settings(SETTINGS), "mode": mode, "modes": [mode]}, VPN_MARK)
+                            for mode in rt.CUT_MODES}}))

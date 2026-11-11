@@ -170,9 +170,11 @@ EMPTY = "".join(["flush chain inet agent_sandbox cut\n"] + [
 
 
 def chains(cut, vpn_mark=None):
-    """{chain: [rules]} of cut_rules(CUT): every mode's chain is made and emptied first, then filled."""
+    """{chain: [rules]} of cut_rules(CUT): every mode's chain is made and emptied first, then filled. What a mode
+    forbids is rejected (rt.CUT_REJECT), never only dropped; written "drop" here, for reading."""
     text = rt.cut_rules(cut, vpn_mark)
-    assert text.startswith(EMPTY)
+    assert text.startswith(EMPTY) and not any(line.endswith("drop") for line in text.splitlines())
+    text = text.replace(rt.CUT_REJECT, "drop")
     found = {"cut": []}
     for line in text[len(EMPTY):].splitlines():
         assert line.startswith("add rule inet agent_sandbox cut"), line
@@ -199,7 +201,8 @@ def test_every_mode_lets_resets_and_neighbour_discovery_pass_first():
     for mode in rt.CUT_MODES:
         found = chains(view(mode))["cut"]
         assert found[0].startswith("ip6 hoplimit 255 icmpv6 type") and found[1] == "tcp flags & rst == rst return"
-        assert found[2:] == [f"jump cut_{mode}"]
+        assert found[2] == "meta l4proto { icmp, ipv6-icmp } ct state related return"
+        assert found[3:] == [f"jump cut_{mode}"]
     assert chains(view("all"), vpn_mark="meta mark 0xca6c")["cut"][0] == "meta mark 0xca6c return"
 
 
@@ -304,7 +307,7 @@ def test_off_gives_back_exactly_what_the_run_had(network):
         assert shown["cut"] == mode and json.loads(network.allow_path.read_text())["cut"]["mode"] == mode
         runtime_part = network.applied[-1].split("flush chain inet agent_sandbox cut")[0]
         assert runtime_part == before_rules.split("flush chain inet agent_sandbox cut")[0]  # nothing else changed
-        assert network.applied[-1].rstrip().endswith("drop") or mode == "local"
+        assert network.applied[-1].rstrip().endswith(rt.CUT_REJECT) or mode == "local"
         assert shown["cuts"] == {"self": mode}
         assert {k: v for k, v in shown.items() if k not in ("cut", "cuts")} == \
             {k: v for k, v in before_shown.items() if k not in ("cut", "cuts")}
@@ -321,7 +324,7 @@ def test_what_is_allowed_during_a_cut_stays_cut(network):
     allow = json.loads(network.allow_path.read_text())
     assert ["198.51.100.7", 443] in allow["tcp"] and allow["cut"]["mode"] == "all"
     assert not rt.allowed_destination(allow, "198.51.100.7", 443)
-    assert network.applied[-1].rstrip().endswith("add rule inet agent_sandbox cut_all drop")
+    assert network.applied[-1].rstrip().endswith(f"add rule inet agent_sandbox cut_all {rt.CUT_REJECT}")
     network.allow_once("198.51.100.8", 443, timer=lambda seconds, function: type("T", (), {
         "daemon": True, "start": lambda self: None})())
     assert not rt.allowed_destination(json.loads(network.allow_path.read_text()), "198.51.100.8", 443)
@@ -892,3 +895,20 @@ def test_the_proxy_looks_again_when_closing_failed(tmp_path):
     server.close_cut = close_cut
     server.watch_cut(stop, every=0.01)
     assert calls == ["all", "all"]  # the failed look was tried again
+
+
+def test_a_cut_rejects_what_it_forbids_and_lets_its_own_rejection_back():
+    """The first run in a real kernel: every cut connection waited ("direct") instead of being refused. A dropped TCP
+    SYN leaves connect() sending it again and again - the agent hangs, and nothing tells a cut connection from one on
+    its way out. So what a cut forbids is rejected, and the rejection's own ICMP error (related to the connection it
+    ends, whose original destination is the forbidden one) passes the cut before any mode's chain."""
+    for modes in (["remote"], ["local"], ["api"], ["all"], ["remote", "api"]):
+        text = rt.cut_rules({**view("api"), "modes": modes})
+        verdicts = [line.rsplit(" ", 1)[1] for line in text.splitlines() if line.startswith("add rule")]
+        assert "drop" not in verdicts, modes
+        assert any(line.endswith(rt.CUT_REJECT) for line in text.splitlines()), modes
+        lines = text.splitlines()
+        related = lines.index("add rule inet agent_sandbox cut meta l4proto { icmp, ipv6-icmp } ct state related "
+                              "return")
+        assert related < min(i for i, line in enumerate(lines) if " jump cut_" in line)
+    assert rt.CUT_REJECT == "reject with icmpx type admin-prohibited"  # as Tor's kill switch refuses (its live test)

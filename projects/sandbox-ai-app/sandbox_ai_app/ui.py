@@ -7738,7 +7738,7 @@ class MainWindow(QMainWindow):
         if key == "files":
             saved = s.section("splitters").get("files")
             page.keep_split = isinstance(saved, list) and len(saved) == page.split.count()  # kept: it wins
-        splitters = {"approvals": [("approvals", "split")], "connections": [("connections", "split")],
+        splitters = {"connections": [("connections", "split")],
                      "kits": [("kits", "split"), ("kits-marketplaces", "market_split")], "files": [("files", "split")]}
         for name, attribute in splitters.get(key, ()):
             s.splitter(name, getattr(page, attribute))
@@ -8282,6 +8282,9 @@ class MainWindow(QMainWindow):
         entry = self.tabs.entry(index)
         if entry is None:
             return
+        approvals = self.built("approvals")
+        if approvals is not None and hasattr(approvals, "set_active_tab"):
+            approvals.set_active_tab(entry)  # its Blocked and Allowed now follow the active tab
         path = entry.get("path")
         folder = backend.is_folder(path) if path else False
         if folder:

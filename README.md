@@ -3811,10 +3811,41 @@ sandbox-ai approvals deny ID [--scope once|always] # default: not asked again in
 sandbox-ai approvals history [RUN]            # questions and their answers
 sandbox-ai approvals remembered [--json]      # what is allowed/blocked always, per project: name or address, how, when, from which question
 sandbox-ai approvals forget PROJECT ENTRY     # forget one (a host name or IP:PORT)
+sandbox-ai approvals blocked [RUN] [--json]   # what a running sandbox (and its MCP servers, helpers) was refused, newest first: why, by which process, what to do
+sandbox-ai approvals decided [RUN] [--json]   # the decisions a running sandbox remembers for the run, and what it refuses for now (unanswered)
+sandbox-ai approvals allow ID --scope run     # on a question answered or left unanswered already: allowed for the rest of the run
+sandbox-ai approvals deny ID                  # ... denied for the rest of the run, without a question
+sandbox-ai approvals ask-again ID             # ... the run forgets its decision: the next try is asked again
+sandbox-ai approvals allow ID --scope always  # ... a request or MCP tool call: an exception rule (see below); a connection or lookup: net allow --keep
 ```
 
-A question nobody answers is refused after 60 seconds and, like a deny, not
-asked again in that run. `once` allows this one connection (the address is
+A question nobody answers is refused after 60 seconds. That is no decision:
+the same request is refused at once (without a new question) for the next 2
+minutes, so that the agent does not wait out the timeout again and again, and
+is asked again after that. The refusal says so, with the question's ID and the
+command that allows it. Your own answers keep their scope: a deny (`run`, the
+default) is not asked again in that run. Both can be changed while the sandbox
+runs - on the app's Approvals page (Blocked) or with `sandbox-ai approvals
+allow ID --scope run`, `deny ID` and `ask-again ID` on the answered question.
+These go to the sandbox's supervisor over its control socket, which only you
+reach (a process of the sandbox is refused): an allow for the run is refused
+where the security mode or the administrator's policy approves only once, a
+connection allowed so stays inside the policy's networks, and while the kill
+switch cuts the run, what you allow is recorded but stays cut until the cut
+is lifted. `allow ID --scope always` on a request or MCP tool call writes an
+exception rule (exactly that method, host and path, or that server and tool)
+first into the ruleset that held it: your own `rules.json` in place (the
+running start reads it again at once), the project's own ruleset into its
+trusted `.sandbox-ai.json` (from the next start), and a preset's or someone
+else's ruleset is never changed - a copy of your own with the exception goes
+to `~/.config/sandbox-ai/rules/`, which a start uses only in its place: each
+ruleset decides on its own and the strictest decision wins, so a rule of
+yours beside it could not widen it. The network settings (`--allow-host`, the
+board's Network and VPN parts) open destinations; they do not change what a
+ruleset decides about the requests to them: a request a ruleset asks about is
+asked even when its host is allowed.
+
+`once` allows this one connection (the address is
 open for 30 seconds), `run` until the sandbox ends, `always` also every later
 start of the same project (for a lookup the name; for a connection the name
 when it can be proved, else the address, see below; kept in
@@ -4569,7 +4600,8 @@ makes in it, and has none anywhere else. What the container gets for it:
 Firejail's own filter stays, but lets through what a container engine needs inside its own namespaces (`mount`,
 `umount2`, `pivot_root`, `chroot`, `sethostname`, `setdomainname` and the new mount calls); `ptrace`, `keyctl`,
 modules, `bpf` and the rest stay blocked, `no_new_privs` stays set. Podman is configured for the sandbox
-(`/sandbox/session/containers/`, through `CONTAINERS_CONF` and `CONTAINERS_STORAGE_CONF`): the containers share
+(a drop-in over the image's own `containers.conf` in `/etc/containers/containers.conf.d/`, and
+`CONTAINERS_STORAGE_CONF`): the containers share
 the agent's network namespace, have no cgroups of their own (the sandbox's limits hold for all of them), and their
 images live in `/var/tmp/containers` (a tmpfs, `--tmp-size`), so they go with the run and nothing owned by your
 subordinate IDs is left in a HOME. The dry run shows all of it (`nested_containers`).

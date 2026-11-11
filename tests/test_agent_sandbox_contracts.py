@@ -12075,7 +12075,7 @@ def test_enter_nested_userns(scenario, tmp_path):
             assert kind == rt.CLONE_NEWNS
             return 0
     if scenario == "happy":
-        rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc)
+        rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc, run_dirs=(str(tmp_path / "run" / "libpod"),))
     elif scenario == "sad":
         with pytest.raises(OSError, match="cannot enter"):
             rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc)
@@ -12174,7 +12174,8 @@ def test_nft_set(scenario):
 def test_cut_rules(scenario):
     if scenario == "happy":
         rules = rt.cut_rules(cut_view("api"))
-        assert rules.startswith("flush chain inet agent_sandbox cut\n") and rules.rstrip().endswith("cut_api drop")
+        assert rules.startswith("flush chain inet agent_sandbox cut\n")
+        assert rules.rstrip().endswith(f"cut_api {rt.CUT_REJECT}")
         assert "add rule inet agent_sandbox cut jump cut_api" in rules
         assert "ct original ip daddr { 192.0.2.10 } meta l4proto tcp ct original proto-dst 443 return" in rules
     elif scenario == "sad":
@@ -12231,9 +12232,9 @@ def test_cut_allows_one(scenario):
 
 def test_cut_mode_rules(scenario):
     if scenario == "happy":
-        assert rt.cut_mode_rules(cut_view("all"), "all")[-1] == "drop"
-    elif scenario == "sad":  # "local" drops the local network only: the rest goes on to the next chain
-        assert rt.cut_mode_rules(cut_view("local"), "local")[-1].endswith("} drop")
+        assert rt.cut_mode_rules(cut_view("all"), "all")[-1] == rt.CUT_REJECT  # rejected, never only dropped
+    elif scenario == "sad":  # "local" refuses the local network only: the rest goes on to the next chain
+        assert rt.cut_mode_rules(cut_view("local"), "local")[-1].endswith("} " + rt.CUT_REJECT)
     else:
         assert "ct original ip daddr 10.0.0.5 meta l4proto tcp ct original proto-dst 11434 return" in \
             rt.cut_mode_rules(cut_view("api"), "api")
@@ -12289,9 +12290,10 @@ def test_nested_writable(scenario, tmp_path):
 def test_give_back(scenario, tmp_path):
     (tmp_path / "f").write_text("")
     calls = []
-    if scenario == "happy":  # the real lstat: everything here is the test's own user, nothing to give back
-        found = rt.give_back([str(tmp_path)], 0, lchown=lambda *a: calls.append(a), chmod=lambda *a: None)
-        assert found == {"count": 0, "paths": [], "failed": 0, "complete": True} or os.getuid() != 0
+    if scenario == "happy":  # the real lstat: everything here is the test runner's, standing for the sandbox's root
+        found = rt.give_back([str(tmp_path)], 0, lchown=lambda *a: calls.append(a), chmod=lambda *a: None,
+                             owner=(os.getuid(), os.getgid()))
+        assert found == {"count": 0, "paths": [], "failed": 0, "complete": True} and calls == []
     elif scenario == "sad":
         assert rt.give_back([str(tmp_path / "missing")], 0)["count"] == 0
     else:
@@ -12309,3 +12311,26 @@ def test_report_given_back(scenario, tmp_path, capsys):
     else:  # no log directory: only said
         rt.report_given_back(found, tmp_path / "missing")
         assert "/work/a, /work/b" in capsys.readouterr().err
+
+
+def test_approval_record(scenario):
+    """What a log keeps of an approval: decision, scope, reason and the question it came from (the Blocked list)."""
+    if scenario == "happy":
+        assert rt.approval_record({"decision": "deny", "scope": "once", "reason": "no answer within 60 s",
+                                   "question": "1-2-3", "why": "..."}) == {
+            "decision": "deny", "scope": "once", "reason": "no answer within 60 s", "question": "1-2-3"}
+    elif scenario == "sad":
+        assert rt.approval_record({}) == {"decision": None, "scope": None, "reason": None}
+    else:  # a question that is no text is not kept
+        assert "question" not in rt.approval_record({"decision": "allow", "question": 7})
+
+
+def test_not_approved(scenario):
+    """A refusal says the answer's reason, the rule's and, where the broker said it, why and what to do."""
+    if scenario == "happy":
+        text = rt.not_approved({"reason": "no answer within 60 s", "why": "then asked again"}, "POST / is asked")
+        assert text == "not approved (no answer within 60 s): POST / is asked. then asked again"
+    elif scenario == "sad":
+        assert rt.not_approved({}) == "not approved (refused)"
+    else:
+        assert rt.not_approved({"reason": "answered", "why": ""}, None) == "not approved (answered)"

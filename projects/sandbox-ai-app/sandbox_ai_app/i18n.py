@@ -4370,9 +4370,6 @@ TEXTS = {
     'Load anyway': {
         'en': 'Load anyway',
         'de': 'Trotzdem laden'},
-    'Allowed or blocked always (per project)': {
-        'en': 'Allowed or blocked always (per project)',
-        'de': 'Immer erlaubt oder blockiert (je Projekt)'},
     'Block always': {
         'en': 'Block always',
         'de': 'Immer blockieren'},
@@ -8898,9 +8895,6 @@ TEXTS = {
     'Only http and https pages are opened here.': {
         'en': 'Only http and https pages are opened here.',
         'de': 'Hier werden nur http- und https-Seiten geöffnet.'},
-    'Open questions of the running sandboxes, on every host': {
-        'en': 'Open questions of the running sandboxes, on every host',
-        'de': 'Offene Fragen der laufenden Sandboxen, auf allen Hosts'},
     'Remove device from {run} on {host}': {
         'en': 'Remove device from {run} on {host}',
         'de': 'Gerät von {run} auf {host} entfernen'},
@@ -9514,9 +9508,6 @@ TEXTS = {
     'Add {what} to the kit {name}? Every later start with this kit gets it; a plugin or a hook runs code there.': {
         'en': 'Add {what} to the kit {name}? Every later start with this kit gets it; a plugin or a hook runs code there.',
         'de': '{what} zum Kit {name} hinzufügen? Jeder spätere Start mit diesem Kit bekommt es; ein Plugin oder ein Hook führt dort Code aus.'},
-    'Allow with the scope chosen (Ctrl+Return)': {
-        'en': 'Allow with the scope chosen (Ctrl+Return)',
-        'de': 'Mit der gewählten Geltung erlauben (Strg+Eingabe)'},
     'Allowed this time only (Ctrl+Return)': {
         'en': 'Allowed this time only (Ctrl+Return)',
         'de': 'Nur dieses Mal erlaubt (Strg+Eingabe)'},
@@ -9610,9 +9601,6 @@ TEXTS = {
     "Whose answers: this machine's or a host's": {
         'en': "Whose answers: this machine's or a host's",
         'de': 'Wessen Antworten: die dieses Rechners oder die eines Hosts'},
-    'Without an answer within {seconds} seconds a question is refused; a page to open waits until it is answered. A deny lasts at most for the run; “always” is remembered for the project. Allowing a URL opens it in your browser.': {
-        'en': 'Without an answer within {seconds} seconds a question is refused; a page to open waits until it is answered. A deny lasts at most for the run; “always” is remembered for the project. Allowing a URL opens it in your browser.',
-        'de': 'Ohne Antwort innerhalb von {seconds} Sekunden wird eine Frage abgelehnt; eine zu öffnende Seite wartet, bis sie beantwortet ist. Ein Ablehnen gilt höchstens für den Lauf; „immer“ wird für das Projekt gemerkt. Eine erlaubte URL öffnet sich in Ihrem Browser.'},
     'answered': {
         'en': 'answered',
         'de': 'beantwortet'},
@@ -11067,4 +11055,326 @@ TEXTS = {
     'Lift every cut, on this machine and on every host? Every sandbox reaches again what it may reach, also those you cut one by one.': {
         'en': 'Lift every cut, on this machine and on every host? Every sandbox reaches again what it may reach, also those you cut one by one.',
         'de': 'Jede Kappung aufheben, auf diesem Rechner und auf jedem Host? Jede Sandbox erreicht wieder, was sie erreichen darf, auch die, die Sie einzeln gekappt haben.'},
+    # == the Approvals page: which sandbox it is about, Blocked (what was refused, why, what to do), Allowed now (approvals_sections.py) ==
+    '(the kill switch cuts them now: {mode})': {
+        'en': '(the kill switch cuts them now: {mode})',
+        'de': '(der Kill-Switch kappt sie gerade: {mode})'},
+    'A decoy file was touched: nothing legitimate uses it. The sandbox waits for you.': {
+        'en': 'A decoy file was touched: nothing legitimate uses it. The sandbox waits for you.',
+        'de': 'Eine Köderdatei wurde berührt: Nichts Legitimes benutzt sie. Die Sandbox wartet auf Sie.'},
+    'All reasons': {
+        'en': 'All reasons',
+        'de': 'Alle Gründe'},
+    'All running sandboxes': {
+        'en': 'All running sandboxes',
+        'de': 'Alle laufenden Sandboxen'},
+    'All running sandboxes ({count})': {
+        'en': 'All running sandboxes ({count})',
+        'de': 'Alle laufenden Sandboxen ({count})'},
+    'Allow always': {
+        'en': 'Allow always',
+        'de': 'Immer erlauben'},
+    'Allow always for this project?': {
+        'en': 'Allow always for this project?',
+        'de': 'Für dieses Projekt immer erlauben?'},
+    'Allow for': {
+        'en': 'Allow for',
+        'de': 'Erlauben für'},
+    'Allow for as long as chosen beside it (Ctrl+Return; Enter in the list allows for this run)': {
+        'en': 'Allow for as long as chosen beside it (Ctrl+Return; Enter in the list allows for this run)',
+        'de': 'Erlauben, so lange wie daneben gewählt (Strg+Eingabe; Eingabe in der Liste erlaubt für diesen Lauf)'},
+    'Allow for this run': {
+        'en': 'Allow for this run',
+        'de': 'Für diesen Lauf erlauben'},
+    'Allow for this run?': {
+        'en': 'Allow for this run?',
+        'de': 'Für diesen Lauf erlauben?'},
+    'Allowed now': {
+        'en': 'Allowed now',
+        'de': 'Jetzt erlaubt'},
+    'Allowed or blocked always, per project: the next starts keep to it': {
+        'en': 'Allowed or blocked always, per project: the next starts keep to it',
+        'de': 'Immer erlaubt oder gesperrt, je Projekt: Die nächsten Starts halten sich daran'},
+    'Ask again': {
+        'en': 'Ask again',
+        'de': 'Wieder fragen'},
+    'Asked because rule {rule} of the ruleset {ruleset} asks before it. The network settings do not change that.': {
+        'en': 'Asked because rule {rule} of the ruleset {ruleset} asks before it. The network settings do not change that.',
+        'de': 'Gefragt, weil Regel {rule} des Regelsatzes {ruleset} vorher fragt. Die Netzwerk-Einstellungen ändern daran nichts.'},
+    'Asked because the privacy check found warnings in what is pushed.': {
+        'en': 'Asked because the privacy check found warnings in what is pushed.',
+        'de': 'Gefragt, weil die Datenschutzprüfung im Gepushten Warnungen fand.'},
+    "Asked because the sandbox's network settings do not allow it.": {
+        'en': "Asked because the sandbox's network settings do not allow it.",
+        'de': 'Gefragt, weil die Netzwerk-Einstellungen der Sandbox es nicht erlauben.'},
+    'Blocked': {
+        'en': 'Blocked',
+        'de': 'Blockiert'},
+    'Blocked always': {
+        'en': 'Blocked always',
+        'de': 'Immer gesperrt'},
+    "Blocked and Allowed now show this sandbox: the active tab's (it follows the tabs), another one that runs, or all of them": {
+        'en': "Blocked and Allowed now show this sandbox: the active tab's (it follows the tabs), another one that runs, or all of them",
+        'de': 'Blockiert und Jetzt erlaubt zeigen diese Sandbox: die des aktiven Tabs (folgt den Tabs), eine andere laufende oder alle'},
+    'Cannot read it: {error}': {
+        'en': 'Cannot read it: {error}',
+        'de': 'Nicht lesbar: {error}'},
+    'Cannot read what was refused: {error}': {
+        'en': 'Cannot read what was refused: {error}',
+        'de': 'Was abgelehnt wurde, ist nicht lesbar: {error}'},
+    'Choose one running sandbox above to see what it may reach.': {
+        'en': 'Choose one running sandbox above to see what it may reach.',
+        'de': 'Wählen Sie oben eine laufende Sandbox, um zu sehen, was sie erreichen darf.'},
+    'Choose what to revoke first.': {
+        'en': 'Choose what to revoke first.',
+        'de': 'Wählen Sie zuerst, was zurückgenommen werden soll.'},
+    'Choose what was refused first.': {
+        'en': 'Choose what was refused first.',
+        'de': 'Wählen Sie zuerst etwas Abgelehntes.'},
+    'DNS (lookups)': {
+        'en': 'DNS (lookups)',
+        'de': 'DNS (Namensauflösung)'},
+    'Denied by a ruleset': {
+        'en': 'Denied by a ruleset',
+        'de': 'Von einem Regelsatz verweigert'},
+    'Denied by you': {
+        'en': 'Denied by you',
+        'de': 'Von Ihnen verweigert'},
+    'Destination': {
+        'en': 'Destination',
+        'de': 'Ziel'},
+    'Forget what this run decided: its next try is asked again': {
+        'en': 'Forget what this run decided: its next try is asked again',
+        'de': 'Vergessen, was dieser Lauf entschieden hat: Der nächste Versuch wird wieder gefragt'},
+    'HTTPS (port 443)': {
+        'en': 'HTTPS (port 443)',
+        'de': 'HTTPS (Port 443)'},
+    'How the sandbox runs': {
+        'en': 'How the sandbox runs',
+        'de': 'Wie die Sandbox läuft'},
+    'It was asked about, and nobody answered in time. It is refused for 2 minutes, then asked again.': {
+        'en': 'It was asked about, and nobody answered in time. It is refused for 2 minutes, then asked again.',
+        'de': 'Es wurde gefragt, und niemand hat rechtzeitig geantwortet. Es wird 2 Minuten lang abgelehnt, dann wieder gefragt.'},
+    'Kept for this project: a destination in its .sandbox-ai.json, a request as an exception in a ruleset of yours (shown before it is written)': {
+        'en': 'Kept for this project: a destination in its .sandbox-ai.json, a request as an exception in a ruleset of yours (shown before it is written)',
+        'de': 'Für dieses Projekt behalten: ein Ziel in seiner .sandbox-ai.json, eine Anfrage als Ausnahme in einem Ihrer Regelsätze (wird gezeigt, bevor es geschrieben wird)'},
+    'Listed: what was allowed while it runs (on this page, with sandbox-ai net allow, or by an answer). What its start options allow is on the Board (Network); what is kept for the project, under Remembered.': {
+        'en': 'Listed: what was allowed while it runs (on this page, with sandbox-ai net allow, or by an answer). What its start options allow is on the Board (Network); what is kept for the project, under Remembered.',
+        'de': 'Aufgeführt: was während des Laufs erlaubt wurde (auf dieser Seite, mit sandbox-ai net allow oder durch eine Antwort). Was die Startoptionen erlauben, steht im Board (Netzwerk); was für das Projekt behalten wird, unter Gemerkt.'},
+    'Names': {
+        'en': 'Names',
+        'de': 'Namen'},
+    'No sandbox runs: nothing to show.': {
+        'en': 'No sandbox runs: nothing to show.',
+        'de': 'Keine Sandbox läuft: nichts zu zeigen.'},
+    'Not allowed by the network settings': {
+        'en': 'Not allowed by the network settings',
+        'de': 'Von den Netzwerk-Einstellungen nicht erlaubt'},
+    'Not answered in time': {
+        'en': 'Not answered in time',
+        'de': 'Nicht rechtzeitig beantwortet'},
+    "Not possible for everything selected (the reason, the security mode or the administrator's policy).": {
+        'en': "Not possible for everything selected (the reason, the security mode or the administrator's policy).",
+        'de': 'Nicht für alles Ausgewählte möglich (der Grund, der Sicherheitsmodus oder die Richtlinie des Administrators).'},
+    'Not revoked: {error}': {
+        'en': 'Not revoked: {error}',
+        'de': 'Nicht zurückgenommen: {error}'},
+    'Nothing is waiting for an answer.': {
+        'en': 'Nothing is waiting for an answer.',
+        'de': 'Nichts wartet auf eine Antwort.'},
+    'Nothing was refused.': {
+        'en': 'Nothing was refused.',
+        'de': 'Nichts wurde abgelehnt.'},
+    'Opening a host in the network or VPN settings does not change what a ruleset decides: a request a ruleset asks about is asked even when its host is allowed.': {
+        'en': 'Opening a host in the network or VPN settings does not change what a ruleset decides: a request a ruleset asks about is asked even when its host is allowed.',
+        'de': 'Einen Host in den Netzwerk- oder VPN-Einstellungen freizugeben, ändert nicht, was ein Regelsatz entscheidet: Eine Anfrage, nach der ein Regelsatz fragt, wird auch dann gefragt, wenn ihr Host erlaubt ist.'},
+    'Other': {
+        'en': 'Other',
+        'de': 'Anderes'},
+    'Other reasons': {
+        'en': 'Other reasons',
+        'de': 'Andere Gründe'},
+    'Questions waiting for your answer, on every host': {
+        'en': 'Questions waiting for your answer, on every host',
+        'de': 'Fragen, die auf Ihre Antwort warten, auf jedem Host'},
+    'Refresh the blocked list': {
+        'en': 'Refresh the blocked list',
+        'de': 'Liste der Blockierten neu laden'},
+    'Refresh what it may reach': {
+        'en': 'Refresh what it may reach',
+        'de': 'Neu laden, was sie erreichen darf'},
+    'Refused until the sandbox ends, without a question': {
+        'en': 'Refused until the sandbox ends, without a question',
+        'de': 'Abgelehnt, bis die Sandbox endet, ohne Frage'},
+    'Refused.': {
+        'en': 'Refused.',
+        'de': 'Abgelehnt.'},
+    'Refused; not asked again in this run (Delete, Ctrl+Shift+D)': {
+        'en': 'Refused; not asked again in this run (Delete, Ctrl+Shift+D)',
+        'de': 'Abgelehnt; in diesem Lauf nicht wieder gefragt (Entf, Strg+Umschalt+D)'},
+    'Remembered': {
+        'en': 'Remembered',
+        'de': 'Gemerkt'},
+    'Revoke': {
+        'en': 'Revoke',
+        'de': 'Zurücknehmen'},
+    'Revoke?': {
+        'en': 'Revoke?',
+        'de': 'Zurücknehmen?'},
+    'Revoked.': {
+        'en': 'Revoked.',
+        'de': 'Zurückgenommen.'},
+    'Rule {rule} of the ruleset {ruleset} asks before it, and nobody answered in time. It is refused for 2 minutes, then asked again. Allowing its host in the network settings does not change that: allow it here.': {
+        'en': 'Rule {rule} of the ruleset {ruleset} asks before it, and nobody answered in time. It is refused for 2 minutes, then asked again. Allowing its host in the network settings does not change that: allow it here.',
+        'de': 'Regel {rule} des Regelsatzes {ruleset} fragt vorher, und niemand hat rechtzeitig geantwortet. Es wird 2 Minuten lang abgelehnt, dann wieder gefragt. Seinen Host in den Netzwerk-Einstellungen freizugeben, ändert daran nichts: Erlauben Sie es hier.'},
+    'Rule {rule} of the ruleset {ruleset} denies it. The network settings do not change what a ruleset decides; “Allow always” adds an exception to a ruleset of yours.': {
+        'en': 'Rule {rule} of the ruleset {ruleset} denies it. The network settings do not change what a ruleset decides; “Allow always” adds an exception to a ruleset of yours.',
+        'de': 'Regel {rule} des Regelsatzes {ruleset} verweigert es. Die Netzwerk-Einstellungen ändern nicht, was ein Regelsatz entscheidet; „Immer erlauben“ fügt einem Ihrer Regelsätze eine Ausnahme hinzu.'},
+    'Sandbox shown': {
+        'en': 'Sandbox shown',
+        'de': 'Gezeigte Sandbox'},
+    'Security mode or policy': {
+        'en': 'Security mode or policy',
+        'de': 'Sicherheitsmodus oder Richtlinie'},
+    'Show the refusals of': {
+        'en': 'Show the refusals of',
+        'de': 'Die Ablehnungen zeigen von'},
+    'TCP port': {
+        'en': 'TCP port',
+        'de': 'TCP-Port'},
+    'The active tab has no running sandbox: all running ones are shown ({count}).': {
+        'en': 'The active tab has no running sandbox: all running ones are shown ({count}).',
+        'de': 'Der aktive Tab hat keine laufende Sandbox: Alle laufenden werden gezeigt ({count}).'},
+    'The active tab has no running sandbox; the only one that runs:': {
+        'en': 'The active tab has no running sandbox; the only one that runs:',
+        'de': 'Der aktive Tab hat keine laufende Sandbox; die einzige, die läuft:'},
+    "The active tab's (none runs)": {
+        'en': "The active tab's (none runs)",
+        'de': 'Die des aktiven Tabs (keine läuft)'},
+    "The active tab's: {name}": {
+        'en': "The active tab's: {name}",
+        'de': 'Die des aktiven Tabs: {name}'},
+    "The administrator's policy": {
+        'en': "The administrator's policy",
+        'de': 'Die Richtlinie des Administrators'},
+    "The administrator's policy refuses it. Only your administrator can change that.": {
+        'en': "The administrator's policy refuses it. Only your administrator can change that.",
+        'de': 'Die Richtlinie des Administrators lehnt es ab. Nur Ihr Administrator kann das ändern.'},
+    'The agent asks to open this page in your browser.': {
+        'en': 'The agent asks to open this page in your browser.',
+        'de': 'Der Agent bittet darum, diese Seite in Ihrem Browser zu öffnen.'},
+    'The kill switch': {
+        'en': 'The kill switch',
+        'de': 'Der Kill-Switch'},
+    'The kill switch cuts it. What you allow meanwhile stays cut until the cut is lifted (Sandboxes › Kill switch).': {
+        'en': 'The kill switch cuts it. What you allow meanwhile stays cut until the cut is lifted (Sandboxes › Kill switch).',
+        'de': 'Der Kill-Switch kappt es. Was Sie währenddessen erlauben, bleibt gekappt, bis die Kappung aufgehoben ist (Sandboxen › Kill-Switch).'},
+    'The kill switch holds: what you allowed stays cut until the cut is lifted.': {
+        'en': 'The kill switch holds: what you allowed stays cut until the cut is lifted.',
+        'de': 'Der Kill-Switch hält: Was Sie erlaubt haben, bleibt gekappt, bis die Kappung aufgehoben ist.'},
+    "The run's security mode refuses it. Start again with a laxer mode if you mean it.": {
+        'en': "The run's security mode refuses it. Start again with a laxer mode if you mean it.",
+        'de': 'Der Sicherheitsmodus des Laufs lehnt es ab. Starten Sie mit einem lockereren Modus neu, wenn Sie es wollen.'},
+    'The sandbox may do it until it ends: a destination is opened, a request or tool call no longer asked': {
+        'en': 'The sandbox may do it until it ends: a destination is opened, a request or tool call no longer asked',
+        'de': 'Die Sandbox darf es, bis sie endet: Ein Ziel wird geöffnet, eine Anfrage oder ein Werkzeugaufruf nicht mehr gefragt'},
+    'The sandbox may do this until it ends:': {
+        'en': 'The sandbox may do this until it ends:',
+        'de': 'Die Sandbox darf dies, bis sie endet:'},
+    'The sandbox may no longer reach it (a connection open already stays until it ends)': {
+        'en': 'The sandbox may no longer reach it (a connection open already stays until it ends)',
+        'de': 'Die Sandbox darf es nicht mehr erreichen (eine schon offene Verbindung bleibt, bis sie endet)'},
+    'The sandbox may no longer reach:': {
+        'en': 'The sandbox may no longer reach:',
+        'de': 'Die Sandbox darf nicht mehr erreichen:'},
+    "The sandbox's network settings do not allow it. Allow it for this run, or always for this project.": {
+        'en': "The sandbox's network settings do not allow it. Allow it for this run, or always for this project.",
+        'de': 'Die Netzwerk-Einstellungen der Sandbox erlauben es nicht. Erlauben Sie es für diesen Lauf oder immer für dieses Projekt.'},
+    'The security mode': {
+        'en': 'The security mode',
+        'de': 'Der Sicherheitsmodus'},
+    'This sandbox-ai has no list of what was refused (an older version).': {
+        'en': 'This sandbox-ai has no list of what was refused (an older version).',
+        'de': 'Dieses sandbox-ai hat keine Liste dessen, was abgelehnt wurde (eine ältere Version).'},
+    'Tried by': {
+        'en': 'Tried by',
+        'de': 'Versucht von'},
+    'Untrusted content': {
+        'en': 'Untrusted content',
+        'de': 'Nicht vertrauenswürdiger Inhalt'},
+    'Untrusted content entered the run, and the rules for tainted runs hold. `sandbox-ai net untaint` takes that back, if you trust what entered.': {
+        'en': 'Untrusted content entered the run, and the rules for tainted runs hold. `sandbox-ai net untaint` takes that back, if you trust what entered.',
+        'de': 'Nicht vertrauenswürdiger Inhalt kam in den Lauf, und die Regeln für belastete Läufe gelten. `sandbox-ai net untaint` nimmt das zurück, wenn Sie dem Hereingekommenen vertrauen.'},
+    'What your sandboxes ask, what they were refused and why, and what they may reach. What you change here holds for the running sandbox at once.': {
+        'en': 'What your sandboxes ask, what they were refused and why, and what they may reach. What you change here holds for the running sandbox at once.',
+        'de': 'Was Ihre Sandboxen fragen, was ihnen abgelehnt wurde und warum, und was sie erreichen dürfen. Was Sie hier ändern, gilt sofort für die laufende Sandbox.'},
+    'Why it is asked': {
+        'en': 'Why it is asked',
+        'de': 'Warum gefragt wird'},
+    'Why it was refused': {
+        'en': 'Why it was refused',
+        'de': 'Warum es abgelehnt wurde'},
+    'Without an answer within {seconds} seconds a question is refused, and the same request is refused at once for 2 minutes, then asked again (Blocked lists it); a page to open waits until it is answered. A deny lasts at most for the run; “always” is remembered for the project.': {
+        'en': 'Without an answer within {seconds} seconds a question is refused, and the same request is refused at once for 2 minutes, then asked again (Blocked lists it); a page to open waits until it is answered. A deny lasts at most for the run; “always” is remembered for the project.',
+        'de': 'Ohne Antwort innerhalb von {seconds} Sekunden wird eine Frage abgelehnt, und dieselbe Anfrage wird 2 Minuten lang sofort abgelehnt, dann wieder gefragt (Blockiert führt sie auf); eine zu öffnende Seite wartet, bis sie beantwortet ist. Eine Ablehnung gilt höchstens für den Lauf; „immer“ wird für das Projekt gemerkt.'},
+    'You blocked it always for this project (Remembered › Forget lifts it).': {
+        'en': 'You blocked it always for this project (Remembered › Forget lifts it).',
+        'de': 'Sie haben es für dieses Projekt immer gesperrt (Gemerkt › Vergessen hebt das auf).'},
+    'You denied it for this run. “Ask again” takes that back; “Allow for this run” allows it.': {
+        'en': 'You denied it for this run. “Ask again” takes that back; “Allow for this run” allows it.',
+        'de': 'Sie haben es für diesen Lauf verweigert. „Wieder fragen“ nimmt das zurück; „Für diesen Lauf erlauben“ erlaubt es.'},
+    'a port of this computer': {
+        'en': 'a port of this computer',
+        'de': 'ein Port dieses Computers'},
+    'a question waits {seconds} s for your answer': {
+        'en': 'a question waits {seconds} s for your answer',
+        'de': 'eine Frage wartet {seconds} s auf Ihre Antwort'},
+    'allows every question by itself (--ask allow)': {
+        'en': 'allows every question by itself (--ask allow)',
+        'de': 'erlaubt jede Frage von selbst (--ask allow)'},
+    'asks nothing (--ask off): what is not allowed is refused': {
+        'en': 'asks nothing (--ask off): what is not allowed is refused',
+        'de': 'fragt nichts (--ask off): Was nicht erlaubt ist, wird abgelehnt'},
+    'every port and protocol': {
+        'en': 'every port and protocol',
+        'de': 'jeder Port und jedes Protokoll'},
+    'host wildcard': {
+        'en': 'host wildcard',
+        'de': 'Host-Platzhalter'},
+    'kill switch: cut ({mode})': {
+        'en': 'kill switch: cut ({mode})',
+        'de': 'Kill-Switch: gekappt ({mode})'},
+    'sandbox-ai said: {reason}': {
+        'en': 'sandbox-ai said: {reason}',
+        'de': 'sandbox-ai sagte: {reason}'},
+    'security mode {mode}': {
+        'en': 'security mode {mode}',
+        'de': 'Sicherheitsmodus {mode}'},
+    'through Tor': {
+        'en': 'through Tor',
+        'de': 'über Tor'},
+    'through the VPN {name}': {
+        'en': 'through the VPN {name}',
+        'de': 'über das VPN {name}'},
+    '{count} destinations allowed during this run': {
+        'en': '{count} destinations allowed during this run',
+        'de': '{count} Ziele während dieses Laufs erlaubt'},
+    '{count} selected': {
+        'en': '{count} selected',
+        'de': '{count} ausgewählt'},
+    "{what}: the rule {rule} goes first into the project's own ruleset (its .sandbox-ai.json, trusted at once); it holds from the next start, and this run allows it now.": {
+        'en': "{what}: the rule {rule} goes first into the project's own ruleset (its .sandbox-ai.json, trusted at once); it holds from the next start, and this run allows it now.",
+        'de': '{what}: Die Regel {rule} kommt als erste in den eigenen Regelsatz des Projekts (seine .sandbox-ai.json, sofort vertraut); sie gilt ab dem nächsten Start, und dieser Lauf erlaubt es jetzt.'},
+    '{what}: the rule {rule} goes first into your own ruleset {path}; the running sandbox reads it again at once.': {
+        'en': '{what}: the rule {rule} goes first into your own ruleset {path}; the running sandbox reads it again at once.',
+        'de': '{what}: Die Regel {rule} kommt als erste in Ihren eigenen Regelsatz {path}; die laufende Sandbox liest ihn sofort neu.'},
+    '{what}: {error}': {
+        'en': '{what}: {error}',
+        'de': '{what}: {error}'},
+    "{what}: {option} goes into the project's .sandbox-ai.json (trusted at once); every later start of the project may reach it.": {
+        'en': "{what}: {option} goes into the project's .sandbox-ai.json (trusted at once); every later start of the project may reach it.",
+        'de': '{what}: {option} kommt in die .sandbox-ai.json des Projekts (sofort vertraut); jeder spätere Start des Projekts darf es erreichen.'},
+    "{what}: {original} is a preset's or someone else's ruleset and stays as it is. A copy of it with the rule {rule} first is written to {path}; a start uses it only in place of the original (Board › Approvals and rules). This run allows it now.": {
+        'en': "{what}: {original} is a preset's or someone else's ruleset and stays as it is. A copy of it with the rule {rule} first is written to {path}; a start uses it only in place of the original (Board › Approvals and rules). This run allows it now.",
+        'de': '{what}: {original} ist der Regelsatz einer Vorlage oder von jemand anderem und bleibt, wie er ist. Eine Kopie davon mit der Regel {rule} zuerst wird nach {path} geschrieben; ein Start nutzt sie nur anstelle des Originals (Board › Freigaben und Regeln). Dieser Lauf erlaubt es jetzt.'},
 }

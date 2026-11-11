@@ -7545,6 +7545,8 @@ def pod_commands(a, name, session, home):
         bindings.append((wayland_socket(), WAYLAND_TARGET, "rw"))
     if getattr(a, "proxy_dir", None):
         bindings.append((a.proxy_dir, str(PROXY_DIR), "ro"))
+    if nested(a):
+        bindings.append((session / "containers" / "containers.conf", NESTED_CONF_DROPIN, "ro"))
     if getattr(a, "control_dir", None):
         bindings.append((a.control_dir, str(CONTROL_DIR), "rw"))
     if getattr(a, "browser_dir", None) and on_machine(a):
@@ -7569,10 +7571,13 @@ def pod_commands(a, name, session, home):
 # makes before Firejail starts (runtime.nested_setup). The devices the engines inside need, where this host has them
 # (without /dev/fuse the images are stored by copying, "vfs"):
 NESTED_DEVICES = ("/dev/fuse", "/dev/net/tun")
-NESTED_ENV = {"CONTAINERS_CONF": "/sandbox/session/containers/containers.conf",
-              "CONTAINERS_STORAGE_CONF": "/sandbox/session/containers/storage.conf",
+NESTED_ENV = {"CONTAINERS_STORAGE_CONF": "/sandbox/session/containers/storage.conf",
               # A build's RUN steps in a chroot of their own (no further namespaces of their own to set up).
               "BUILDAH_ISOLATION": "chroot"}
+# The engines' configuration for the sandbox: a drop-in on top of the image's own containers.conf (CONTAINERS_CONF
+# would replace it, and with it the distribution's choice of network backend and helper paths: Podman then looked
+# for programs the image does not have and failed with "no such file or directory").
+NESTED_CONF_DROPIN = "/etc/containers/containers.conf.d/90-sandbox-ai-nested.conf"
 # Where the images and containers inside are kept: the sandbox's /var/tmp, a tmpfs (--tmp-size) that goes with the run,
 # so that nothing owned by your subordinate IDs is left in a HOME or a workspace.
 NESTED_GRAPHROOT = "/var/tmp/containers/storage"
@@ -7658,6 +7663,7 @@ def nested_plan(a):
                 name.lstrip("!") for name in RUNTIME.NESTED_SECCOMP.partition("=")[2].split(",")),
             "storage": {"driver": nested_storage(a), "graphroot": NESTED_GRAPHROOT},
             "network": "the agent's own: its firewall and connection proxy", "environment": dict(NESTED_ENV),
+            "containers_conf": NESTED_CONF_DROPIN,
             "host_folders": "every bind mount nosuid and nodev (a setuid file made there gives nothing inside)",
             "given_back": {"paths": nested_writable(a),
                            "what": "files and folders the run left owned by another of the sandbox's IDs: given "

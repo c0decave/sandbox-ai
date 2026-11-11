@@ -65,6 +65,8 @@ def test_the_container_gets_setfcap_and_the_devices_and_nothing_without_the_opti
     # Everything else stays as it was: the same capabilities, no privileged mode, seccomp left to Firejail.
     # (and the host's folders nosuid: test_every_host_folder_is_mounted_nosuid_in_a_nested_run)
     stripped = [x[:-len(",nosuid")] if x.startswith("type=bind,") and x.endswith(",nosuid") else x for x in run]
+    dropin = next(i for i, x in enumerate(stripped) if s.NESTED_CONF_DROPIN in x)  # (the engines' configuration)
+    del stripped[dropin - 1:dropin + 1]
     for value in ("SETFCAP", "/dev/fuse", "/dev/net/tun"):
         index = stripped.index(value)
         del stripped[index - 1:index + 1]
@@ -90,8 +92,19 @@ def test_the_engines_configuration(devices):
     assert 'cgroup_manager = "cgroupfs"' in containers and "keyring = false" in containers
     assert 'driver = "overlay"' in storage and 'mount_program = "/usr/bin/fuse-overlayfs"' in storage
     assert f'graphroot = "{s.NESTED_GRAPHROOT}"' in storage and s.NESTED_GRAPHROOT.startswith("/var/tmp/")
-    assert set(s.NESTED_ENV) == {"CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF", "BUILDAH_ISOLATION"}
-    assert s.NESTED_ENV["CONTAINERS_CONF"] == "/sandbox/session/containers/containers.conf"
+    # containers.conf as a drop-in over the image's own (CONTAINERS_CONF would replace it: Podman then missed the
+    # distribution's network backend and helper paths, "no such file or directory" in CI); storage.conf replaced.
+    assert set(s.NESTED_ENV) == {"CONTAINERS_STORAGE_CONF", "BUILDAH_ISOLATION"} and "CONTAINERS_CONF" not in s.NESTED_ENV
+    assert s.NESTED_CONF_DROPIN.startswith("/etc/containers/containers.conf.d/")
+
+
+def test_the_drop_in_is_mounted_read_only_over_the_images_own_configuration(devices, tmp_path):
+    session = tmp_path / "session"
+    _, run = s.pod_commands(parsed("--nested-containers"), "agent-x", session, tmp_path / "home")
+    assert f"type=bind,src={session / 'containers' / 'containers.conf'},dst={s.NESTED_CONF_DROPIN},ro,nodev,nosuid" \
+        in run
+    _, plain = s.pod_commands(parsed(), "agent-x", session, tmp_path / "home")
+    assert not any(s.NESTED_CONF_DROPIN in x for x in plain)
 
 
 # --- --tmp-size ---------------------------------------------------------------------------------------------------
@@ -205,7 +218,7 @@ def test_a_start_hands_the_supervisor_the_namespace_and_the_agent_the_engines(m,
         m.refused("--nested-containers", match="needs the Podman backend")
         return
     plain = m.run()
-    assert "nested" not in plain.config and "CONTAINERS_CONF" not in plain.env and plain.containers == {}
+    assert "nested" not in plain.config and "CONTAINERS_STORAGE_CONF" not in plain.env and plain.containers == {}
     run = m.run("--nested-containers", "--tmp-size", "3g")
     assert run.config["nested"] == {"reserved": RESERVED, "writable": ["/work", "/root"]}
     assert {key: run.env[key] for key in s.NESTED_ENV} == s.NESTED_ENV
@@ -320,7 +333,13 @@ def test_the_guard_enters_the_namespace_and_checks_its_map(tmp_path):
     userns.write_text("")
     good = rt.id_map_text(rt.nested_id_map(SUBUIDS, RESERVED))
     libc = FakeLibc()
-    rt.enter_nested_userns(RESERVED, userns, libc, fake_proc(tmp_path / "good", good))
+    run = tmp_path / "run"
+    run.mkdir()
+    rt.enter_nested_userns(RESERVED, userns, libc, fake_proc(tmp_path / "good", good),
+                           run_dirs=(str(run / "libpod"), str(run / "containers" / "storage")))
+    # Podman's run state exists before its first command (`podman import -` wrote into a missing /run/libpod).
+    assert (run / "libpod").is_dir() and (run / "containers" / "storage").is_dir()
+    assert rt.NESTED_RUN_DIRS == ("/run/libpod", "/run/containers/storage")
     # Its own user namespace first, then a mount namespace of it (where the engines may mount).
     assert libc.calls == [("setns", rt.CLONE_NEWUSER), ("unshare", rt.CLONE_NEWNS)]
     with pytest.raises(RuntimeError, match=r"maps the reserved IDs \[1, 2, 950\]"):
@@ -466,6 +485,9 @@ def owned(real, owners):
     return lstat
 
 
+OTHER = 4242424  # an ID no test runner has
+
+
 def test_the_supervisor_gives_back_what_other_ids_left(tmp_path):
     work = tmp_path / "work"
     (work / "sub").mkdir(parents=True)
@@ -480,12 +502,15 @@ def test_the_supervisor_gives_back_what_other_ids_left(tmp_path):
               str(work / "sub" / "deep"): (7, 7, 0o2755, None),
               str(work / "link"): (9, 9, None, None)}
     calls = []
-    found = rt.give_back([str(work)], now - 60, lstat=owned(os.lstat, owners),
+    me = (os.getuid(), os.getgid())  # whoever runs the tests stands for the sandbox's root
+    owners = {path: (uid if uid != 0 else OTHER, gid if gid != 0 else OTHER, mode, ctime) if (uid, gid) != (0, 0)
+              else (*me, mode, ctime) for path, (uid, gid, mode, ctime) in owners.items()}
+    found = rt.give_back([str(work)], now - 60, lstat=owned(os.lstat, owners), owner=me,
                          lchown=lambda path, uid, gid: calls.append(("chown", path, uid, gid)),
                          chmod=lambda path, mode: calls.append(("chmod", path, mode)))
     chowned = sorted(c[1] for c in calls if c[0] == "chown")
     assert chowned == sorted(str(work / n) for n in ("theirs", "setuid", "sub", "sub/deep", "link"))
-    assert all(c[2:] == (0, 0) for c in calls if c[0] == "chown")
+    assert all(c[2:] == me for c in calls if c[0] == "chown")
     assert sorted((c[1], c[2]) for c in calls if c[0] == "chmod") == [(str(work / "setuid"), 0o755),
                                                                       (str(work / "sub" / "deep"), 0o755)]
     assert found["count"] == 5 and found["failed"] == 0 and found["complete"] and len(found["paths"]) == 5
@@ -496,13 +521,15 @@ def test_a_give_back_that_fails_or_has_too_much_says_so(tmp_path, capsys):
     work.mkdir()
     for index in range(30):
         (work / f"f{index}").write_text("")
-    owners = {str(work / f"f{index}"): (1000, 1000, None, None) for index in range(30)}
+    owners = {str(work / f"f{index}"): (OTHER, OTHER, None, None) for index in range(30)}
 
     def refuse(path, uid, gid):
         if path.endswith("f3"):
             raise PermissionError("read-only")
+    me = (os.getuid(), os.getgid())
     found = rt.give_back([str(work), str(tmp_path / "missing")], 0, lstat=owned(os.lstat, owners), lchown=refuse,
-                         chmod=lambda *a: None)
+                         chmod=lambda *a: None, owner=me)
+    # The folder itself is the runner's own: only the 30 files count (29 given back, 1 refused).
     assert found["count"] == 29 and found["failed"] == 1 and len(found["paths"]) == rt.GIVE_BACK_NAMED
     logs = tmp_path / "logs"
     logs.mkdir()
@@ -511,7 +538,7 @@ def test_a_give_back_that_fails_or_has_too_much_says_so(tmp_path, capsys):
     assert "29 files and folders the run left owned by other IDs" in said and "1 could not be" in said and " ..." in said
     assert json.loads((logs / "nested-owners.json").read_text())["count"] == 29
     partial = rt.give_back([str(work)], 0, lstat=owned(os.lstat, owners), lchown=lambda *a: None,
-                           chmod=lambda *a: None, limit=5)
+                           chmod=lambda *a: None, limit=5, owner=me)
     assert partial["complete"] is False
     rt.report_given_back({"count": 0, "paths": [], "failed": 0, "complete": True})
     assert capsys.readouterr().err == ""  # nothing left: nothing said
@@ -546,3 +573,18 @@ def test_the_live_test_asks_for_pasta_where_the_podman_inside_has_it():
         assert f"PORT_{name}" in live.SCRIPT, name
     assert live.results("RESULT shared refused\nnoise\nRESULT pasta unavailable: no such mode\n") == \
         {"shared": "refused", "pasta": "unavailable: no such mode"}
+
+
+def test_the_supervisor_gives_back_to_the_sandboxs_root_by_default(tmp_path):
+    """In the sandbox the supervisor's 0:0 is your user and group on the host, whatever their numbers; a file of
+    another ID goes to 0:0 there. Here: one file presented as owned by OTHER, everything else as 0:0."""
+    (tmp_path / "f").write_text("")
+    real = os.lstat
+
+    def lstat(path):
+        values = list(real(path))
+        values[4], values[5] = (OTHER, OTHER) if str(path).endswith("/f") else (0, 0)
+        return os.stat_result(values)
+    calls = []
+    found = rt.give_back([str(tmp_path)], 0, lstat=lstat, lchown=lambda *a: calls.append(a), chmod=lambda *a: None)
+    assert calls == [(str(tmp_path / "f"), 0, 0)] and found["count"] == 1

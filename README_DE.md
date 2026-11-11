@@ -4060,10 +4060,45 @@ sandbox-ai approvals deny ID [--scope once|always] # Standard: in diesem Lauf ni
 sandbox-ai approvals history [LAUF]           # Fragen und ihre Antworten
 sandbox-ai approvals remembered [--json]      # was je Projekt immer erlaubt/blockiert ist: Name oder Adresse, wie, wann, aus welcher Frage
 sandbox-ai approvals forget PROJEKT EINTRAG   # einen davon vergessen (Hostname oder IP:PORT)
+sandbox-ai approvals blocked [LAUF] [--json]  # was einer laufenden Sandbox (und ihren MCP-Servern, Helfern) abgewiesen wurde, neueste zuerst: warum, von welchem Prozess, was zu tun ist
+sandbox-ai approvals decided [LAUF] [--json]  # die Entscheidungen, die eine laufende Sandbox für den Lauf behält, und was sie vorerst abweist (unbeantwortet)
+sandbox-ai approvals allow ID --scope run     # bei einer schon beantworteten oder unbeantworteten Frage: für den Rest des Laufs erlaubt
+sandbox-ai approvals deny ID                  # ... für den Rest des Laufs abgewiesen, ohne Frage
+sandbox-ai approvals ask-again ID             # ... der Lauf vergisst seine Entscheidung: der nächste Versuch wird wieder gefragt
+sandbox-ai approvals allow ID --scope always  # ... eine Anfrage oder ein MCP-Aufruf: eine Ausnahmeregel (siehe unten); eine Verbindung oder Namensauflösung: net allow --keep
 ```
 
-Eine Frage ohne Antwort wird nach 60 Sekunden abgewiesen und, wie eine
-Ablehnung, in diesem Lauf nicht erneut gestellt. `once` erlaubt diese eine
+Eine Frage ohne Antwort wird nach 60 Sekunden abgewiesen. Das ist keine
+Entscheidung: Dieselbe Anfrage wird die nächsten 2 Minuten sofort (ohne neue
+Frage) abgewiesen, damit der Agent nicht wieder und wieder die Wartezeit
+absitzt, und danach wieder gefragt. Die Abweisung sagt das, mit der ID der
+Frage und dem Befehl, der sie erlaubt. Ihre eigenen Antworten behalten ihre
+Geltung: Eine Ablehnung (`run`, der Standard) wird in diesem Lauf nicht
+erneut gefragt. Beides lässt sich ändern, solange die Sandbox läuft - auf der
+Seite Freigaben der App (Blockiert) oder mit `sandbox-ai approvals allow ID
+--scope run`, `deny ID` und `ask-again ID` auf der beantworteten Frage. Das
+geht über den Steuer-Socket an den Supervisor der Sandbox, den nur Sie
+erreichen (ein Prozess der Sandbox wird abgewiesen): Ein Erlauben für den
+Lauf wird abgewiesen, wo der Sicherheitsmodus oder die Richtlinie des
+Administrators nur einmal erlaubt, eine so erlaubte Verbindung bleibt in den
+Netzen der Richtlinie, und während der Kill-Switch den Lauf kappt, wird
+Erlaubtes vermerkt, bleibt aber gekappt, bis die Kappung aufgehoben ist.
+`allow ID --scope always` auf einer Anfrage oder einem MCP-Aufruf schreibt
+eine Ausnahmeregel (genau diese Methode, dieser Host und Pfad, oder dieser
+Server und dieses Werkzeug) als erste in das Regelwerk, das sie anhielt: Ihre
+eigene `rules.json` an Ort und Stelle (der laufende Start liest sie sofort
+neu), das eigene Regelwerk des Projekts in seine vertraute `.sandbox-ai.json`
+(ab dem nächsten Start), und das Regelwerk einer Vorlage oder von jemand
+anderem wird nie geändert - eine Kopie für Sie mit der Ausnahme kommt nach
+`~/.config/sandbox-ai/rules/` und wird von einem Start nur an seiner Stelle
+genutzt: Jedes Regelwerk entscheidet für sich, und die strengste Entscheidung
+gewinnt, eine Regel von Ihnen daneben könnte es also nicht erweitern. Die
+Netzwerk-Einstellungen (`--allow-host`, die Teile Netzwerk und VPN im Board)
+öffnen Ziele; sie ändern nicht, was ein Regelwerk über die Anfragen an sie
+entscheidet: Eine Anfrage, nach der ein Regelwerk fragt, wird auch gefragt,
+wenn ihr Host erlaubt ist.
+
+`once` erlaubt diese eine
 Verbindung (die Adresse ist 30 Sekunden offen), `run` bis zum Ende der
 Sandbox, `always` zusätzlich jeden späteren Start desselben Projekts (bei
 einer Namensauflösung der Name, bei einer Verbindung der Name, wenn er sich
@@ -4883,7 +4918,8 @@ Container dafür bekommt:
 Firejails eigener Filter bleibt, lässt aber durch, was eine Container-Engine in ihren eigenen Namespaces braucht
 (`mount`, `umount2`, `pivot_root`, `chroot`, `sethostname`, `setdomainname` und die neuen Mount-Aufrufe);
 `ptrace`, `keyctl`, Module, `bpf` und der Rest bleiben gesperrt, `no_new_privs` bleibt gesetzt. Podman ist für die
-Sandbox eingerichtet (`/sandbox/session/containers/`, über `CONTAINERS_CONF` und `CONTAINERS_STORAGE_CONF`): die
+Sandbox eingerichtet (eine Ergänzung der eigenen `containers.conf` des Images in `/etc/containers/containers.conf.d/`, und
+`CONTAINERS_STORAGE_CONF`): die
 Container teilen den Netz-Namespace des Agenten, haben keine eigenen Cgroups (die Limits der Sandbox gelten für
 alle) und ihre Images liegen in `/var/tmp/containers` (ein tmpfs, `--tmp-size`), gehen also mit dem Lauf, und in
 keinem HOME bleibt etwas zurück, das Ihren untergeordneten IDs gehört. Der Probelauf zeigt alles

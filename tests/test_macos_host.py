@@ -183,8 +183,11 @@ def test_launcher_and_net_judge_processes_through_it(mac, monkeypatch):
             net.launcher_process({"run": "x", "pid": 701, "pid_start": 1_700_000_100_000_000})
         with pytest.raises(ValueError, match="has ended"):
             net.launcher_process({"run": "x", "pid": 4242, "pid_start": 1})
-    with pytest.raises(ValueError, match="belongs to another user"):
-        net.launcher_process(record)
+    with pytest.MonkeyPatch.context() as patch:
+        # Another user than the launcher's 501 - also on a Mac whose own user is 501 (GitHub's macOS runners).
+        patch.setattr(os, "getuid", lambda: 502)
+        with pytest.raises(ValueError, match="belongs to another user"):
+            net.launcher_process(record)
     assert net.ended(702, start)  # a zombie has ended
     canary = load("canary", "canary_macos_test")
     canary._procinfo = s.procinfo()

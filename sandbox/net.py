@@ -1857,12 +1857,13 @@ def keep_allowed():
                          "allowed during the run is not kept for later starts (nothing was written)")
 
 
-def keep_in_project(record, tokens, write=True, workspaces=(), preview=None):
+def keep_in_project(record, tokens, write=True, workspaces=(), preview=None, change=None):
     """Add TOKENS (options) to the run's project file, WORKSPACE/.sandbox-ai.json, and trust the result: only while
     the file is exactly what you trusted (an agent's change is never trusted along), or a new one for the run's
     agent. Returns (path, [added options]); ValueError otherwise. WRITE False only checks (before the run changes:
     a refused --keep changes nothing; the write checks again). PREVIEW(path, added) is called before the write
-    with exactly what it adds."""
+    with exactly what it adds. CHANGE(document): another change of the document (an exception rule in its "rules",
+    approvals.rule_exception), made in place; it returns what it added ([] for nothing)."""
     l = launcher()
     workspace = record.get("workspace")
     if not workspace:
@@ -1914,6 +1915,8 @@ def keep_in_project(record, tokens, write=True, workspaces=(), preview=None):
             options += pair
             added += pair
         index += len(pair)
+    if change is not None:
+        added += change(document)
     if not added:
         return path, []
     if preview is not None:
