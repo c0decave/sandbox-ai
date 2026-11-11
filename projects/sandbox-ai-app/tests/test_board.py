@@ -167,13 +167,13 @@ def test_templates_pass_the_launchers_own_checks(sai, name, tmp_path):
     board = B.template(sai, name, tmp_path)
     assert not [p for p in B.problems(sai, board) if p.level == "error"]
     agent, _, _ = B.values(board)
-    plan, message = sai.dry_run(agent, B.launcher_argv(sai, board))
+    plan, message = sai.dry_run(agent, B.check_argv(sai, board))
     assert plan is not None, message
 
 
 def test_the_launcher_refuses_what_the_board_refuses(sai, tmp_path):
     board = B.from_argv(sai, "claude", ["--offline", "--allow-pypi"], workspaces=[str(tmp_path)])
-    plan, message = sai.dry_run("claude", B.launcher_argv(sai, board))
+    plan, message = sai.dry_run("claude", B.check_argv(sai, board))
     assert plan is None and "--offline" in message
 
 

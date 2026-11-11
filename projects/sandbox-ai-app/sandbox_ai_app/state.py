@@ -70,13 +70,19 @@ def scrub_arguments(arguments):
     return kept
 
 
+SECRET_PREFIX = re.compile(r"(sk-|ghp_|gho_|github_pat_|glpat-|xox[abp]-|AKIA|ya29\.|eyJ)")
+SECRET_RUN = re.compile(r"[A-Za-z0-9_\-+/=.]{32,}")
+DIGIT, LETTER = re.compile(r"[0-9]"), re.compile(r"[A-Za-z]")
+
+
 def looks_secret(value):
-    """A token by its look: well-known prefixes, or a long run of letters and digits with no spaces."""
+    """A token by its look: well-known prefixes, or a long run of letters and digits with no spaces. (Compiled once:
+    a preset catalogue asks it for each of its values, some 4,000 times.)"""
     value = str(value)
-    if re.match(r"(sk-|ghp_|gho_|github_pat_|glpat-|xox[abp]-|AKIA|ya29\.|eyJ)", value):
+    if SECRET_PREFIX.match(value):
         return True
-    return bool(re.fullmatch(r"[A-Za-z0-9_\-+/=.]{32,}", value)) and bool(re.search(r"[0-9]", value)) \
-        and bool(re.search(r"[A-Za-z]", value)) and "/" not in value[:1]
+    return bool(SECRET_RUN.fullmatch(value)) and bool(DIGIT.search(value)) and bool(LETTER.search(value)) \
+        and "/" not in value[:1]
 
 
 def dragging():

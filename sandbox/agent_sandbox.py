@@ -28,7 +28,6 @@ import termios
 import threading
 import time
 import urllib.parse
-import uuid
 
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
@@ -224,7 +223,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.92"
+__version__ = "0.1.93"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -358,7 +357,8 @@ SHORT_OPTIONS = {
     "--no-keep": "-nkp", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
     "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--ask": "-Q",
     "--secret-env": "-se", "--api-key": "-ky", "--model": "-mm", "--effort": "-ef", "--publish": "-pl", "--git-token-secret": "-gk", "--token-proxy": "-tp", "--git-logins": "-gn", "--rules": "-ru",
-    "--log-debug": "-ld", "--llm": "-lm", "--vpn": "-vp", "--vpn-check": "-vc", "--mode": "-mo",
+    "--log-debug": "-ld", "--llm": "-lm", "--vpn": "-vp", "--vpn-check": "-vc",
+    "--vpn-bypass-host-ports": "-vb", "--mode": "-mo",
     "--canaries": "-cn", "--no-canaries": "-nn", "--telemetry": "-tm",
 }
 HELP_EPILOG = """\
@@ -399,7 +399,7 @@ HELP_GROUPS = [  # --help: options by topic, in this order
                  "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier", "--allow", "--allow-tcp",
                  "--allow-host-port", "--no-provider-defaults", "--dns", "--nameserver", "--offline",
                  "--egress-all-allow", "--subnet", "--subnet6", "--network", "--ip", "--ip6", "--vpn",
-                 "--vpn-check"]),
+                 "--vpn-check", "--vpn-bypass-host-ports"]),
     ("Connection proxy, approvals and privacy", ["--ask", "--rules", "--allow-http", "--privacy-check",
                                                  "--privacy-rules", "--no-inspect", "--no-proxy", "--canaries",
                                                  "--no-canaries", "--telemetry"]),
@@ -657,6 +657,10 @@ def build_parser():
                         "addresses and DNS seen from outside are checked before the agent starts")
     p.add_argument("--vpn-check", choices=["stop", "warn"], default="stop",
                    help="What a failed VPN check does: stop the start (default) or only warn")
+    p.add_argument("--vpn-bypass-host-ports", action="store_true",
+                   help="With a Tor profile: let the sandbox reach the host's loopback ports it names (--allow-host-port, "
+                        "an --llm server or a Git server on this host) past Tor; whatever listens there reaches the "
+                        "internet from your own address. Without it a Tor start refuses them")
     p.add_argument("--image", help="Prebuilt Podman image (default: localhost/<agent>-sandbox:latest); never pulled implicitly")
     p.add_argument("--image-variant", metavar="NAME",
                    help="Your image variant NAME of this agent (sandbox-ai images new NAME --from AGENT): "
@@ -1418,6 +1422,21 @@ def login_locations():
     return [(path, label) for path, label in result if path != Path("/")]
 
 
+def plugin_store_run(a):
+    """A is the plugin installer's own start (sandbox-ai plugins claude): Claude with --no-plugins on the plugin
+    store itself as its HOME. Its HOME holds the store's index (known_marketplaces.json, installed_plugins.json,
+    extraKnownMarketplaces), which that run writes: --no-plugins must not clear it there."""
+    if getattr(a, "agent", None) != "claude" or not getattr(a, "no_plugins", False) or not getattr(a, "state_dir", None):
+        return False
+    try:
+        home = Path(os.path.normpath(Path(a.state_dir).expanduser().absolute())).resolve()
+        data = Path(os.path.normpath((Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+                                      / "sandbox-ai").absolute())).resolve()
+    except (OSError, RuntimeError, TypeError):
+        return False
+    return home == data / "plugins" / "claude"
+
+
 def own_folders(a):
     """[path] (resolved): the folders inside sandbox-ai's own (sandbox_ai_folders) that this start A is sandbox-ai's
     own internal start of, and so may be given: a session's or a kept start's own HOME (its --state-dir is its
@@ -1452,8 +1471,7 @@ def own_folders(a):
             home.name == "home" and work.name == "work" and home.parent.parent == data / "auth" and \
             home.parent.name.startswith(".login-"):
         found += [home, work]
-    if home is not None and data is not None and getattr(a, "agent", None) == "claude" and \
-            getattr(a, "no_plugins", False) and home == data / "plugins" / "claude":
+    if home is not None and data is not None and plugin_store_run(a):
         found.append(home)
         if work is not None and work.parent == data / "plugins" and work.name.startswith(".work-"):
             found.append(work)
@@ -2962,6 +2980,58 @@ def add_helpers(a):
             a.mcp.append(name)
 
 
+def check_mcp_names(a):
+    """Every --mcp server of this start is defined (built-in, sandbox-ai mcp add, a team's, the trusted project file's
+    or a --helper's): refused before anything is made or started - a dry run says it too - instead of deep in the
+    start (mcp.ensure_running), which left a session behind that failed the same way at every resume."""
+    names = [name for name in dict.fromkeys(a.mcp) if re.fullmatch(MCP_NAME, name)]
+    if a.probe or a.mcp_socket_dir or not names:
+        return
+    servers = {**load_mcp_module().definitions(getattr(a, "project_document", None)),
+               **(getattr(a, "helper_definitions", None) or {})}
+    missing = [name for name in names if name not in servers]
+    if missing:
+        raise ValueError(unknown_mcp_message(a, missing, servers))
+    if getattr(a, "vpn", None):  # a server that would leave outside the start's VPN (Tor: outside Tor) is refused here
+        with contextlib.suppress(OSError):  # (an unreadable profile: the VPN's own check says so)
+            load_mcp_module().vpn_for_servers(a, names)
+
+
+def unknown_mcp_message(a, missing, servers):
+    """What a start that names the MCP servers MISSING (not among SERVERS) is told: which ones, which are defined, and
+    - when the project file of its workspace defines one but is not read (--no-config) - why."""
+    text = f"Unknown MCP server: {', '.join(missing)}; defined: {', '.join(sorted(servers)) or 'none'}"
+    path = Path(a.workspaces[0] or ".").expanduser() / CONFIG_NAME if a.workspaces else None
+    try:
+        own = None
+        if path and path.is_file():
+            with open(path, "rb") as stream:
+                own = json.loads(stream.read(CONFIG_LIMIT)).get("mcp_servers")
+    except (OSError, ValueError, AttributeError):
+        own = None  # only for the hint: the file is not trusted here, nothing of it is used
+    named = [name for name in missing if isinstance(own, dict) and name in own]
+    if named and not getattr(a, "project_document", None):
+        why = "it is started with --no-config" if a.no_config else "it reads another configuration"
+        text += (f". {printable(str(path))} defines {', '.join(named)}, but this start reads no project file there "
+                 f"({why}): start it without --no-config once that file is trusted (sandbox-ai wizard trust FILE)")
+    return (text + "; add a server with sandbox-ai mcp add (sandbox-ai mcp catalog lists the catalogs' servers), "
+            "or start without it")
+
+
+def check_workspace_creatable(workspace):
+    """A workspace that is not there yet is made at the start (prepare_workspace): refused now - in a dry run too -
+    when it cannot be, e.g. a folder of another machine whose parent belongs to root here."""
+    if workspace.exists():
+        return
+    parent = workspace.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    if not (parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)):
+        raise ValueError(f"Workspace {printable(str(workspace))} does not exist and cannot be created: "
+                         f"{printable(str(parent))} is not writable for you. Choose a folder you can write (for "
+                         "another machine: a folder of that machine), or create it first")
+
+
 def mcp_socket_dir(name):
     """Host directory holding the Unix socket of MCP server NAME."""
     state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
@@ -3525,6 +3595,7 @@ def validate(a):
         check_planted(source, "Workspace", exposed_before())
         if (workspace.exists() and not workspace.is_dir()) or any(c in str(workspace) for c in (",", "\n", "\r")):
             raise ValueError("Workspace must be a directory without commas/control characters")
+        check_workspace_creatable(workspace)
         resolved.append(workspace)
     for index, first in enumerate(resolved):
         for second in resolved[index + 1:]:
@@ -3544,6 +3615,7 @@ def validate(a):
         if path not in a.workspaces[1:]:
             raise ValueError(f"--workspace-name {name}={printable(path)}: names no --workspace of this start")
     add_helpers(a)
+    check_mcp_names(a)
     check_companions(a)
     if any(parse_mount(m)[1] == "/work" for m in a.mount):
         raise ValueError("Use --workspace to mount /work")
@@ -3906,14 +3978,20 @@ def check_host_sources(a):
                                  "or the folder itself.")
 
 
-def prepare_workspace(path):
+def prepare_workspace(path, warn=True):
+    """Create the workspace PATH; an existing one is used, with a warning unless WARN is false (a folder sandbox-ai
+    made for this very start, such as the plugin installer's work folder)."""
     workspace = Path(path)
     try:
         workspace.mkdir(parents=True)
     except FileExistsError:
         if not workspace.is_dir():
             raise ValueError(f"Workspace path exists but is not a directory: {workspace}") from None
-        print(f"agent-sandbox: warning: workspace exists already; using it: {workspace}", file=sys.stderr)
+        if warn:
+            print(f"agent-sandbox: warning: workspace exists already; using it: {workspace}", file=sys.stderr)
+    except PermissionError as exc:
+        raise ValueError(f"Workspace {printable(str(workspace))} cannot be created: "
+                         f"{printable(str(exc.filename or workspace))} is not writable for you") from None
 
 
 def resolve_hosts(hosts):
@@ -3930,9 +4008,22 @@ def resolve_hosts(hosts):
     return result
 
 
-def hosts_file(hosts):
-    return "127.0.0.1 localhost\n::1 localhost\n" + "".join(
+def hosts_file(hosts, own=()):
+    """The sandbox's /etc/hosts: localhost, the sandbox's own host names OWN (the pod's, Bubblewrap's agent-sandbox)
+    on the loopback addresses - git, sudo, hostname -f look their own name up; without it the lookup went to the DNS
+    stub and was refused and logged as a name outside the allowed hosts - then the pinned HOSTS."""
+    names = " ".join(["localhost", *dict.fromkeys(n for n in own if n and n != "localhost")])
+    return f"127.0.0.1 {names}\n::1 {names}\n" + "".join(
         f"{addr} {name}\n" for name, addresses in hosts.items() for addr in addresses)
+
+
+def own_host_names(a):
+    """The host names the sandbox of A may call itself: its pod's (Podman gives a pod's containers the pod's name
+    as host name) and agent-sandbox (Bubblewrap's)."""
+    names = ["agent-sandbox"]
+    if getattr(a, "run_id", None) or getattr(a, "vpn_pod", None) or getattr(a, "pod_name", None):
+        names.append(pod_name(a))
+    return [name for name in names if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", name or "")]
 
 
 def podman_command(a, *args):
@@ -4018,14 +4109,17 @@ def resolve_pod_hosts(a, hosts):
 
 
 def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=(), proxy=None, vpn_mark=None,
-                   vpn_rules=(), machine_host=None):
+                   vpn_rules=(), machine_host=None, check_mark=None):
     """The sandbox's nftables table. PROXY ({"port", "loopback"}) redirects every TCP connection of the agent
     to the connection proxy, except the proxy's own (PROXY_UID) and those to loopback ports other than
     LOOPBACK (the host's forwarded ports). The chain "runtime" holds what `sandbox-ai net` allows later.
     VPN_MARK (an nft match, see vpn.py) lets the VPN's own packets pass, unredirected: only a process with
     CAP_NET_ADMIN can mark one, and the VPN's kill switch limits where they go. VPN_RULES (vpn.py: Tor's
     loopback ports) open the output chain, before loopback is accepted. MACHINE_HOST (macOS): the Mac's address in
-    podman machine, reached only by the supervisor's relays of host ports (runtime.HOST_RELAY_MARK)."""
+    podman machine, reached only by the supervisor's relays of host ports (runtime.HOST_RELAY_MARK). CHECK_MARK (with
+    a VPN: vpn_runtime.CHECK_MARK): the VPN container's own checks and lookups during the run pass this table, neither
+    redirected to the proxy nor held by the allow-list, so that they measure the tunnel; the VPN's kill switch still
+    holds them (only a process with CAP_NET_ADMIN can mark a packet, and the agent has none)."""
     for rule in vpn_rules:
         if not re.fullmatch(r"[a-z0-9 .:/,=-]{1,200}", rule):
             raise ValueError(f"not a firewall rule of a VPN: {rule!r}")
@@ -4042,6 +4136,7 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
              " chain forward { type filter hook forward priority 0; policy drop; }",
              " chain runtime {", " }",
              " chain output { type filter hook output priority 0; policy drop;",
+             *([f"  meta mark {int(check_mark):#x} accept"] if check_mark else []),
              *[f"  {rule}" for rule in vpn_rules],
              '  oifname "lo" accept', "  ct state established,related accept",
              "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept"]
@@ -4083,6 +4178,7 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
         lines += [" chain relay {", " }",
                   " chain proxy { type nat hook output priority -100; policy accept;",
                   f"  meta skuid {PROXY_UID} return", *([f"  {vpn_mark} return"] if vpn_mark else []),
+                  *([f"  meta mark {int(check_mark):#x} return"] if check_mark else []),
                   *([f"  meta mark {RUNTIME.HOST_RELAY_MARK:#x} return"] if machine_host else []),
                   # Host ports relayed during the run (sandbox-ai net allow --allow-host-port) go through the proxy too.
                   "  jump relay",
@@ -5200,6 +5296,7 @@ def replace_home_file(home, relative, content):
     """Atomically replace the file RELATIVE in the sandbox HOME with CONTENT (mode 0600) while the agent may be
     writing the HOME: written next to it and renamed over it through a directory descriptor, never through a
     link (a link in its place is replaced, not followed)."""
+    import uuid
     parent = open_home_dir(home, relative)
     name = PurePosixPath(relative).name
     temporary = f".{name}.sandbox-ai-{os.getpid()}-{uuid.uuid4().hex[:8]}"
@@ -6114,6 +6211,17 @@ def asking(a):
     return proxy_enabled(a) and a.ask in ("on", "allow") and not a.probe
 
 
+def tor_run(a):
+    """A start behind a Tor profile (--vpn)."""
+    return (getattr(a, "vpn_profile", None) or {}).get("type") == "tor"
+
+
+def host_browser(a):
+    """The sandbox's xdg-open goes to your browser (as a question): in a run that asks, never behind Tor, where your
+    browser would open the agent's URL from your own address."""
+    return asking(a) and not tor_run(a)
+
+
 def asks_nobody(a):
     """--ask allow in a run that asks: every question is answered "allow" by the launcher, at once (approvals.watch
     and serve_browser with auto). Only the launcher's own options set it: nothing in the sandbox can (no
@@ -6688,6 +6796,8 @@ def connection_summary(path):
                         refused.append(", ".join(push.get("refs") or []) or record.get("url", "?"))
                 elif event == "denied":
                     counts["denied"] += 1
+                elif event == "tls-refused" and record.get("abandoned"):
+                    counts["other"] += 1  # the program went away mid-handshake: it refused nothing
                 elif event in ("tls-refused", "tls-upstream-failed"):
                     tls[str(record.get("host") or record.get("destination"))] = event
                 else:
@@ -6702,6 +6812,14 @@ def connection_summary(path):
         lines.append(f"proxy: TLS to {host} failed ({'the program rejected the session CA' if event == 'tls-refused' else 'the server certificate is not trusted'}); "
                      f"--no-inspect {host} passes it through unopened")
     return lines
+
+
+def launcher_script():
+    """The file that runs this launcher as a process of its own (python3 -I SCRIPT AGENT ...): launcher/agent_sandbox.py,
+    which runs this file from its cached bytecode under the same name (a script Python runs itself is compiled anew:
+    55 ms of every start), this file in a copy without it (main.py's executed_script)."""
+    stub = HERE / "launcher" / "agent_sandbox.py"
+    return stub if stub.is_file() else HERE / "agent_sandbox.py"
 
 
 def runs_dir():
@@ -6758,6 +6876,10 @@ def register_run(a, run, session):
         "no_inspect": sorted({value.lower() for value in a.no_inspect}),
         # `sandbox-ai vpn rotate` refuses a profile in use.
         "vpn_profile": a.vpn_profile["name"] if getattr(a, "vpn_profile", None) else None,
+        # A Tor run: `sandbox-ai net allow --allow-host-port` keeps to it (only with --vpn-bypass-host-ports), and no
+        # URL of it is opened in your browser (approvals.py), which would reach it from your own address.
+        "vpn_type": a.vpn_profile.get("type") if getattr(a, "vpn_profile", None) else None,
+        "vpn_bypass_host_ports": bool(getattr(a, "vpn_bypass_host_ports", False)),
         # macOS: the container `sandbox-ai net` reaches the supervisor in (podman exec; runtime.VM_CONTROL_DIR).
         **({"container": f"{pod_name(a, run)}-agent"} if on_machine(a) else {}),
         # sandbox-ai list (and the app and the web, which group by them): the agents --with in this sandbox, and
@@ -6865,6 +6987,7 @@ def run_name(a):
 def pod_name(a, run=None):
     """The Podman pod of this run (RUN, default a.run_id): the VPN's pod (vpn.py made it), the one a session or
     MCP server chose, else agent-RUN."""
+    import uuid
     run = run or getattr(a, "run_id", None) or f"{a.agent}-{uuid.uuid4().hex[:12]}"
     return getattr(a, "vpn_pod", None) or a.pod_name or f"agent-{run}"
 
@@ -6873,6 +6996,9 @@ def load_starts_module():
     spec = importlib.util.spec_from_file_location("sandbox_starts", HERE / "starts.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # This launcher for it and its modules (sessions, net, mcp, team): they loaded agent_sandbox.py (and the runtime) a
+    # second time for the names of a start, about 20 ms of each.
+    module._modules.setdefault("agent_sandbox", RunningLauncher())
     return module
 
 
@@ -7090,7 +7216,8 @@ def prepare_kits(a, home, staging):
             a.opencode_plugins = plugins
             if not a.egress_all_allow and "registry.npmjs.org" not in allowed_hosts(a):
                 notes.append("OpenCode installs its plugins from npm: allow it with --allow-host registry.npmjs.org")
-    elif a.agent == "claude":
+    elif a.agent == "claude" and not plugin_store_run(a):
+        # The plugin installer's HOME is the store: its index is what that run is there to write.
         claude_drop_plugins(home, notes)
     return mounts, notes, memory
 
@@ -7176,7 +7303,7 @@ def agent_environment(a):
         env["NODE_EXTRA_CA_CERTS"] = str(CA_DIR / "ca.pem")
     if getattr(a, "run_id", None):
         env["SANDBOX_AI_RUN"] = a.run_id
-    if asking(a):
+    if host_browser(a):
         # Browser requests (OAuth logins and the like) go to you as questions.
         env["PATH"] = "/sandbox/session/bin:" + base_env()["PATH"]
         env["BROWSER"] = "/sandbox/session/bin/xdg-open"
@@ -8694,6 +8821,7 @@ def launch(argv, floor_by=None):
     # FLOOR_BY: the floor that chose the mode of this start (the launch below), for MODES.check (--ask allow).
     # --preset NAME: its options right after the agent (the command line wins), its first task as the agent's
     # arguments; then everything is checked as if typed.
+    import uuid
     preset_notes = []
     argv, preset_mode = load_presets_module().apply(canonical_options(list(argv)), canonical=canonical_options,
                                                     with_mode=True, notes=preset_notes)
@@ -8873,8 +9001,10 @@ def launch(argv, floor_by=None):
             where = str(Path(found).resolve(strict=True).parent)
             if not where.startswith("/usr/") and where not in a.runtime:
                 a.runtime.append(where)
+    own = own_folders(a)
     for workspace in a.workspaces:
-        prepare_workspace(workspace)
+        prepare_workspace(workspace, warn=Path(os.path.normpath(Path(workspace).expanduser().absolute())).resolve()
+                          not in own)
     for private in (a.log_dir, a.gui_vnc, a.tmux_socket_dir, a.mcp_socket_dir, a.mcp_approvals_dir):
         if private:
             private.expanduser().mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -8883,10 +9013,14 @@ def launch(argv, floor_by=None):
         print("agent-sandbox: warning: --gui-wayland gives the agent access to your Wayland compositor "
               "(its windows appear on your desktop).", file=sys.stderr)
     if a.mcp and not a.probe:
-        # Each MCP server runs in its own sandbox and outlives this one.
+        # Each MCP server runs in its own sandbox and outlives this one. With --vpn, those that reach the network
+        # run behind this start's VPN too (their own VPN where they have one; with Tor, Tor only): a server outside
+        # it reached the internet from your own address.
         mcp = load_mcp_module()
-        for name in dict.fromkeys(a.mcp):
-            mcp.ensure_running(name, a)
+        names = list(dict.fromkeys(a.mcp))
+        behind = mcp.vpn_for_servers(a, names)
+        for name in names:
+            mcp.ensure_running(name, a, vpn=behind.get(name))
     hosts = None
     remembered = [name for name in getattr(a, "remembered_hosts", []) if name in allowed_hosts(a)]
     if not a.vpn:  # with --vpn the names are resolved through the tunnel, once it is up (below)
@@ -8951,7 +9085,7 @@ def launch(argv, floor_by=None):
             cleanup.callback(a.canary_plan.drain)  # before the control directory goes: what is left is read
         device_watch = start_devices(a)
         history_event(a, "start")
-        if asking(a):
+        if host_browser(a):  # behind Tor no URL goes to your browser: it would reach it from your own address
             a.browser_dir = a.control_dir.with_name(a.control_dir.name + ".browser")
             a.browser_dir.mkdir(mode=0o700, exist_ok=True)
             cleanup.callback(shutil.rmtree, a.browser_dir, True)
@@ -8982,9 +9116,9 @@ def launch(argv, floor_by=None):
                "pinned": [*hosts, *a.llm_pins], "wildcards": host_wildcards(a), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
                          *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else [],
                # macOS: the sandbox runs in podman machine's VM (runtime.VM_CONTROL_DIR, PortRelay's upstream).
-               **({"machine": {"host": machine_host(), "browser": asking(a)}} if on_machine(a) else {})}
+               **({"machine": {"host": machine_host(), "browser": host_browser(a)}} if on_machine(a) else {})}
         resolv, nsswitch = resolver_files(a)
-        files = {"config.json": json.dumps(cfg), "hosts": hosts_file({**hosts, **a.llm_pins}),
+        files = {"config.json": json.dumps(cfg), "hosts": hosts_file({**hosts, **a.llm_pins}, own_host_names(a)),
                  "resolv.conf": resolv, "nsswitch.conf": nsswitch,
                  "passwd": "root:x:0:0:Sandbox:/root:/bin/bash\n", "group": "root:x:0:\n",
                  "firewall.nft": firewall_rules(a.allow, [addr for values in hosts.values() for addr in values]
@@ -8994,6 +9128,7 @@ def launch(argv, floor_by=None):
                                                 proxy={"port": PROXY_PORT, "loopback": host_ports(a)}
                                                 if log_name else None, vpn_mark=getattr(a, "vpn_mark", None),
                                                 vpn_rules=getattr(a, "vpn_firewall", ()),
+                                                check_mark=getattr(a, "vpn_check_mark", None),
                                                 machine_host=machine_host() if on_machine(a) else None)}
         if gui_config(a):
             files["gui.json"] = json.dumps(gui_config(a))
@@ -9022,11 +9157,11 @@ def launch(argv, floor_by=None):
             # --ask allow: answered here at once, nobody is notified (a canary's alarm still is).
             threading.Thread(target=approvals.watch, args=(a.control_dir / "approvals", watching),
                              kwargs={"auto": True, "interval": 0.2} if asks_nobody(a) else {}, daemon=True).start()
-        if asking(a) and on_machine(a):
+        if host_browser(a) and on_machine(a):
             threading.Thread(target=approvals.serve_browser_files,
                              args=(a.control_dir / RUNTIME.BROWSER_REQUESTS, a.control_dir / "approvals", watching),
                              kwargs={"auto": asks_nobody(a)}, daemon=True).start()
-        elif asking(a):
+        elif host_browser(a):
             threading.Thread(target=approvals.serve_browser, args=(a.browser_dir / "open.sock",
                                                                    a.control_dir / "approvals", watching),
                              kwargs={"auto": asks_nobody(a)}, daemon=True).start()

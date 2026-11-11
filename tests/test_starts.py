@@ -1119,6 +1119,40 @@ def test_list_puts_a_helper_below_its_lead(tmp_path, terminal):
         "mcp-legacy": "claude-lead0001"}
 
 
+def test_list_puts_a_teams_members_below_its_lead(tmp_path, terminal):
+    """User report: the members of a team (sandbox-ai team) and its board stood apart, as if they belonged to no
+    agent. The board below the lead it was started for, the other members below the lead too ("lead": its name, read
+    from the team's record); without a record (damaged, another team's name) a member stands on its own."""
+    team = st.module("team")
+    record = team.record_path("rev")
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"version": 1, "name": "rev", "members": ["claude", "codex"], "lead": "claude",
+                                  "workspace": "/w", "options": []}))
+    make_start("rev-claude", tmp_path, pid=41, options=["--mcp", "team-rev"])
+    make_start("rev-codex", tmp_path, pid=42, options=["--mcp", "team-rev"])
+    make_start("work", tmp_path, pid=43, options=["--mcp", "team-rev"])  # not of its name: no member
+    register("session-rev-claude", start="rev-claude", mcp_servers=["team-rev"])
+    make_mcp(tmp_path, "team-rev", pid=44, started_for={"start": "rev-claude", "run": "session-rev-claude"})
+    found = {e["name"]: e for e in listed()}
+    assert found["rev-codex"]["lead"] == "rev-claude" and found["rev-codex"]["listed_under"] == "rev-claude"
+    assert found["rev-claude"]["lead"] is None and found["rev-claude"]["listed_under"] is None
+    assert found["work"]["lead"] is None and found["work"]["listed_under"] is None
+    assert found["mcp-team-rev"]["listed_under"] == "rev-claude" and found["mcp-team-rev"]["owner_recorded"] is True
+    assert names_shown(shown(["list", "--no-color"]))[:3] == ["rev-claude", "├─ rev-codex", "└─ mcp-team-rev"]
+    record.write_text("{damaged")
+    found = {e["name"]: e for e in listed()}
+    assert found["rev-codex"]["lead"] is None and found["rev-codex"]["listed_under"] is None
+
+
+def test_an_mcp_server_says_whether_it_recorded_its_start():
+    """owner_recorded: its mcp.json has started_for (null: started on its own); not before 0.1.78, whose servers the
+    app places by their start time."""
+    make_mcp(None, "alone", started_for=None)
+    make_mcp(None, "legacy")
+    found = {e["name"]: e for e in listed(["--all"])}
+    assert found["mcp-alone"]["owner_recorded"] is True and found["mcp-legacy"]["owner_recorded"] is False
+
+
 def test_list_flat_is_the_table_of_before(tmp_path, terminal):
     """--flat: one row per entry in the listed order, exactly the table of earlier versions (colour aside)."""
     a_registry(tmp_path)

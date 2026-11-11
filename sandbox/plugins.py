@@ -150,7 +150,13 @@ def sync(options=(), update=False, out=None, runner=None, builtin=(), marketplac
         if plugin.split("@")[1] not in known:
             continue  # its marketplace failed above
         out(f"sandbox-ai plugins: installing {plugin}")
-        run_in_store(["install", plugin], options, source, runner)
+        if run_in_store(["install", plugin], options, source, runner) != 0 and not update:
+            # Claude installs from its copy of the marketplace's plugin list; one fetched by an older version may
+            # lack the plugin. Refreshed once, then tried again.
+            name = plugin.split("@")[1]
+            out(f"sandbox-ai plugins: updating the marketplace {name} and trying {plugin} again")
+            run_in_store(["marketplace", "update", name], options, [marketplaces[name]], runner)
+            run_in_store(["install", plugin], options, source, runner)
     known, installed = k.installed()
     missing = [p for p in plugins if p not in installed] + [f"marketplace {m}" for m in marketplaces if m not in known]
     if missing:

@@ -183,7 +183,9 @@ def test_mcp_names_validated():
 def test_launcher_starts_missing_servers_before_the_sandbox(tmp_path, monkeypatch):
     order = []
     module = Mock()
-    module.ensure_running.side_effect = lambda name, a: order.append(("ensure", name))
+    module.ensure_running.side_effect = lambda name, a, vpn=None: order.append(("ensure", name))
+    module.definitions.return_value = {"demo": {}, "fs": {}}
+    module.vpn_for_servers.side_effect = lambda a, names: {name: None for name in names}
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/" + n)
@@ -193,10 +195,34 @@ def test_launcher_starts_missing_servers_before_the_sandbox(tmp_path, monkeypatc
 
 
 def test_dry_run_lists_mcp_without_starting(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(s, "load_mcp_module", Mock(side_effect=AssertionError("must not start")))
+    module = Mock()
+    module.ensure_running.side_effect = AssertionError("must not start")
+    module.definitions.side_effect = m.definitions
+    monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     s.main(["codex", "--mcp", "demo", "--dry-run"])
     plan = json.loads(capsys.readouterr().out)
     assert plan["mcp"] == [{"name": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock")}]
+
+
+def test_an_unknown_server_is_refused_before_anything_starts_a_dry_run_too(tmp_path, monkeypatch):
+    """Regression ("Unknown MCP server: search; defined: demo, yara" at every resume): a start that names a server
+    no catalog defines is refused by its checks - its dry run too, so that a check on another host says it - not deep
+    in the start, after a session was saved that then failed the same way at every resume."""
+    module = Mock()
+    module.ensure_running.side_effect = AssertionError("must not start")
+    module.definitions.side_effect = m.definitions
+    monkeypatch.setattr(s, "load_mcp_module", lambda: module)
+    project = tmp_path / "research"
+    project.mkdir()
+    (project / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "mcp_servers": {
+        "search": {"command": ["uvx", "duckduckgo-mcp-server"]}}}))
+    for extra in ([], ["--dry-run"]):
+        with pytest.raises(ValueError, match="Unknown MCP server: search, fetch; defined: demo") as caught:
+            s.main(["codex", "--workspace", str(project), "--no-config", "--no-auth", "--mcp", "search", "--mcp",
+                    "fetch", *extra])
+        # The project file defines search, but the start reads no project file: said, with what to do.
+        assert "defines search, but this start reads no project file there" in str(caught.value)
+        assert "--no-config" in str(caught.value) and "sandbox-ai mcp add" in str(caught.value)
 
 
 # --- host lifecycle (mcp.py) -----------------------------------------------
@@ -1446,3 +1472,202 @@ def test_a_catalog_text_never_makes_another_row_and_full_network_is_said(tmp_pat
     m.add("helper", catalogs=catalog(tmp_path, [{**ENTRY, "name": "helper", "network": "full"}]), pull=False,
           out=out.append, unsigned=True)
     assert any("helper gets the full outside network (its catalog entry asks for it)" in line for line in out)
+
+
+def test_servers_that_reach_the_network_run_behind_the_starts_vpn(tmp_path, monkeypatch):
+    """A start with --vpn: its MCP servers that reach the network are started behind that VPN (a server outside it
+    left from your own address while the agent went through Tor); one with its own VPN keeps it - with Tor it must be
+    Tor too; one without network needs none; a Bubblewrap-only server with network is refused."""
+    import types
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    servers = {"browser": {"image": "ghcr.io/x/playwright@sha256:" + "a" * 64, "network": "full"},
+               "offline": {"image": "ghcr.io/x/yara@sha256:" + "b" * 64},
+               "vpned": {"image": "ghcr.io/x/s@sha256:" + "c" * 64, "network": "full", "vpn": "mullvad"},
+               "torred": {"image": "ghcr.io/x/t@sha256:" + "d" * 64, "network": "full", "vpn": "tor2"},
+               "cmd": {"command": ["python3", "x.py"], "options": []},
+               "cmd-off": {"command": ["python3", "x.py"], "options": ["--offline"]}}
+    monkeypatch.setattr(m, "definitions", lambda project=None: servers)
+    types_of = {"anon": "tor", "tor2": "tor", "mullvad": "wireguard", "home": "wireguard"}
+    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]})
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
+    tor = types.SimpleNamespace(vpn="anon", vpn_profile={"type": "tor"}, project_document=None)
+    assert m.vpn_for_servers(tor, ["browser", "offline", "torred", "cmd", "cmd-off"]) == \
+        {"browser": "anon", "offline": None, "torred": None, "cmd": "anon", "cmd-off": None}
+    with pytest.raises(ValueError, match="not through Tor"):
+        m.vpn_for_servers(tor, ["vpned"])
+    wireguard = types.SimpleNamespace(vpn="home", vpn_profile={"type": "wireguard"}, project_document=None)
+    assert m.vpn_for_servers(wireguard, ["browser", "vpned"]) == {"browser": "home", "vpned": None}
+    assert m.vpn_for_servers(types.SimpleNamespace(vpn=None), ["browser"]) == {"browser": None}
+    servers["bwrap"] = {"rootfs": {"path": "/x", "sha256": "e" * 64}, "network": "full"}
+    with pytest.raises(ValueError, match="Bubblewrap only"):
+        m.vpn_for_servers(tor, ["bwrap"])
+
+
+def test_attach_live_starts_the_server_behind_the_runs_vpn(live, monkeypatch):
+    """`mcp attach NAME START --live` into a run behind Tor: the server goes behind that Tor too (it was started without
+    any VPN, and left from your own address); a server with a VPN of another type is refused."""
+    import types
+    run, _ = live.make(options=("--backend", "podman", "--vpn", "anon"), record={"vpn_profile": "anon", "vpn_type": "tor"})
+    given = []
+    started = m.ensure_running  # the fixture's stand-in
+
+    def ensure_running(name, a, vpn=None):
+        given.append((name, vpn))
+        return started(name, a, vpn)
+    monkeypatch.setattr(m, "ensure_running", ensure_running)
+    types_of = {"anon": "tor", "corp": "wireguard"}
+    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]}, check_name=lambda name: None)
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
+    assert m.attach_live("web-search", "web", out=live.out)["attached"] == "live"
+    assert given == [("web-search", "anon")]
+    defined = json.loads(m.config_file().read_text())
+    m.config_file().write_text(json.dumps({**defined, "other": {"command": ["python3", "-I", "/opt/y.py"],
+                                                                "options": ["--vpn", "corp"]}}))
+    with pytest.raises(ValueError, match="through the VPN corp, not through Tor"):
+        m.attach_live("other", "web", out=live.out)
+    assert given == [("web-search", "anon")]
+
+
+def test_the_vpn_of_a_server_started_for_a_start(tmp_path, monkeypatch):
+    """mcp start NAME --for START [--vpn PROFILE] and mcp attach: the server behind the start's VPN; an explicit
+    --vpn in its place only where it keeps the promise (with a Tor start: Tor)."""
+    import types
+    monkeypatch.setattr(m, "definitions", lambda project=None: {"web": {"command": ["x"], "options": []},
+                                                                 "yara": {"command": ["x"], "options": ["--offline"]}})
+    types_of = {"anon": "tor", "tor2": "tor", "corp": "wireguard"}
+    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]})
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
+    tor = types.SimpleNamespace(vpn="anon", vpn_profile={"type": "tor"}, project_document=None)
+    assert m.server_vpn(tor, "web") == "anon" and m.server_vpn(tor, "yara") is None
+    assert m.server_vpn(tor, "web", "tor2") == "tor2"
+    with pytest.raises(ValueError, match="not a Tor profile"):
+        m.server_vpn(tor, "web", "corp")
+    plain = types.SimpleNamespace(vpn=None, project_document=None)
+    assert m.server_vpn(plain, "web") is None and m.server_vpn(plain, "web", "corp") == "corp"
+
+
+def test_a_server_behind_a_vpn_never_runs_under_bubblewrap_instead(tmp_path, monkeypatch):
+    """Bypass: a catalog server with both forms, started with --backend bwrap, ran its rootfs under Bubblewrap with
+    the full network and dropped the VPN it was given. Now its Podman form runs behind the VPN; one without a Podman
+    form is refused."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    rootfs = {"path": str(tmp_path / "rootfs"), "sha256": "e" * 64}
+    (tmp_path / "rootfs").mkdir()
+    servers = {"both": {"image": "ghcr.io/x/s@sha256:" + "a" * 64, "rootfs": rootfs, "network": "full", "vpn": "anon"},
+               "only": {"rootfs": rootfs, "network": "full", "vpn": "anon"}}
+    monkeypatch.setattr(m, "definitions", lambda project=None: servers)
+    monkeypatch.setattr(m.launcher(), "mcp_gateway", lambda a, name, directory: None)
+    monkeypatch.setattr(m, "check_image_policy", lambda name, definition: None)
+    monkeypatch.setattr(m, "check_image_mounts", lambda name, definition: None)
+    commands = []
+
+    class Started(Exception):
+        pass
+
+    def start_logged(cmd, directory, **options):
+        commands.append(cmd)
+        raise Started
+    monkeypatch.setattr(m, "start_logged", start_logged)
+    import types
+    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": "wireguard"}, check_name=lambda name: None,
+                                     mcp_container=lambda name: f"sandbox-ai-vpn-mcp-{name}")
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
+    a = s.parse_args(["codex", "--backend", "bwrap"])
+    with pytest.raises(Started):
+        m.ensure_running("both", a)
+    assert "--internal-mcp-vpn" in commands[-1] and "bwrap" not in " ".join(commands[-1])
+    with pytest.raises(ValueError, match="Bubblewrap only, where no VPN can be put in front"):
+        m.ensure_running("only", a)
+
+
+def test_a_command_server_put_behind_a_vpn_stops_on_a_failed_check(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "rt"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    servers = {"web": {"command": ["python3", "x.py"], "options": ["--vpn-check", "warn"]}}
+    monkeypatch.setattr(m, "definitions", lambda project=None: servers)
+    monkeypatch.setattr(m.launcher(), "mcp_gateway", lambda a, name, directory: None)
+    monkeypatch.setattr(m.launcher(), "remove_stale_pod", lambda a, pod, sock: False)
+    import types
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: types.SimpleNamespace(check_name=lambda name: None))
+    commands = []
+
+    class Started(Exception):
+        pass
+
+    def start_logged(cmd, directory, **options):
+        commands.append(cmd)
+        raise Started
+    monkeypatch.setattr(m, "start_logged", start_logged)
+    with pytest.raises(Started):
+        m.ensure_running("web", s.parse_args(["codex"]), vpn="anon")
+    cmd = commands[-1]
+    tail = cmd[:cmd.index("--workspace")]
+    # Its own --vpn-check warn comes first; the start's stop after it wins (argparse takes the last).
+    assert tail[-4:] == ["--vpn", "anon", "--vpn-check", "stop"] and tail.index("warn") < tail.index("stop")
+
+
+def test_what_a_server_behind_the_starts_vpn_could_not_start_with_is_refused_up_front(tmp_path, monkeypatch):
+    """--profile offline is no network (as the security modes read it), so no VPN is added: --profile offline --vpn X
+    would fail the server's own start ("conflicts with --offline"). Resolvers of its own (--nameserver) conflict with
+    any VPN; with Tor --no-proxy and the host's ports would fail its start too: all refused before the agent's start."""
+    import types
+    servers = {"off": {"command": ["x"], "options": ["--profile", "offline"]},
+               "off2": {"command": ["x"], "options": ["--profile=offline"]},
+               "ns": {"command": ["x"], "options": ["--nameserver", "9.9.9.9"]},
+               "noproxy": {"command": ["x"], "options": ["--no-proxy"]},
+               "ports": {"command": ["x"], "options": ["--allow-host-port", "3000"]},
+               "ports-ok": {"command": ["x"], "options": ["--allow-host-port", "3000", "--vpn-bypass-host-ports"]}}
+    monkeypatch.setattr(m, "definitions", lambda project=None: servers)
+    types_of = {"anon": "tor", "home": "wireguard"}
+    monkeypatch.setattr(m.launcher(), "load_vpn_module",
+                        lambda: types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]}))
+    tor = types.SimpleNamespace(vpn="anon", vpn_profile={"type": "tor"}, project_document=None)
+    wireguard = types.SimpleNamespace(vpn="home", vpn_profile={"type": "wireguard"}, project_document=None)
+    assert m.vpn_for_servers(tor, ["off", "off2", "ports-ok"]) == {"off": None, "off2": None, "ports-ok": "anon"}
+    for name, match in (("ns", "--nameserver"), ("noproxy", "--no-proxy"), ("ports", "--allow-host-port")):
+        with pytest.raises(ValueError, match=match):
+            m.vpn_for_servers(tor, [name])
+    with pytest.raises(ValueError, match="--nameserver"):
+        m.vpn_for_servers(wireguard, ["ns"])
+    assert m.vpn_for_servers(wireguard, ["noproxy", "ports"]) == {"noproxy": "home", "ports": "home"}
+
+
+def test_a_server_running_without_the_starts_vpn_is_refused_before_a_restart(tmp_path, monkeypatch):
+    """mcp attach NAME START --restart (and mcp start NAME --for START --restart) into a Tor start: a server that runs
+    already outside Tor is refused before the start is stopped, not by the start that follows."""
+    monkeypatch.setattr(m, "status", lambda name: "running")
+    monkeypatch.setattr(m, "load_state", lambda name: {"vpn": None})
+    with pytest.raises(ValueError, match="running without the VPN anon; stop it first"):
+        m.check_running_vpn("web", "anon")
+    m.check_running_vpn("web", None)  # nothing to put it behind
+    monkeypatch.setattr(m, "load_state", lambda name: {"vpn": "anon"})
+    m.check_running_vpn("web", "anon")
+    source = (Path(m.__file__)).read_text()
+    attach = source[source.index("def attach("):source.index("def net_module(")]
+    # The check comes before anything is started or stopped.
+    assert attach.index("check_running_vpn(name, server_vpn(a, name, vpn))") < attach.index("sessions.stop(key)")
+    assert attach.index("check_running_vpn(name, server_vpn(a, name, vpn))") < attach.index("ensure_running(")
+
+
+def test_tors_uid_is_found_as_the_engine_reads_the_image_user(monkeypatch):
+    """Review 2: USER 0950 passed (isdigit, never compared) and a passwd line with leading spaces was skipped while
+    the engine (Go's user package) trims it and takes the first match: both ran the server as tor's uid 950."""
+    class Done:
+        def __init__(self, user):
+            self.stdout, self.returncode = user + "\n", 0
+    for user in ("0950", "0950:0", "+950", "950"):
+        with pytest.raises(ValueError, match="past Tor"):
+            m.check_tor_image_user("x", "img", inspect=lambda u=user: Done(u))
+    with pytest.raises(ValueError, match="uid 950"):
+        m.check_tor_image_user("x", "img", inspect=lambda: Done("svc"),
+                               passwd=lambda: "  svc:x:950:950::/:/bin/sh\nsvc:x:1000:1000::/:/bin/sh\n")
+    m.check_tor_image_user("x", "img", inspect=lambda: Done("1000"))  # another uid passes
+
+
+def test_the_bypass_option_reaches_a_server_only_with_a_vpn_in_front():
+    definition = {"command": ["python3", "s.py"], "options": ["--vpn-bypass-host-ports", "--allow-host-port", "8080"]}
+    assert "--vpn-bypass-host-ports" not in m.server_options(definition, None)
+    assert "--vpn-bypass-host-ports" in m.server_options(definition, "anon")
+    assert m.vpn_conflicts("s", {"command": ["x"], "options": ["--allow-host-port", "8080"]}, "anon", True)
+    assert m.vpn_conflicts("s", definition, "anon", True) is None

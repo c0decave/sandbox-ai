@@ -279,6 +279,28 @@ def test_a_move_leaves_what_appeared_or_changed_after_it_was_copied(places, monk
     assert (host / "sub" / "deeper" / "c.txt").exists()
 
 
+def test_a_move_out_of_a_sandbox_within_one_root_is_a_copy_as_the_agents(places):
+    """A cut in a host folder of a sandbox pasted into an ordinary host folder (one Root("/")): never a plain rename -
+    the copy drops the executable bits and names what tools run, then the source goes."""
+    _, machine, ws, host, _ = places
+    (ws / "Makefile").write_text("all:\n")
+    result = files.move_entry(machine, rel(ws / "run.sh"), machine, rel(host), untrusted=True, target_untrusted=False)
+    assert result.moved and not (ws / "run.sh").exists() and (host / "run.sh").exists()
+    assert not os.access(host / "run.sh", os.X_OK) and result.executable == ["run.sh"]
+    result = files.move_entry(machine, rel(ws / "Makefile"), machine, rel(host), untrusted=True)
+    assert result.moved and result.risky == ["Makefile"], "the target is not a sandbox's: copied (default)"
+    # Within the sandbox's folders (or from the host into one) a move stays a rename.
+    (ws / "into").mkdir()
+    inode = (ws / "a.txt").stat().st_ino
+    files.move_entry(machine, rel(ws / "a.txt"), machine, rel(ws / "into"), untrusted=True, target_untrusted=True)
+    assert (ws / "into" / "a.txt").stat().st_ino == inode
+    (host / "tool").write_text("#!/bin/sh\n")
+    (host / "tool").chmod(0o755)
+    inode = (host / "tool").stat().st_ino
+    files.move_entry(machine, rel(host / "tool"), machine, rel(ws), untrusted=False)
+    assert (ws / "tool").stat().st_ino == inode
+
+
 # -- budgets, cancel, partial cleanup --
 
 def test_copy_budgets_remove_what_the_copy_created(places):

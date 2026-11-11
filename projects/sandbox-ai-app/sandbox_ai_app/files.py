@@ -33,6 +33,12 @@ files it copied unchanged (what the agent added or changed meanwhile stays, and 
 root no set-user-ID, set-group-ID or sticky bit is ever set, and chown goes only to the user and their own
 groups; files a rootless Podman sandbox gave a subordinate UID (/etc/subuid) are taken back with
 take_ownership (podman unshare: inside Podman's user namespace, UID 0 is the user).
+
+The file manager's editor reads a whole file with Root.read_file (a regular file only, at most EDIT_LIMIT bytes) and
+writes it back with Root.write_file: a temporary file in the same folder renamed over the old one, never written
+through a link or a hard link, refused (Changed) when the file is no longer the one that was read unless the human
+said to replace it; its permission bits stay, set-ID and sticky bits do not. Root.measure counts a folder's size for
+the Properties dialog (links counted, never followed; bounded like a delete).
 """
 from __future__ import annotations
 
@@ -58,6 +64,8 @@ LIMIT = 1 << 30  # bytes per copy
 MAX_ENTRIES = 20_000  # files and folders per copy, entries per listing
 MAX_DEPTH = 64  # nested folders per copy
 CHUNK = 1 << 20
+EDIT_LIMIT = 16 << 20  # bytes the editor reads (the hex editor; more: the first part, read-only)
+TEXT_LIMIT = 5 << 20  # bytes the text editor takes (more: the hex editor)
 O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 O_NOCTTY = getattr(os, "O_NOCTTY", 0)
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | O_CLOEXEC
@@ -99,6 +107,33 @@ class Refused(ValueError):
 
 class Cancelled(Refused):
     pass
+
+
+class Changed(Refused):
+    """The file is no longer the one that was read (Root.write_file with expected)."""
+
+
+@dataclass
+class FileData:
+    """A file read for the editor (Root.read_file)."""
+    data: bytes
+    identity: tuple  # (st_dev, st_ino, size, mtime_ns): what Root.write_file(expected=...) checks
+    size: int  # the file's whole size
+    truncated: bool  # it holds more than was read (shown, never saved)
+    mode: int = 0
+
+
+def text_of(data, truncated=False):
+    """DATA decoded as text (str) when it is valid UTF-8 without NUL bytes, else None (binary: the hex editor). A
+    file cut at LIMIT may end inside a character: those last bytes do not count."""
+    if b"\0" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if truncated and exc.start >= len(data) - 3 and exc.reason in ("unexpected end of data",):
+            return data[:exc.start].decode("utf-8")
+        return None
 
 
 def printable(text):
@@ -557,6 +592,153 @@ class Root:
             return os.read(fd, limit)
         finally:
             os.close(fd)
+
+    def stat_entry(self, relative):
+        """lstat of RELATIVE (a link itself, never what it points to); "" is the root's own folder."""
+        if not parts(relative):
+            fd = self.open_dir("")
+            try:
+                return os.fstat(fd)
+            finally:
+                os.close(fd)
+        return self.lstat(relative)
+
+    def readlink(self, relative):
+        """Where the link RELATIVE points (read, never followed)."""
+        parent, name = self._parent(relative)
+        try:
+            return os.readlink(name, dir_fd=parent)
+        finally:
+            os.close(parent)
+
+    # -- the editor: a whole file in, a whole file back --
+
+    def read_file(self, relative, limit=None):
+        """FileData of the regular file RELATIVE (opened without following a link, never a FIFO or device): at most
+        LIMIT (default EDIT_LIMIT) bytes (FileData.truncated when it holds more)."""
+        limit = EDIT_LIMIT if limit is None else limit
+        parent, name = self._parent(relative)
+        try:
+            fd, info = _open_regular(name, parent)
+        finally:
+            os.close(parent)
+        try:
+            chunks, size = [], 0
+            while size <= limit:
+                chunk = os.read(fd, min(CHUNK, limit + 1 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            data = b"".join(chunks)
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        truncated = len(data) > limit
+        return FileData(data[:limit], _identity(after), after.st_size, truncated, info.st_mode)
+
+    def write_file(self, relative, data, expected=None):
+        """Write DATA as the file RELATIVE: through a temporary file in its folder that is then renamed over it (never
+        written through a link or a hard link the agent put there; a write cut short leaves the file as it was). Its
+        permission bits stay (no set-user-ID, set-group-ID or sticky bit). EXPECTED (FileData.identity of what was
+        read): if the file is no longer that (changed, replaced or removed meanwhile), Changed is raised and nothing
+        is written. Returns the identity of the file written."""
+        parent, name = self._parent(relative)
+        try:
+            try:
+                now = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                now = None
+            if now is not None and stat.S_ISLNK(now.st_mode):
+                raise Refused(tr("{name} is a symbolic link; links are not followed.", name=printable(name)))
+            if now is not None and not stat.S_ISREG(now.st_mode):
+                raise Refused(tr("{name} is not a regular file.", name=printable(name)))
+            if expected is not None and (now is None or _identity(now) != tuple(expected)):
+                raise Changed(tr("{name} changed since it was opened.", name=printable(name)))
+            temporary = _temporary_name()
+            fd = _create(temporary, parent, 0o600 if now is not None else 0o666)  # (a new file: the umask applies)
+            try:
+                key = _register_partial(parent, temporary)
+            except BaseException:
+                os.close(fd)
+                os.unlink(temporary, dir_fd=parent)
+                raise
+            try:
+                try:
+                    written = os.fstat(fd)
+                    view = memoryview(bytes(data))
+                    while view:
+                        view = view[os.write(fd, view):]
+                    if now is not None:
+                        os.fchmod(fd, stat.S_IMODE(now.st_mode) & 0o777)
+                finally:
+                    os.close(fd)
+                if expected is not None:  # (once more, right before: the agent may write meanwhile)
+                    try:
+                        again = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except FileNotFoundError:
+                        again = None
+                    if again is None or _identity(again) != tuple(expected):
+                        raise Changed(tr("{name} changed since it was opened.", name=printable(name)))
+                _place(temporary, name, parent, True, (written.st_dev, written.st_ino))
+            except BaseException:
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                raise
+            finally:
+                _forget_partial(key)
+            return _identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+        finally:
+            os.close(parent)
+
+    def measure(self, relative, entries=WALK_ENTRIES, cancelled=None):
+        """The size of the file or folder RELATIVE ("" the root's folder) with all it holds: Result.bytes, .files and
+        .directories. Links are counted, never followed; at most ENTRIES entries and MAX_DEPTH nested folders (then
+        Refused, with what was counted so far on its .partial)."""
+        budget, result = Budget(0, entries, cancelled, TOO_MANY_WALK), Result()
+        try:
+            if not parts(relative):
+                fd = self.open_dir("")
+                try:
+                    result.directories += 1
+                    self._measure_folder(fd, budget, result, 0)
+                finally:
+                    os.close(fd)
+            else:
+                parent, name = self._parent(relative)
+                try:
+                    self._measure(parent, name, budget, result, 0)
+                finally:
+                    os.close(parent)
+        except (OSError, ValueError) as exc:
+            exc.partial = result
+            raise
+        return result
+
+    def _measure(self, dir_fd, name, budget, result, depth):
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        budget.entry()
+        if stat.S_ISDIR(info.st_mode):
+            if depth >= MAX_DEPTH:
+                raise Refused(tr("Folders nested more than {count} deep are not counted.", count=MAX_DEPTH))
+            result.directories += 1
+            fd = self._open_child_dir(dir_fd, name)
+            try:
+                self._measure_folder(fd, budget, result, depth)
+            finally:
+                os.close(fd)
+        else:
+            result.files += 1
+            result.bytes += info.st_size if stat.S_ISREG(info.st_mode) else 0
+
+    def _measure_folder(self, fd, budget, result, depth):
+        for child in _names(fd, budget):
+            self._measure(fd, child, budget, result, depth + 1)
 
     # -- copying out --
 
@@ -1110,13 +1292,18 @@ def _fill_folder(source, source_fd, target, target_parent, name, shown, overwrit
 
 
 def move_entry(source, relative, target, target_dir="", overwrite=False, untrusted=None, limit=LIMIT,
-               entries=MAX_ENTRIES, cancelled=None, progress=None):
+               entries=MAX_ENTRIES, cancelled=None, progress=None, target_untrusted=None):
     """Move the file or folder RELATIVE of SOURCE into TARGET_DIR of TARGET. Within one root: renamed (an
-    existing name only replaced with OVERWRITE, and only a file by a file). Otherwise copied (copy_entry), and
+    existing name only replaced with OVERWRITE, and only a file by a file) - unless what an agent may have written
+    (UNTRUSTED, default SOURCE.sandbox) goes where none writes (TARGET_UNTRUSTED False, default TARGET.sandbox: the
+    host's Root("/") from a sandbox's folder to an ordinary one): that is copied as the agent's (never executable,
+    the files tools run named) like a move between roots. Otherwise copied (copy_entry), and
     the source is removed only when the copy is complete - nothing skipped, nothing changed while it was
     copied, not cancelled - and then only the files copied unchanged and the folders walked (Result.left:
     what stayed because it appeared or changed meanwhile; Result.kept: why the source was kept)."""
-    if source.path == target.path and source.sandbox == target.sandbox:
+    untrusted = source.sandbox if untrusted is None else untrusted
+    target_untrusted = target.sandbox if target_untrusted is None else target_untrusted
+    if source.path == target.path and source.sandbox == target.sandbox and (target_untrusted or not untrusted):
         moved = _rename_within(source, relative, target_dir, overwrite)
         if moved is not None:
             return moved

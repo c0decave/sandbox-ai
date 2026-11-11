@@ -111,6 +111,32 @@ def package_update_check(kind, rest):
     return result.returncode
 
 
+# The agents' launcher keeps a process of its own (python -I agent_sandbox.py AGENT ...): net, the app and the
+# sessions recognise a running start by that command line in /proc.
+EXECUTED = ("agent_sandbox.py",)
+
+
+def executed_script(script):
+    """The file that runs SCRIPT in a process of its own: launcher/agent_sandbox.py, which runs agent_sandbox.py from
+    its cached bytecode under the same name (a script Python runs itself is compiled anew: 55 ms of every start);
+    SCRIPT itself in a copy without it."""
+    stub = HERE / "launcher" / script
+    return stub if stub.is_file() else HERE / script
+
+
+def run_script(path, args):
+    """Runs the command script PATH as __main__ with ARGS in this process, as `python -I PATH ARGS` would (the
+    same interpreter, flags and environment) - without a second interpreter start, and from its cached bytecode
+    (__pycache__, written by install.sh's compileall) instead of compiling it anew: what the app's polls, which
+    run a command every few seconds, wait for. Its exit status is the script's (sys.exit), 0 when it just ends."""
+    spec = importlib.util.spec_from_file_location("__main__", path)
+    script = importlib.util.module_from_spec(spec)
+    sys.argv = [str(path), *args]
+    sys.modules["__main__"] = script
+    spec.loader.exec_module(script)
+    return 0
+
+
 def module(name):
     spec = importlib.util.spec_from_file_location(f"sandbox_{name}_for_main", HERE / f"{name}.py")
     loaded = importlib.util.module_from_spec(spec)
@@ -250,7 +276,9 @@ def main(argv):
         return 0
     if command in PYTHON_COMMANDS:
         script, *prefix = PYTHON_COMMANDS[command]
-        os.execv(sys.executable, [sys.executable, "-I", str(HERE / script), *prefix, *rest])
+        if script in EXECUTED:
+            os.execv(sys.executable, [sys.executable, "-I", str(executed_script(script)), *prefix, *rest])
+        return run_script(HERE / script, [*prefix, *rest])
     if command == "build":
         os.environ["SANDBOX_AI_PYTHON"] = sys.executable  # the extension layers are built by images.py
         bash(HERE / "build_image.sh", rest)

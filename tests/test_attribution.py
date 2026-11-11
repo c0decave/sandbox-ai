@@ -285,7 +285,7 @@ def test_a_refused_connection_names_its_process_and_what_it_sent(tmp_path, pki, 
 def test_a_supervisor_that_does_not_answer_holds_nothing(tmp_path, pki, monkeypatch):  # noqa: F811
     """The lookup is slow or lost: the refusal reaches the agent at once, the record says unknown."""
     monkeypatch.setattr(rt, "ATTRIBUTION_WAIT", 0.3)
-    monkeypatch.setattr(rt, "REFUSAL_WAIT", 0.05)  # production's value: this test is about not waiting longer
+    monkeypatch.setattr(rt, "REFUSAL_WAIT", 0.05)  # a short wait: this test is about not waiting longer
     silent, _ = socket.socketpair()  # nobody answers at the other end
     upstream = tp.serve(tp.Handler)
     p = proxy(tmp_path, pki, upstream.server_address[1], {"allow": {"loopback": []}}, who=rt.AskChannel(silent))
@@ -426,8 +426,9 @@ def test_a_refused_lookup_names_the_process(tmp_path, monkeypatch):
 
         def sendto(self, data, peer):
             sent.append(peer)
+            looked_up.append(list(who.calls))  # who asked is looked up before the refusal goes out
     monkeypatch.setattr(rt.socket, "socket", Sock)
-    asked, who = [], Who()
+    asked, who, looked_up = [], Who(), []
 
     class Broker:
         def ask(self, kind, details, wait=True):
@@ -436,7 +437,9 @@ def test_a_refused_lookup_names_the_process(tmp_path, monkeypatch):
         rt.dns_logger(set(), broker=Broker(), who=who)
     record = json.loads((tmp_path / "egress-denied.jsonl").read_text())
     assert record["host"] == "evil.example" and record["process"]["comm"] == "curl" and record["sandbox"] == SANDBOX
-    assert sent == [("10.0.2.100", 53000)] and who.calls == [("udp", "10.0.2.100", 53000)]  # answered, then looked up
+    assert sent == [("10.0.2.100", 53000)] and who.calls == [("udp", "10.0.2.100", 53000)]
+    # Looked up, then answered: once the refusal is out the client closes its socket and nothing names it.
+    assert looked_up == [[("udp", "10.0.2.100", 53000)]]
     assert asked[0][1]["process"]["pid"] == 30
 
 

@@ -74,6 +74,15 @@ ECHO_LIMIT = 64 << 10
 # checks.recheck, 0: never): a provider's exit that moved, a tunnel that stalls, show during the run, not only at
 # its start.
 RECHECK = 600
+# With a Tor profile the first check during the run comes this soon after the start (seconds): it sees the namespace
+# with the agent's own firewall in place, not only as it was before the agent started.
+FIRST_RECHECK = 60
+# The checks' own sockets carry this mark once the container serves (serve, check, resolve): the agent's firewall in
+# the same namespace (agent_sandbox.firewall_rules) lets them pass unredirected, so that a check during the run
+# measures the tunnel, not the agent's connection proxy or its allow-list. Setting a mark needs CAP_NET_ADMIN, which
+# neither the agent nor the proxy has; the kill switch treats a marked check like any other packet (only MARK, the
+# tunnel's own, and tailscaled's mark are let past it), so it leaves through the tunnel, or through Tor.
+CHECK_MARK = 0xca6d
 REQUEST_LIMIT = 8 << 20  # the body of an answer to a request of the launcher (llm check|models through the VPN)
 REQUEST_TIMEOUT = 10
 SERVE_STATE = RUN / "serve.json"  # what `resolve` (podman exec during a run) needs of the tunnel: its resolvers
@@ -171,7 +180,7 @@ def dns_lookup(name, server, qtype, timeout=4.0, port=53):
     packet = dns_query_packet(name, qtype, ident)
     family = socket.AF_INET6 if ipaddress.ip_address(server).version == 6 else socket.AF_INET
     deadline = time.monotonic() + timeout
-    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+    with check_socket(family, socket.SOCK_DGRAM) as sock:
         sock.connect((server, port))
         sock.send(packet)
         while True:
@@ -182,7 +191,7 @@ def dns_lookup(name, server, qtype, timeout=4.0, port=53):
             if len(data) >= 4 and struct.unpack("!H", data[:2])[0] == ident:
                 break  # anything else is a stray or spoofed packet: keep waiting
     if struct.unpack("!H", data[2:4])[0] & 0x0200:  # truncated: ask again over TCP
-        with socket.create_connection((server, port), timeout=max(deadline - time.monotonic(), 0.5)) as sock:
+        with check_connection((server, port), timeout=max(deadline - time.monotonic(), 0.5)) as sock:
             sock.sendall(struct.pack("!H", len(packet)) + packet)
             length = struct.unpack("!H", read_exact(sock, 2))[0]
             data = read_exact(sock, length)
@@ -231,6 +240,43 @@ def system_resolver(name, family):
 
 # --- the address echo: who the internet thinks we are, over IPv4 and IPv6 separately -------------------------
 
+_check_mark = None  # CHECK_MARK once use_check_mark() ran (the serving container), else None
+
+
+def use_check_mark(mark=CHECK_MARK):
+    """Mark the checks' sockets from now on (in the VPN container, which has CAP_NET_ADMIN)."""
+    global _check_mark
+    _check_mark = mark
+
+
+def check_socket(family, kind):
+    """A socket for a check: marked with CHECK_MARK when use_check_mark() ran. A mark that cannot be set (no
+    CAP_NET_ADMIN: a plain container for the baseline) leaves it unmarked."""
+    sock = socket.socket(family, kind)
+    if _check_mark is not None:
+        with contextlib.suppress(OSError):
+            sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), _check_mark)
+    return sock
+
+
+def check_connection(address, timeout=None):
+    """socket.create_connection for the IP literal ADDRESS (address, port), through check_socket."""
+    host, port = address[0], int(address[1])
+    try:
+        family = socket.AF_INET6 if ipaddress.ip_address(host.split("%")[0]).version == 6 else socket.AF_INET
+    except ValueError:  # a name (only in tests: the checks connect to the addresses they resolved)
+        return socket.create_connection((host, port), timeout)
+    sock = check_socket(family, socket.SOCK_STREAM)
+    try:
+        if timeout is not None:
+            sock.settimeout(timeout)
+        sock.connect((host, port))
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
 class PinnedHTTPConnection(http.client.HTTPConnection):
     """HTTP to ADDRESS, whatever the host name resolves to elsewhere (the name came from our own resolver)."""
 
@@ -239,7 +285,7 @@ class PinnedHTTPConnection(http.client.HTTPConnection):
         self.address = address
 
     def connect(self):
-        self.sock = socket.create_connection((self.address, self.port), self.timeout)
+        self.sock = check_connection((self.address, self.port), self.timeout)
 
 
 class PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -251,7 +297,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.tls = context
 
     def connect(self):
-        sock = socket.create_connection((self.address, self.port), self.timeout)
+        sock = check_connection((self.address, self.port), self.timeout)
         self.sock = self.tls.wrap_socket(sock, server_hostname=self.host)
 
 
@@ -679,11 +725,11 @@ def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
                     "trans_port": f"127.0.0.1:{TOR_TRANS_PORT}"}}
 
 
-def probe_ipv6(timeout, connect=socket.create_connection):
+def probe_ipv6(timeout, connect=None):
     """Behind Tor there is no IPv6 resolver to ask an echo service with: a connection to a literal IPv6 address
     must fail locally. {"error", "kind": "blocked"|"failed"}, or {"ip", ...} when it connected (a leak)."""
     try:
-        sock = connect((IPV6_PROBE, 443), timeout)
+        sock = (connect or check_connection)((IPV6_PROBE, 443), timeout)
     except OSError as exc:
         blocked = exc.errno in BLOCKED_ERRNOS or isinstance(exc, (socket.timeout, TimeoutError))
         return {"error": exc.strerror or str(exc), "kind": "blocked" if blocked else "failed"}
@@ -1221,7 +1267,10 @@ def baseline_command(stdin, out):
 
 def resolve_command(stdin, out, path=None):
     """`vpn_runtime.py resolve`, run by the launcher with podman exec in the running VPN container: the names on
-    standard input (a JSON list) resolved through the tunnel's resolvers, {"hosts": {...}} or {"error"} on stdout."""
+    standard input (a JSON list) resolved through the tunnel's resolvers, {"hosts": {...}} or {"error"} on stdout.
+    Its lookups are marked as the checks' are: the agent's firewall in the namespace does not hold them (tor's
+    DNSPort is closed to the agent without --dns)."""
+    use_check_mark()
     try:
         state = json.loads(Path(path or SERVE_STATE).read_text())
         names = json.loads(stdin.read(1 << 16))
@@ -1247,6 +1296,7 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
         return 2
     payload = json.loads(stdin.readline())
     runner = runner or Runner()
+    use_check_mark()  # the agent's firewall, loaded later in this namespace, lets the checks pass to the tunnel
     try:
         kind = payload["profile"]["type"]
         emit("progress", out=out, message=f"bringing up {kind}")
@@ -1275,7 +1325,8 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
     save_serve_state(tunnel, tailnet)
     checks_of = payload.get("checks") or {}
     every = float(checks_of.get("recheck", RECHECK) or 0) if not tailnet and checks_of.get("ip", True) else 0
-    due = time.monotonic() + every
+    first = float(checks_of.get("first_recheck") or every)
+    due = time.monotonic() + min(every, first)
     secrets_of = secret_values(payload)
     while True:
         ready = select.select([stdin], [], [], max(0.0, min(2.0, due - time.monotonic())) if every else 2)[0]

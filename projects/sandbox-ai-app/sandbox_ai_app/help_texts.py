@@ -327,13 +327,17 @@ AREA_TIPS = (
           "antwortete, sind ausgegraut (zuletzt vor N s gesehen) und lassen sich nicht bedienen."),
          ("Select a start for its details and the buttons that act on it; a host's row and what hangs below a "
           "start have no buttons (a double-click opens the row it stands for). Which groups are open is kept; "
-          "View › Fold all sections and Unfold all sections close or open them all. The hosts are read about "
-          "every 10 seconds while the page is shown, every minute otherwise.",
+          "View › Fold all sections and Unfold all sections close or open them all. Ctrl+click adds a row, "
+          "Shift+click a range: Stop, Pause, Resume and Delete then act on each selected start they can act on "
+          "(one question names them), the other buttons wait for one row. The hosts are read about every 10 "
+          "seconds while the page is shown, every minute otherwise.",
           "Wählen Sie einen Start für seine Details und die Knöpfe, die auf ihn wirken; die Zeile eines Hosts und "
           "was unter einem Start hängt, haben keine Knöpfe (ein Doppelklick öffnet die Zeile, für die es steht). "
           "Welche Gruppen offen sind, bleibt erhalten; Ansicht › Alle Abschnitte einklappen und Alle Abschnitte "
-          "ausklappen schließen oder öffnen alle. Die Hosts werden etwa alle 10 Sekunden gelesen, solange die "
-          "Seite zu sehen ist, sonst jede Minute."),
+          "ausklappen schließen oder öffnen alle. Strg+Klick fügt eine Zeile hinzu, Umschalt+Klick einen "
+          "Bereich: Stoppen, Pausieren, Fortsetzen und Löschen wirken dann auf jeden gewählten Start, bei dem es "
+          "geht (eine Rückfrage nennt sie), die übrigen Knöpfe warten auf eine Zeile. Die Hosts werden etwa alle 10 "
+          "Sekunden gelesen, solange die Seite zu sehen ist, sonst jede Minute."),
          "sandbox-ai list", "sessions"),
     _tip("sandboxes.only_project", ("Only the current project", "Nur das aktuelle Projekt"),
          ("Limits the list to the sandboxes and sessions of the project open now.",
@@ -372,9 +376,10 @@ AREA_TIPS = (
           "Liste inzwischen geändert hat. Sie warten, solange ein Befehl läuft."),
          "sandbox-ai rename OLD NEW, sandbox-ai list --history NAME, sandbox-ai gc --dry-run", "page-sandboxes"),
     _tip("sandboxes.stop", ("Stop", "Stoppen"),
-         ("Ends the selected sandbox after asking; its launcher cleans up. A session can be paused instead.",
-          "Stoppt die gewählte Sandbox nach Rückfrage; ihr Launcher räumt auf. Eine Sitzung lässt sich "
-          "stattdessen pausieren."),
+         ("Ends the selected sandbox after asking (several selected: each of them, after one question); its "
+          "launcher cleans up. A session can be paused instead.",
+          "Stoppt die gewählte Sandbox nach Rückfrage (mehrere gewählt: jede davon, nach einer Rückfrage); ihr "
+          "Launcher räumt auf. Eine Sitzung lässt sich stattdessen pausieren."),
          None, "sandbox-ai stop NAME", "sessions"),
     _tip("sandboxes.live", ("While it runs", "Während sie läuft"),
          ("Changes for a running sandbox: allow or revoke a host, hand over a device, change the limits, show "
@@ -506,9 +511,12 @@ AREA_TIPS = (
           "Der linke Bereich: die Dateien des gewählten Sandbox-Ordners; der rechte Bereich: dieser Rechner. Links "
           "werden mit ihrem Ziel gezeigt, aber nie verfolgt."),
          ("Copy (F5) or Move (F6) what is selected in one pane into the other pane's folder: no mount is needed. "
-          "Tab switches panes.",
+          "Tab switches panes. Drag items into the other pane or onto a folder (Shift: move); a double click opens "
+          "a file in the editor (text or hex); a right click shows Copy, Cut, Paste, Rename, Properties and more.",
           "Kopieren (F5) oder Verschieben (F6) bringt das in einem Bereich Gewählte in den Ordner des anderen "
-          "Bereichs: Es braucht keine Einbindung. Tab wechselt den Bereich."),
+          "Bereichs: Es braucht keine Einbindung. Tab wechselt den Bereich. Ziehen Sie Einträge in den anderen "
+          "Bereich oder auf einen Ordner (Umschalt: verschieben); ein Doppelklick öffnet eine Datei im Editor (Text "
+          "oder Hex); ein Rechtsklick zeigt Kopieren, Ausschneiden, Einfügen, Umbenennen, Eigenschaften und mehr."),
          "", "page-files"),
     _tip("files.replace", ("Replace existing files", "Vorhandene Dateien ersetzen"),
          ("Allows a copy to overwrite a file of the same name; off, nothing is ever replaced.",
@@ -535,10 +543,13 @@ AREA_TIPS = (
           "freigegeben haben."),
          ("A changed hook needs approval again.", "Ein geänderter Hook braucht erneut eine Freigabe."),
          "sandbox-ai kits trust-hooks", "kits"),
-    _tip("kits.skill", ("New skill", "Neuer Skill"),
-         ("A SKILL.md in a kit of yours, which the agent reads when its description fits the task.",
-          "Eine SKILL.md in einem Ihrer Kits, die der Agent liest, wenn ihre Beschreibung zur Aufgabe passt."),
-         None, "sandbox-ai kits new-skill", "kits"),
+    _tip("kits.add", ("Add to the kit", "Zum Kit hinzufügen"),
+         ("A skill (a SKILL.md the agent reads when its description fits the task), a plugin, a marketplace or a hook "
+          "into a kit of yours. A plugin added here is only declared: Install the kits' plugins downloads it.",
+          "Ein Skill (eine SKILL.md, die der Agent liest, wenn ihre Beschreibung zur Aufgabe passt), ein Plugin, ein "
+          "Marktplatz oder ein Hook in eines Ihrer Kits. Ein hier hinzugefügtes Plugin ist nur angegeben: Plugins der "
+          "Kits installieren lädt es."),
+         None, "sandbox-ai kits add-skill, new-skill, add-plugin", "kits"),
     # MCP servers
     _tip("mcp.servers", ("Your MCP servers", "Ihre MCP-Server"),
          ("The servers you defined, each in a sandbox or container of its own with only the network and folders "
@@ -848,7 +859,7 @@ PLACES = {
     "files": (("roots", "files.roots", "after"), ("table", "files.table", "corner"),
               ("replace", "files.replace", "after")),
     "kits": (("table", "kits.table", "group"), ("use_button", "kits.use", "after"),
-             ("trust_button", "kits.hooks", "after"), ("new_skill_button", "kits.skill", "after")),
+             ("trust_button", "kits.hooks", "after"), ("add_menu_button", "kits.add", "after")),
     "mcp": (("servers", "mcp.servers", "group"), ("catalog", "mcp.catalog", "group")),
     "llm": (("host_box", "llm.host", "after"), ("servers", "llm.servers", "corner"),
             ("add_button", "llm.add", "after"), ("check_button", "llm.check", "after")),
@@ -1041,8 +1052,10 @@ SETTING_TIPS = _terms(
      "protection.", "Terminal-Tabs funktionieren dann ohne freie User-Namespaces, aber ohne den Schutz von Chromium."),
     ("notify", "A desktop notification for each new question of a sandbox.",
      "Eine Desktop-Benachrichtigung für jede neue Frage einer Sandbox."),
-    ("auto_tabs", "Each session or sandbox that starts gets a terminal tab of its own.",
-     "Jede Sitzung oder Sandbox, die startet, bekommt einen eigenen Terminal-Tab."),
+    ("auto_tabs", "Each session or sandbox that starts gets one tab; its MCP servers, helpers and a team's other "
+     "members get none (Open terminal reaches them).",
+     "Jede startende Sitzung oder Sandbox bekommt einen Tab; ihre MCP-Server, Helfer und die anderen Mitglieder "
+     "eines Teams keinen (Terminal öffnen erreicht sie)."),
     ("notify_seconds", "How long a notification stays on the screen.", "Wie lange eine Benachrichtigung zu sehen ist."),
     ("notify_safeguards", "A notification when a safeguard refuses or ends something; the Safeguards tab lists all.",
      "Eine Benachrichtigung, wenn eine Schutzmaßnahme etwas ablehnt oder beendet; der Tab listet alle."),

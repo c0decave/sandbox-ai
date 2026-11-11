@@ -326,7 +326,10 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     before = (B.command_line(sai, board), B.project_document(sai, board))
     assert page.open_project(str(project))
     assert page.board is not board and (B.command_line(sai, page.board), B.project_document(sai, page.board)) == before
-    # Start from the board: one tab of the app's terminal, the board's command line, in the project.
+    # Start from the board: one tab of the app's terminal, the board's command line, in the project. (What the start
+    # needs on the host - its MCP servers, an identity - is made first by prerequisites.py, tested in test_guide_view;
+    # here the host has it all.)
+    monkeypatch.setattr(page, "check_prerequisites", lambda then=None, why="start": False)
     assert page.start(embedded=True)
     assert len(w.opened) == 1
     argv, tab_title, cwd = w.opened[0]

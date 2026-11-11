@@ -77,6 +77,9 @@ def qapp():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     from sandbox_ai_app import widgets
     widgets.collect_on_gui_thread()  # as the app does: the cycle collector never deletes a Qt object in a worker
+    widgets.nonblocking_dialogs()  # as the app does (main.py): dialogs block no window
+    # (not fitting_dialogs: offscreen's screen is 800x600, and the layout tests size dialogs as laptops of their own;
+    # test_logview tests the fitting itself)
     yield app
     if "sandbox_ai_app.terminal" in sys.modules:  # web pages before their profile, or Chromium aborts
         sys.modules["sandbox_ai_app.terminal"].shutdown()
@@ -125,6 +128,25 @@ def no_widgets_left():
         before = set(app.topLevelWidgets()) if app is not None else ()
     yield
     sweep_widgets(before)
+
+
+@pytest.fixture(autouse=True)
+def no_modifiers_held():
+    """QTest's key clicks with Ctrl or Shift leave them as the application's keyboard modifiers (offscreen, until the
+    next key event): a later selectRow() in a list that takes several rows (Ctrl, Shift) would add to the selection
+    or take a range instead of choosing one row. A plain key release after each test lets go of them."""
+    yield
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6 import QtWidgets
+    from PySide6.QtCore import Qt
+    if QtWidgets.QApplication.instance() is None or \
+            QtWidgets.QApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier:
+        return
+    from PySide6.QtTest import QTest
+    widget = QtWidgets.QWidget()
+    QTest.keyRelease(widget, Qt.Key.Key_Shift)
+    widget.deleteLater()
 
 
 @pytest.fixture(autouse=True)

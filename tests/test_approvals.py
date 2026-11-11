@@ -162,6 +162,21 @@ def test_browser_requests_open_only_http_after_the_answer(run):
     assert len(opened) == 1
 
 
+
+def test_a_tor_runs_url_never_opens_in_your_browser(run):
+    """Bypass: your browser would fetch the agent's URL from your own address, past the run's Tor. A Tor run makes no
+    such question (no relay); one that is there anyway (an older run, a question file) is answered without opening."""
+    opened, said = [], []
+    run["claude-1"].update(vpn_profile="anon", vpn_type="tor")
+    ask(run, "1-1-1", kind="browser", url="https://tracker.example/?id=1")
+    reply = ap.answer("1-1-1", "allow", runs=run, opener=opened.append, out=said.append)
+    assert opened == [] and reply["decision"] == "allow"
+    assert "not opened: this run goes through Tor" in said[-1]
+    run["claude-1"].update(vpn_profile="corp", vpn_type="wireguard")
+    ask(run, "1-1-2", kind="browser", url="https://login.example/")
+    ap.answer("1-1-2", "allow", runs=run, opener=opened.append, out=said.append)
+    assert opened == ["https://login.example/"]
+
 def test_watch_notifies_once_per_question(run):
     directory = Path(run["claude-1"]["directory"]) / "approvals"
     notes, stop = [], threading.Event()

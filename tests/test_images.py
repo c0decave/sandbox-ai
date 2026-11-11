@@ -469,7 +469,7 @@ def test_the_tor_recipe(config):
     it), the agent's own fragment kept before it; the validator accepts the result."""
     lines = []
     assert im.main(["recipe", "tor", "--from", "claude"], out=lines.append) == 0
-    assert "sandbox-ai build tor" in lines[-1] and "--image-variant tor" in lines[-1]
+    assert "sandbox-ai build --variant tor" in lines[-1] and "--image-variant tor" in lines[-1]
     document = json.loads((im.config_root() / "tor" / "image.json").read_text())
     assert document["apt"] == ["torsocks"] and "tor" not in document["apt"]  # tor itself runs in the VPN container
     fragment = (im.config_root() / "tor" / im.FRAGMENT).read_text()
@@ -552,3 +552,13 @@ def test_a_network_given_to_the_build_is_left_as_given(tmp_path, monkeypatch):
     result = builder("claude", "--build-arg", "CLAUDE_VERSION=1.2.3", "--dns", "192.0.2.53")
     assert result.returncode == 0, result.stderr
     assert not [c for c in builds() if c[:1] == ["run"]], "no check"
+
+
+def test_a_missing_variant_of_a_recipes_name_points_to_the_recipe(tmp_path, monkeypatch):
+    """`images new tor` makes an empty variant without the Tor tools: for a recipe's name the refusal says to make it
+    from the recipe and build it."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with pytest.raises(ValueError, match=r"images recipe tor --from opencode && sandbox-ai build --variant tor"):
+        im.variant_image("opencode", "tor")
+    with pytest.raises(ValueError, match=r"images new other --from opencode"):
+        im.variant_image("opencode", "other")

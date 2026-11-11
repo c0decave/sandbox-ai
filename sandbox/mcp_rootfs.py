@@ -254,7 +254,15 @@ def bwrap_args(definition, environ=None):
     for name in definition.get("env", []):  # from the bridge's environment, as podman's --env=NAME
         if name in environ:
             args += ["--setenv", name, environ[name]]
-    return [*args, "--chdir", rootfs.get("workdir", "/tmp"), "--", *rootfs["entrypoint"]]
+    # Options only: bwrap reads nothing but options from --args FD - a command after "--" there is dropped, and bwrap
+    # without one printed its usage and exited 1 (every rootfs server failed to start). The command follows --args on
+    # bwrap's command line (entrypoint(): from the signed rootfs.json, no secret in it).
+    return [*args, "--chdir", rootfs.get("workdir", "/tmp")]
+
+
+def entrypoint(definition):
+    """The server's command, for bwrap's command line after --args FD and "--"."""
+    return ["--", *definition["rootfs"]["entrypoint"]]
 
 
 def bwrap_command(definition_file, definition, launcher=None):
@@ -293,10 +301,11 @@ def run(definition, environ=None):
     import json
     args = args_pipe(bwrap_args(definition, environ))
     if definition.get("network", "none") != "full":
-        os.execvp("bwrap", ["bwrap", "--args", str(args)])
+        os.execvp("bwrap", ["bwrap", "--args", str(args), *entrypoint(definition)])
     info_r, info_w = os.pipe()
     ready_r, ready_w = os.pipe()
-    child = subprocess.Popen(["bwrap", "--info-fd", str(info_w), "--args", str(args)], pass_fds=(info_w, args))
+    child = subprocess.Popen(["bwrap", "--info-fd", str(info_w), "--args", str(args), *entrypoint(definition)],
+                             pass_fds=(info_w, args))
     os.close(info_w)
     os.close(args)
     slirp = None

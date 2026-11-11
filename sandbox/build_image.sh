@@ -5,6 +5,7 @@ script_dir=$(dirname -- "$script_path")
 usage='Usage: sandbox-ai build [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
                         [-e|--extension-only] codex|claude|opencode|all|VARIANT [podman build options]
        sandbox-ai build [-pu|--podman-url URL] [-u|--uv VERSION] [-n|--node IMAGE] team [podman build options]
+       sandbox-ai build [-pu|--podman-url URL] [-e|--extension-only] --variant VARIANT [podman build options]
        sandbox-ai build [-pu|--podman-url URL] vpn|tor [podman build options]
 
 Every build uses the newest releases unless you pin them: the newest npm release
@@ -23,7 +24,9 @@ Extensions (sandbox-ai images extend/new): the base image is tagged
 localhost/AGENT-sandbox:base; an agent with an extension gets it as a layer on
 top (localhost/AGENT-sandbox:latest), and building an agent also builds its
 variants (localhost/AGENT-sandbox-NAME). A VARIANT builds its agent'"'"'s base and
-that variant only. Each layer is labelled with the hash of its extension.
+that variant only; --variant VARIANT names one whose name is also a target here (the
+variant tor of the recipe tor: build tor is the image of the Tor VPN). Each layer is
+labelled with the hash of its extension.
 
   --extension-only  build only the extension layers, on the base image there is
 
@@ -63,6 +66,15 @@ while [[ $# -gt 0 ]]; do
     vpn) vpn=vpn; shift; break ;;
     tor) vpn=tor; shift; break ;;
     team) team=1; shift; break ;;
+    --variant)
+      # The variant NAME even when NAME is also a target above (the recipe "tor" makes the variant tor, while
+      # "build tor" is the Tor VPN's image).
+      [[ $# -ge 2 && "$2" =~ ^[a-z0-9][a-z0-9_.-]{0,29}$ ]] || die_usage
+      plan=$("${images[@]}" build-plan "$2" 2>/dev/null) || {
+        why=$("${images[@]}" build-plan "$2" 2>&1 >/dev/null | tail -n 1) || true
+        echo "sandbox-ai build: $2 is not a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
+        exit 2; }
+      agents=("${plan%% *}") variant=$2; shift 2; break ;;
     [a-z0-9]*)
       # A variant (sandbox-ai images new NAME --from AGENT): its agent's base, then the variant only.
       [[ "$1" =~ ^[a-z0-9][a-z0-9_.-]{0,29}$ ]] || die_usage
@@ -76,6 +88,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ ${#agents[@]} -gt 0 || -n "$vpn" || -n "$team" ]] || die_usage
+# Built as root for someone else (sudo): Podman keeps images per user - root's store is not the one the user's
+# sandboxes (and the app, run as that user) look in. Said, not refused: root may well use sandbox-ai itself.
+if [[ -z "$podman_url" && "$(id -u)" == 0 && -n "${SUDO_USER:-}" && "${SUDO_USER}" != root ]]; then
+  echo "sandbox-ai build: warning: building as root (sudo): the images go to root's Podman store; sandboxes" \
+       "${SUDO_USER} starts (and the app) use ${SUDO_USER}'s own - build as ${SUDO_USER} for those" >&2
+fi
 # Without a systemd user session (no user bus: an unprivileged LXC or Proxmox container, a login without systemd)
 # the RUN steps of a build ask systemd for their cgroup and fail ("sd-bus call: Permission denied"); Podman falls
 # back to cgroupfs for its own runs, not for those. Build with cgroupfs then.

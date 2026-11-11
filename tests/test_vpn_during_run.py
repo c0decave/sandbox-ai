@@ -168,6 +168,17 @@ def test_serve_checks_the_address_again_during_the_run(monkeypatch):
     assert not rechecks and not [e for e in events if e["event"] == "recheck"]
 
 
+
+def test_tors_first_check_during_the_run_comes_soon(monkeypatch):
+    """With Tor (check_settings: first_recheck) the first check during the run comes soon after the start, when the
+    agent's firewall is in the namespace too, then at the usual interval."""
+    rechecks = []
+    serve(monkeypatch, [0.6], checks={"recheck": 60, "first_recheck": 0.2}, rechecks=rechecks)
+    assert len(rechecks) == 1
+    rechecks.clear()
+    serve(monkeypatch, [0.4], checks={"recheck": 60}, rechecks=rechecks)
+    assert rechecks == []
+
 def test_resolve_in_the_running_container(tmp_path, monkeypatch):
     state = tmp_path / "serve.json"
     rt.save_serve_state({"dns": ["10.66.0.1"], "ipv4": True, "ipv6": False}, False, state)

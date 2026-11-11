@@ -1399,7 +1399,7 @@ class ReviewPage(Page):
         self.token += 1
         token = self.token
         agent, _, _ = B.values(board)
-        background(sai.dry_run, agent, B.launcher_argv(sai, board), timeout=90,
+        background(sai.dry_run, agent, B.check_argv(sai, board), timeout=90,
                    done=lambda result, error: self.checked(token, result, error))
 
     def checked(self, token, result, error):

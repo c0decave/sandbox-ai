@@ -83,6 +83,23 @@ def value_for(preset, placeholder, root, agent):
     return "" if placeholder.optional else "a task for the test"
 
 
+def registered_servers(root, board):
+    """The MCP servers BOARD names that a user registers (sandbox-ai mcp add, e.g. from the private catalog), not the
+    project's own: defined in this configuration as small stand-ins, as `mcp add` would have (the launcher refuses
+    a start whose --mcp servers are unknown, dry runs too)."""
+    import json as _json
+    path = root / "config" / "sandbox-ai" / "mcp.json"
+    document = _json.loads(path.read_text()) if path.is_file() else {}
+    own = set(B.project_servers(board))
+    for node in board.included():
+        name = node.props.get("name") if node.kind == "mcp" else None
+        if name and name not in own and name not in document and name != "demo":
+            document[name] = {"command": ["python3", "-I", "-c", "pass"], "options": ["--offline"],
+                              "description": "stand-in of a registered server (tests)"}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(document))
+
+
 @pytest.mark.parametrize("agent", AGENTS)
 @pytest.mark.parametrize("preset", PRESETS, ids=lambda p: p.id)
 def test_every_preset_with_every_agent_passes_a_dry_run(registered, preset, agent):
@@ -94,11 +111,12 @@ def test_every_preset_with_every_agent_passes_a_dry_run(registered, preset, agen
     assert B.placeholders(board) == []
     used = B.values(board)[0]
     assert used == (preset.agent or (agent if not preset.agents or agent in preset.agents else preset.agents[0]))
-    plan, message = sai.dry_run(used, B.launcher_argv(sai, board))
+    registered_servers(root, board)
+    plan, message = sai.dry_run(used, B.check_argv(sai, board))
     if plan is None and "--gpu dri: no /dev/dri" in message:  # this machine has no GPU: only that may be refused
         without = B.Board.from_state(board.state())
         without.first("devices").props.pop("--gpu")
-        plan, message = sai.dry_run(used, B.launcher_argv(sai, without))
+        plan, message = sai.dry_run(used, B.check_argv(sai, without))
     assert plan is not None, message
     assert plan["agent"] == used
     llm = next((v for m, v in values.items() if m.startswith("<llm:") and v), None)
@@ -121,7 +139,7 @@ def test_claude_with_a_raw_api_is_refused_and_says_why(registered, server):
     project = root / f"raw-{server.replace(':', '-')}"
     project.mkdir(exist_ok=True)
     board = PR.build(sai, PR.BUILTIN["local-api"], project, agent="claude", values={"<llm:api>": server})
-    plan, message = sai.dry_run("claude", B.launcher_argv(sai, board))
+    plan, message = sai.dry_run("claude", B.check_argv(sai, board))
     assert plan is None and "Anthropic Messages API" in message
 
 

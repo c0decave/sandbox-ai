@@ -1,6 +1,7 @@
 """The windows of sandbox-ai-app (PySide6)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -31,7 +32,8 @@ from .state import choose_file, choose_folder
 from .i18n import N_, tr
 from .activity_page import ActivityPage
 from .board_view import BoardPage, HostCombo
-from . import dock_fold, help_view, labels
+from . import copying, dock_fold, help_view, labels
+from .prerequisites import Prerequisites
 from . import presets as PR
 from . import project_trust as PT
 from .hosts_page import HostsPage
@@ -40,12 +42,14 @@ from .state import State, scrub_arguments
 from .pages import ApprovalsPage, CredentialsPage, ImagesPage, StatisticsPage
 from .files_page import FilesPage
 from .reviews import REVIEW_PATHS, home_review, restorable_paths, review_refusal
-from .start_tree import ID_ROLE, KEY_ROLE, KIND_ROLE, StartTree, id_host, related, row_id
+from .start_tree import (
+    ID_ROLE, KEY_ROLE, KIND_ROLE, ORPHANS, StartTree, id_host, orphans, owners, related, row_id,
+)
 from . import wizard_llm as WL
 from .widgets import (
-    MONO, AsyncCommand, MessageText, StartControls, ThreadCall, append_rows, ask_first, background, busy, fill, find_row, fit_columns,
-    flow, inform, local_time, outcome, plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled,
-    show_text, table, warn, shown_as_text, tame_combos, working,
+    MONO, AsyncCommand, MessageText, StartControls, ThreadCall, append_rows, ask_first, background, busy, confirm, fill, find_row, fit_columns,
+    flow, inform, local_time, outcome, plain_label, report_each, row_key, run_each, safe_tooltip, selected, selected_rows,
+    set_enabled, several, show_text, table, warn, shown_as_text, tame_combos, working,
 )
 
 CONNECTIONS_LIMIT = 5000  # records the Connections page keeps (backend.read_connections reads as many)
@@ -609,7 +613,7 @@ def without_file_values(options, values, file_values):
     return result
 
 
-class LaunchPage(QWidget):
+class LaunchPage(Prerequisites, QWidget):
     """Choose the agent and every option, see the command, start."""
     opened = Signal(str)  # a project folder was reviewed and trusted here
 
@@ -1369,8 +1373,8 @@ class LaunchPage(QWidget):
         self.form.set_values(values)
         self.agent_args.setText(shlex.join(agent_args))
         if unknown:
-            QMessageBox.warning(self, tr("Options not shown"), shown_as_text(tr(
-                "These are not options of this sandbox-ai version and were left out:") + "\n" + " ".join(unknown)))
+            warn(self, tr("Options not shown"), tr(  # (no one waits for its OK: called from callbacks too)
+                "These are not options of this sandbox-ai version and were left out:") + "\n" + " ".join(unknown))
 
     def load_profile(self):
         name = self.profile.currentText()
@@ -1507,8 +1511,32 @@ class LaunchPage(QWidget):
             return
         show_text(self, tr("Plan (dry run)"), (message + "\n\n" if message else "") + json.dumps(plan, indent=2))
 
+    def prerequisite_argv(self):
+        return self.argv()
+
+    def prerequisite_agent(self):
+        return self.agent.currentText()
+
+    def prerequisite_own_servers(self):
+        """The MCP servers the workspace's project file defines (the launcher reads it at the start): nothing to add."""
+        folder = self.workspace() if self.host() == LOCAL else None
+        try:
+            with open(os.path.join(folder, ".sandbox-ai.json"), "rb") as stream:
+                document = json.loads(stream.read(1 << 20))
+        except (OSError, TypeError, ValueError):
+            return set()
+        servers = document.get("mcp_servers") if isinstance(document, dict) else None
+        return {name for name in servers if isinstance(name, str)} if isinstance(servers, dict) else set()
+
+    def prerequisite_context(self):
+        return (self.host(), self.agent.currentText(), str(self.workspace() or ""))
+
     def start(self, session=None, embedded=False):
         if self.refused_options(tr("Not started")) or not self.require_workspace(tr("Not started")):
+            return False
+        # What the options need on the host (an identity, an image variant, a VPN profile, MCP servers) made first;
+        # then the start goes on by itself.
+        if self.check_prerequisites(then=lambda: self.start(session, embedded)):
             return False
         try:
             host = self.host()
@@ -1714,10 +1742,10 @@ class DeviceDialog(QDialog):
             self.list.addItem(item)
         self.list.itemSelectionChanged.connect(lambda: self.edit.setText(
             self.list.currentItem().data(Qt.ItemDataRole.UserRole) if self.list.currentItem() else self.edit.text()))
-        self.list.setVisible(bool(candidates))  # another host's devices are typed in: its /dev is not listed here
         layout.addWidget(plain_label(tr("Devices weaken the isolation: a service on the host reached through a host "
                                         "port is safer. Refused devices are greyed out.")))
         layout.addWidget(self.list, 1)
+        self.list.setVisible(bool(candidates))  # another host's devices are typed in: its /dev is not listed here
         layout.addWidget(self.edit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -1942,11 +1970,24 @@ ACTIVE_STATES = ("running", "paused", "starting")
 SESSION_ACTIONS = (("attach", N_("Attach")), ("attach-app", N_("Attach in the app")), ("pause", N_("Pause")),
                    ("resume", N_("Resume")), ("delete", N_("Delete")))
 ACTION_TITLES = {**dict(SESSION_ACTIONS), "stop": N_("Stop")}
+BULK_ACTIONS = ("stop", "pause", "resume", "delete")  # what acts on several starts at once (Ctrl, Shift)
 REMOTE_WAIT = 60  # seconds one host may take to list its starts (the hosts are asked at the same time, each apart)
 # What hangs below a start on the Sandboxes page (start_tree.related), by its kind.
 PART_TITLES = {"mcp": N_("MCP server"), "helper": N_("Helper"), "pod": N_("Pod"), "companion": N_("Companion"),
                "team": N_("Team"), "serves": N_("Serves")}
 GROUPS_KEPT = 400  # groups of the Sandboxes page whose fold is kept (the ones changed last)
+# Why a start is shown below another one (start_tree.owners' HOW), in its tooltip.
+BELONGS_HELP = {
+    "started": N_("Started for {name}: it belongs to that start and is shown below it."),
+    "uses": N_("{name} uses it: it belongs to that start and is shown below it."),
+    "listed": N_("It belongs to {name} (as sandbox-ai list shows it) and is shown below it."),
+    "helper": N_("A helper of {name}: it belongs to that start and is shown below it."),
+    "team": N_("A member of the team {name} leads: shown below the lead."),
+    "time": N_("Shown below {name}, which started at the same time: the sandbox-ai that started it did not record "
+               "whom it belongs to, so this is a guess."),
+}
+ORPHANS_HELP = N_("These MCP servers belong to no start listed here: started on their own (sandbox-ai mcp start), or "
+                  "the start they were started for ended and none uses them. Stop one when nothing needs it.")
 
 
 def history_time(value):
@@ -2610,8 +2651,9 @@ class SandboxesPage(QWidget):
                                   and (i.host, getattr(i, "ident", i.name)) not in names})
         return found
 
-    def start_row(self, i):
-        """{cells, color, tip, sort} of the row of the start I."""
+    def start_row(self, i, belongs=None):
+        """{cells, color, tip, sort} of the row of the start I. BELONGS: (the start it is shown below, how:
+        start_tree.owners), "orphan" (an MCP server that belongs to no start), or None (a start of its own)."""
         memory = backend.memory_share(i) if i.state in ("running", "paused") else None
         state = tr(STATE_TITLES.get(i.state, i.state)) if i.state else ""
         stale, asking = self.stale(i), self.is_asking(i)
@@ -2639,6 +2681,10 @@ class SandboxesPage(QWidget):
         if stale is not None or i.state in ENDED_STATES and i.key.startswith("ended:"):
             color = "muted"
         tip = [tr("Current project")] if self.mine(i) else []
+        if belongs == "orphan":
+            tip.append(tr(ORPHANS_HELP))
+        elif belongs is not None:
+            tip.append(tr(BELONGS_HELP.get(belongs[1], BELONGS_HELP["uses"]), name=printable(belongs[0].name)))
         if allows_all:
             tip.append(tr(AC.ALLOW_HELP))
         if asking:
@@ -2709,33 +2755,81 @@ class SandboxesPage(QWidget):
                  tr("this machine") if host == LOCAL else printable(host), ""]
         return {"cells": cells, "color": color, "tip": tip}
 
+    def host_plan(self, host, starts):
+        """The rows of HOST (StartTree.fill's plan) for its STARTS (in the order shown): the host, below it each start
+        that belongs to no other one, below that start the starts that belong to it (start_tree.owners: its MCP
+        servers and helpers, the members of a team it leads) and what else belongs to it (related), then the MCP
+        servers that belong to no start, together below a row that says so. "Only the current project" keeps a
+        start with what belongs to it, by the start at its top."""
+        owned = owners(starts)
+        alone = set(orphans(starts, owned))
+        parts = related(starts)
+        by_key = {i.key: i for i in starts}
+
+        def top(key):
+            return owned[key][0] if key in owned else key
+        only = self.only_project.isChecked()
+        tops = [i for i in starts if i.key not in owned and i.key not in alone and (not only or self.mine(i))]
+        below = {}
+        for i in starts:
+            if i.key in owned:
+                below.setdefault(owned[i.key][0], []).append(i)
+        lonely = [i for i in starts if i.key in alone and (not only or self.mine(i))]
+        listed = [*tops, *(i for t in tops for i in below.get(t.key, [])), *lonely]
+        host_id = row_id(host)
+        plan = [(None, host_id, "host", None, self.host_row(host, listed))]
+
+        def add(parent, i):
+            start_id = row_id(host, i.key)
+            belongs = (by_key[owned[i.key][0]], owned[i.key][1]) if i.key in owned else \
+                "orphan" if i.key in alone else None
+            plan.append((parent, start_id, "start", i.key, {**self.start_row(i, belongs), "bold": self.mine(i)}))
+            return start_id
+
+        def add_parts(start_id, i):
+            for part in parts.get(i.key, []):
+                if part["key"] and part["key"] in by_key and top(part["key"]) == top(i.key):
+                    continue  # its own row is in this group already
+                plan.append((start_id, row_id(host, f"{i.key}\n{part['kind']}\n{part['name']}"), "part",
+                             part["key"], self.part_row(host, i, part)))
+        for i in tops:
+            start_id = add(host_id, i)
+            for child in below.get(i.key, []):
+                add_parts(add(start_id, child), child)
+            add_parts(start_id, i)
+        if lonely:
+            group_id = row_id(host, ORPHANS)
+            plan.append((host_id, group_id, "group", None, self.orphans_row(host, lonely)))
+            for i in lonely:
+                add_parts(add(group_id, i), i)
+        return plan
+
+    def orphans_row(self, host, servers):
+        """{cells, color, tip, sort} of the row above the MCP servers of HOST that belong to no start."""
+        cells = [tr("Belongs to no start"), tr("MCP servers: {count}", count=len(servers)), "", "", "", "", "", "",
+                 tr("this machine") if host == LOCAL else printable(host), ""]
+        return {"cells": cells, "color": "muted", "tip": tr(ORPHANS_HELP), "sort": ["\uffff"] * len(cells)}
+
     def show_instances(self):
         """The tree: each host (the one chosen above, or all), under it its starts, under each what belongs to it.
         The row selected stays selected (by host and id), the groups stay open or closed as they were left."""
         chosen = self.host_filter.currentData()
         self.rows = self.listed()
-        shown = [i for i in self.rows.values() if (not self.only_project.isChecked() or self.mine(i))
-                 and (chosen is None or getattr(i, "host", "local") == chosen)]
         order = {"run": 0, "session": 1, "mcp": 2, "unregistered": 3}
-        shown.sort(key=lambda i: (getattr(i, "host", "local") != "local", not self.mine(i), order.get(i.kind, 9),
-                                  str(getattr(i, "host", "")), str(i.name)))
+
+        def sort_key(i):
+            return (getattr(i, "host", "local") != "local", not self.mine(i), order.get(i.kind, 9),
+                    str(getattr(i, "host", "")), str(i.name))
+        every = sorted((i for i in self.rows.values() if chosen is None or getattr(i, "host", "local") == chosen),
+                       key=sort_key)
         names = list(getattr(self, "remote_names", []))
-        hosts = [LOCAL, *names, *sorted({i.host for i in shown} - {LOCAL} - set(names))] if chosen is None else [chosen]
+        hosts = [LOCAL, *names, *sorted({i.host for i in every} - {LOCAL} - set(names))] if chosen is None else [chosen]
         tree = self.table
         plan = []  # (parent row id, row id, kind, key, cells...): StartTree.fill
         for host in hosts:
-            starts = [i for i in shown if i.host == host]
-            host_id = row_id(host)
-            plan.append((None, host_id, "host", None, self.host_row(host, starts)))
-            parts = related([i for i in self.rows.values() if i.host == host])
-            for i in starts:
-                start_id = row_id(host, i.key)
-                plan.append((host_id, start_id, "start", i.key, {**self.start_row(i), "bold": self.mine(i)}))
-                for part in parts.get(i.key, []):
-                    plan.append((start_id, row_id(host, f"{i.key}\n{part['kind']}\n{part['name']}"), "part",
-                                 part["key"], self.part_row(host, i, part)))
+            plan += self.host_plan(host, [i for i in every if i.host == host])
         expanded = (lambda ident, item: self.open_groups.get(
-            ident, self.hosts_open if item.data(0, KIND_ROLE) == "host" else self.starts_open))
+            ident, self.hosts_open if item.data(0, KIND_ROLE) in ("host", "group") else self.starts_open))
         same_rows, changed = tree.same_rows(plan), not tree.shows(plan)
         if same_rows and changed:  # the same rows, some cells changed (a state, "seen 12 s ago"): set in place
             tree.blockSignals(True)
@@ -2744,17 +2838,19 @@ class SandboxesPage(QWidget):
             finally:
                 tree.blockSignals(False)
         elif changed:  # other rows: the tree is built again, the selection, folds and scroll kept
-            selected_item = tree.selected_item()
-            previous = selected_item.data(0, ID_ROLE) if selected_item is not None else None
+            previous = [item.data(0, ID_ROLE) for item in tree.selectedItems()]  # (several: Ctrl, Shift)
             scroll = tree.verticalScrollBar().value()
             tree.blockSignals(True)  # rebuilt: no selection or fold changes are said (selection_changed() below)
             try:
                 tree.setSortingEnabled(False)
                 tree.fill(plan, expanded)
                 tree.setSortingEnabled(True)  # the order the human chose by a header, if any
-                again = tree.find_item(previous) if previous else None
-                if again is not None:
-                    tree.select_item(again, open_groups=False)
+                again = [item for item in (tree.find_item(ident) for ident in previous) if item is not None]
+                for number, item in enumerate(again):
+                    if number == 0:
+                        tree.select_item(item, open_groups=False)
+                    else:
+                        item.setSelected(True)
             finally:
                 tree.blockSignals(False)
             tree.verticalScrollBar().setValue(scroll)
@@ -2784,21 +2880,166 @@ class SandboxesPage(QWidget):
         self.selection_changed()
 
     def current(self):
-        """The start of the row selected, or None (none selected, or a host's row or a part of a start)."""
+        """The start of the row selected, or None (none selected, several, or a host's row or a part of a start)."""
+        if self.several():
+            return None
         item = self.table.selected_item()
         if item is None or item.data(0, KIND_ROLE) != "start":
             return None
         return getattr(self, "rows", self.instances).get(item.data(0, KEY_ROLE))
 
     def no_start(self):
-        """Why the buttons do not act now: no row selected, or one that is not a start."""
+        """Why the buttons do not act now: no row selected, several, or one that is not a start."""
+        if self.several():
+            return tr("{count} rows are selected: Stop, Pause, Resume and Delete act on each of them; the other "
+                      "buttons on one row.", count=len(self.table.selectedItems()))
         item = self.table.selected_item()
         kind = item.data(0, KIND_ROLE) if item is not None else None
         if kind == "host":
             return tr("A host's row: select one of its starts below it.")
         if kind == "part":
             return tr("What belongs to the start above it: select the start itself to act on it.")
+        if kind == "group":
+            return tr("MCP servers that belong to no start: select one of them below to act on it.")
         return tr("Select a row first.")
+
+    def several(self):
+        """True while more than one row is selected (Ctrl+click, Shift+click)."""
+        return len(self.table.selectedItems()) > 1
+
+    def selected_starts(self):
+        """The starts of the rows selected, top to bottom (hosts' rows and what belongs to a start left out)."""
+        rows = getattr(self, "rows", self.instances)
+        found = []
+        for item in self.table.every_item():
+            if item.isSelected() and item.data(0, KIND_ROLE) == "start":
+                instance = rows.get(item.data(0, KEY_ROLE))
+                if instance is not None and instance not in found:
+                    found.append(instance)
+        return found
+
+    def bulk_why(self, instance, action):
+        """Why ACTION (BULK_ACTIONS) cannot act on INSTANCE as one of several (None: it can) - as the buttons say for
+        one; a stopped session is resumed alone (its HOME is reviewed first)."""
+        remote = getattr(instance, "host", LOCAL) != LOCAL
+        kind, state = instance.kind, instance.state
+        shown = tr(STATE_TITLES.get(state, state))
+        if instance.key.startswith("ended:"):
+            return tr("It ended: History… shows what happened to it.")
+        if remote and self.stale(instance) is not None:
+            return tr("{host} does not answer.", host=printable(instance.host))
+        if kind == "unregistered":
+            return tr("It has not registered with sandbox-ai (yet).")
+        if action == "stop":
+            if kind == "run" and not remote and not (self.stoppable and instance.run):
+                return tr("This sandbox-ai cannot stop it from outside: end it in its terminal.")
+            ok = state in ("running", "paused") if remote or kind == "session" else state in ACTIVE_STATES
+        elif kind == "mcp":
+            return tr("An MCP server only stops.")
+        elif action == "delete":
+            if kind != "session":
+                return tr("Only for sessions.")
+            ok = state == "stopped"
+        elif kind not in ("session", "run") or (kind == "run" and not remote and not backend.valid_run(instance.name)):
+            return tr("Only for sessions.")
+        elif action == "pause":
+            ok = state == "running"
+        else:
+            if state == "stopped" and kind == "session":
+                return tr("Stopped: resume it alone (its HOME is reviewed first).")
+            ok = state == "paused"
+        return None if ok else tr("Not while it is {state}.", state=shown)
+
+    def update_bulk_buttons(self):
+        """Several rows selected: Stop, Pause, Resume and Delete act on those of them they can act on; every other
+        button acts on one row and waits."""
+        starts, why = self.selected_starts(), self.no_start()
+        for button in [*self.run_buttons, *self.transfer_buttons.values(), self.resume_with_button,
+                       self.manage_buttons["rename"], self.manage_buttons["history"]]:
+            set_enabled(button, False, why)
+        for action, button in [("stop", self.stop_button), *self.session_buttons.items()]:
+            if action not in BULK_ACTIONS:
+                set_enabled(button, False, why)
+                continue
+            able = [instance for instance in starts if self.bulk_why(instance, action) is None]
+            reason = None if able else tr("None of the selected can: {why}", why=self.bulk_why(starts[0], action)) \
+                if starts else why
+            set_enabled(button, bool(able), reason,
+                        tooltip=tr("{action}: {count} of the {total} selected", action=tr(ACTION_TITLES[action]),
+                                   count=len(able), total=len(starts)))
+        host = self.host_filter.currentData()
+        set_enabled(self.manage_buttons["clean"], host is not None,
+                    None if host is not None else tr("Choose a host above (or select a start of the host to clean up "
+                                                     "on)."))
+
+    def bulk(self, action):
+        """ACTION (BULK_ACTIONS) on every selected start it can act on: one question naming them (and those left
+        out, with why), then one after the other in the background; what failed is said together at the end."""
+        starts = self.selected_starts()
+        able = [instance for instance in starts if self.bulk_why(instance, action) is None]
+        title = tr(ACTION_TITLES[action])
+        if not able:
+            inform(self, title, tr("None of the selected can: {why}", why=self.bulk_why(starts[0], action))
+                   if starts else self.no_start(), modal=False)
+            return
+        names = [self.bulk_name(instance) for instance in able]
+        text = {"stop": tr("Stop these {count} starts? Their agents end; what they did not save is lost (a session's "
+                           "HOME is kept).", count=len(able)),
+                "pause": tr("Pause these {count} starts?", count=len(able)),
+                "resume": tr("Resume these {count} starts?", count=len(able)),
+                "delete": tr("Delete these {count} sessions and their HOME? This cannot be undone.",
+                             count=len(able))}[action]
+        text = several(text, names)
+        left = [instance for instance in starts if instance not in able]
+        if left:
+            text += "\n\n" + tr("Left out:") + "\n" + "\n".join(
+                f"- {self.bulk_name(instance)}: {self.bulk_why(instance, action)}" for instance in left)
+        if action == "delete":
+            asked = ask_first(self, "start-delete", title, text, title)
+        elif action == "stop":  # (MCP servers alone: asked as their stop is; with starts: as a start's)
+            asked = ask_first(self, "mcp-stop", title, text, title) if all(i.kind == "mcp" for i in able) else \
+                ask_first(self, "start-stop", title, text, title)
+        else:
+            asked = confirm(self, title, text, title)
+        if not asked:
+            return
+        wait = self.stop_wait.value()
+        if action == "resume":
+            for host in sorted({getattr(instance, "host", LOCAL) for instance in able} - {LOCAL}):
+                self.started_on.emit(host)
+
+        def call(instance):
+            host = getattr(instance, "host", LOCAL)
+            if host != LOCAL:
+                args = [action, instance.name] + (["--yes"] if action == "delete" else [])
+                if action == "stop" and wait != STOP_WAIT:
+                    args = backend.stop_args(instance.name, wait)
+                return self.sai.host_run(host, *args, timeout=180 + wait)
+            if action == "stop":
+                if instance.kind == "session":
+                    return self.sai.call(*backend.stop_args(instance.name, wait), timeout=wait + 60) \
+                        if wait != STOP_WAIT else self.sai.call("session", "stop", instance.name, timeout=330)
+                if instance.kind == "mcp":
+                    return self.sai.stop_mcp(instance.mcp)
+                return self.sai.stop_run(instance.run)
+            if instance.kind == "run":
+                return self.sai.call(action, instance.name, timeout=150)
+            return self.sai.call("session", action, instance.session or instance.name,
+                                 *(["--yes"] if action == "delete" else []), timeout=150)
+
+        def done(outcomes):
+            report_each(self, title, outcomes, self.bulk_name)
+            self.refresh_soon(again=True)
+            hosts = sorted({getattr(instance, "host", LOCAL) for instance in able} - {LOCAL})
+            if hosts:
+                self.refresh_remote(hosts)
+        run_each(call, able, owner=self, source=[self.stop_button, *self.session_buttons.values()],
+                 timeout=len(able) * (330 + wait), done=done)
+
+    def bulk_name(self, instance):
+        host = getattr(instance, "host", LOCAL)
+        name = printable(instance.name)
+        return name if host == LOCAL else tr("{name} on {host}", name=name, host=printable(host))
 
     # -- the groups: open or closed, kept per host and start --
 
@@ -2850,7 +3091,9 @@ class SandboxesPage(QWidget):
             self.wanted = instance.key
             self.state.set("sandboxes-selected", instance.key)
         item = self.table.selected_item()
-        if instance is None and item is not None:  # a host's row, or what belongs to a start: what it says
+        if self.several():  # what acts on several, and what waits
+            self.detail.setText(self.no_start())
+        elif instance is None and item is not None:  # a host's row, or what belongs to a start: what it says
             self.detail.setText(" · ".join(text for text in (item.text(0), item.text(1), item.text(6)) if text))
         elif instance is None:
             self.detail.setText(tr("Select a row: the buttons below act on it."))
@@ -2940,6 +3183,9 @@ class SandboxesPage(QWidget):
                     set_enabled(button, False, tr("A command runs."))
             for button in [*self.manage_buttons.values(), *self.transfer_buttons.values()]:
                 set_enabled(button, False, tr("A command runs."))
+            return
+        if self.several():
+            self.update_bulk_buttons()
             return
         none = self.no_start()
         if instance is not None and getattr(instance, "host", "local") != "local":
@@ -3165,6 +3411,9 @@ class SandboxesPage(QWidget):
                    work=True, timeout=630, done=done)
 
     def stop(self, instance=None):
+        if instance is None and self.several():
+            self.bulk("stop")
+            return
         instance = instance or self.current()
         if instance is None:
             return
@@ -3808,6 +4057,9 @@ class SandboxesPage(QWidget):
     # -- sessions --
 
     def session(self, action, instance=None):
+        if instance is None and action in BULK_ACTIONS and self.several():
+            self.bulk(action)
+            return
         instance = instance or self.current()
         if instance is not None and getattr(instance, "host", "local") != "local":
             host = printable(instance.host)
@@ -4064,7 +4316,7 @@ class ConnectionsPage(QWidget):
         split = self.split = QSplitter(Qt.Orientation.Vertical)
         # A ModelTable: thousands of records are shown in one step (a filter applied again, a new log).
         self.table = table([tr("Time"), tr("Event"), tr("Method"), tr("Status"), tr("Target"), tr("Bytes")], many=True,
-                           stretch=4, compact=(0, 1, 2, 3, 5))
+                           stretch=4, compact=(0, 1, 2, 3, 5), multi=True)  # several (Ctrl, Shift): to copy them
         self.table.setAccessibleName(tr("Connections"))
         self.table.itemSelectionChanged.connect(self.details)
         self.detail = QPlainTextEdit()
@@ -4564,7 +4816,6 @@ class AddServerDialog(QDialog):
         signature = (entry.get("_signature") or {}).get("state", "unsigned")
         self.unsigned = QCheckBox(labels.shown(tr("Take it although its catalog is not signed by a trusted key "
                                                   "(--unsigned)")))
-        self.unsigned.setVisible(signature != "good")
         if signature == "bad":
             set_enabled(self.unsigned, False, tr("Its catalog's signature does not verify: sandbox-ai refuses it "
                                                  "anyway."))
@@ -4574,6 +4825,7 @@ class AddServerDialog(QDialog):
                                     tr("Its catalog's signature does not verify: sandbox-ai refuses it."),
                                     role="notice-warn"))
         form.addRow(self.unsigned)
+        self.unsigned.setVisible(signature != "good")  # (in the form first: else a window of its own for a moment)
         if catalog:
             form.addRow(tr("Catalog"), plain_label(printable(catalog)))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -4698,6 +4950,7 @@ class McpPage(QWidget):
         servers_layout = QVBoxLayout(servers)
         self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs"), tr("Catalog")], stretch=2, compact=(1,))
         self.servers.setAccessibleName(tr("MCP servers"))
+        widgets.multi_select(self.servers)  # several at once (Ctrl, Shift): Stop takes them all
         servers_layout.addWidget(self.servers)
         row = QHBoxLayout()
         self.server_buttons = []
@@ -4714,6 +4967,7 @@ class McpPage(QWidget):
         self.attach_button.setEnabled(sai.mcp_attach_supported())
         row.addWidget(self.attach_button)
         self.server_buttons.append(self.attach_button)
+        widgets.one_only(self.servers, [self.server_buttons[0], self.attach_button])  # Start… and Attach to…: one
         row.addStretch()
         servers_layout.addLayout(row)
         layout.addWidget(servers)
@@ -4826,6 +5080,10 @@ class McpPage(QWidget):
         self.refresh()
 
     def server(self, action):
+        names = [name for name in widgets.selected_keys(self.servers) if name]
+        if action == "stop" and len(names) > 1:
+            self.stop_servers(names)
+            return
         name = selected(self.servers)
         if not name:
             return
@@ -4843,6 +5101,22 @@ class McpPage(QWidget):
         background(lambda: self.sai.host_run(host, "mcp", action, name, timeout=300), owner=self, work=True,
                    source=self.server_buttons, timeout=330, done=lambda result, error: self.server_done(action, result,
                                                                                                        error))
+
+    def stop_servers(self, names):
+        """Stop with several servers selected: one question naming them, then each (mcp stop NAME)."""
+        host = self.host()
+        text = several(tr("Stop these {count} MCP servers? Agents that use one lose it until it is started again.",
+                          count=len(names)), [printable(name) for name in names])
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not ask_first(self, "start-stop", tr("Stop"), text, tr("Stop")):
+            return
+
+        def done(outcomes):
+            report_each(self, tr("Stop"), outcomes, printable)
+            self.server_done("stop", (0, "", ""), None)
+        run_each(lambda name: self.sai.host_run(host, "mcp", "stop", name, timeout=300), names, owner=self,
+                 source=self.server_buttons, timeout=330 * len(names), done=done)
 
     def start_server(self, host, name, targets):
         """`sandbox-ai mcp start` with the dialog's options; for a start it is attached to it too (asked first:
@@ -5093,8 +5367,8 @@ class PrivacyResults(QDialog):
         notes = [printable(str(note)) for result in results for note in result.get("notes") or []][:20] + \
             [printable(line) for line in problems]
         self.notes = plain_label("\n".join(notes), role="secondary")
-        self.notes.setVisible(bool(notes))
         layout.addWidget(self.notes)
+        self.notes.setVisible(bool(notes))  # (in the dialog first: else a window of its own for a moment)
         close = QDialogButtonBox()
         close.addButton(tr("Close"), QDialogButtonBox.ButtonRole.RejectRole)
         close.rejected.connect(self.reject)
@@ -5442,6 +5716,7 @@ SECTIONS = ((N_("Project"), (("launch", N_("Start")), ("board", N_("Board")))),
             (N_("System"), (("system", N_("System")), ("hosts", N_("Hosts")), ("help", N_("Help")))))
 PAGES = tuple(page for _, pages in SECTIONS for page in pages)
 SHORTCUT_PAGES = 9
+HISTORY_KEPT = 50  # the steps Back can go (MainWindow.page_history)
 NOTIFY_AT_ONCE = 5  # new questions announced one by one at once; more are counted in one notification
 NAV_WIDTH, COMPACT_NAV_WIDTH = 224, 52  # the navigation with titles, and as a strip of icons
 NAV_MAX_WIDTH = 300  # the navigation with titles at most, however long a title is in the language chosen
@@ -5696,6 +5971,15 @@ def menu_text(text):
 def project_entry(path):
     path = os.path.realpath(os.path.expanduser(str(path)))
     return {"key": f"project:{path}", "kind": "project", "path": path}
+
+
+def parts_of_starts(instances):
+    """The keys of INSTANCES (backend.Instance, of any hosts) that belong to another start (start_tree.owners, host by
+    host): the starts the Sandboxes page shows below another one."""
+    hosts = {}
+    for instance in instances:
+        hosts.setdefault(getattr(instance, "host", "local"), []).append(instance)
+    return {key for group in hosts.values() for key in owners(group)}
 
 
 def instance_entry(instance):
@@ -5993,6 +6277,37 @@ class InputWatch(QObject):
             self.app = None
 
 
+class SideButtons(QObject):
+    """The mouse's side buttons (back, forward, and the one after them: the settings) anywhere over the window and its
+    floated panels: watched on their QWindow, where the input arrives before any widget gets it - lists, tables,
+    text fields, the board and the terminals' web views take a press of any button and never pass it on to the
+    window. Never with a filter on the whole application (see InputWatch). The press goes to WINDOW.side_button;
+    the press, its release and a double click of those buttons go nowhere else."""
+    BUTTONS = (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton, Qt.MouseButton.TaskButton)
+    KINDS = (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick)
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window, self.watched = window, []
+
+    def watch(self, handle):
+        if handle is None or any(seen is handle for seen in self.watched):
+            return
+        handle.installEventFilter(self)
+        self.watched.append(handle)
+        handle.destroyed.connect(lambda _=None, h=handle: self.forget(h))
+
+    def forget(self, handle):
+        self.watched = [seen for seen in self.watched if seen is not handle]
+
+    def eventFilter(self, _watched, event):  # noqa: N802
+        if event.type() not in self.KINDS or event.button() not in self.BUTTONS:
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            self.window.side_button(event.button())
+        return True
+
+
 class PanelDock(QDockWidget):
     """A panel of a page (View > Panels): closing it by its button is remembered (closed_by_user); hiding
     it because another page is shown is not."""
@@ -6039,6 +6354,9 @@ class MainWindow(QMainWindow):
         # finished: the window has closed for good (shutdown ran, exactly once).
         self.sai, self.quitting, self.leaving, self.finished, self.stopped = sai, False, False, False, False
         self.close_seen = False
+        if lazy:  # the first pages' reads start once the window has painted itself (eventFilter), at the latest after
+            widgets.hold_background()  # a while (shown minimized; a window that failed to be made)
+            QTimer.singleShot(LAZY_FALLBACK, widgets.release_background)
         # What the window looked like when it was left (state.json); file dialogs remember their folders there.
         self.state = State(parent=self)
         if sai.hosts_supported():
@@ -6054,10 +6372,10 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
         # RISK (backend.InsideSandbox from the start check): stays on screen for as long as the app runs.
         self.banner = plain_label(role="notice-error")
-        self.banner.setVisible(risk is not None)
         if risk is not None:
             self.banner.setText(risk_text(risk))
         outer.addWidget(self.banner)
+        self.banner.setVisible(risk is not None)  # (in the window first: else a window of its own for a moment)
         problems = [p for p in (backend.settings_problem(), self.state.problem) if p]
         self.notice_bar = plain_label(tr("Saved settings could not be read; the app started with defaults: {problems}",
                                          problems=printable("; ".join(problems))) if problems else "",
@@ -6072,6 +6390,10 @@ class MainWindow(QMainWindow):
         self.nav.setFixedWidth(NAV_WIDTH)
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.compact_nav = False
+        # Back and Forward (the mouse's side buttons, Alt+Left and Alt+Right, Go > Back and Forward): the pages shown,
+        # in order, with the Help section shown; HISTORY_AT is where Back and Forward are now (go_history).
+        self.page_history, self.history_at, self.history_moving = [], -1, False
+        self.side_buttons = SideButtons(self)
         self.own_starts = []  # (agent, project folder, when) of sandboxes started in the app's terminal
         self.pages = PageStack()
         self.project = None
@@ -6213,12 +6535,23 @@ class MainWindow(QMainWindow):
         layout.addWidget(content, 1)
         self.setCentralWidget(central)
         self.make_docks()
+        widgets.LOG_WINDOW_OPENER = self.open_log_window  # Ctrl+Shift+L inside the dialogs too
+        # Terminal tabs: an OpenGL window from the start - else the first tab made Qt make the window again.
+        settings_now = sai.settings() if hasattr(sai, "settings") else {}
+        self.gl_surface = terminal.prepare_window(self, wanted=settings_now.get("terminal", "app") == "app")
         help_view.OPENER = self.show_help
         help_view.set_shown(backend.setting("help_buttons"))  # the setting; the Help page and F1 stay either way
         # The (?)s of the pages' areas and controls, hover explanations (a page made later gets its own then).
         self.help_buttons = help_view.install(self, {key: page for key in BUILD_ORDER
                                                      if (page := self.built(key)) is not None})
         help_view.explain_windows(QApplication.instance())  # and those of the dialogs, when they are opened
+        # Copy (Ctrl+C, the context menu) in every list, table and tree: the pages' now, a later one's and the
+        # dialogs' when they get the focus; not in the navigation (no data in it).
+        self.nav.setProperty(copying.PROPERTY, False)
+        for page in (self.built(key) for key in BUILD_ORDER):
+            if page is not None:
+                copying.copyable_all(page)
+        copying.watch_focus(QApplication.instance())
         self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
         self.make_busy_indicator()
         self.tray, self.tray_timer = None, None
@@ -6317,6 +6650,7 @@ class MainWindow(QMainWindow):
         page = getattr(self, key)
         self.link_page(key, late=True)
         self.help_buttons.update(help_view.install(self, {key: page}, tree=page))
+        copying.copyable_all(page)
         self.register_page_state(key)
         if self.project:
             self.show_project_in(key, self.project)
@@ -6376,6 +6710,7 @@ class MainWindow(QMainWindow):
         page = getattr(self, key)
         if key == "help":
             page.tour_requested.connect(self.start_any_tour)
+            page.section_shown.connect(self.help_section_shown)
         elif key == "launch":
             page.opened.connect(self.project_opened)
         elif key == "sandboxes":
@@ -6406,11 +6741,16 @@ class MainWindow(QMainWindow):
         elif key == "kits":
             page.enable_kit.connect(self.enable_kit)
             page.inventory_loaded.connect(lambda *found: self.board.set_kit_inventory(*found))
+            # How `sandbox-ai plugins claude` went (in the background, no terminal): a failure leads to the log.
+            page.notice.connect(lambda level, title, text: self.notify(
+                title, text, level=level,
+                action=(tr("Show the log"), lambda: self.set_panel("log", True)) if level != "success" else None))
         elif key == "board":
             page.opened.connect(self.project_opened)
             page.open_request = self.choose_project_folder
             page.project_request = self.set_project  # a project folder dropped on the board opens in its tab
             page.inspector_request = lambda: self.reopen_panel("inspector")  # a part selected: its inspector
+            page.close_request = self.close_inspector  # OK or Cancel in it: the properties close
             page.score_request = lambda shown: self.set_panel("findings", shown)  # the score's button
         elif key == "system":
             page.update_button.clicked.connect(self.check_updates)
@@ -6467,6 +6807,7 @@ class MainWindow(QMainWindow):
         key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         if key in self.nav_rows:
             applog.debug("page", key=key)
+            self.remember_page(key)
             if hasattr(self, "docks"):
                 # the panels of the page left go first: shown beside the next page's minimum for that moment, they
                 # would widen the window for good (Qt grows it at once; review 6 N1, the Board's two panels)
@@ -6490,6 +6831,94 @@ class MainWindow(QMainWindow):
             self.show()
         self.raise_()
         self.activateWindow()
+
+    # -- Back and Forward: the mouse's side buttons, Alt+Left and Alt+Right, Go > Back and Forward --
+
+    def page_place(self, key):
+        """Where on page KEY the human is, as far as Back and Forward come back to it: the Help page's section."""
+        if key == "help":
+            help_page = self.built("help")
+            return getattr(help_page, "shown", None)
+        return None
+
+    def remember_page(self, key):
+        """Page KEY is shown now (or another section of it): a step of the history, unless Back or Forward show it.
+        What was ahead of the current step (Forward) goes, as in a browser."""
+        if self.history_moving:
+            return
+        entry = (key, self.page_place(key))
+        history = self.page_history
+        if 0 <= self.history_at < len(history) and history[self.history_at] == entry:
+            return
+        del history[self.history_at + 1:]
+        history.append(entry)
+        del history[:-HISTORY_KEPT]
+        self.history_at = len(history) - 1
+        self.update_history_actions()
+
+    def help_section_shown(self, _ident):
+        if self.current_page() == "help":
+            self.remember_page("help")
+
+    def can_go(self, step):
+        return 0 <= self.history_at + step < len(self.page_history)
+
+    def go_history(self, step):
+        """Back (STEP -1) or Forward (+1): the page shown before or after the current one, at the Help section it
+        showed; False when there is none."""
+        if not self.can_go(step):
+            return False
+        target = self.history_at + step
+        key, place = self.page_history[target]
+        self.history_at = target
+        self.history_moving = True
+        try:
+            if key in self.nav_rows:
+                self.show_page(key, raise_window=False)
+            if key == "help" and place:
+                self.help.show_section(place)
+        finally:
+            self.history_moving = False
+        self.update_history_actions()
+        return True
+
+    def go_back(self):
+        return self.go_history(-1)
+
+    def go_forward(self):
+        return self.go_history(1)
+
+    def update_history_actions(self):
+        actions = self.__dict__.get("actions") or {}
+        for name, step in (("back", -1), ("forward", 1)):
+            if name in actions:
+                actions[name].setEnabled(self.can_go(step))
+
+    def side_button(self, button):
+        """A side button of the mouse over the window: back, forward, or (the next one) the settings. True if it is
+        one of them."""
+        if button == Qt.MouseButton.BackButton:
+            self.go_back()
+        elif button == Qt.MouseButton.ForwardButton:
+            self.go_forward()
+        elif button == Qt.MouseButton.TaskButton:
+            # (after the press is handled: the dialog's own loop never runs inside the window's input)
+            QTimer.singleShot(0, lambda: alive(self) and not self.finished and self.open_settings())
+        else:
+            return False
+        return True
+
+    def mousePressEvent(self, event):  # noqa: N802
+        """What no widget took (a press on a label, a button, a free place): the side buttons too. Most presses of the
+        side buttons are taken before any widget sees them (SideButtons: lists and tables would keep them)."""
+        if self.side_button(event.button()):
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self.side_buttons.watch(self.windowHandle())
 
     # -- the window's own controls and menus (for desktops whose window manager shows none) --
 
@@ -6559,6 +6988,7 @@ class MainWindow(QMainWindow):
             self.panel_actions[name] = item
         panels.addSeparator()
         action(panels, "panels-reset", tr("Reset the panels"), self.reset_docks)
+        action(view, "log-window", tr("Log in its own window"), self.open_log_window, [widgets.LOG_WINDOW_KEYS])
         navigation = view.addMenu(tr("Navigation"))
         action(navigation, "nav-compact", tr("Only icons"), lambda: self.set_compact_nav(not self.compact_nav),
                ["Ctrl+Shift+B"], checkable=True).setChecked(self.compact_nav)
@@ -6577,6 +7007,18 @@ class MainWindow(QMainWindow):
             item.setIcon(theme.glyph(key, theme.colors()["text"], 16))
             if number <= SHORTCUT_PAGES:
                 self.shortcuts.append(item)
+        go.addSeparator()
+        # The platform's keys (Alt+Left and Alt+Right; Cmd+[ and Cmd+] on macOS), and the mouse's side buttons.
+        for name, text, slot, standard, fallback in (
+                ("back", tr("Back"), self.go_back, QKeySequence.StandardKey.Back, "Alt+Left"),
+                ("forward", tr("Forward"), self.go_forward, QKeySequence.StandardKey.Forward, "Alt+Right")):
+            item = action(go, name, text, slot)
+            keys = [key for key in QKeySequence.keyBindings(standard) if not key.isEmpty()] or [QKeySequence(fallback)]
+            item.setShortcuts(keys)
+            item.setToolTip(safe_tooltip(tr("{what} ({keys}, or the mouse's side button)", what=text,
+                                            keys=keys[0].toString(QKeySequence.SequenceFormat.NativeText))))
+        self.update_history_actions()
+        go.setToolTipsVisible(True)
         go.addSeparator()
         action(go, "next-tab", tr("Next tab"), lambda: self.next_tab(1), ["Ctrl+Tab"])
         action(go, "previous-tab", tr("Previous tab"), lambda: self.next_tab(-1), ["Ctrl+Shift+Tab", "Ctrl+Backtab"])
@@ -6604,7 +7046,8 @@ class MainWindow(QMainWindow):
         action(help_menu, "intro", tr("Watch the intro again"), self.play_intro)
         action(help_menu, "about", tr("About sandbox-ai-app"), self.about)
         action(help_menu, "readme", tr("Read the README"), self.readme)
-        self.terminal_keys = {key: self.actions[key].shortcuts() for key in ("close-tab", "next-tab", "previous-tab")}
+        self.terminal_keys = {key: self.actions[key].shortcuts() for key in ("close-tab", "next-tab", "previous-tab",
+                                                                         "back", "forward")}
 
     def show_log_file(self):
         """The end of the app's log (app.log): errors with time, component and versions; in debug mode every step."""
@@ -6645,10 +7088,10 @@ class MainWindow(QMainWindow):
         panel.start()
 
     def show_help(self, section=None):
-        """The Help page, at SECTION (a help_content id) when given."""
-        self.show_page("help")
+        """The Help page, at SECTION (a help_content id) when given (first: Back leads to the page shown before)."""
         if section:
             self.help.show_section(section)
+        self.show_page("help")
         return self.help
 
     def tour_about(self, text=""):
@@ -6988,8 +7431,10 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event):  # noqa: N802
         if event.type() == QEvent.Type.Paint and self.__dict__.get("idle_build", 0) is None and self.lazy \
                 and self.ready:
-            # The window's first paint (the navigation is part of it): the other pages are made from a moment on.
+            # The window's first paint (the navigation is part of it): the other pages are made from a moment on, the
+            # first pages' reads start right after it.
             self.idle_build = False
+            QTimer.singleShot(0, widgets.release_background)
             QTimer.singleShot(LAZY_START, self.build_later)
             QTimer.singleShot(0, lambda: alive(self) and self.approvals.first_scan())  # (see there)
         if (event.type() == QEvent.Type.MouseButtonRelease and getattr(self, "nav", None) is not None
@@ -7121,7 +7566,9 @@ class MainWindow(QMainWindow):
         page area: they can be floated (a floating one stays on every page), docked elsewhere and closed."""
         from . import logview
         self.log_panel = logview.LogPanel(self.state.get("log_level", logview.DEFAULT_LEVEL)
-                                          if isinstance(self.state.get("log_level"), str) else logview.DEFAULT_LEVEL)
+                                          if isinstance(self.state.get("log_level"), str) else logview.DEFAULT_LEVEL,
+                                          detachable=True)
+        self.log_panel.own_window.connect(self.open_log_window)
         self.log_panel.level.currentIndexChanged.connect(
             lambda _i: self.state.set("log_level", self.log_panel.chosen()))
         widgets = {"parts": self.board.parts_panel, "inspector": self.board.side, "findings": self.board.findings_panel,
@@ -7141,6 +7588,9 @@ class MainWindow(QMainWindow):
             dock.closed_by_user.connect(lambda n=name: self.panel_closed(n))
             escape_closes(dock)  # floating: Esc closes it
             dock.topLevelChanged.connect(lambda _floating: self.docks_changed())
+            # a floated panel is a window of its own: its side buttons too (its QWindow is there once it is shown)
+            dock.topLevelChanged.connect(lambda floating, d=dock: floating and QTimer.singleShot(
+                0, lambda: alive(d) and self.side_buttons.watch(d.windowHandle())))
             dock.dockLocationChanged.connect(lambda _area: self.docks_changed())
             self.docks[name] = dock
         self.board.palette.setMinimumWidth(150)
@@ -7158,6 +7608,17 @@ class MainWindow(QMainWindow):
         self.workspace.resizeDocks([self.docks["parts"]], [170], Qt.Orientation.Horizontal)
         self.default_docks = self.workspace.saveState()
 
+    def open_log_window(self):
+        """The log in a window of its own (logview.LogWindow): no dialog blocks it (they are window modal)."""
+        from . import logview
+        window = getattr(self, "log_window", None)
+        if window is None:
+            window = self.log_window = logview.LogWindow(self.log_panel.chosen())
+            window.panel.level.currentIndexChanged.connect(
+                lambda _i: self.state.set("log_level", window.panel.chosen()))
+        window.bring_up()
+        return window
+
     def fold_inspector(self):
         """Esc or a click on the Board's empty canvas: its inspector folds if it is docked, shown and unfolded (never
         a floating one). True if it folded."""
@@ -7166,6 +7627,19 @@ class MainWindow(QMainWindow):
             return False
         self.inspector_fold.fold()
         return True
+
+    def close_inspector(self):
+        """OK or Cancel of the Board's properties: docked, they fold to their strip; floating, the panel closes (the
+        next part selected opens it again where it was)."""
+        dock = self.docks["inspector"]
+        if not dock.isVisible():
+            return
+        if dock.isFloating():
+            self.closed_docks.add("inspector")
+            self.update_docks()
+            self.save_docks()
+        elif not self.inspector_fold.is_folded():
+            self.inspector_fold.fold()
 
     def log_unread(self, count):
         """The log window's title names the warnings and errors that arrived while it was folded or hidden."""
@@ -7210,8 +7684,12 @@ class MainWindow(QMainWindow):
         self.set_panel(name, self.panel_actions[name].isChecked())
 
     def set_panel(self, name, shown):
-        """Show the panel NAME (on its page, unfolded) or close it."""
+        """Show the panel NAME (on its page, unfolded) or close it. The log while a dialog blocks the window: in its
+        own window (the panel could not be reached)."""
         page = dict((n, p) for n, _, p, _ in DOCKS)[name]
+        if shown and name == "log" and QApplication.activeModalWidget() is not None:
+            self.open_log_window()
+            return
         if shown:
             self.closed_docks.discard(name)
             if name == "inspector":
@@ -7524,7 +8002,12 @@ class MainWindow(QMainWindow):
         running = {key for key, i in instances.items() if i.kind in ("session", "run") and i.state == "running"}
         seen = getattr(self, "seen_running", set())
         if open_new and seen is not None and backend.setting("auto_tabs"):  # (None: the first read, what ran already)
+            # One tab per start: what belongs to another start (a member of a team below its lead, a helper, an MCP
+            # server - start_tree.owners) opens none; Open terminal or the Sandboxes page reach it.
+            owned = parts_of_starts(instances.values()) if running - seen else set()
             for key in sorted(running - seen):
+                if key in owned:
+                    continue
                 if self.tabs.find(key) < 0 and not self.own_start(instances[key]):
                     self.open_tab(instance_entry(instances[key]), activate=False)
         self.seen_running = running
@@ -7719,6 +8202,7 @@ class MainWindow(QMainWindow):
     def questions_changed(self, count, new):
         # Said every second (each scan of the questions): the entry and the tray only when the count changed - setting
         # an item's icon again (a new QIcon each time) re-laid out and repainted the navigation every second.
+        self.close_settled_toasts()
         changed = count != getattr(self, "pending_count", None)
         self.pending_count = count
         if changed:
@@ -7735,8 +8219,11 @@ class MainWindow(QMainWindow):
             entries.sort(key=lambda e: not (isinstance(e[1], dict) and e[1].get("kind") == "canary"))
             for run, question, key in entries[:NOTIFY_AT_ONCE]:
                 canary = isinstance(question, dict) and question.get("kind") == "canary"
-                self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), describe(question),
-                            level="error" if canary else "warning", action=self.question_actions(key, canary))
+                toast = self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), describe(question),
+                                    level="error" if canary else "warning", action=self.question_actions(key, canary))
+                if toast is not None and key is not None:
+                    self.question_toasts[key] = toast
+                    toast.closed.connect(lambda _toast=None, k=key: self.question_toasts.pop(k, None))
             rest = entries[NOTIFY_AT_ONCE:]
             if rest:
                 self.notify(tr("sandbox-ai asks: {count} more questions", count=len(rest)),
@@ -7756,28 +8243,59 @@ class MainWindow(QMainWindow):
                 counts[host] = counts.get(host, 0) + 1
             hosts.set_questions(counts)
 
+    @property
+    def question_toasts(self):
+        """{question key: its notification (a toast)} while the toast is shown."""
+        if "_question_toasts" not in self.__dict__:
+            self._question_toasts = {}
+        return self._question_toasts
+
+    def close_settled_toasts(self):
+        """One answer anywhere settles a question everywhere: the toast of a question answered (here, on the
+        Approvals page, in the Questions window, on the command line or the web) or ended closes."""
+        approvals = self.built("approvals")
+        if approvals is None or not self.question_toasts:
+            return
+        settled = getattr(approvals, "settled", lambda key: key not in approvals.questions)
+        for key, toast in list(self.question_toasts.items()):
+            if settled(key):
+                self.question_toasts.pop(key, None)
+                with contextlib.suppress(RuntimeError):  # deleted meanwhile
+                    toast.close()
+
     def question_actions(self, key, canary=False):
-        """The buttons of a question's notification: answered right there - Allow, Allow always, Block, Block
-        always ("always" remembered for the project, as on the Approvals page, with its caps and its question before
-        an allow) - and the way to its page. A canary's alarm only leads to its page."""
+        """The buttons of a question's notification: answered right there - Allow (this once) and Block (for this
+        run) at once, the click is the answer; Allow always… and Block always… outlive the run (remembered for the
+        project), so their one confirmation is where they are answered, as on the Approvals page with its caps -
+        and the way to its page. A canary's alarm only leads to its page."""
         open_page = (tr("Open approvals"), lambda k=key: self.open_question(k))
         if canary:
             return open_page
         return [(tr("Allow"), lambda k=key: self.answer_question(k, "allow", "once")),
-                (tr("Allow always"), lambda k=key: self.answer_question(k, "allow", "always")),
+                (tr("Allow always…"), lambda k=key: self.answer_question(k, "allow", "always")),
                 (tr("Block"), lambda k=key: self.answer_question(k, "deny", "run")),
-                (tr("Block always"), lambda k=key: self.answer_question(k, "deny", "always")),
+                (tr("Block always…"), lambda k=key: self.answer_question(k, "deny", "always")),
                 open_page]
 
     def answer_question(self, key, decision, scope):
-        """A notification's answer: the Approvals page sends it (the same checks and questions as its own
-        buttons); a question answered or ended meanwhile is left alone."""
+        """A notification's answer: the Approvals page sends it (the same checks as its own buttons) without asking
+        again - the button clicked on the notification was the answer; only "always" asks, once. A question answered
+        or ended meanwhile is left alone, and why an answer cannot be given is said (the page may not be shown)."""
         approvals = self.approvals
         entry = approvals.questions.get(key)
-        if entry is None:
+        if entry is None or approvals.settled(key):
             self.notify(tr("Not answered"), tr("The question is not open any more."), level="info")
             return
-        approvals.answer(decision, scope, entry=entry, parent=self)
+        rules = approvals.answer_rules(entry)
+        refused = rules["allow"] if decision == "allow" else rules["block"] if scope == "always" else rules["deny"]
+        if refused is None and decision == "allow":
+            refused = approvals.scope_refused(entry, scope)
+        if refused:
+            self.notify(tr("Not answered"), refused, level="info", action=(tr("Open approvals"),
+                                                                             lambda k=key: self.open_question(k)))
+            return
+        approvals.answer(decision, scope, entry=entry, parent=self, asked=True)
+        self.close_settled_toasts()
 
     def watcher_heartbeat(self):
         """Refresh the app's heartbeat while its question notifications are on; remove it when they are off."""
@@ -7847,10 +8365,11 @@ class MainWindow(QMainWindow):
         ACTION: (label, callback) for a button on the popup. Warnings and errors also ask for attention in the
         task bar."""
         style = backend.setting("notify_style")
-        self.notifier.show(level, title, text, seconds=backend.setting("notify_seconds"),
-                           style=style if style in ("themed", "system") else "themed", action=action)
+        toast = self.notifier.show(level, title, text, seconds=backend.setting("notify_seconds"),
+                                   style=style if style in ("themed", "system") else "themed", action=action)
         if level in ("warning", "error"):
             QApplication.alert(self)
+        return toast
 
     # -- updates --
 
@@ -8213,6 +8732,7 @@ class MainWindow(QMainWindow):
         """A start at login (--hidden): stay in the tray. The panel may come up after the app, so without a
         tray yet, look again every INTERVAL ms; after SECONDS the window is shown instead (nobody would
         see the questions otherwise)."""
+        widgets.release_background()  # (no first paint to wait for)
         if self.tray is not None:
             return
         deadline = time.monotonic() + seconds
@@ -8358,10 +8878,17 @@ class MainWindow(QMainWindow):
         self.save_tabs()
         self.state.flush()
         self.shut_down = True
+        if widgets.LOG_WINDOW_OPENER == self.open_log_window:
+            widgets.LOG_WINDOW_OPENER = None
+        if getattr(self, "log_window", None) is not None:
+            self.log_window.close()
+            self.log_window.deleteLater()
+            self.log_window = None
         self.heartbeat_timer.stop()
         if getattr(self, "heartbeat_on", False):  # the launchers notify again from now on
             self.sai.watcher_heartbeat(False)
             self.heartbeat_on = False
+        widgets.release_background()  # (closed before its first paint: what was held runs, its result abandoned)
         ThreadCall.abandon_all()  # no result reaches a page after this
         # What still runs is reads and polls (the work was asked about and stopped before): ended without a grace
         # period, with what they started, so that no `sandbox-ai hosts run`, ssh or podman outlives the app.

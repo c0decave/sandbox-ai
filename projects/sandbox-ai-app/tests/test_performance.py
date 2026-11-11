@@ -594,3 +594,131 @@ def test_an_icon_is_drawn_once(qapp):
         assert len(drawn) == 4
     finally:
         theme._glyph_pixmap = original
+
+
+def test_a_folders_owners_are_looked_up_once_each(monkeypatch):
+    """A folder's rows asked the user and group databases for every entry (70 % of the time of the rows of 20,000
+    entries: about 0.2 s, in the listing's thread but holding the interpreter): once per user:group of the listing
+    now - the same rows."""
+    from sandbox_ai_app import files, files_page
+    uid, gid = os.getuid(), os.getgid()
+    entries = [files.Entry(f"file_{i:05d}.txt", "file" if i % 7 else "dir", i * 13, 1.7e9 + i, None, 0o100644,
+                           *((uid, gid) if i % 3 else (100005, 100005))) for i in range(20000)]
+    ranges = [(100000, 65536)]
+    expected = [files_page.owner_text(entry, ranges) for entry in entries[:6]]
+    asked = []
+    original = files_page.owner_text
+    monkeypatch.setattr(files_page, "owner_text", lambda entry, r: asked.append((entry.uid, entry.gid)) or
+                        original(entry, r))
+    begin = time.monotonic()
+    rows, colors = files_page.entry_rows(entries, ranges, True)
+    took = time.monotonic() - begin
+    assert sorted(asked) == sorted({(uid, gid), (100005, 100005)}), "one lookup per owner of the listing"
+    assert [row[5] for row in rows[:6]] == expected and len(rows) == len(colors) == 20000
+    assert "(a sandbox's)" in rows[0][5] and rows[1][5] == expected[1] != rows[0][5]
+    assert took < 2.0, f"the rows of 20,000 entries took {took:.2f} s (here: about 0.04 s, was 0.2 s)"
+
+
+def test_the_log_is_drawn_again_with_its_filter_read_once(qapp, monkeypatch):
+    """Each key typed into the log's filter draws up to MAX_ENTRIES entries again: the level and the filter were read
+    from their widgets for every entry (a fifth of the time of each key), once per redraw now - the same entries."""
+    from sandbox_ai_app import logview
+    hub = logview.hub()
+    kept = hub.snapshot()
+    hub.clear()
+    levels = ["INFO", "DEBUG", "WARNING", "INFO", "ERROR"]
+    try:
+        for i in range(logview.MAX_ENTRIES):
+            hub.entries.append({"time": "2026-11-11T12:00:00", "level": levels[i % 5], "where": "page",
+                                "message": f"message number {i}"})
+        panel = logview.LogPanel("WARNING")
+        reads = []
+        original = panel.filter.text
+        monkeypatch.setattr(panel.filter, "text", lambda: reads.append(1) or original())
+        panel.filter.setText("number 12")
+        lines = panel.text.toPlainText().splitlines()
+        assert lines and all("number 12" in line and ("WARNING" in line or "ERROR" in line) for line in lines)
+        assert len(lines) == sum(1 for i in range(logview.MAX_ENTRIES) if str(i).startswith("12") and i % 5 in (2, 4))
+        assert len(reads) <= 3, f"the filter was read {len(reads)} times for one redraw"
+        begin = time.monotonic()
+        for text in ("n", "nu", "num", "numb", ""):
+            panel.filter.setText(text)
+        took = time.monotonic() - begin
+        assert took < 5.0, f"five keys took {took:.2f} s (here: about 0.08 s)"
+        panel.deleteLater()
+    finally:
+        hub.clear()
+        hub.entries.extend(kept)
+
+
+def test_a_lazy_windows_first_reads_wait_for_its_first_paint(qapp, env, monkeypatch):
+    """Performance round 2: the first pages' reads (in their threads, sandbox-ai's modules loaded and run there) shared
+    Python with the window being made and painted for the first time - about a seventh of the time to the first
+    paint. A lazy window (the app's start) holds them until it has painted itself, then they run, in their order; a
+    window made at once (the tests, the self-test) holds nothing, and one closed before its paint lets them go."""
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    ran = []
+
+    def read(number):
+        ran.append(number)
+        return number
+    w = make_lazy(monkeypatch)
+    try:
+        assert widgets._workers.held is not None
+        for number in (1, 2, 3):
+            widgets.background(read, number, done=lambda result, error: None)
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert ran == [], "a read ran before the window's first paint"
+        w.resize(1200, 800)
+        w.show()
+        deadline = time.monotonic() + 10
+        while len(ran) < 3 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert sorted(ran) == [1, 2, 3] and widgets._workers.held is None
+        widgets.background(read, 4, done=lambda result, error: None)  # from now on: at once
+        deadline = time.monotonic() + 10
+        while len(ran) < 4 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ran[-1] == 4
+    finally:
+        close(w)
+    w = make_lazy(monkeypatch)
+    assert widgets._workers.held is not None
+    close(w)  # closed before it painted
+    assert widgets._workers.held is None
+    from test_projects import make_window
+    eager = make_window(monkeypatch)
+    try:
+        assert widgets._workers.held is None
+    finally:
+        close(eager)
+
+
+def test_a_secret_is_told_by_its_look_as_before_and_without_an_import_per_value(qapp):
+    """Performance round 2: a preset catalogue asks looks_secret for each of its values (some 4,000): it imported
+    state.looks_secret at every call (through PySide's import hook) and compiled its patterns from the cache - about
+    13 of the catalogue's 14 ms; now once. The answers are those of the patterns as they were."""
+    import re
+    from sandbox_ai_app import presets, state
+
+    def before(value):
+        value = str(value)
+        if re.match(r"(sk-|ghp_|gho_|github_pat_|glpat-|xox[abp]-|AKIA|ya29\.|eyJ)", value):
+            return True
+        return bool(re.fullmatch(r"[A-Za-z0-9_\-+/=.]{32,}", value)) and bool(re.search(r"[0-9]", value)) \
+            and bool(re.search(r"[A-Za-z]", value)) and "/" not in value[:1]
+    values = ["sk-abc", "ghp_x", "eyJhbGciOi", "AKIA1234", "ya29.token", "xoxb-1", "plain words here", "a" * 40,
+              "a1" * 20, "/a1" + "b" * 40, "a1/" + "b" * 40, "x" * 31 + "1", "x" * 32 + "1", "", 12345, None,
+              "Write a test for {path}", "--allow-pypi", "A9" * 16, "a=b+c.d-e_f" * 4 + "1"]
+    for value in values:
+        assert presets.looks_secret(value) == state.looks_secret(value) == before(value), value
+    begin = time.perf_counter()
+    for _ in range(400):
+        for value in values[:10]:
+            presets.looks_secret(value)
+    took = time.perf_counter() - begin
+    assert took < 0.5, f"4,000 looks took {took * 1000:.0f} ms (here: about 1.5 ms; before: about 10)"

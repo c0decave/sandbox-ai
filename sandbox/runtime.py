@@ -29,7 +29,11 @@ import shutil
 import shlex
 import signal
 import socket
-import ssl
+if __name__ == "__main__":
+    # In the sandbox ssl is loaded at the start, before anything is restricted (the proxy's TLS). The host's launcher
+    # loads this file for the helpers both sides share: its functions import ssl where they need it (4 ms of every
+    # command that loads the launcher).
+    import ssl  # noqa: F401
 import stat
 import struct
 import subprocess
@@ -1676,9 +1680,11 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
                 except RuntimeError:  # no thread to be had (the sandbox's process limit): the client asks again
                     workers.release()
                 continue
+            # Who asked, before the answer: once a refusal is out the client closes its socket at once, and the
+            # lookup found nothing ("a process not identified" for most refused names).
+            found = who.lookup("udp", peer[0], peer[1]) if who is not None and name not in pinned else {}
             sock.sendto(reply, peer)
             if name not in pinned:
-                found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
                 log_event("egress-denied.jsonl", {"host": name, "reason": "not in allowed hosts", **found})
                 # A name with a canary token is reported and never asked about: the question would go to the host,
                 # which looks the name up (below a wildcard by itself), and the token would leave through its DNS.
@@ -2551,6 +2557,7 @@ def no_delay(sock):
 def send_all(sock, data):
     """sendall that also works on a non-blocking (TLS) socket. A peer that takes nothing for IDLE_TIMEOUT
     seconds (a zero window) raises socket.timeout, an OSError: a broken connection to the callers."""
+    import ssl
     view = memoryview(data)
     deadline = time.monotonic() + IDLE_TIMEOUT
     while view:
@@ -2572,6 +2579,7 @@ def send_all(sock, data):
 def relay(left, right, counts, idle=IDLE_TIMEOUT, grace=30):
     """Copy bytes both ways until both sides closed (or one did and the other stays quiet for GRACE
     seconds); COUNTS[0] gets left->right, COUNTS[1] the rest."""
+    import ssl
     peers = {left: (right, 0), right: (left, 1)}
     open_ = {left, right}
     for sock in peers:
@@ -3102,11 +3110,26 @@ PROXY_CONTEXTS = 256    # TLS contexts the proxy keeps (one per host name it ope
 PROXY_VERIFIED = 4096   # (address, port, name) answers of serves_name it keeps
 
 
+def handshake_abandoned(exc):
+    """True when EXC, from the program's side of a TLS handshake with the proxy, is the connection closed or reset
+    without a TLS alert: the program went away (it ended, or timed out), it did not refuse the session CA - that
+    comes as an alert (unknown CA, bad certificate) from the program."""
+    import ssl
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, ssl.SSLEOFError,
+                        ssl.SSLZeroReturnError)):
+        return True
+    text = str(exc).upper()
+    if isinstance(exc, ssl.SSLError) and "ALERT" in text:
+        return False
+    return isinstance(exc, OSError) and ("EOF" in text or "CONNECTION RESET" in text or "CLOSED" in text)
+
+
 class ProxyServer:
     """Connections of one sandbox run; one thread per connection."""
 
     def __init__(self, config, log_fd, checker=None, run_dir=PROXY_RUN, destination=original_destination,
                  upstream=None, asker=None, who=None):
+        import ssl
         self.config, self.log_fd, self.checker, self.run_dir = config, log_fd, checker, run_dir
         # ASKER puts questions to the supervisor; WHO (the same channel, also with --ask off) asks it which
         # process a connection belongs to. DEBUG (--log-debug) logs more of what a refused client sent.
@@ -3343,6 +3366,7 @@ class ProxyServer:
     def server_context(self, host):
         """The TLS context for HOST, kept for the PROXY_CONTEXTS hosts used last (each holds a certificate in
         OpenSSL's memory; names under an allowed wildcard are endless)."""
+        import ssl
         with self.lock:
             context = self.contexts.pop(host, None)
             if context is not None:
@@ -3546,6 +3570,7 @@ class ProxyServer:
     def serves_name(self, address, port, name):
         """True if ADDRESS:PORT proves, with a certificate the system trusts, to be a server of NAME: an
         unopened connection may not carry a name that belongs elsewhere. Answers are cached for a while."""
+        import ssl
         key = (address, port, name)
         with self.lock:
             cached = self.verified.get(key)
@@ -3596,6 +3621,7 @@ class ProxyServer:
 
     def upstream_context(self, name, port):
         """How the real server is checked: against the system's CAs, an --llm endpoint also against its own CA."""
+        import ssl
         for entry in self.config.get("llm") or []:
             if entry.get("ca") and entry["scheme"] == "https" and entry["port"] == port and entry["host"] == name.lower():
                 with self.lock:
@@ -3616,6 +3642,7 @@ class ProxyServer:
             self.who.send("verified", {"address": address, "port": port, "name": name, "ok": bool(ok)})
 
     def intercept(self, client, upstream, name, address, record, started, port=443):
+        import ssl
         try:
             server = self.upstream_context(name or address, port).wrap_socket(upstream, server_hostname=name or address)
         except (ssl.SSLError, OSError) as exc:
@@ -3629,6 +3656,14 @@ class ProxyServer:
             context = self.server_context(name or address)
             agent = context.wrap_socket(client, server_side=True)
         except (ssl.SSLError, OSError, ValueError, RuntimeError) as exc:
+            if handshake_abandoned(exc):
+                # No alert from the program: it closed the connection while the proxy reached the server first (a
+                # short command such as `claude plugin install` that ended with a request of its own still open).
+                self.log({**record, "event": "tls-refused", "abandoned": True, "error": str(exc),
+                          "hint": "the program closed the connection during the TLS handshake without refusing the "
+                                  "session CA (it ended or gave up meanwhile); nothing to change unless it keeps "
+                                  "failing"})
+                return
             self.log({**record, "event": "tls-refused", "error": str(exc),
                       "hint": f"the program did not accept the session CA; --no-inspect {name or address} passes "
                               "this host through unopened (then only its name is logged)"})
@@ -3787,15 +3822,42 @@ class ProxyServer:
             details["body"] = printable_text(redact_text(json.dumps(shortened(body), default=repr)), 1000)
         return self.asker("http", details)
 
+    @staticmethod
+    def next_request_or_upstream_gone(stream, client, replies, upstream, timeout=None):
+        """Between two requests of a kept-alive connection: True once the client sends its next one, False when the
+        server closes its idle side first (or neither speaks within IDLE_TIMEOUT). A server that closes idle
+        connections (LM Studio, Ollama and others after a few seconds) left the client's connection open; the
+        client's next request then met a closed server and got no answer ("the socket connection was closed
+        unexpectedly", OpenCode's red line). Closed along with it, the client opens a new one instead."""
+        def pending(sock):
+            try:
+                return sock.pending() if hasattr(sock, "pending") else 0
+            except (OSError, ValueError):
+                return 0
+        if stream.buffer or pending(client):
+            return True
+        try:
+            ready = select.select([client, upstream], [], [], IDLE_TIMEOUT if timeout is None else timeout)[0]
+        except (OSError, ValueError):
+            return False
+        # The client first: its request goes on. Else the server spoke unasked - its close, a TLS close_notify, or a
+        # "408 Request Timeout" before it closes: the connection ends either way (a reply nobody asked for would be
+        # taken for the answer to the next request).
+        return client in ready
+
     def exchange(self, stream, client, upstream, scheme, origin, record):
         """HTTP/1.1 requests and responses on one connection, until either side ends it. ORIGIN is the
         server as the proxy knows it (the name its certificate was checked for, else address:port); the
         push check goes by it, never by the agent's Host header."""
         replies = Stream(upstream)
         limit = int(self.config.get("body_limit", 65536))
+        served = 0
         while True:
             current = {}
             try:
+                if served and not self.next_request_or_upstream_gone(stream, client, replies, upstream):
+                    return  # the server closed its idle connection: the client's goes too, before it sends on it
+                served += 1
                 head = stream.head()
                 if head is None:
                     return
@@ -4315,7 +4377,9 @@ def trust_session_ca(bundles=SYSTEM_BUNDLES, mount=None):
 ATTRIBUTION_BUDGET = 0.2   # seconds one scan of /proc/*/fd may take; what it did not reach is unknown
 ATTRIBUTION_RATE = 50      # lookups per second; beyond that they are unknown ("too many lookups")
 ATTRIBUTION_WAIT = 0.25    # how long the proxy waits for the answer before it writes a record
-REFUSAL_WAIT = 0.05        # how long a refusal waits for it: a reset unhashes the client's socket
+# How long a refusal waits for it: a reset unhashes the client's socket. The client is refused anyway; at 0.05 s a scan
+# of /proc that took longer left the refusal without its process ("no answer in time").
+REFUSAL_WAIT = 0.2
 TCP_STATES = {1: "ESTABLISHED", 2: "SYN_SENT", 3: "SYN_RECV", 4: "FIN_WAIT1", 5: "FIN_WAIT2", 6: "TIME_WAIT",
               7: "CLOSE", 8: "CLOSE_WAIT", 9: "LAST_ACK", 10: "LISTEN", 11: "CLOSING"}
 

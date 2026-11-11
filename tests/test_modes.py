@@ -8,6 +8,7 @@ from pathlib import Path
 import random
 import re
 import secrets
+import uuid
 
 import pytest
 
@@ -135,7 +136,7 @@ def normalized(run):
 
 
 def test_medium_starts_byte_identical_to_a_start_without_mode(m):
-    m.monkeypatch.setattr(s.uuid, "uuid4", lambda: s.uuid.UUID(int=7))
+    m.monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID(int=7))
 
     def run(*options):
         # The canary files' tokens are random: the same ones for each start compared here.

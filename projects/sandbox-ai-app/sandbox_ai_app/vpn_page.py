@@ -23,7 +23,8 @@ from .i18n import N_, tr
 from .host_choice import on_host
 from .name_fields import NameField, publish
 from .widgets import (
-    ask_first, background, disclosure, fill, outcome, plain_label, selected, show_text, table, shown_as_text,
+    ask_first, background, delete_key, disclosure, fill, multi_select, one_only, outcome, plain_label, report_each,
+    run_each, selected, selected_keys, several, show_text, table, shown_as_text,
 )
 
 LOCAL = "local"
@@ -336,13 +337,13 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
     def added(result, error):
         result, problem = result if error is None else (None, None)
         status, out, err = outcome(result, error)
+        # (a background job's outcome: shown without waiting for its OK - widgets.inform)
         if status != 0:
-            QMessageBox.warning(parent, tr("New VPN profile"),
-                                shown_as_text(printable((err or out).strip()[-1500:])))
+            widgets.warn(parent, tr("New VPN profile"), printable((err or out).strip()[-1500:]))
         elif problem is not None:
-            QMessageBox.warning(parent, tr("New VPN profile"), shown_as_text(tr(
+            widgets.warn(parent, tr("New VPN profile"), tr(
                 "{name} added, but its key was not kept as the secret {secret}: {error}", name=name,
-                secret=fields.get("secret") or "", error=printable(problem)[:300])))
+                secret=fields.get("secret") or "", error=printable(problem)[:300]))
         if done:
             done(name if status == 0 else None)
 
@@ -407,6 +408,10 @@ class VpnBox(QGroupBox):
         layout.addLayout(row)
         self.message = plain_label()
         layout.addWidget(self.message)
+        # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Show and Check one
+        multi_select(self.profiles)
+        delete_key(self.profiles, self.remove)
+        one_only(self.profiles, [self.show_button, self.check_button])
 
     def set_host(self, host):
         """Show HOST's profiles from now on (the Credentials page's host chooser)."""
@@ -476,7 +481,33 @@ class VpnBox(QGroupBox):
         show_text(self, tr("VPN profile {name} on {host}", name=name, host=self.host_label(host)),
                   text or tr("exit status {status}", status=status), modal=False)
 
+    def remove_several(self, names):
+        """Remove… with several profiles selected: one question naming them, then each (vpn remove NAME)."""
+        host = self.host
+        text = several(tr("Remove these {count} VPN profiles?", count=len(names)), names)
+        if not ask_first(self, "vpn-remove", tr("Remove"), text if host == LOCAL else
+                         tr("On {host}: {text}", host=printable(host), text=text), tr("Remove")):
+            return
+
+        def work(name):
+            if host == LOCAL:
+                return self.sai.vpn_remove(name)
+            return self.sai.host_run(host, "vpn", "remove", name, timeout=REMOVE_SECONDS)
+
+        def done(outcomes):
+            failures = report_each(self, tr("Remove"), outcomes)
+            self.message.setText(tr("Removed {count} of {total}.", count=len(names) - len(failures), total=len(names)))
+            self.refresh()
+        run_each(work, names, owner=self, source=self.remove_button, timeout=REMOVE_SECONDS * len(names), done=done)
+
     def remove(self):
+        if widgets.held(self.remove_button):  # (the Delete key while one runs: it would report false failures)
+            self.message.setText(tr("A removal is running: wait for it."))
+            return
+        names = [name for name in selected_keys(self.profiles) if isinstance(name, str) and NAME.fullmatch(name)]
+        if len(names) > 1:
+            self.remove_several(names)
+            return
         name, host = self.chosen(), self.host
         if not name or not ask_first(self, "vpn-remove", tr("Remove"), tr("Remove the VPN profile {name}?",
                                                                           name=printable(name)) if host == LOCAL else
@@ -488,4 +519,5 @@ class VpnBox(QGroupBox):
             if host == LOCAL:
                 return self.sai.vpn_remove(name)
             return self.sai.host_run(host, "vpn", "remove", name, timeout=REMOVE_SECONDS)
-        background(work, owner=self, work=True, timeout=REMOVE_SECONDS, done=lambda *_: self.refresh())
+        background(work, owner=self, work=True, timeout=REMOVE_SECONDS, source=self.remove_button,
+                   done=lambda *_: self.refresh())

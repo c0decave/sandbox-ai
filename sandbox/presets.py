@@ -499,6 +499,18 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
         if name not in known:
             found.append(f"MCP server {name} is not added yet (sandbox-ai mcp list shows yours): sandbox-ai mcp add "
                          f"ENTRY --as {name} (sandbox-ai mcp catalog lists the entries){leave_out(names)}")
+    identities = None
+    for identity, names in option_values(preset, values, "--identity"):
+        try:
+            module = _module("identities")
+            identities = module.load() if identities is None else identities
+        except ValueError as exc:
+            found.append(f"--identity {identity}: {exc}")
+            break
+        if identity != module.DEFAULT and identity not in identities:
+            found.append(f"--identity {identity}: no such identity yet; add it once (an identity without commit name "
+                         f"and logins carries none of your accounts): sandbox-ai identities add {identity} "
+                         f"--description \"no accounts of yours\"{leave_out(names)}")
     logins = None
     for kinds, names in option_values(preset, values, "--publish"):
         try:
@@ -536,6 +548,40 @@ def check_vpn_types(preset, values):
         if profile.get("type") != wanted:
             raise ValueError(f"preset {preset['id']}: {name} must name a {wanted} VPN profile; {value} is of type "
                              f"{profile.get('type')} (sandbox-ai vpn list)")
+
+
+def last_value(options, flag):
+    """The value of the last FLAG VALUE (or FLAG=VALUE) among OPTIONS (long forms), None without one."""
+    found = None
+    for index, token in enumerate(options):
+        if token == flag and index + 1 < len(options):
+            found = options[index + 1]
+        elif token.startswith(flag + "="):
+            found = token.split("=", 1)[1]
+    return found
+
+
+def check_effective_vpn(preset, values, options):
+    """The preset's promise holds for the start as it will run: the command line wins over a preset's options, so
+    a --vpn given there must be of the type the preset's VPN value needs (the tor preset's: tor), and a preset that
+    promises Tor is not started with --vpn-check warn (a failed check, a leak found during the run, must stop it).
+    OPTIONS: the start's options (long forms), the preset's and the command line's."""
+    for name, spec in preset.get("values", {}).items():
+        wanted = spec.get("vpn_type")
+        if spec.get("kind") != "vpn" or not wanted or not values.get(name):
+            continue
+        effective = last_value(options, "--vpn")
+        if effective and effective != values[name]:
+            try:
+                kind = _module("vpn").load_profile(effective).get("type")
+            except ValueError:
+                kind = None  # a profile that does not exist: the start's own check of --vpn names the ones there are
+            if kind is not None and kind != wanted:
+                raise ValueError(f"preset {preset['id']}: --vpn {effective} on the command line is of type {kind}; "
+                                 f"this preset needs a {wanted} profile ({name})")
+        if wanted == "tor" and last_value(options, "--vpn-check") == "warn":
+            raise ValueError(f"preset {preset['id']} sends everything through Tor: a failed Tor check must stop it, "
+                             "drop --vpn-check warn")
 
 
 def registered_values(preset, given, agent=None):
@@ -655,6 +701,8 @@ def apply(argv, canonical=None, with_mode=False, notes=None):
     options, mode = split_mode(options)
     options += extras_of(preset, resolved_values(preset, given))
     check_vpn_types(preset, resolved_values(preset, given))
+    check_effective_vpn(preset, resolved_values(preset, given), canonical([*options, *rest]) if canonical
+                        else [*options, *rest])
     agent_args = tail if tail else prompt_args(preset, agent, resolved_values(preset, given))
     result = [agent, *options, *rest, *(["--", *agent_args] if agent_args or "--" in argv else [])]
     return (result, mode) if with_mode else result

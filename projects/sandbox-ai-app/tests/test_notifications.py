@@ -206,3 +206,40 @@ def test_an_action_that_outlives_its_toast_raises_nothing(qapp):
     for _ in range(5):
         qapp.processEvents()
     assert ran == [True]
+
+
+def test_a_toast_shows_no_window_of_its_own_but_itself(qapp, notifier):
+    """Its text label was shown before it had a parent: for a moment a window of its own (a tiling window manager laid
+    out every window anew around it - the app flickered at its start)."""
+    from PySide6.QtCore import QEvent, QObject
+
+    class Spy(QObject):
+        shown = []
+
+        def eventFilter(self, obj, event):  # noqa: N802
+            if event.type() == QEvent.Type.Show and obj.isWidgetType() and obj.isWindow():
+                self.shown.append(type(obj).__name__ + (":" + obj.objectName() if type(obj).__name__ != "Toast" else ""))
+            return False
+    spy = Spy()
+    qapp.installEventFilter(spy)
+    try:
+        notifier.show("warning", "A title", "some text")
+        qapp.processEvents()
+    finally:
+        qapp.removeEventFilter(spy)
+    assert spy.shown and set(spy.shown) <= {"Toast"}, spy.shown
+
+
+def test_a_toasts_text_can_be_marked_and_copied(qapp, notifier):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication
+    toast = notifier.show("error", "Session failed", "agent-sandbox: [Errno 13] Permission denied: '/mnt/ext'")
+    if toast is None:  # the desktop's notification was used instead
+        pytest.skip("no themed toast here")
+    for label in (toast.title, toast.text):
+        assert label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
+    assert toast.message_text() == "Session failed\nagent-sandbox: [Errno 13] Permission denied: '/mnt/ext'"
+    toast.text.setSelection(0, 13)
+    assert toast.selected_text() == "agent-sandbox"
+    QGuiApplication.clipboard().setText(toast.message_text())
+    assert "Permission denied" in QGuiApplication.clipboard().text()

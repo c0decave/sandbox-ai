@@ -862,7 +862,16 @@ QSplitter::handle {{ background: {c['alternate']}; }}
 QMenu {{ background: {c['base']}; color: {c['text']}; border: 1px solid {c['border']}; padding: 4px; }}
 QMenu::item {{ padding: 5px 18px; border-radius: {small}px; }}
 QMenu::item:selected {{ background: {c['highlight']}; color: {c['highlight_text']}; }}
-""" + extra + COMPACT_NAV
+""" + extra + header_edges(c, bevel) + COMPACT_NAV
+
+
+def header_edges(c, bevel=False):
+    """A line between the titles of a table's or tree's columns, where one is grabbed to make it wider or narrower
+    (or to move it, where it moves): after every theme's own rule for the titles, in its border colour. The raised
+    titles of a bevelled theme show their edges already."""
+    if bevel:
+        return ""
+    return f"QHeaderView::section:horizontal {{ border-right: 1px solid {c['border']}; }}\n"
 
 
 def font(name=None):

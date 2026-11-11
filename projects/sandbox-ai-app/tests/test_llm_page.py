@@ -307,6 +307,30 @@ def test_removing_asks_first_with_cancel_as_the_default(qapp, sai, monkeypatch):
     page.deleteLater()
 
 
+def test_several_servers_are_removed_at_once(qapp, sai, monkeypatch):
+    """Ctrl/Shift: several servers; Remove… (and the Delete key) forgets each after one question naming them; what
+    acts on one server waits; what failed is said together."""
+    monkeypatch.setattr(widgets, "background", llm_page.background)  # (run_each's, synchronous as the page's)
+    sai.answers[("local", ("llm", "list", "--json"))] = (0, json.dumps(
+        [LOCAL_SERVER, dict(LOCAL_SERVER, name="lm2"), dict(LOCAL_SERVER, name="lm3")]), "")
+    sai.answers[("local", ("llm", "remove", "lm3"))] = (1, "", "llm: lm3 is in use")
+    page = llm_page.LlmPage(sai)
+    page.show()
+    assert page.servers.rowCount() == 3
+    page.servers.selectAll()
+    assert page.remove_button.isEnabled() and not page.edit_button.isEnabled() and not page.check_button.isEnabled()
+    sai.asked.clear()
+    next(a for a in page.servers.actions() if a.objectName() == "deleteAction").trigger()  # the Delete key
+    title, text, _ = widgets.SHOWN[0]
+    assert title == "Remove" and text.startswith("Forget these 3 LLM servers on local (this machine)?")
+    assert "- lm\n- lm2\n- lm3" in text
+    assert [args for _, args in sai.asked if args[1] == "remove"] == [("llm", "remove", n) for n in ("lm", "lm2", "lm3")]
+    assert widgets.SHOWN[-1][1].startswith("1 of 3 failed:") and "lm3: llm: lm3 is in use" in widgets.SHOWN[-1][1]
+    assert page.status.text().startswith("LLM servers") or "Removed 2 of 3." in page.status.text()
+    page.close()
+    page.deleteLater()
+
+
 def test_a_name_that_reads_as_an_option_is_never_passed_on(qapp, sai, monkeypatch):
     from PySide6.QtWidgets import QDialog
     sai.answers[("local", ("llm", "list", "--json"))] = (0, json.dumps([dict(LOCAL_SERVER, name="--replace")]), "")

@@ -248,6 +248,15 @@ def agent_of(target):
     raise ValueError(f"no variant {target}; create it with: sandbox-ai images new {target} --from AGENT")
 
 
+BUILD_TARGETS = ("codex", "claude", "opencode", "all", "team", "vpn", "tor")  # what `sandbox-ai build NAME` means
+
+
+def build_command(name):
+    """How the variant NAME is built: sandbox-ai build NAME, or with --variant when NAME is a build target too (the
+    recipe tor's variant: `build tor` builds the Tor VPN's image)."""
+    return f"sandbox-ai build --variant {name}" if name in BUILD_TARGETS else f"sandbox-ai build {name}"
+
+
 def variant_image(agent, name):
     """The image of variant NAME of AGENT (for the launcher's --image-variant), else ValueError."""
     if not valid_name(name):
@@ -255,6 +264,9 @@ def variant_image(agent, name):
     try:
         owner = agent_of(name)
     except ValueError:
+        if name in RECIPES:  # (images new would make an empty one: the recipe brings what the name promises)
+            raise ValueError(f"--image-variant {name}: no such variant; make it from its recipe and build it: "
+                             f"sandbox-ai images recipe {name} --from {agent} && {build_command(name)}") from None
         raise ValueError(f"--image-variant {name}: no such variant; create it with: sandbox-ai images new {name} "
                          f"--from {agent}") from None
     if owner != agent:
@@ -1228,7 +1240,7 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
                     for item in description["findings"]:
                         out(format_finding(item))
                 if changes:
-                    out(f"build it with: sandbox-ai build {args.target}")
+                    out(f"build it with: {build_command(args.target) if args.target not in AGENTS else f'sandbox-ai build {args.target}'}")
             return 0
         if args.command == "check":
             agent = agent_of(args.target)
@@ -1250,7 +1262,7 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
             description, changes = recipe(args.name, args.agent, args.variant)
             variant = args.variant or args.name
             out(f"variant {variant} of {args.agent} with the recipe {args.name}: {', '.join(changes) or 'no change'}")
-            out(f"build it: sandbox-ai build {variant}; start with: sandbox-ai {args.agent} --image-variant {variant}")
+            out(f"build it: {build_command(variant)}; start with: sandbox-ai {args.agent} --image-variant {variant}")
             return 0
         if args.command == "new":
             description = new_variant(args.name, args.agent, args.empty)
@@ -1259,7 +1271,7 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
             else:
                 out(f"variant {args.name} of {args.agent}: {description['image']}")
                 out(f"change it with: sandbox-ai images extend {args.name} ...; build it with: "
-                    f"sandbox-ai build {args.name}; start it with: sandbox-ai {args.agent} --image-variant {args.name}")
+                    f"{build_command(args.name)}; start it with: sandbox-ai {args.agent} --image-variant {args.name}")
             return 0
         if args.command == "remove":
             for note in remove(args.target, args.keep_image, args.podman_url, run):
@@ -1287,7 +1299,7 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
         for image in found:
             label = image["target"] if not image["variant"] else f"{image['target']} ({image['agent']})"
             if not image["present"]:
-                out(f"{label:18} not built (sandbox-ai build {image['target']})"
+                out(f"{label:18} not built ({build_command(image['target']) if image['variant'] else 'sandbox-ai build ' + image['target']})"
                     + ("; the extension has errors" if image["status"] == "invalid" else ""))
             else:
                 size = f"{image['size'] / 1e9:.1f} GB"

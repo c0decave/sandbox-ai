@@ -242,7 +242,7 @@ class ActivityPage(QWidget):
 
     def __init__(self, sai, window=None):
         super().__init__()
-        self.sai, self.window = sai, window
+        self.sai, self.main_window = sai, window  # never self.window: it would hide QWidget.window()
         self.process, self.buffer, self.errors, self.starts = None, b"", "", {}
         # One look at a host at a time: remote_busy stays until the look running has come back, also when its result
         # no longer counts (stop(), a new filter: remote_token); remote_again: one more look then, with what is chosen.
@@ -320,7 +320,8 @@ class ActivityPage(QWidget):
         self.table.setAccessibleName(tr("Timeline"))
         self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # several rows (Ctrl, Shift) to copy them (Ctrl+C); the buttons below act on one
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setWordWrap(False)
         self.table.setAlternatingRowColors(True)
@@ -752,6 +753,10 @@ class ActivityPage(QWidget):
                             tr("Choose a network event"))
         widgets.set_enabled(self.files_button, record is not None and self.host_path(record) is not None,
                             tr("Choose a file event inside a workspace"))
+        count = len(self.table.selectionModel().selectedRows()) if self.table.selectionModel() else 0
+        if count > 1:
+            for button in (self.connections_button, self.files_button):
+                widgets.set_enabled(button, False, tr("Acts on one row: {count} are selected.", count=count))
 
     def shown_records(self):
         return [self.model.record_at(self.proxy.mapToSource(self.proxy.index(row, 0)).row())
@@ -819,7 +824,7 @@ class ActivityPage(QWidget):
 
     def show_connections(self):
         record = self.current()
-        window = self.window
+        window = self.main_window
         if record is None or window is None or not hasattr(window, "connections"):
             return False
         details = record.get("details") if isinstance(record.get("details"), dict) else {}
@@ -841,7 +846,7 @@ class ActivityPage(QWidget):
 
     def show_file(self):
         record = self.current()
-        window = self.window
+        window = self.main_window
         found = self.host_path(record) if record is not None else None
         if found is None or window is None or not hasattr(window, "files"):
             return False

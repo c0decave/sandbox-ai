@@ -240,6 +240,21 @@ def cmdline(pid, proc=PROC):
         return None
 
 
+def recorded_cmdline(pid, start, proc=PROC):
+    """agent_sandbox.process_cmdline (a test keeps both the same), for the modules that do not load the launcher for
+    it: the arguments of the process recorded as PID with start time START; [] when it is gone or the PID now belongs
+    to another process (START None: a record of an older version, the caller's match of the arguments decides)."""
+    if not pid:
+        return []
+    found = cmdline(pid, proc)
+    if found is None:
+        return []
+    # Compared after reading the arguments: a match means they belonged to the recorded process.
+    if start is not None and start_time(pid, proc) != start:
+        return []
+    return found
+
+
 def owner(pid, proc=PROC):
     """The user ID PID runs as, or None when it is gone."""
     if darwin(proc):

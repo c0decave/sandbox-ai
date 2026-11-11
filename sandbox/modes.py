@@ -431,6 +431,7 @@ WEAKENING_OPTIONS = frozenset({
     "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",
     "--profile", "--dns", "--nameserver", "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask",
     "--local-config", "--llm", "--preset", "--preset-value", "--vpn-check",  # --vpn-check: a failing VPN used anyway
+    "--vpn-bypass-host-ports",  # the host's ports past Tor
     # files, devices, displays and sound
     "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
     "--state-dir", "--kit", "--kit-dir", "--mcp",

@@ -147,7 +147,10 @@ def test_bwrap_is_as_hardened_as_the_container(tmp_path):
     assert "--uid 10001 --gid 10001" in joined and "--tmpfs /tmp" in joined and "--proc /proc --dev /dev" in joined
     assert f"--ro-bind {work} /work" in joined and f"--bind {work} /out" in joined
     assert "--setenv API_KEY s3cr3t" in joined and "OTHER" not in joined and "--setenv HOME /tmp" in joined
-    assert args[args.index("--") + 1:] == ["/opt/venv/bin/python", "-I", "/opt/mcp/server.py"]
+    # bwrap takes only options from --args FD (a command after "--" there was dropped: no server ever started); the
+    # command goes on bwrap's own command line after it.
+    assert "--" not in args and args[-2:] == ["--chdir", d["rootfs"].get("workdir", "/tmp")]
+    assert r.entrypoint(d) == ["--", "/opt/venv/bin/python", "-I", "/opt/mcp/server.py"]
     assert "resolv.conf" not in joined, "no network: no resolver either"
     full = r.bwrap_args(definition(tmp_path, network="full"), {})
     assert "--unshare-net" in full and any(a.endswith("resolv.conf") for a in full), "slirp4netns's own network"
@@ -202,3 +205,30 @@ def test_add_with_bubblewrap_and_start_the_bridge(tmp_path, data_home, monkeypat
     checked = Path(cmd[-1])
     assert json.loads(checked.read_text())["rootfs"]["sha256"] == sha and checked.stat().st_mode & 0o077 == 0
     assert m.load_state("duckduckgo")["backend"] == "bwrap"
+
+
+@pytest.mark.parametrize("network", ["none", "full"])
+def test_bwrap_gets_the_command_on_its_command_line_after_the_args_pipe(tmp_path, monkeypatch, network):
+    d = definition(tmp_path, env=["API_KEY"], network=network)
+    seen = []
+
+    class Done(Exception):
+        pass
+
+    def execvp(program, argv):
+        seen.append(argv)
+        raise Done
+
+    def popen(argv, **kw):
+        seen.append(argv)
+        raise Done
+    monkeypatch.setattr(r.os, "execvp", execvp)
+    monkeypatch.setattr(r.subprocess, "Popen", popen)
+    try:
+        r.run(d, {"API_KEY": "s3cr3t"})
+    except Done:
+        pass
+    argv = seen[0]
+    assert argv[0] == "bwrap" and "--args" in argv
+    assert argv[argv.index("--"):] == ["--", "/opt/venv/bin/python", "-I", "/opt/mcp/server.py"]
+    assert "s3cr3t" not in " ".join(argv), "variables stay in the pipe"

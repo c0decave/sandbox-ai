@@ -104,6 +104,19 @@ def test_a_kit_change_runs_in_the_background_with_a_busy_bar_and_one_at_a_time(q
     assert "added egm@sandbox-ai" in page.message.text() and window.busy_label.isHidden()
 
 
+def test_install_plugins_runs_in_the_background_without_a_terminal(qapp, window, kits, monkeypatch):
+    """User report: installing opened a terminal tab that only showed the output. `sandbox-ai plugins claude` asks
+    nothing: it runs in the page's Task (the window answers meanwhile), no terminal tab opens."""
+    page = kits
+    window.show_page("kits")
+    install = slow((0, "sandbox-ai plugins: 1 plugin(s) in /x/plugins/claude", ""))
+    monkeypatch.setattr(window.sai, "host_plugins", install)
+    opened = []
+    monkeypatch.setattr(page, "terminal", lambda *a, **k: opened.append(a))
+    responsive(qapp, lambda: page.install(False), lambda: not page.task.running, install.calls)
+    assert opened == [] and "1 plugin(s) in /x/plugins/claude" in page.message.text()
+
+
 def test_a_kit_change_streams_its_output_and_cancel_ends_it(qapp, window, kits, monkeypatch, wait):
     """The real call() path: a command that writes a line and then hangs (a marketplace clone that does not come):
     its line shows while it runs, Cancel ends it (its process group), and the page says it was cancelled."""
@@ -165,10 +178,10 @@ def stub_web(tmp_path):
     return web
 
 
-@pytest.mark.parametrize("action", ["install plugins", "image build", "start"])
+@pytest.mark.parametrize("action", ["image build", "start"])
 def test_what_runs_in_a_terminal_tab_leaves_the_window_free(qapp, window, env, monkeypatch, stub_web, wait, action):
-    """Install plugins, an image build and a start run in a terminal tab of the app (their own process, its output
-    as it comes): opening it keeps the window answering."""
+    """An image build and a start run in a terminal tab of the app (their own process, its output as it comes):
+    opening it keeps the window answering. (Install plugins runs in the background: it asks nothing.)"""
     from sandbox_ai_app import terminal
     monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
     window.terminals.web = str(stub_web)
@@ -181,9 +194,7 @@ def test_what_runs_in_a_terminal_tab_leaves_the_window_free(qapp, window, env, m
     open_tab(window.terminals, [sys.executable, "-c", "pass"], "warm up")  # the first web view (Chromium) once
     before = window.terminals.tabs.count()
     ended = []
-    if action == "install plugins":
-        click = lambda: window.kits.install(False)  # noqa: E731
-    elif action == "image build":
+    if action == "image build":
         click = window.images.build_all
     else:
         window.set_project(project(env, "p"))

@@ -65,6 +65,8 @@ def setup(view, stretch=None, compact=()):
         header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
     if getattr(view, "fit_watcher", None) is None:
         view.fit_watcher = _Watcher(view)
+    from .copying import copyable
+    copyable(view)  # Ctrl+C and the context menu's Copy
     return view
 
 

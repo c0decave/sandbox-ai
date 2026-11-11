@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
 )
 
-from . import backend, theme
+from . import backend, theme, widgets
 from .files import printable
 from .state import choose_folder
 from .i18n import tr
@@ -238,7 +238,7 @@ class QuestionsWindow(QDialog):
 
     def show_questions(self):
         page = self.page
-        keys = list(page.questions)
+        keys = page.open_keys()
         fill(self.table, [[page.labels.get(key, printable(key[1])), describe(page.questions[key][1])] for key in keys],
              keys=keys)
         if not selected_rows(self.table) and len(keys) == 1:
@@ -402,7 +402,7 @@ class ApprovalsPage(QWidget):
         history_layout.addLayout(history_row)
         # A ModelTable: a long-running sandbox's history (hundreds of answers) is filled in one step.
         self.history = table([tr("Time"), tr("Sandbox"), tr("Question"), tr("Answer"), tr("Scope"), tr("Reason")],
-                             stretch=2, compact=(0, 3, 4), many=True)
+                             stretch=2, compact=(0, 3, 4), many=True, multi=True)  # several: to copy them
         self.history.setAccessibleName(tr("History of the answers"))
         history_layout.addWidget(self.history)
         self.history_text = QPlainTextEdit()  # a host's history: its own table, escaped
@@ -417,6 +417,8 @@ class ApprovalsPage(QWidget):
         always_layout = QVBoxLayout(always_box)
         self.always = table([tr("Project"), tr("Allowed"), tr("Kind")], stretch=0, compact=(2,))
         self.always.setAccessibleName(tr("Allowed or blocked always"))
+        widgets.multi_select(self.always)  # several at once (Ctrl, Shift): Forget… (and the Delete key) takes them all
+        widgets.delete_key(self.always, lambda: self.forget(), tr("Forget"))
         always_layout.addWidget(self.always)
         row = QHBoxLayout()
         # Whose list: this machine's (sandbox-ai's file) or a host's (`sandbox-ai approvals remembered` there).
@@ -788,9 +790,15 @@ class ApprovalsPage(QWidget):
         self.remote_note.setText("\n".join(tr("{host}: no answer", host=printable(host)) + f" ({text})"
                                            for host, text in problems))
 
+    def open_keys(self):
+        """The questions that still wait for an answer from here, in their order: not those whose answer is on its
+        way or taken by another host - one answer anywhere settles a question everywhere."""
+        return [key for key in self.questions if not self.settled(key)]
+
     def offer_questions(self):
-        """While a modal dialog blocks the window, open questions are shown in a window above it."""
-        keys = set(self.questions)
+        """While a modal dialog blocks the window, open questions are shown in a window above it; one answered
+        already (from its notification, say) is never offered again."""
+        keys = set(self.open_keys())
         self.dismissed &= keys
         window = self.questions_window
         if window is not None and window.isVisible():
@@ -1198,6 +1206,9 @@ class ApprovalsPage(QWidget):
 
     def forget(self):
         rows = selected_rows(self.always)
+        if len(rows) > 1:
+            self.forget_several([row_key(self.always, row) for row in rows])
+            return
         key = row_key(self.always, rows[0]) if rows else None
         if not key:
             self.always_message.setText(tr("Select an entry first."))
@@ -1218,11 +1229,36 @@ class ApprovalsPage(QWidget):
             background(lambda: self.sai.forget_remembered(project, entry, host=host), owner=self, work=True,
                        source=self.forget_button, timeout=120, done=self.forgotten)
 
+    def forget_several(self, keys):
+        """Forget… with several entries selected: one question naming them, then each (approvals forget)."""
+        keys = [key for key in keys if key]
+        host = getattr(self, "always_shown", LOCAL)  # the host whose list is shown, never the one chosen meanwhile
+        text = widgets.several(tr(
+            "Forget these {count} entries? Their projects' next sandboxes ask again. Sandboxes running now keep what "
+            "they already allowed until they end (take it back there with Sandboxes › Revoke…, sandbox-ai net revoke).",
+            count=len(keys)), [f"{printable(entry)} ({printable(project)})" for project, entry in keys])
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not keys or not ask_first(self, "approval-forget", tr("Forget"), text, tr("Forget")):
+            return
+
+        def forget(key):
+            project, entry = key
+            return self.sai.forget_remembered(project, entry) if host == LOCAL else \
+                self.sai.forget_remembered(project, entry, host=host)
+
+        def done(outcomes):
+            failures = widgets.report_each(self, tr("Forget"), outcomes,
+                                           lambda key: f"{printable(key[1])} ({printable(key[0])})")
+            self.load_always(note=tr("Forgotten: {count} of {total}.", count=len(keys) - len(failures),
+                                     total=len(keys)))
+        widgets.run_each(forget, keys, owner=self, source=self.forget_button, timeout=120 * len(keys), done=done)
+
     def forgotten(self, result, error):
         status, out, err = outcome(result, error)
         self.load_always(note=printable((out + err).strip()) if status != 0 else tr("Forgotten."))
 
-    def answer(self, decision, scope=None, entry=None, parent=None, open_here=False):
+    def answer(self, decision, scope=None, entry=None, parent=None, open_here=False, asked=False):
         """Send the answer in the background (`sandbox-ai approvals` may take up to a minute; on another host through
         `sandbox-ai hosts run HOST --`), one per question: a slow host's answer holds up no other question. Allow asks
         first, naming the sandbox, its host, the question and the scope (the scope box, capped as sandbox-ai caps it);
@@ -1230,7 +1266,9 @@ class ApprovalsPage(QWidget):
         once) this time only; Block always is a deny with the scope "always", asked first. A question whose time is up
         is not answered. ENTRY: the (run, question, host) to answer (default: the one highlighted); PARENT: the window
         asking; OPEN_HERE (a browser question of another host, always so for Allow): allowed there with --no-open,
-        the page opened here once that host took the answer."""
+        the page opened here once that host took the answer. ASKED: the human gave this very answer to this very
+        question already (a button of its notification): an answer for this run is sent without asking again; one
+        that outlives the run ("always") still asks, once - its buttons there say so (Allow always…)."""
         entry = entry or self.current()
         if not entry or self.key_of(entry) in self.answers or self.key_of(entry) in self.answered_there:
             return
@@ -1246,13 +1284,9 @@ class ApprovalsPage(QWidget):
                 self.message.setText(refused)
                 return
             scope = scope if scope in backend.SCOPES else self.scope.currentData()
-            # Refused here above what the policy allows (another host: what it said); the caps of the run's mode and
-            # of the kind narrow the answer in sandbox-ai itself, which says so (the box offers no more anyway).
-            widest = self.widest(entry) if host != LOCAL else \
-                self.max_scope if self.max_scope in backend.SCOPES else "once"
-            if backend.SCOPES.index(scope) > backend.SCOPES.index(widest):
-                self.message.setText(tr("Allowed at most “{scope}” here (the policy, the run's security mode or the "
-                                        "kind of question).", scope=widest))
+            refused = self.scope_refused(entry, scope)
+            if refused:
+                self.message.setText(refused)
                 return
             # Another host's page is opened here (that host may have no screen): allowed there with --no-open.
             open_here = open_here or remote_browser(entry)
@@ -1265,7 +1299,10 @@ class ApprovalsPage(QWidget):
             return
         self.confirming += 1
         try:
-            if decision == "allow" and not self.confirm_allow(entry, scope, parent, open_here=url is not None):
+            # A page to open or a push is shown whole before it is allowed: on the notification its text was cut.
+            whole = question.get("kind") in ("browser", "push")
+            if decision == "allow" and not (asked and scope != "always" and not whole) and \
+                    not self.confirm_allow(entry, scope, parent, open_here=url is not None):
                 return
             if decision == "deny" and scope == "always" and not self.confirm_block(entry, parent):
                 return
@@ -1294,6 +1331,23 @@ class ApprovalsPage(QWidget):
             self.answers[key] = background(lambda: self.sai.host_answer(host, argv, timeout=REMOTE_ANSWER_WAIT - 30),
                                            timeout=REMOTE_ANSWER_WAIT, done=done)
         self.update_buttons()
+        self.offer_questions()  # the Questions window lists it no more
+
+    def scope_refused(self, entry, scope):
+        """Why ENTRY cannot be allowed with SCOPE, or None. Refused here above what the policy allows (another host:
+        what it said); the caps of the run's mode and of the kind narrow the answer in sandbox-ai itself, which says
+        so (the box offers no more anyway)."""
+        widest = self.widest(entry) if entry[2] != LOCAL else \
+            self.max_scope if self.max_scope in backend.SCOPES else "once"
+        if backend.SCOPES.index(scope) > backend.SCOPES.index(widest):
+            return tr("Allowed at most “{scope}” here (the policy, the run's security mode or the kind of question).",
+                      scope=widest)
+        return None
+
+    def settled(self, key):
+        """True when the question KEY needs no answer from here any more: it is not open (answered elsewhere, ended,
+        refused), or its answer is on its way, or another host took it and lists it until it has read it."""
+        return key not in self.questions or key in self.answers or key in self.answered_there
 
     def open_here(self):
         """A browser question of another host: allowed there without opening it (--no-open), opened here."""
@@ -1410,7 +1464,8 @@ class StatisticsPage(QWidget):
             box_layout = QVBoxLayout(box)
             # The bars take the rest of the width; a table without bars: its first text column.
             stretch = len(headers) - 1 if not headers[-1] else 1 if len(headers) > 2 else 0
-            widget = table(headers, stretch=stretch, compact=[c for c in range(1, len(headers)) if c != stretch])
+            widget = table(headers, stretch=stretch, compact=[c for c in range(1, len(headers)) if c != stretch],
+                           multi=True)  # several rows (Ctrl, Shift): to copy them
             widget.setAccessibleName(title)
             widget.setMinimumHeight(160)
             box_layout.addWidget(widget)
@@ -1532,7 +1587,7 @@ class StatisticsPage(QWidget):
                   requests=data.get("requests", 0), processes=data.get("processes", 0), ok=pushes.get("ok", 0),
                   refused=pushes.get("refused", 0))
         if data.get("older_lines_skipped"):
-            text += " " + tr("(only the newest entries: {count} older lines not read)", count=data["older_lines_skipped"])
+            text += " " + tr("(only the newest entries: about {count} older lines not read)", count=data["older_lines_skipped"])
         self.summary.setText(text)
 
         def counted(key, pairs):

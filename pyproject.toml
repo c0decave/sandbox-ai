@@ -39,6 +39,7 @@ packages = ["sandbox_ai"]
 
 [tool.setuptools.package-data]
 sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signers", "public_suffix_list.dat", "web/*",
+              "launcher/*.py",
               "presets/*.json",
               "templates/*/*.md", "templates/*/*.json",
               "templates/*/skills/*/SKILL.md", "builtin/*/skills/*/SKILL.md", "builtin/kits/*/*/marketplaces.json",

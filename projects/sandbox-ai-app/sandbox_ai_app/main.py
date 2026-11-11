@@ -141,6 +141,9 @@ def main(argv=None):
     from . import fonts
     fonts.use(settings, app)  # the fonts chosen in the settings, when installed; theme.apply() applies them
     theme.apply(settings.get("theme", "system"), app)
+    from .widgets import fitting_dialogs, nonblocking_dialogs
+    nonblocking_dialogs()  # a dialog left open blocks nothing
+    fitting_dialogs()  # and never reaches past the screen's edge
     from .ui import MainWindow, risk_text
     from .widgets import ask_first
     # Before any of sandbox-ai's modules runs in this process: are they (or the app) where a sandbox writes?

@@ -96,6 +96,15 @@ def module(name):
     return _modules[name]
 
 
+def default_log_dir(project):
+    """launcher().default_log_dir, without loading the launcher for it (a test keeps both the same): the log
+    directory the wizard uses for PROJECT, per project, also for equal directory names."""
+    project = Path(project)
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    digest = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:12]
+    return state / "sandbox-ai" / "logs" / f"{project.name or 'root'}-{digest}"
+
+
 def stamp(seconds=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() if seconds is None else seconds))
 
@@ -200,6 +209,9 @@ def read(path, keep=None, tail=0):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return []
+        if tail:  # the last TAIL: from the end, only as far back as needed (the file holds every run)
+            tails = module("jsonltail")
+            return tails.newest(fd, tails.complete_end(fd, os.fstat(fd).st_size), safeguard_entry, keep, tail)
         with os.fdopen(os.dup(fd), "rb") as stream:
             for line in stream:
                 if not line.endswith(b"\n"):
@@ -356,11 +368,21 @@ def from_connection(entry, run, redact):
     rule, ruleset = entry.get("rule"), entry.get("ruleset")
     what = f"{entry.get('method')} {entry.get('url')}" if entry.get("method") and entry.get("url") else \
         f"connection to {entry.get('destination') or target}"
+    if event == "tls-refused" and entry.get("abandoned"):
+        return None  # the program left mid-handshake (it ended): nothing was refused
     if event == "tls-refused":
-        return record("network", f"TLS to {target}", reason or "the server's certificate was not valid",
-                      "the proxy checks certificates: it stays refused (a server with a private CA needs it named "
-                      "at the start)", run, entry.get("process"), target, source="proxy", stays=True, when=when,
-                      redact=redact)
+        # The handshake between the program and the proxy failed: the proxy opens TLS (it shows the program a
+        # certificate of the sandbox's session CA), and the program refused it or broke off - not the server's
+        # certificate (that is tls-upstream-failed). Mostly a program with its own list of CAs or pinned keys.
+        name = str(entry.get("host") or entry.get("sni") or target or "")
+        host = name.rpartition(":")[0] if name.count(":") == 1 else name
+        return record("network", f"TLS to {target}",
+                      (reason or "the handshake failed") + " - the program broke off the TLS handshake with the "
+                      "proxy, which opens TLS to look into it: the program did not accept the sandbox's session CA",
+                      f"a program with its own CA list or pinned keys needs the session CA "
+                      f"(NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, REQUESTS_CA_BUNDLE point to it in the sandbox) or "
+                      f"--no-inspect {host or 'HOST'} (the connection passes unopened; only its name is logged)",
+                      run, entry.get("process"), target, source="proxy", when=when, redact=redact)
     kind = classify_refusal(reason, approval, rule, ruleset)
     if kind is None and isinstance(approval, dict) and approval.get("reason") == "answered":
         return None  # the human said no
@@ -858,10 +880,18 @@ def matcher(run=None, kinds=None, since=None):
     return keep
 
 
+def safeguard_entry(line):
+    try:
+        entry = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    return entry if isinstance(entry, dict) and entry.get("kind") in KINDS else None
+
+
 def collect(files, keep=None, tail=0):
     found = []
     for path in files:
-        found += read(path, keep)
+        found += read(path, keep, tail)  # (each file's last TAIL: the last TAIL of all are among them)
     unique = {}
     for entry in found:
         unique.setdefault(entry.get("id") or json.dumps(entry, sort_keys=True), entry)
@@ -937,13 +967,13 @@ def locate(a):
         activity = module("activity")
         return [activity.session_log_dir(a.session) / FILE], run
     if a.project:
-        return [module("agent_sandbox").default_log_dir(a.project.expanduser().resolve()) / FILE], run
+        return [default_log_dir(a.project.expanduser().resolve()) / FILE], run
     if run:
         path = find_run(run)
         if path is None:
             raise ValueError(f"no safeguard records of a run {run!r} found (a run with --log-dir elsewhere: add --log-dir)")
         return [path], run
-    return [module("agent_sandbox").default_log_dir(Path(os.getcwd()).resolve()) / FILE], None
+    return [default_log_dir(Path(os.getcwd()).resolve()) / FILE], None
 
 
 def cli(argv, out=None):

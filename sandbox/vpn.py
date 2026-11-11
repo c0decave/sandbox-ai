@@ -50,8 +50,6 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
-import uuid
 
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
@@ -561,6 +559,7 @@ class Mullvad:
             headers["Content-Type"] = "application/json"
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        import urllib.request  # here: it loads in about 20 ms (http.client, email), a third of every `vpn list`
         request = urllib.request.Request(f"{self.base}/{path}", data=json.dumps(body).encode() if body is not None
                                          else None, method=method, headers=headers)
         try:
@@ -737,7 +736,13 @@ def check_settings(profile):
     recheck = own.get("recheck", configured.get("recheck", runtime().RECHECK))
     if isinstance(recheck, bool) or not isinstance(recheck, (int, float)) or not (recheck == 0 or 60 <= recheck <= 86400):
         raise ValueError("checks: recheck is 0 (never) or 60-86400 seconds")
-    return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck}
+    if not tor:
+        return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck}
+    # Tor: never only at the start (0 counts as the default), and the first check during the run soon after it, with
+    # the agent's firewall in place.
+    recheck = recheck or runtime().RECHECK
+    return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck,
+            "first_recheck": min(recheck, runtime().FIRST_RECHECK)}
 
 
 def check_url(url):
@@ -796,6 +801,8 @@ def evaluate(profile, tunnel, inside, host):
                 elif got.get("vpn") is False:
                     failures.append(f"{label}: the Tor Project says {got['ip']} is not a Tor exit" if tor else
                                     f"{label}: {provider} says {got['ip']} is not one of its VPN exits")
+                    if tor:  # behind Tor any other address is traffic past Tor, whether this host's own or not
+                        leaks.append(failures[-1])
                 elif tor and got.get("vpn") is not True:
                     failures.append(f"{label}: {seen} did not confirm that {got['ip']} is a Tor exit (no "
                                     '"IsTor": true)')
@@ -1276,6 +1283,8 @@ def validate(a):
     l = launcher()
     check_paths(exposed_paths(a, l), "Workspace, --mount, --copy or file option")
     if not getattr(a, "vpn", None):
+        if getattr(a, "vpn_bypass_host_ports", False):
+            raise ValueError("--vpn-bypass-host-ports goes with --vpn (a Tor profile)")
         return
     check_name(a.vpn)
     # An LLM endpoint's VPN (llm.apply_vpn) is named with where it came from.
@@ -1295,6 +1304,7 @@ def validate(a):
         l.check_host_source(a, tailscale_state(profile), "The VPN's Tailscale state (XDG_DATA_HOME)")
     a.vpn_profile = profile
     a.vpn_mark = mark_expression(profile)
+    a.vpn_check_mark = runtime().CHECK_MARK  # the VPN container's checks during the run pass the agent's firewall
     if profile["type"] == "tor":
         validate_tor(a, profile, option, l)
         return
@@ -1323,10 +1333,46 @@ def validate_tor(a, profile, option, l):
     ports = {rt.TOR_TRANS_PORT, *([rt.TOR_SOCKS_PORT] if profile["tor"].get("socks") else [])}
     for port in sorted(ports & set(l.host_ports(a))):
         raise ValueError(f"--allow-host-port {port}: Tor listens there in the sandbox ({option} {a.vpn})")
+    check_tor_host_ports(a, option, l.host_ports(a))
+    check_tor_llm(a, option, l)
     a.vpn_dns = [rt.TOR_DNS]  # on loopback, inside the sandbox: no network to hold against the policy
     a.vpn_firewall = tor_agent_rules(bool(a.dns or a.egress_all_allow), l.PROXY_UID)
     if l.within_ceiling(a, network=rt.TOR_VIRTUAL_NET) and rt.TOR_VIRTUAL_NET not in a.allow:
         a.allow.append(rt.TOR_VIRTUAL_NET)
+
+
+def host_ports_past_tor(ports, option, name):
+    """Why the host's loopback PORTS may not be reached in a Tor start: they lie past Tor."""
+    listed = ", ".join(str(port) for port in ports)
+    return (f"{option} {name} is a Tor profile, and the host's port{'s' if len(ports) > 1 else ''} {listed} would be "
+            "reached past Tor (--allow-host-port, an --llm server or a Git server on this host's loopback): whatever "
+            "listens there reaches the internet from your own address (a proxy, your own Tor or VPN client, a "
+            "server that fetches URLs). Drop them, or accept that with --vpn-bypass-host-ports")
+
+
+def check_tor_host_ports(a, option, ports):
+    """A Tor start reaches the host's loopback (pasta's forwards, the supervisor's relays) only with
+    --vpn-bypass-host-ports: everything else it reaches goes through Tor."""
+    if ports and not getattr(a, "vpn_bypass_host_ports", False):
+        raise ValueError(host_ports_past_tor(ports, option, a.vpn))
+
+
+def check_tor_llm(a, option, l):
+    """An --llm server at an address of your local network cannot be reached from a Tor start: Tor's exits refuse
+    private addresses, and nothing else leaves the sandbox. Said before the start, not as a failing agent."""
+    if not getattr(a, "llm", None):
+        return
+    llm = l.load_llm_module()
+    try:
+        found, _ = llm.selection(a)
+    except ValueError:
+        return  # llm.validate says why
+    parsed = found["parsed"]
+    if parsed["address"] and not parsed["loopback"] and llm.address_kind(parsed["address"]) == "local":
+        raise ValueError(f"--llm {found['name']}: {found['url']} lies in your local network, which a Tor start "
+                         f"cannot reach ({option} {a.vpn}: everything leaves through Tor, and Tor's exits refuse "
+                         "private addresses). Use a server on this host's loopback with --vpn-bypass-host-ports, one "
+                         "on the internet, or start without Tor")
 
 
 def check_policy(a, policy, where=""):
@@ -1389,6 +1435,7 @@ def agent_up(a, session, home, names, cleanup):
         kind = "Tor" if needed == TOR_IMAGE else "VPN"
         raise ValueError(f"The {kind} image {needed} is missing; build it with: {build_command(needed)}")
     cleanup.enter_context(profile_lock(profile))
+    import uuid  # here: only a start or a check names a container with it
     a.vpn_pod = a.pod_name or f"agent-{getattr(a, 'run_id', None) or a.agent + '-' + uuid.uuid4().hex[:12]}"
     create = l.pod_commands(a, a.vpn_pod, session, home)[0]
     podman_run(create, check=True, stdout=subprocess.DEVNULL)
@@ -1429,8 +1476,10 @@ def rechecked(a, profile, ready, event, say, baseline=None, stop=None):
         return None
     tunnel = ready.get("tunnel") or {}
     tailnet = profile["type"] == "tailscale" and not profile["tailscale"].get("exit_node")
+    # Tor: the Tor Project's answer decides (an address that is no Tor exit is a leak), so this host does not ask
+    # check.torproject.org from its own address every few minutes beside the sandbox's Tor exit.
     try:
-        host = {} if tailnet else (baseline or host_baseline)(check_settings(profile))
+        host = {} if tailnet or profile["type"] == "tor" else (baseline or host_baseline)(check_settings(profile))
     except (OSError, ValueError):
         host = {}
     verdict = evaluate(profile, tunnel, event.get("checks") or {}, host)
@@ -1439,7 +1488,8 @@ def rechecked(a, profile, ready, event, say, baseline=None, stop=None):
     for line in verdict["failures"]:
         say(f"check during the run FAILED: {line}")
     if verdict["leaks"] and getattr(a, "vpn_check", None) != "warn":
-        say("the run is stopped: traffic leaves past the VPN (start with --vpn-check warn to only be told)")
+        say("the run is stopped: traffic leaves past " + ("Tor" if profile["type"] == "tor" else "the VPN")
+            + " (start with --vpn-check warn to only be told)")
         (stop or (lambda: os.kill(os.getpid(), signal.SIGTERM)))()
     return verdict
 
@@ -1487,6 +1537,7 @@ def channel(name, podman_url=None, say=None):
     if podman_run([*podman, "image", "exists", image(profile)]).returncode != 0:
         raise ValueError(f"the image {image(profile)} is missing; build it with: {build_command(profile)}")
     say = say or (lambda text: None)
+    import uuid  # here: only a start or a check names a container with it
     container = f"sandbox-ai-vpn-req-{uuid.uuid4().hex[:8]}"
     with profile_lock(profile):
         command = container_command(podman, container, profile, action="serve", network=launcher().POD_NETWORK)
@@ -1842,6 +1893,7 @@ def check(name, as_json=False, podman_url=None, out=print):
     podman = ["podman", *(["--remote", "--url", podman_url] if podman_url else [])]
     need_podman(["podman"])
     say = (lambda text: None) if as_json else (lambda text: out(f"vpn: {text}"))
+    import uuid  # here: only a start or a check names a container with it
     container = f"sandbox-ai-vpn-check-{uuid.uuid4().hex[:8]}"
     with profile_lock(profile):
         command = container_command(podman, container, profile, action="check", network=launcher().POD_NETWORK)

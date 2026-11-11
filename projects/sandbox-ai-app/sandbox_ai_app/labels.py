@@ -100,6 +100,8 @@ OPTION_LABELS = {
     "--telemetry": ("Telemetry of the agents", "Telemetrie der Agenten"),
     "--vpn": ("VPN profile", "VPN-Profil"),
     "--vpn-check": ("When a VPN check fails", "Wenn eine VPN-Prüfung fehlschlägt"),
+    "--vpn-bypass-host-ports": ("Let host ports past the VPN (they leave from your address)",
+                                "Host-Ports am VPN vorbei (sie gehen von Ihrer Adresse aus)"),
     "--model": ("Model", "Modell"),
     "--effort": ("Effort", "Denkaufwand"),
     "--api-key": ("API keys kept out of the sandbox", "API-Schlüssel außerhalb der Sandbox"),

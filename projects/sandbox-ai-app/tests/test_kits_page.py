@@ -294,7 +294,10 @@ def test_names_are_checked_before_anything_runs(fake, monkeypatch):
     assert fake.sai.__class__.kit_command(fake.sai, "add-skill", "mine", "")[0] == 2
 
 
-def test_install_plugins_in_a_terminal_with_the_projects_built_in_kits(fake, env):
+def test_install_plugins_in_the_background_with_the_projects_built_in_kits(fake, env, monkeypatch, wait):
+    """User report: installing opened a terminal tab that only showed the output. `sandbox-ai plugins claude` asks
+    nothing: it runs in the background, its output goes to the log window, and a notification says how it went (a
+    failure with the way to the log)."""
     folder = project(env, "p")
     (folder / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude",
                                                          "options": ["--kit", "egm", "--kit", "mine"]}))
@@ -304,11 +307,65 @@ def test_install_plugins_in_a_terminal_with_the_projects_built_in_kits(fake, env
     assert page.table.item(widgets.find_row(page.table, "builtin:egm"), 4).text() == "✔"
     assert page.table.item(widgets.find_row(page.table, "user:mine"), 4).text() == "✔"
     page.table.clearSelection()
+    ran, notes = [], []
+    answers = [(0, "", "sandbox-ai plugins: 1 plugin(s) in /x/plugins/claude; every Claude sandbox enables those "
+                       "its kits list\n"),
+               (1, "", "sandbox-ai plugins: not installed: sandcastle@sandbox-ai\n")]
+    call = fake.sai.call
+    monkeypatch.setattr(fake.sai, "call", lambda *args, **kw: (ran.append(args) or answers.pop(0))
+                        if args[:2] == ("plugins", "claude") else call(*args, **kw))
+    monkeypatch.setattr(fake, "notify", lambda title, text, level="warning", action=None: notes.append(
+        (level, title, text, action)))
+    started = len(fake.started)
     page.install(update=True)
-    argv = fake.started[-1]
-    assert argv[0] == "term" and argv[4:7] == ["plugins", "claude", "--update"]
+    assert wait(lambda: notes and not page.task.running, 20)
+    assert len(fake.started) == started, "no terminal"
     supports = "--kit" in (fake.sai.directory / "plugins.py").read_text()
-    assert (argv[7:] == ["--kit", "egm"]) if supports else argv[7:] == [], "only built-in kits, only where it can"
+    assert ran[-1] == (("plugins", "claude", "--update") + (("--kit", "egm") if supports else ())), \
+        "only built-in kits, only where it can"
+    assert notes[-1][:3] == ("success", "Plugins updated", "sandbox-ai plugins: 1 plugin(s) in /x/plugins/claude; "
+                             "every Claude sandbox enables those its kits list")
+    assert wait(lambda: "1 plugin(s) in /x/plugins/claude" in fake.log_panel.text.toPlainText(), 5), \
+        "the output is in the log window"
+    page.install(update=False)
+    assert wait(lambda: len(notes) == 2 and not page.task.running, 20)
+    level, title, text, action = notes[-1]
+    assert (level, title, text) == ("error", "Plugins not installed",
+                                    "sandbox-ai plugins: not installed: sandcastle@sandbox-ai")
+    assert action[0] == "Show the log"
+    action[1]()
+    assert not fake.log_fold.is_folded()
+    assert ran[-1][:2] == ("plugins", "claude") and "--update" not in ran[-1]
+
+
+def test_the_page_s_actions_are_above_its_lists_grouped_and_on_their_context_menus(fake):
+    """User report: the important buttons were at the bottom, out of sight, and "Add plugin" beside "Install plugins"
+    did not say which does what. The plugin store's actions come first; each list's actions are above it; the
+    additions to a kit are one menu; each list has them on its context menu too."""
+    from sandbox_ai_app import kits_page
+    page = fake.kits
+    layout = page.layout()
+    order = [layout.itemAt(i).widget() for i in range(layout.count()) if layout.itemAt(i).widget() is not None]
+    store = next(w for w in order if isinstance(w, QtWidgets.QGroupBox))
+    assert order.index(store) < order.index(page.tabs), "the plugin store before the lists"
+    assert store.isAncestorOf(page.install_button) and page.install_button.text() == "Install the kits' plugins"
+    assert "only declares" in page.store_hint.text()
+    table_top = page.table.mapTo(page, page.table.rect().topLeft()).y()
+    for button in (page.use_button, page.add_menu_button, page.remove_button, page.delete_button):
+        assert button.mapTo(page, button.rect().topLeft()).y() < table_top or not page.isVisible()
+    assert [action.text() for action in page.add_menu.actions()] == [
+        "Skill from a folder…", "New skill…", "Plugin by its name…", "Marketplace…", "Hook…"]
+    assert "Nothing is downloaded" in page.plugin_button.toolTip()
+    select_kit(page, "user", "mine")
+    menu = kits_page.context_menu(page.table, [page.use_button, page.add_menu, page.remove_button, None,
+                                               page.delete_button])
+    texts = [action.text() for action in menu.actions() if not action.isSeparator()]
+    assert texts == ["Use in the current project…", "Add to the kit", "Remove from the kit…", "Delete kit…"]
+    delete = next(action for action in menu.actions() if action.text() == "Delete kit…")
+    assert delete.isEnabled() == page.delete_button.isEnabled()
+    assert page.table.contextMenuPolicy() == QtWidgets.QWidget().contextMenuPolicy().CustomContextMenu
+    assert page.market.contextMenuPolicy() == QtWidgets.QWidget().contextMenuPolicy().CustomContextMenu
+    assert page.plugins.contextMenuPolicy() == QtWidgets.QWidget().contextMenuPolicy().CustomContextMenu
 
 
 def test_using_a_kit_writes_the_project_file_after_review_and_trusts_it(fake, env, wait):
@@ -478,7 +535,7 @@ def test_hooks_are_added_and_removed_with_sandbox_ai_kits(hooked, env, monkeypat
             self.dialog = real(parent, agents)
             self.dialog.file.setText(str(script))
             self.dialog.matcher.setText("Write|Edit")
-            self.dialog.event.setCurrentText("PostToolUse")
+            self.dialog.event_box.setCurrentText("PostToolUse")
             self.dialog.agents.boxes["codex"].setChecked(False)
             self.file, self.agents, self.options = self.dialog.file, self.dialog.agents, self.dialog.options
 
@@ -532,3 +589,28 @@ def test_kit_hooks_end_to_end_with_sandbox_ai(window, env):
         assert sai.kit_command("remove-hook", "e2e-hooks", "check.sh", options=["--agent=claude"])[0] == 0
     finally:
         sai.kit_command("delete", "e2e-hooks", options=["--yes"])
+
+
+def test_several_kits_are_deleted_at_once_and_only_yours(fake, monkeypatch, wait):
+    """Ctrl/Shift: several kits; Delete kit… (and the Delete key) deletes your own of them after one question naming
+    them (sandbox-ai's own are left out, said); what acts on one kit waits."""
+    page, calls = fake.kits, fake.calls
+    inventory = copy.deepcopy(INVENTORY)
+    ours = copy.deepcopy(inventory["kits"][-1])
+    ours["name"], ours["path"] = "ours", "/home/u/.local/share/sandbox-ai/kits/ours"
+    inventory["kits"].append(ours)
+    monkeypatch.setattr(fake.sai, "kits_inventory", lambda: copy.deepcopy(inventory))
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page.refresh()
+    assert wait(lambda: page.table.rowCount() == 5, 10)
+    assert page.table.selectionMode() == QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+    widgets.select_keys(page.table, ["builtin:egm", "user:mine", "user:ours"])
+    assert len(page.chosen_kits()) == 3
+    assert page.delete_button.isEnabled()
+    assert not page.use_button.isEnabled() and not page.remove_button.isEnabled() and \
+        "3 are selected" in page.remove_button.toolTip()
+    next(a for a in page.table.actions() if a.objectName() == "deleteAction").trigger()  # the Delete key
+    question = widgets.SHOWN[0][1]
+    assert "Delete these 2 kits" in question and "- mine\n- ours" in question and "Left out" in question
+    assert wait(lambda: ("delete", "ours", "--yes") in calls, 10)
+    assert [c for c in calls if c[0] == "delete"] == [("delete", "mine", "--yes"), ("delete", "ours", "--yes")]

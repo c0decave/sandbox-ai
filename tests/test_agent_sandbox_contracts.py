@@ -4,6 +4,7 @@ Only OS/process boundaries are mocked. Filesystem copies, pipes, validation,
 configuration serialization and security decisions use the implementation.
 The separate live suite proves the actual namespace and model boundaries.
 """
+import types
 import argparse
 import ast
 import base64
@@ -214,6 +215,54 @@ def test_prepare_workspace(scenario, tmp_path):
             s.prepare_workspace(path)
         assert (path / "marker").read_text() == "preserve"
         assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+def test_check_workspace_creatable(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        s.check_workspace_creatable(tmp_path)  # there already
+        s.check_workspace_creatable(tmp_path / "new" / "deeper")  # made at the start
+    elif scenario == "sad":
+        monkeypatch.setattr(s.os, "access", lambda path, mode: Path(path) != tmp_path)  # (root writes anything)
+        with pytest.raises(ValueError, match=f"{tmp_path} is not writable for you"):
+            s.check_workspace_creatable(tmp_path / "a" / "b")
+        assert not (tmp_path / "a").exists()
+    else:
+        (tmp_path / "file").write_text("x")  # the nearest existing part is no folder: nothing can be made below
+        with pytest.raises(ValueError, match="cannot be created"):
+            s.check_workspace_creatable(tmp_path / "file" / "w")
+
+
+def test_check_mcp_names(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    a = s.parse_args(["codex", "--workspace", str(tmp_path), "--mcp", "demo"])
+    if scenario == "happy":
+        s.check_mcp_names(a)  # built-in
+        a.mcp, a.helper_definitions = ["demo", "helper-codex-0123abcd"], {"helper-codex-0123abcd": {}}
+        s.check_mcp_names(a)  # a --helper's server is defined by the start itself
+    elif scenario == "sad":
+        a.mcp = ["demo", "gone"]
+        with pytest.raises(ValueError, match="Unknown MCP server: gone; defined: demo"):
+            s.check_mcp_names(a)
+    else:
+        a.mcp, a.probe = ["gone"], True
+        s.check_mcp_names(a)  # a probe starts no server: nothing to look up
+        a.probe, a.project_document = False, {"mcp_servers": {"gone": {"command": ["x"]}}}
+        s.check_mcp_names(a)  # the trusted project file defines it
+
+
+def test_unknown_mcp_message(scenario, tmp_path):
+    a = s.parse_args(["codex", "--workspace", str(tmp_path), "--no-config"])
+    if scenario == "happy":
+        text = s.unknown_mcp_message(a, ["x"], {"demo": {}})
+        assert text.startswith("Unknown MCP server: x; defined: demo") and "sandbox-ai mcp add" in text
+    elif scenario == "sad":
+        (tmp_path / ".sandbox-ai.json").write_text("{not json")  # only for the hint: never an error of its own
+        assert "defines" not in s.unknown_mcp_message(a, ["x"], {})
+    else:
+        (tmp_path / ".sandbox-ai.json").write_text(json.dumps({"mcp_servers": {"x": {}}}))
+        text = s.unknown_mcp_message(a, ["x", "y"], {})
+        assert "defined: none" in text and "defines x, but this start reads no project file there" in text
+        assert "--no-config" in text
 
 
 def test_resolve_hosts(scenario, monkeypatch):
@@ -5083,6 +5132,77 @@ def test_claude_drop_plugins(scenario, tmp_path):
         assert json.loads((outside / "settings.json").read_text()) == {"enabledPlugins": {"x@y": True}}
 
 
+def test_the_plugin_installer_keeps_the_store_s_index(tmp_path, capsys):
+    """sandbox-ai plugins claude runs Claude with --no-plugins on the plugin store as its HOME: that run is there to
+    write the store's index, so --no-plugins must not clear it (it did: every install step erased what the step
+    before had added, so Claude no longer knew the marketplace and sandcastle was "not found")."""
+    kits = s.load_kits_module()
+    store_index = plugin_store_fixture()
+    store = kits.plugin_store("claude")
+    settings = store / ".claude/settings.json"
+    settings.write_text(json.dumps({"extraKnownMarketplaces": {"sandbox-ai": {"source": {
+        "source": "directory", "path": "/sandbox/marketplace"}}}}))
+    store.chmod(0o700)
+    work = store.parent / ".work-abc123"
+    work.mkdir()
+    a = s.parse_args(["claude", "--workspace", str(work), "--no-auth", "--no-config", "--no-default-kit",
+                      "--no-memory", "--no-plugins", "--binary", "claude", "--state-dir", str(store)])
+    s.validate(a)
+    assert s.plugin_store_run(a)
+    mounts, notes, _ = s.prepare_kits(a, store, tmp_path / "staging")
+    assert (kits.MARKETPLACE, "/sandbox/marketplace", "ro") in mounts
+    assert set(json.loads((store_index / "known_marketplaces.json").read_text())) == {"sandbox-ai"}
+    assert set(json.loads((store_index / "installed_plugins.json").read_text())["plugins"]) == {"sandcastle@sandbox-ai"}
+    assert "sandbox-ai" in json.loads(settings.read_text())["extraKnownMarketplaces"]
+    # Its own work folder, made for this start, is used without a warning; any other existing workspace warns.
+    assert work.resolve() in s.own_folders(a)
+    s.prepare_workspace(work, warn=False)
+    assert "exists already" not in capsys.readouterr().err
+    # Another HOME with --no-plugins is no installer run; nor is the store without --no-plugins.
+    other = s.parse_args(["claude", "--workspace", str(work), "--no-auth", "--no-plugins",
+                          "--state-dir", str(tmp_path / "state")])
+    assert not s.plugin_store_run(other)
+    assert not s.plugin_store_run(s.parse_args(["claude", "--workspace", str(work), "--no-auth",
+                                                "--state-dir", str(store)]))
+
+
+def test_plugin_store_run(scenario, tmp_path):
+    store = s.load_kits_module().plugin_store("claude")
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--no-auth", "--no-plugins", "--state-dir", str(store)])
+        assert s.plugin_store_run(a)
+    elif scenario == "sad":
+        # Another HOME, or the store without --no-plugins, or another agent: no installer run.
+        assert not s.plugin_store_run(s.parse_args(["claude", "--no-auth", "--no-plugins", "--state-dir",
+                                                    str(tmp_path / "state")]))
+        assert not s.plugin_store_run(s.parse_args(["claude", "--no-auth", "--state-dir", str(store)]))
+        assert not s.plugin_store_run(s.parse_args(["codex", "--no-auth", "--no-plugins", "--state-dir", str(store)]))
+    else:
+        # Reached through a symlink: the resolved path counts; no --state-dir at all: none.
+        store.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "link").symlink_to(store, target_is_directory=True)
+        assert s.plugin_store_run(s.parse_args(["claude", "--no-auth", "--no-plugins", "--state-dir",
+                                                str(tmp_path / "link")]))
+        assert not s.plugin_store_run(s.parse_args(["claude", "--no-auth", "--no-plugins"]))
+
+
+def test_handshake_abandoned(scenario):
+    import ssl as ssl_module
+    abandoned = s.RUNTIME.handshake_abandoned
+    if scenario == "happy":
+        # The program went away: a reset, an EOF, a close without an alert.
+        assert abandoned(ConnectionResetError(104, "Connection reset by peer"))
+        assert abandoned(ssl_module.SSLEOFError(8, "EOF occurred in violation of protocol"))
+        assert abandoned(ssl_module.SSLError("TLS/SSL connection has been closed (EOF)"))
+    elif scenario == "sad":
+        # The program refused the session CA: an alert.
+        assert not abandoned(ssl_module.SSLError(1, "[SSL: TLSV1_ALERT_UNKNOWN_CA] tlsv1 alert unknown ca"))
+        assert not abandoned(ssl_module.SSLError(1, "[SSL: SSLV3_ALERT_BAD_CERTIFICATE] sslv3 alert bad certificate"))
+    else:
+        assert not abandoned(ValueError("not a socket error")) and not abandoned(RuntimeError("x"))
+        assert abandoned(BrokenPipeError(32, "Broken pipe"))
+
+
 def test_prepare_kits(scenario, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -6292,15 +6412,31 @@ def test_connection_summary(scenario, tmp_path):
         log.write_text("\n".join(json.dumps(r) for r in [
             {"event": "http", "url": "https://a/"}, {"event": "denied"}, {"event": "tcp"},
             {"event": "http", "push": {"ok": False, "refs": ["refs/heads/main"]}},
-            {"event": "tls-refused", "host": "pinned.example.org"}]) + "\nnot json\n")
+            {"event": "tls-refused", "host": "pinned.example.org"},
+            {"event": "tls-refused", "host": "api.anthropic.com", "abandoned": True}]) + "\nnot json\n")
         lines = s.connection_summary(log)
-        assert lines[0].startswith("proxy: 2 HTTP request(s), 1 other connection(s), 1 refused")
+        assert lines[0].startswith("proxy: 2 HTTP request(s), 2 other connection(s), 1 refused")
         assert "refs/heads/main" in lines[1] and "--no-inspect pinned.example.org" in lines[2]
+        # A program that went away mid-handshake refused nothing: no advice to stop inspecting its host.
+        assert len(lines) == 3 and "api.anthropic.com" not in "\n".join(lines)
     elif scenario == "sad":
         assert s.connection_summary(tmp_path / "missing") == []
     else:
         log.write_text("")
         assert s.connection_summary(log) == [f"proxy: 0 HTTP request(s), 0 other connection(s), 0 refused; log: {log}"]
+
+
+def test_launcher_script(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":  # the stub that runs this file from its cached bytecode, under the same name
+        assert s.launcher_script() == ROOT / "sandbox" / "launcher" / "agent_sandbox.py"
+        assert s.launcher_script().is_file()
+    elif scenario == "sad":  # a copy without the stub: the file itself
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        assert s.launcher_script() == tmp_path / "agent_sandbox.py"
+    else:  # a folder of that name is no stub
+        (tmp_path / "launcher" / "agent_sandbox.py").mkdir(parents=True)
+        monkeypatch.setattr(s, "HERE", tmp_path)
+        assert s.launcher_script() == tmp_path / "agent_sandbox.py"
 
 
 def test_runs_dir(scenario, tmp_path, monkeypatch):
@@ -6707,6 +6843,29 @@ def test_asks_nobody(scenario):
     else:  # nothing is asked without the proxy: nothing to answer either
         assert not s.asks_nobody(s.parse_args(["codex", "--ask", "allow", "--no-proxy"]))
         assert not s.asks_nobody(s.parse_args(["codex", "--ask", "allow", "--probe"]))
+
+
+def test_tor_run(scenario):
+    a = s.parse_args(["codex", "--vpn", "anon"])
+    if scenario == "happy":
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert s.tor_run(a)
+    elif scenario == "sad":
+        a.vpn_profile = {"name": "corp", "type": "wireguard"}
+        assert not s.tor_run(a) and not s.tor_run(s.parse_args(["codex"]))
+    else:  # before vpn.validate read the profile: not known as Tor yet
+        assert not s.tor_run(a)
+
+
+def test_host_browser(scenario):
+    if scenario == "happy":
+        assert s.host_browser(s.parse_args(["codex"]))
+    elif scenario == "sad":  # behind Tor your browser would open the agent's URL from your own address
+        a = s.parse_args(["codex", "--vpn", "anon"])
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert s.asking(a) and not s.host_browser(a)
+    else:
+        assert not s.host_browser(s.parse_args(["codex", "--ask", "off"]))
 
 
 def test_ask_allow_notes(scenario):
@@ -11609,3 +11768,23 @@ def test_give_api_keys(scenario, tmp_path):
     else:
         assert rt.give_api_keys([], path, owner=(os_module.getuid(), os_module.getgid())) == []
         assert rt.added_api_keys(path) == []
+
+
+
+def test_own_host_names(scenario):
+    """git, sudo and hostname -f look the sandbox's own name up: in /etc/hosts it never reaches the DNS stub (it was
+    refused there and logged as a name outside the allowed hosts: "lookup of agent-claude-…")."""
+    if scenario == "happy":
+        a = types.SimpleNamespace(run_id="claude-f46e2339", vpn_pod=None, pod_name=None, agent="claude")
+        own = s.own_host_names(a)
+        assert own == ["agent-sandbox", "agent-claude-f46e2339"]
+        text = s.hosts_file({"example.org": ["203.0.113.1"]}, own)
+        assert text.splitlines()[:2] == ["127.0.0.1 localhost agent-sandbox agent-claude-f46e2339",
+                                         "::1 localhost agent-sandbox agent-claude-f46e2339"]
+    elif scenario == "sad":  # nothing known of the run yet: only Bubblewrap's name, never a made-up pod name
+        assert s.own_host_names(types.SimpleNamespace(run_id=None, vpn_pod=None, pod_name=None, agent="claude")) == \
+            ["agent-sandbox"]
+        assert s.hosts_file({}, ["localhost"]).startswith("127.0.0.1 localhost\n")
+    else:  # a VPN's pod names the sandbox
+        assert s.own_host_names(types.SimpleNamespace(run_id=None, vpn_pod="vpn-work", pod_name=None,
+                                                      agent="claude")) == ["agent-sandbox", "vpn-work"]

@@ -381,7 +381,7 @@ und passen so immer zur installierten Version.
 | `sandbox-ai resume NAME --restore-home [--path PFAD] [--yes] [--json]` | | den Text, den diese Dateien beim letzten Start hatten, wie aufgezeichnet zurücklegen (kleine Textdateien, nie Schlüssel oder Tokens); je Datei gefragt oder `--yes`; startet nichts |
 | `sandbox-ai gc [--older-than TAGE] [--dry-run] [--json]` | | Reste entfernen; mit TAGE auch die gestoppten aufbewahrten Starts, die so lange unbenutzt sind, samt HOME |
 | `sandbox-ai session …` | | dasselbe für Sessions, in der älteren Form |
-| `sandbox-ai session copy\|move NAME HOST [--as NAME] [--map LOKAL=REMOTE] [--check]` | | die Konfiguration einer Sitzung auf einem anderen Host neu gestartet (move: danach hier gestoppt); [Eine Sitzung auf einen anderen Host](#eine-sitzung-auf-einen-anderen-host) |
+| `sandbox-ai session copy\|move NAME HOST [--as NAME] [--map LOKAL=REMOTE] [--check] [--replace]` | | die Konfiguration einer Sitzung auf einem anderen Host neu gestartet (move: danach hier gestoppt); [Eine Sitzung auf einen anderen Host](#eine-sitzung-auf-einen-anderen-host) |
 | `sandbox-ai mcp …` | | MCP-Server-Sandboxen |
 | `sandbox-ai wizard [new\|edit\|trust\|forget\|models] …` | | Projekt einrichten, bearbeiten und vertrauen |
 | `sandbox-ai login claude\|codex\|opencode` | | in einer Sandbox anmelden; das Login gilt für alle Sandboxes dieses Agenten ([Login-Speicher](#login-speicher-für-sandboxes)) |
@@ -2017,6 +2017,14 @@ Adresse dieses Hosts, wie sie dann ist; jede Prüfung landet in `vpn.jsonl`
 eine Adresse einer Familie, die der Tunnel nicht trägt, ein Resolver am Tunnel
 vorbei) beendet den Lauf; `--vpn-check warn` meldet es nur. Ein Tunnel, der
 hängt, wird gemeldet, nicht gestoppt: Der Kill-Switch hält ohnehin alles drin.
+Diese Prüfungen (und die Abfragen der während des Laufs erlaubten Namen) gehen
+an der eigenen Firewall des Agenten im Namespace vorbei: Ihre Sockets tragen die
+Markierung `0xca6d`, die nur ein Prozess mit `CAP_NET_ADMIN` setzen kann; so
+messen sie den Tunnel, nicht den Verbindungs-Proxy des Agenten oder seine
+Freigabeliste, und der Kill-Switch hält sie wie alles andere. Mit Tor kommt die
+erste Prüfung während des Laufs eine Minute nach dem Start, `recheck` `0` gilt
+als der Standard, eine Adresse, die kein Tor-Exit ist, ist ein Leck, und dieser
+Host fragt check.torproject.org während des Laufs nichts.
 
 **DNS.** Ohne `--dns` bleiben die erlaubten Namen wie immer gepinnt, beim Start
 über das VPN aufgelöst. Mit `--dns` sind die Resolver der Sandbox die des VPN:
@@ -2044,8 +2052,10 @@ Rückfragen, TLS-Prüfung und Verbindungsprotokoll gelten also), jede Abfrage
 auf Port 53 auf seinen DNSPort (`127.0.53.1`). Der Kill-Switch lässt nur Tors
 eigenen Benutzer hinaus (`debian-tor`, UID 950, im Image fest; nur ein
 Prozess mit `CAP_SETUID` könnte sie annehmen; ein MCP-Server hinter einem
-Tor-Profil, dessen Image als UID 950 oder ein Tor-Benutzername läuft, wird
-abgelehnt, da er diese Ausnahme teilen würde), über IPv4-TCP, mit Bridges nur
+Tor-Profil, dessen Image als UID 950, ein Tor-Benutzername oder ein Name läuft,
+dem seine eigene `/etc/passwd` die UID 950 gibt, wird abgelehnt, da er diese
+Ausnahme teilen würde: die Datei wird aus dem Image gelesen, ohne es zu starten,
+und ein Name, dessen UID nicht zu finden ist, wird ebenfalls abgelehnt), über IPv4-TCP, mit Bridges nur
 zu ihnen; anderes UDP und alles IPv6 werden verworfen. Alles geht über Tor
 hinaus, auch die API-Verbindungen des Agenten selbst. `.onion`-Namen lösen
 sich in `10.192.0.0/10` auf (AutomapHostsOnResolve), das die Sandbox
@@ -2078,6 +2088,26 @@ Agenten geschlossen, außer der Start hat `--dns` oder `--egress-all-allow`;
 während eines Laufs erlaubter Name wird über tor nachgeschlagen, im
 Tor-Container des Laufs; für `.onion`-Namen mit ihnen starten, oder mit `--dns`.
 
+<a id="nichts-an-tor-vorbei"></a>**Nichts an Tor vorbei.** Ein Tor-Start erreicht nichts von Ihrer eigenen
+Adresse aus. Seine MCP-Server, die ins Netz gehen, laufen ebenfalls hinter Tor
+(unten; auch bei `mcp start --for` und `mcp attach --live`). Keine URL des
+Agenten öffnet sich in Ihrem Browser: Das `xdg-open` der Sandbox erreicht kein
+Relay (öffnen Sie die Seite in Tor Browser). Während des Laufs erlaubte Namen
+werden über tor nachgeschlagen. Der Starter fragt keinen `--llm`-Server von
+diesem Host aus nach seinem Kontextfenster. Die Loopback-Ports des Hosts werden
+abgelehnt: `--allow-host-port`, ein `--llm`-Server auf diesem Rechner, ein
+Git-Server auf localhost und `sandbox-ai net allow --allow-host-port` während
+des Laufs, denn was dort lauscht (ein Proxy, Ihr eigener Tor- oder VPN-Client,
+ein Server, der URLs abruft), erreicht das Internet von Ihrer Adresse aus;
+`--vpn-bypass-host-ports` lässt sie zu, wenn Sie das wollen. Ein `--llm`-Server
+in Ihrem lokalen Netz wird abgelehnt (Tors Exits lehnen private Adressen ab, und
+sonst geht nichts hinaus). Von Ihrer eigenen Adresse kommen nur noch die
+Vergleichsmessung des Starts (eine Anfrage an check.torproject.org) und was Sie
+selbst ausführen: `sandbox-ai llm status` (der Status des `--llm`-Servers des
+Starts in der App; legen Sie einen Server im Internet mit `llm add ... --vpn
+PROFIL` an, damit er durch dieses Profil gelesen wird), `mcp add` und `build`
+beim Holen von Images.
+
 **Geheimnisse.** Private und Preshared Keys, OpenVPN-Zugangsdaten und
 Auth-Keys liegen in `sandbox-ai secrets` (Schlüsselbund oder `0600`-Dateien);
 die Profile in `~/.config/sandbox-ai/vpn` (`0600`) halten den Rest, ein
@@ -2090,7 +2120,15 @@ darf kein Workspace, kein Mount (auch kein schreibgeschützter), kein Kit, kein
 einer Sandbox zeigen, und ein Workspace oder Mount, über den der Agent ein
 Profil ändern könnte, wird abgelehnt.
 
-**MCP-Server.** Ein Server mit Befehl bekommt `--vpn PROFIL` in seinen
+**MCP-Server.** Mit `--vpn` laufen die MCP-Server des Starts, die ins Netz
+gehen, ebenfalls hinter seinem VPN, jeder in einem eigenen Container (ein Server
+ohne Netz braucht keines; einer mit eigenem VPN behält es, mit Tor muss das auch
+ein Tor-Profil sein; ein Server nur für Bubblewrap mit Netz wird abgelehnt, und
+einer, der schon ohne das VPN des Starts läuft, muss erst gestoppt werden:
+`sandbox-ai mcp stop NAME`); `mcp start NAME --for START` und `mcp attach NAME
+START --live` setzen sie ebenso hinter das VPN des Starts, und ein Server
+dahinter stoppt bei einer fehlgeschlagenen Prüfung, was immer sein eigenes
+`--vpn-check` sagt. Ein Server mit Befehl bekommt `--vpn PROFIL` in seinen
 `options`; ein Katalog-Server mit Netz bekommt eines mit `sandbox-ai mcp add NAME
 --network full --vpn PROFIL` (oder `"vpn": "PROFIL"` in `mcp.json`); `sandbox-ai
 mcp start NAME --vpn PROFIL` setzt für diesen Start eines davor. Die Container
@@ -2109,11 +2147,10 @@ von wo ihn der Agent erreichen wird.
 **Grenzen.** Bubblewrap wird nicht unterstützt (`--vpn` mit `--backend bwrap`
 wird abgelehnt, siehe TODO.md).
 `--allow-host-port` erreicht weiterhin das Loopback des Hosts, am Tunnel
-vorbei, wie verlangt. Namen, die während eines Laufs erlaubt werden
-(`sandbox-ai net allow --allow-host`, Rückfragen), lösen die eigenen Resolver
-des VPN auf, in seinem laufenden Container. Ein MCP-Server hat
-ein eigenes Netz: Geben Sie ihm ebenfalls `--vpn` (`require_vpn` tut das). Das
-Board der Desktop-App behält `--vpn` als Option der Befehlszeile, bis es einen
+vorbei, wie verlangt (mit Tor nur mit `--vpn-bypass-host-ports`). Namen, die
+während eines Laufs erlaubt werden (`sandbox-ai net allow --allow-host`,
+Rückfragen), lösen die eigenen Resolver des VPN auf, in seinem laufenden
+Container. Das Board der Desktop-App behält `--vpn` als Option der Befehlszeile, bis es einen
 VPN-Knoten hat.
 
 ## LLM-Server: lokal und entfernt
@@ -2721,15 +2758,26 @@ Probelauf auf diesem Host geprüft, dann dort als Sitzung gleichen Namens
 gestartet (`--as NAME`: ein anderer). `session move` tut dasselbe und stoppt
 danach die Sitzung hier (ihr HOME bleibt bis `sandbox-ai session delete`).
 Ordner, die dort woanders liegen, werden mit `--map /home/ich/src=/srv/src`
-umgesetzt (mehrfach möglich); `--check` prüft nur; `session plan NAME --json` zeigt, womit eine Kopie
-startet und welche Pfade dieses Rechners sie nennt. Anmeldungen und das HOME der
+umgesetzt (mehrfach möglich; jeder Ordner einer `--workspace`-Liste, Mounts,
+Kopien, Regelwerke und Ordner eines Presets ebenso); `--check` prüft nur; `session plan NAME --json` zeigt, womit eine Kopie
+startet und welche Pfade dieses Rechners sie nennt. Die Prüfung ist der Probelauf
+des Hosts, der ablehnt, woran der Start scheitern würde: ein Workspace, den es
+dort nicht gibt und der dort nicht angelegt werden kann (sein Elternordner nicht
+beschreibbar, etwa `/mnt` von root), ein MCP-Server, den der Host nicht kennt. Er
+warnt, wenn der Host keine Anmeldung des Agenten hat (einmal dort anmelden:
+`sandbox-ai hosts run HOST login AGENT`). Anmeldungen und das HOME der
 Sitzung werden nicht kopiert: Der Host nutzt seine eigenen (`sandbox-ai login`
 dort). Eigene MCP-Server und Regelwerke eines Projekts (in seiner
-`.sandbox-ai.json`) gehen nicht mit: Der Befehl sagt es und startet nichts.
+`.sandbox-ai.json`) gehen nicht mit: Der Befehl sagt es und startet nichts. Eine
+Sitzung dieses Namens auf dem Host wird abgelehnt (ein Start dieses Namens nähme
+sie mit ihren eigenen gespeicherten Optionen wieder auf); `--replace` löscht sie
+dort zuerst, ihr HOME dort auch. Ein Start dort, der scheitert, hinterlässt keine
+Sitzung: Ein neuer Versuch, auch mit anderen `--map`-Werten, beginnt von vorn.
 
 ```bash
 sandbox-ai session copy web ct1 --check                     # kann sie auf ct1 so starten?
 sandbox-ai session move web ct1 --map /home/ich/src=/srv/src  # dort, dann hier gestoppt
+sandbox-ai session copy web ct1 --replace                   # ihre Sitzung web dort wird zuerst gelöscht
 ```
 
 Die Liste liegt in `~/.config/sandbox-ai/hosts.json`, neben `local` (diesem
@@ -3055,7 +3103,14 @@ Vertrauen, Geräte); abgelehnt ändert sich nichts, und ein laufender Start
 Wiedergeburt änderbar: sein Name, sein HOME (`--keep`, `--state-dir`), Backend
 und Podman-Dienst, `--config` und seine Workspaces (`--workspace` fügt einen
 hinzu, wie `--mount` und `--mcp` die ihren). Was die Projektdatei setzt, gehört
-nicht zu den gespeicherten Optionen: Dafür die Datei ändern.
+nicht zu den gespeicherten Optionen: Dafür die Datei ändern. Ein Start, dessen
+gespeicherte `--mcp`-Server auf diesem Rechner nicht mehr definiert sind (mit
+`sandbox-ai mcp remove` entfernt, oder eigene Server eines Projekts bei
+gespeichertem `--no-config`), wird abgelehnt, bevor etwas startet, mit ihren
+Namen und dem Weg ohne sie: `sandbox-ai resume NAME --drop-option mcp=SERVER`.
+Jeder Start lehnt einen MCP-Server, den kein Katalog definiert, vorab ab (auch
+sein Probelauf), und eine neue Sitzung, deren erster Start scheitert, wird nicht
+aufbewahrt: Derselbe Start läuft nach der Behebung einfach erneut.
 
 **Was sich im HOME geändert hat.** Ein aufbewahrtes HOME ist das Einzige, womit
 ein kompromittierter Agent seinen nächsten Start erreichen könnte: eine Zeile
@@ -3139,10 +3194,13 @@ Zustand (läuft grün, pausiert gelb, verwaist und beschädigt rot, gestoppt gra
 ([no-color.org](https://no-color.org)) und `TERM=dumb` bedeuten keine Farbe,
 und `--json` ist nie farbig. Ein Server vermerkt in seiner `mcp.json` den
 Start, für den er gestartet wurde (`started_for`, seit 0.1.78; ältere Server
-werden nach den Starts eingeordnet, die sie nutzen). `list --json` nennt für
+werden nach den Starts eingeordnet, die sie nutzen). Die Mitglieder eines
+Teams (`sandbox-ai team`) stehen unter ihrer Leitung. `list --json` nennt für
 jede Zeile `listed_under` (den Start, unter dem sie steht, oder `null`), für
-einen MCP-Server `serves` (der Start, für den er gestartet wurde, zuerst) und
-`started_for` (dessen Name oder `null`).
+ein Teammitglied `lead` (den Namen der Leitung), für einen MCP-Server `serves`
+(der Start, für den er gestartet wurde, zuerst), `started_for` (dessen Name
+oder `null`) und `owner_recorded` (ob seine `mcp.json` sagt, für wen er
+gestartet wurde: `false` bei einem Server einer Version vor 0.1.78).
 
 **Die älteren Formen** bleiben: `--session NAME` und `sandbox-ai session
 list|attach|pause|resume|stop|delete` wirken wie bisher, auf dieselben Starts
@@ -3824,7 +3882,10 @@ wurde.
 
 Programme mit Certificate Pinning oder eigener CA-Liste lehnen die
 Sitzungs-CA ab; der Proxy loggt so eine Verbindung als `tls-refused` mit
-Hinweis. Mit `--no-inspect HOST` (oder `--no-inspect '*.example.org'`)
+Hinweis. Ein Programm, das während des Handshakes nur verschwand (ein kurzer
+Befehl, der mit einer noch offenen Anfrage endet: Reset oder EOF, kein
+TLS-Alert), wird als `tls-refused` mit `"abandoned": true` geloggt; es lehnte
+nichts ab und braucht keine Ausnahme. Mit `--no-inspect HOST` (oder `--no-inspect '*.example.org'`)
 läuft TLS zu diesem Host ungeöffnet durch: Geloggt werden nur Name und Bytes,
 Pushes dorthin werden nicht geprüft; öffentliche Git-Hosts lassen sich daher
 nicht ausnehmen, solange die Datenschutzprüfung an ist. Dasselbe gilt für
@@ -5250,7 +5311,7 @@ zu jedem Problem den Befehl, der es behebt.
 | Login-Code oder OAuth-Token abgelehnt, obwohl richtig kopiert | In tmux übernimmt die Oberfläche des Agenten die Maus; eine normale Auswahl kopiert nichts oder nur ein umbrochenes Stück: beim Markieren Shift gedrückt halten (in manchen macOS-Terminals Option/Alt) und den Code als eine Zeile einfügen. `sandbox-ai login claude` meldet ohne tmux an. |
 | `Project configuration … is not trusted` | Datei prüfen, dann `./sandbox-ai wizard trust DATEI`, oder mit `--no-config` starten. |
 | LLM-Server nicht erreichbar oder abgewiesen | `sandbox-ai llm check NAME --agent AGENT` (Adresse, TLS, Schlüssel, Modell, API); ohne `sandbox-ai llm`: Server ans LAN gebunden, LAN-IP des Hosts verwendet, `--allow-tcp IP:PORT` passt. |
-| `Unknown MCP server` / Server startet nicht | `./sandbox-ai mcp list`; `~/.local/state/sandbox-ai/mcp/NAME/supervisor.log` lesen. |
+| `Unknown MCP server` / Server startet nicht | `./sandbox-ai mcp list` (die Meldung nennt die definierten Server und, bei eigenen Servern eines Projekts, ob der Start keine Projektdatei liest: `--no-config`); ein aufbewahrter Start ohne ihn: `sandbox-ai resume NAME --drop-option mcp=SERVER`; `~/.local/state/sandbox-ai/mcp/NAME/supervisor.log` lesen. |
 | `-T`, `--tmux needs an interactive terminal` | `--tmux` weglassen (im Terminal ist tmux ohnehin Standard) oder für Hintergrundläufe `--session` verwenden. |
 | `The trusted project configuration … is missing` | Datei wiederherstellen, mit `--no-config` starten oder `./sandbox-ai wizard forget DATEI`. |
 | `… is a symlink; refusing` | Projektdateien und Sandbox-Anmeldedaten müssen reguläre Dateien sein; den Link ersetzen. |

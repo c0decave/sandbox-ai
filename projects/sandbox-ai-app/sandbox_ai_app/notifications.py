@@ -160,7 +160,6 @@ class Toast(QFrame):
         texts.setSpacing(3)
         self.title = self._label(clean(title, TITLE_LIMIT), "toastTitle")
         self.text = self._label(clean(text, TEXT_LIMIT), "toastText")
-        self.text.setVisible(bool(self.text.text()))
         texts.addWidget(self.title)
         texts.addWidget(self.text)
         # ACTION: (label, callback), or a list of them (a question's answers: Allow, Allow always, Block, Block
@@ -183,6 +182,9 @@ class Toast(QFrame):
             texts.addLayout(grid)
         texts.addStretch(1)
         body.addLayout(texts, 1)
+        # (only now that it is in the toast: a label without a parent shown is a window of its own for a moment - on a
+        # tiling window manager the other windows were laid out anew around it, a flicker)
+        self.text.setVisible(bool(self.text.text()))
         self.close_button = QToolButton()
         self.close_button.setObjectName("toastClose")
         self.close_button.setText("×")
@@ -220,7 +222,11 @@ class Toast(QFrame):
         label = QLabel()
         label.setObjectName(name)
         label.setTextFormat(Qt.TextFormat.PlainText)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        # Marked with the mouse and copied (its menu, or Copy / Copy all in the toast's menu): a message often has a
+        # name or a path to take elsewhere.
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)  # (the toast's menu: Copy and Copy all)
+        label.setCursor(Qt.CursorShape.IBeamCursor)
         label.setWordWrap(True)
         label.setText(text)
         return label
@@ -269,6 +275,29 @@ class Toast(QFrame):
                 and not self._restyling:
             self.restyle_timer.start()
         super().changeEvent(event)
+
+    def message_text(self):
+        """The toast's title and text, as shown."""
+        return "\n".join(t for t in (self.title.text(), self.text.text()) if t)
+
+    def selected_text(self):
+        return next((label.selectedText() for label in (self.text, self.title) if label.hasSelectedText()), "")
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        """Copy (what is marked) and Copy all (title and text); the toast stays while its menu is open."""
+        from PySide6.QtWidgets import QMenu
+        self.timer.stop()
+        menu = QMenu(self)
+        selected = self.selected_text()
+        copy = menu.addAction(tr("Copy"), lambda: QGuiApplication.clipboard().setText(selected))
+        copy.setEnabled(bool(selected))
+        menu.addAction(tr("Copy all"), lambda: QGuiApplication.clipboard().setText(self.message_text()))
+        menu.exec(event.globalPos())
+        import shiboken6
+        if not shiboken6.isValid(self):  # closed while its menu was open (answered elsewhere, or pushed out)
+            return
+        if not self.underMouse():
+            self.start()
 
     def enterEvent(self, event):  # noqa: N802
         self.timer.stop()

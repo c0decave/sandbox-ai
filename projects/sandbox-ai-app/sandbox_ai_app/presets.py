@@ -475,6 +475,7 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
         B.fill(board, values)
         left = {marker for marker, _ in B.placeholders(board)}
         B.drop(board, [p.marker for p in preset.placeholders if p.optional and p.marker in left])
+    board.labels = {p.marker: [preset.text(p.label), preset.text(p.hint)] for p in preset.placeholders}
     B.with_backend(board, backend)
     board.layout(grid)
     keys = role_keys(board)
@@ -505,9 +506,15 @@ def store_path():
     return backend.settings_file().with_name("presets.json")
 
 
+_looks_secret = None
+
+
 def looks_secret(value):
-    from .state import looks_secret as looks
-    return looks(value)
+    global _looks_secret
+    if _looks_secret is None:  # (once: an import statement goes through PySide's import hook, each time)
+        from .state import looks_secret as looks
+        _looks_secret = looks
+    return _looks_secret(value)
 
 
 def _check(condition, text, **values):

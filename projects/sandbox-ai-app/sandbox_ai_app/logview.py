@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 import threading
+import weakref
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
@@ -61,6 +62,18 @@ class LogHub(QObject):
 
 
 _hub = None
+PANELS = weakref.WeakSet()  # every LogPanel alive (each chooses its own level)
+
+
+def shown_levels():
+    """The level each LogPanel still alive shows from (one whose window was deleted is forgotten)."""
+    levels = []
+    for panel in list(PANELS):
+        try:
+            levels.append(panel.chosen())
+        except RuntimeError:  # its Qt object is gone
+            PANELS.discard(panel)
+    return levels
 
 
 def hub():
@@ -89,9 +102,11 @@ def line_of(entry):
 class LogPanel(QWidget):
     """The log window's content: level chooser, filter, Copy, Clear, and the entries."""
     unread = Signal(int)  # warnings and errors that arrived while the panel was folded or hidden
+    own_window = Signal()  # its button "Own window": the log in a window of its own (LogWindow)
 
-    def __init__(self, level=DEFAULT_LEVEL):
+    def __init__(self, level=DEFAULT_LEVEL, detachable=False):
         super().__init__()
+        PANELS.add(self)
         self.setToolTip(tr("Everything the app reports: messages, warnings, errors and, at Debug, what it does"))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 4)
@@ -118,6 +133,11 @@ class LogPanel(QWidget):
         bar.addWidget(self.filter, 1)
         bar.addWidget(copy)
         bar.addWidget(clear)
+        if detachable:
+            window = QPushButton(tr("Own window"))
+            window.setToolTip(tr("The log in a window of its own, usable while a dialog is open (Ctrl+Shift+L)"))
+            window.clicked.connect(lambda _=False: self.own_window.emit())
+            bar.addWidget(window)
         layout.addLayout(bar)
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
@@ -136,14 +156,23 @@ class LogPanel(QWidget):
         return self.level.currentData() or DEFAULT_LEVEL
 
     def level_changed(self):
-        applog.want_debug(self.chosen() == "DEBUG")
+        # (debug entries are made while any panel - the docked one, the log window of its own - shows them)
+        applog.want_debug(any(level == "DEBUG" for level in shown_levels()))
         self.show_all()
 
     def shows(self, entry):
-        if RANK.get(entry.get("level"), 1) < RANK[self.chosen()]:
-            return False
-        needle = self.filter.text().strip().lower()
-        return not needle or needle in line_of(entry).lower()
+        return self.shown_by()(entry)
+
+    def shown_by(self):
+        """shows() as a function, with the level and the filter read once (show_all asks it for each of up to
+        MAX_ENTRIES entries: reading both widgets for each was most of a redraw - at every key typed into the filter)."""
+        least, needle = RANK[self.chosen()], self.filter.text().strip().lower()
+
+        def shows(entry):
+            if RANK.get(entry.get("level"), 1) < least:
+                return False
+            return not needle or needle in line_of(entry).lower()
+        return shows
 
     def formats(self):
         """The colours of the levels in the theme now (made again only when the theme changed)."""
@@ -182,9 +211,9 @@ class LogPanel(QWidget):
             # took half a second for the MAX_ENTRIES at Debug - at every new theme and every key typed into the filter.
             cursor = self.text.textCursor()
             cursor.beginEditBlock()
-            lines, level = [], None
+            lines, level, shows = [], None, self.shown_by()
             for entry in self.hub.snapshot():
-                if not self.shows(entry):
+                if not shows(entry):
                     continue
                 if lines and entry.get("level") != level:
                     self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
@@ -229,3 +258,27 @@ class LogPanel(QWidget):
         self.text.clear()
         self.unread_count = 0
         self.unread.emit(0)
+
+
+class LogWindow(QWidget):
+    """The log in a window of its own (View > Log in its own window, Ctrl+Shift+L, also inside a dialog): a top-level
+    window without a parent, so no dialog blocks it (widgets.nonblocking_dialogs; a file dialog blocks its window only): what
+    a dialog reported can be read and copied while the dialog is still open. Closing it only hides it."""
+
+    def __init__(self, level=DEFAULT_LEVEL):
+        super().__init__(None, Qt.WindowType.Window)
+        self.setObjectName("logWindow")
+        self.setWindowTitle(tr("sandbox-ai: log"))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.panel = LogPanel(level)
+        self.panel.set_watching(True)
+        layout.addWidget(self.panel)
+        self.resize(900, 420)
+
+    def bring_up(self):
+        if self.isMinimized():
+            self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()

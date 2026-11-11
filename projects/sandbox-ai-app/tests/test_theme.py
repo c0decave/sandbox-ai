@@ -157,3 +157,16 @@ def test_the_web_interface_has_the_same_themes():
     assert exported["themes"] == json.loads(json.dumps(theme.THEMES_DATA))
     from sandbox_ai_app import fonts  # the font lists of the settings, with how to get each
     assert exported["fonts"] == {kind: [list(entry) for entry in fonts.KINDS[kind]] for kind in ("ui", "mono")}
+
+
+@pytest.mark.parametrize("name", ["system", *NAMES])
+def test_a_line_between_the_column_titles_shows_where_to_grab_them(qapp, name, monkeypatch):
+    """Every look draws an edge between the titles of a table's columns (where one is made wider or moved): a line in
+    its border colour after its own rules for the titles, or (a bevelled look) the raised titles' own edges."""
+    monkeypatch.setattr(theme, "_current", name)
+    sheet, data = theme.stylesheet(), theme.data()
+    rule = "QHeaderView::section:horizontal { border-right: 1px solid " + data["colors"]["border"] + "; }"
+    if data.get("bevel"):
+        assert rule not in sheet and "QHeaderView::section { border-top: 2px solid" in sheet
+    else:
+        assert rule in sheet and sheet.rindex(rule) > sheet.rindex("QHeaderView::section {")

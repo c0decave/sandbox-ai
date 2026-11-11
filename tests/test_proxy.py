@@ -237,6 +237,41 @@ def test_program_rejecting_the_session_ca_is_logged_with_a_hint(tmp_path, pki):
         upstream.shutdown()
 
 
+def test_a_program_that_goes_away_mid_handshake_did_not_refuse_the_session_ca(tmp_path, pki):
+    """A short command (`claude plugin install`) that ends with a request of its own still in its TLS handshake:
+    the connection is reset without an alert. Logged as abandoned, with no advice to stop inspecting the host."""
+    upstream = serve(Handler, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = ssl.create_default_context(cafile=str(pki["ca"])).wrap_bio(incoming, outgoing,
+                                                                             server_hostname="example.test")
+        with pytest.raises(ssl.SSLWantReadError):
+            client.do_handshake()
+        hello = outgoing.read()
+        raw = socket.create_connection(("127.0.0.1", proxy.port))
+        raw.sendall(hello)
+        raw.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        raw.close()  # a reset, no alert
+        record = next(r for r in proxy.records(until=lambda r: r.get("event") == "tls-refused")
+                      if r.get("event") == "tls-refused")
+        assert record["host"] == "example.test" and record.get("abandoned") is True
+        assert "--no-inspect" not in record["hint"] and "closed the connection" in record["hint"]
+    finally:
+        proxy.close()
+        upstream.shutdown()
+
+
+def test_handshake_abandoned_tells_a_reset_from_an_alert():
+    from ssl import SSLError, SSLEOFError
+    assert rt.handshake_abandoned(ConnectionResetError(104, "Connection reset by peer"))
+    assert rt.handshake_abandoned(SSLEOFError(8, "EOF occurred in violation of protocol"))
+    assert rt.handshake_abandoned(SSLError("TLS/SSL connection has been closed (EOF)"))
+    assert not rt.handshake_abandoned(SSLError(1, "[SSL: TLSV1_ALERT_UNKNOWN_CA] tlsv1 alert unknown ca"))
+    assert not rt.handshake_abandoned(SSLError(1, "[SSL: SSLV3_ALERT_BAD_CERTIFICATE] sslv3 alert bad certificate"))
+    assert not rt.handshake_abandoned(ValueError("x"))
+
+
 def test_no_inspect_passes_tls_through_unopened(tmp_path, pki):
     upstream = serve(Handler, pki["server"])
     proxy = Proxy(tmp_path, pki, upstream.server_address[1], {"no_inspect": ["*.test"]})
@@ -1502,7 +1537,7 @@ def test_the_proxys_caches_stay_bounded(monkeypatch, tmp_path):
 
         def load_cert_chain(self, certificate, key):
             pass
-    monkeypatch.setattr(rt.ssl, "SSLContext", Context)
+    monkeypatch.setattr(ssl, "SSLContext", Context)
     monkeypatch.setattr(rt, "server_certificate", lambda run_dir, host: tmp_path / f"{host}.pem")
     monkeypatch.setattr(rt, "PROXY_CONTEXTS", 4)
     first = server.server_context("h0.example.org")
@@ -1791,3 +1826,33 @@ def test_keep_alive_requests_are_not_held_back_by_nagle(tmp_path, pki):
         proxy.close()
         upstream.shutdown()
 
+
+
+class ClosesIdle(KeepAlive):
+    timeout = 0.3  # the server closes a connection idle this long (LM Studio, Ollama: a few seconds)
+
+
+def test_a_connection_the_server_closed_while_idle_is_closed_for_the_client_too(tmp_path, pki):
+    """OpenCode against a local model server showed "the socket connection was closed unexpectedly": the server
+    closed its idle side, the proxy kept the client's open, and the client's next request on it got no answer. Now
+    the client's connection closes with the server's, so the client opens a new one for its next request."""
+    upstream = serve(ClosesIdle, pki["server"])
+    proxy = Proxy(tmp_path, pki, upstream.server_address[1])
+    try:
+        context = ssl.create_default_context(cafile=str(pki["ca"]))
+        with socket.create_connection(("127.0.0.1", proxy.port)) as raw, \
+                context.wrap_socket(raw, server_hostname="example.test") as tls:
+            tls.sendall(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+            buffer = b""
+            while b'{"ok": true}' not in buffer:
+                buffer += tls.recv(65536)
+            tls.settimeout(5)
+            closed = b""
+            try:
+                closed = tls.recv(65536)  # the server's idle close reaches the client as its own close
+            except ssl.SSLZeroReturnError:
+                closed = b""
+            assert closed == b""
+    finally:
+        proxy.close()
+        upstream.shutdown()

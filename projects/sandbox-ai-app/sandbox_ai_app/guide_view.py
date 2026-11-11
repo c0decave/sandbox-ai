@@ -12,6 +12,7 @@ from . import board as B
 from . import guide, tours
 from .board_view import PathEdit
 from .files import printable
+from .widgets import safe_tooltip
 from .i18n import tr
 from .widgets import plain_label
 
@@ -319,7 +320,8 @@ class NodeGuide(QDialog):
         elif question.form in ("model", "effort"):
             widget = QComboBox()
             widget.setEditable(question.form == "model")
-            self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current)
+            self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current,
+                                    self.parent())
         elif question.key == "--vpn":  # the board's host's VPN profiles to choose from, any other name typed
             from .name_fields import NameField
             board = self.parent()
@@ -354,9 +356,15 @@ class NodeGuide(QDialog):
         return page
 
     @staticmethod
-    def fill_agent_choices(question, widget, agent, current):
-        """The model names or effort levels AGENT knows; the empty choice is its default."""
+    def fill_agent_choices(question, widget, agent, current, page=None):
+        """The model names or effort levels AGENT knows; the empty choice is its default. With a model server on the
+        board of PAGE (--llm), the models are that server's (NAME:MODEL; the launcher refuses --model with --llm)."""
         if question.form == "model":  # each model with its version (models.py says where the lists come from)
+            server = server_models(page)
+            widget.setProperty("server", server is not None)
+            if server is not None:
+                fill_server_models(widget, *server)
+                return
             from . import models
             models.fill_combo(widget, agent, current)
             widget.setEnabled(True)
@@ -382,7 +390,7 @@ class NodeGuide(QDialog):
                 question, widget = self.inputs[key]
                 value = widget.currentData() if widget.currentText() == widget.itemText(widget.currentIndex()) \
                     else widget.currentText()
-                self.fill_agent_choices(question, widget, agent, value)
+                self.fill_agent_choices(question, widget, agent, value, self.parent())
 
     def answers(self):
         found = {}
@@ -434,11 +442,55 @@ class NodeGuide(QDialog):
             self.show_page(self.pages.currentIndex() + 1)
 
 
+def server_models(page):
+    """(name, [NAME:MODEL ...], current --llm value) of the model server on PAGE's board, or None (none used)."""
+    from . import wizard_llm as WL
+    board = getattr(page, "board", None)
+    if board is None or not WL.uses_server(board):
+        return None
+    current = str(board.first("llm").props.get("--llm") or "")
+    name, _ = WL.parse_value(current)
+    values = []
+    for endpoint in getattr(page, "llm_servers", None) or []:
+        if isinstance(endpoint, dict) and endpoint.get("name") == name:
+            values = WL.placeholder_choices(endpoint)
+    return name, values, current
+
+
+def fill_server_models(widget, name, values, current):
+    """WIDGET (the Model question) with the models of the server NAME: NAME (its default) and NAME:MODEL each."""
+    widget.blockSignals(True)
+    try:
+        widget.clear()
+        for value in values or [name]:
+            widget.addItem(value, value)
+        if current and widget.findData(current) < 0:
+            widget.addItem(current, current)
+        widget.setCurrentIndex(max(0, widget.findData(current)))
+        widget.setEnabled(True)
+        widget.setToolTip(safe_tooltip(tr("The model of the model server {name} (--llm {name}:MODEL); the agent's "
+                                          "own models are not used with a server", name=printable(name))))
+    finally:
+        widget.blockSignals(False)
+
+
 def apply(page, node_id, answers):
-    """The ANSWERS of the dialog on node NODE_ID of the BoardPage PAGE, as one undo step."""
+    """The ANSWERS of the dialog on node NODE_ID of the BoardPage PAGE, as one undo step. With a model server on the
+    board, the model answered is the server's (--llm NAME:MODEL), never --model."""
     node = page.board.node(node_id)
     if node is None:
         return
+    models = server_models(page) if node.kind == "agent" and "model" in answers else None
+    if models is not None:
+        from . import wizard_llm as WL
+        value = str(answers.pop("model") or "").strip()
+        servers = {endpoint.get("name") for endpoint in getattr(page, "llm_servers", None) or []
+                   if isinstance(endpoint, dict)}
+        if value and ":" not in value and models[0] and value not in servers | {models[0]}:
+            value = f"{models[0]}:{value}"  # a model typed bare: the server's (NAME:MODEL), not a server of that name
+        choice = WL.choice_of(value, bool((WL.from_board(page.board) or {}).get("only"))) if value else None
+        if choice and value != str(page.board.first("llm").props.get("--llm") or ""):
+            page.choose_llm_server(choice)
     updates = guide.props_of(node.kind, answers)
 
     def change():

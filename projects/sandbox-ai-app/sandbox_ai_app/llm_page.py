@@ -48,8 +48,8 @@ from .i18n import N_, tr
 from .model_combo import searchable
 from .name_fields import NameField
 from .widgets import (
-    ask_first, background, fill, flow, outcome, plain_label, row_key, safe_tooltip, selected_keys, set_enabled,
-    show_text, table, warn,
+    ask_first, background, delete_key, fill, flow, multi_select, outcome, plain_label, report_each, row_key, run_each,
+    safe_tooltip, selected_keys, set_enabled, several, show_text, table, warn,
 )
 
 # As sandbox-ai llm checks them (llm.py: NAME, SECRET, MODEL_NAME, VPN_PROFILE, URL).
@@ -244,10 +244,11 @@ class LlmDialog(QDialog):
         self.form.addRow(tr("Headers from secrets"), self.headers)
         self.form.addRow(tr("CA certificate"), self.ca)
         self.form.addRow("", self.no_ca)
-        self.form.setRowVisible(self.no_ca, bool((existing or {}).get("has_ca")))
         self.form.addRow("", self.insecure)
         self.form.addRow("", self.replace)
         layout.addLayout(self.form)
+        # (once the form is in the dialog: a row hidden before showed its field as a window of its own for a moment)
+        self.form.setRowVisible(self.no_ca, bool((existing or {}).get("has_ca")))
         note = tr("A key typed here is kept as a secret of sandbox-ai on the server's host (standard input, over SSH "
                   "for another host, never a command line); the server's entry only names that secret, and the proxy "
                   "adds the key on the wire.")
@@ -541,6 +542,7 @@ class LlmPage(QWidget):
         self.servers = table([tr("Name"), tr("Kind"), tr("URL"), tr("Model"), tr("Key"), tr("VPN"), tr("Agents")],
                              stretch=2, compact=(1, 5, 6))
         self.servers.setAccessibleName(tr("LLM servers"))
+        multi_select(self.servers)  # several at once (Ctrl, Shift): Remove… (and the Delete key) takes them all
         self.servers.itemSelectionChanged.connect(self.update_buttons)
         self.servers.cellDoubleClicked.connect(lambda *_: self.edit())
         layout.addWidget(self.servers, 2)
@@ -591,6 +593,7 @@ class LlmPage(QWidget):
         self.check_button.clicked.connect(self.check)
         self.models_button.clicked.connect(self.models)
         self.remove_button.clicked.connect(self.remove)
+        delete_key(self.servers, self.remove)
         self.refresh_button.clicked.connect(self.refresh)
         # A row that wraps when the window is narrow (it made the window 1300 px wide in German before).
         layout.addWidget(flow(self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
@@ -795,6 +798,9 @@ class LlmPage(QWidget):
         keys = selected_keys(self.servers)
         for button in (self.edit_button, self.check_button, self.models_button, self.show_button, self.remove_button):
             set_enabled(button, bool(keys), tr("Select a server first."))
+        if len(keys) > 1:  # several: Remove… takes them all; what acts on one server waits
+            for button in (self.edit_button, self.check_button, self.models_button, self.show_button):
+                set_enabled(button, False, tr("Acts on one row: {count} are selected.", count=len(keys)))
         if keys and self.models_of and self.models_of != (self.host(), keys[0]):
             self.models_box.hide()  # the models shown are another server's
             self.models_of = None
@@ -1144,6 +1150,9 @@ class LlmPage(QWidget):
                   modal=False)
 
     def remove(self):
+        if len(selected_keys(self.servers)) > 1:
+            self.remove_several()
+            return
         host, name = valid_host(self.host()), self.chosen()
         if host is None or name is None:
             return
@@ -1154,6 +1163,29 @@ class LlmPage(QWidget):
         background(lambda: self.sai.host_run(host, "llm", "remove", name, timeout=REMOVE_SECONDS), owner=self,
                    work=True, source=self.remove_button, timeout=REMOVE_SECONDS + 15,
                    done=lambda result, error: self.removed(host, name, result, error))
+
+    def remove_several(self):
+        """Remove… with several servers selected: one question naming them, then each (llm remove NAME there)."""
+        host = valid_host(self.host())
+        keys = selected_keys(self.servers)
+        names = [name for name in (valid_name(key) for key in keys) if name]
+        if host is None or not names:
+            return
+        if not ask_first(self, "llm-remove", tr("Remove"), several(tr(
+                "Forget these {count} LLM servers on {host}? Starts with --llm and one of them cannot start until it "
+                "is added again.", count=len(names), host=self.host_label(host)), names), tr("Remove")):
+            return
+
+        def done(outcomes):
+            failures = report_each(self, tr("Remove"), outcomes)
+            self.status.setText(tr("Removed {count} of {total}.", count=len(names) - len(failures), total=len(names)))
+            if self.models_of and self.models_of[0] == host and self.models_of[1] in set(names) - set(failures):
+                self.models_box.hide()
+                self.models_of = None
+            if host == self.host():
+                self.refresh()
+        run_each(lambda name: self.sai.host_run(host, "llm", "remove", name, timeout=REMOVE_SECONDS), names, owner=self,
+                 source=self.remove_button, timeout=(REMOVE_SECONDS + 15) * len(names), done=done)
 
     def removed(self, host, name, result, error):
         status, out, err = outcome(result, error)

@@ -244,9 +244,6 @@ TEXTS = {
     'The marketplaces are not read yet: Refresh.': {
         'en': 'The marketplaces are not read yet: Refresh.',
         'de': 'Die Marktplätze sind noch nicht gelesen: Neu laden.'},
-    'The plugin lists are fetched in the terminal (nothing is installed); Refresh afterwards.': {
-        'en': 'The plugin lists are fetched in the terminal (nothing is installed); Refresh afterwards.',
-        'de': 'Die Plugin-Listen werden im Terminal geholt (nichts wird installiert); danach Neu laden.'},
     'The sandbox-ai on {host} has no marketplace browser yet (it came with 0.1.78): update the host (Hosts › Update). Its kits on the tab Kits work as before.': {
         'en': 'The sandbox-ai on {host} has no marketplace browser yet (it came with 0.1.78): update the host (Hosts › Update). Its kits on the tab Kits work as before.',
         'de': 'Das sandbox-ai auf {host} hat noch keinen Marktplatz-Browser (er kam mit 0.1.78): Aktualisieren Sie den Host (Hosts › Aktualisieren). Seine Kits auf dem Reiter Kits funktionieren wie bisher.'},
@@ -316,9 +313,6 @@ TEXTS = {
     'sandbox-ai kits add-marketplace: the kit declares the marketplace with the source it has here; its plugins can then be added': {
         'en': 'sandbox-ai kits add-marketplace: the kit declares the marketplace with the source it has here; its plugins can then be added',
         'de': 'sandbox-ai kits add-marketplace: Das Kit gibt den Marktplatz mit der Quelle an, die er hier hat; seine Plugins lassen sich dann hinzufügen'},
-    'sandbox-ai kits add-plugin: every later start with the kit gets it': {
-        'en': 'sandbox-ai kits add-plugin: every later start with the kit gets it',
-        'de': 'sandbox-ai kits add-plugin: Jeder spätere Start mit dem Kit bekommt es'},
     'sandbox-ai kits disable-plugin: declared (and installed) but off with the kit; it can turn off a plugin the default kit enables': {
         'en': 'sandbox-ai kits disable-plugin: declared (and installed) but off with the kit; it can turn off a plugin the default kit enables',
         'de': 'sandbox-ai kits disable-plugin: angegeben (und installiert), aber aus mit dem Kit; so lässt sich auch ein Plugin ausschalten, das das Standard-Kit einschaltet'},
@@ -334,9 +328,6 @@ TEXTS = {
     'sandbox-ai kits remove-plugin: out of the kit': {
         'en': 'sandbox-ai kits remove-plugin: out of the kit',
         'de': 'sandbox-ai kits remove-plugin: aus dem Kit'},
-    "sandbox-ai plugins claude --marketplaces-only, in a terminal: fetches the kits' marketplaces (their plugin lists) in the plugin store's sandbox, which reaches only their hosts. It installs nothing; Refresh afterwards.": {
-        'en': "sandbox-ai plugins claude --marketplaces-only, in a terminal: fetches the kits' marketplaces (their plugin lists) in the plugin store's sandbox, which reaches only their hosts. It installs nothing; Refresh afterwards.",
-        'de': 'sandbox-ai plugins claude --marketplaces-only, in einem Terminal: holt die Marktplätze der Kits (ihre Plugin-Listen) in der Sandbox des Plugin-Speichers, die nur deren Hosts erreicht. Es installiert nichts; danach Neu laden.'},
     "sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.": {
         'en': "sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.",
         'de': 'Die Kits von sandbox-ai geben Codex noch keine Plugins: gezeigt, wie Codex sie auf diesem Host hat.'},
@@ -786,6 +777,9 @@ TEXTS = {
     'Wait until the copy, move or delete running now has finished (or cancel it).': {
         'en': 'Wait until the copy, move or delete running now has finished (or cancel it).',
         'de': 'Warten Sie, bis das laufende Kopieren, Verschieben oder Löschen fertig ist (oder brechen Sie es ab).'},
+    'Wait until {path} is listed: the list still shows the folder before.': {
+        'en': 'Wait until {path} is listed: the list still shows the folder before.',
+        'de': 'Warten Sie, bis {path} aufgelistet ist: Die Liste zeigt noch den Ordner davor.'},
     'Remove the secret {name}? Every start, VPN profile and Git login that names it goes without it.': {
         'en': 'Remove the secret {name}? Every start, VPN profile and Git login that names it goes without it.',
         'de': 'Das Geheimnis {name} entfernen? Jeder Start, jedes VPN-Profil und jeder Git-Login, der es nennt, bekommt es dann nicht mehr.'},
@@ -1270,9 +1264,6 @@ TEXTS = {
     'The kits of this machine, or of a host (over SSH)': {
         'en': 'The kits of this machine, or of a host (over SSH)',
         'de': 'Die Kits dieses Rechners oder eines Hosts (über SSH)'},
-    'Plugin status': {
-        'en': 'Plugin status',
-        'de': 'Plugin-Stand'},
     'sandbox-ai plugins --status: the plugins declared and installed': {
         'en': 'sandbox-ai plugins --status: the plugins declared and installed',
         'de': 'sandbox-ai plugins --status: die erklärten und die installierten Plugins'},
@@ -3322,9 +3313,9 @@ TEXTS = {
     'No logs yet: they appear once a sandbox has run with its connection proxy.': {
         'en': 'No logs yet: they appear once a sandbox has run with its connection proxy.',
         'de': 'Noch keine Protokolle: Sie erscheinen, sobald eine Sandbox mit ihrem Verbindungs-Proxy gelaufen ist.'},
-    '(only the newest entries: {count} older lines not read)': {
-        'en': '(only the newest entries: {count} older lines not read)',
-        'de': '(nur die neuesten Einträge: {count} ältere Zeilen nicht gelesen)'},
+    '(only the newest entries: about {count} older lines not read)': {
+        'en': '(only the newest entries: about {count} older lines not read)',
+        'de': '(nur die neuesten Einträge: etwa {count} ältere Zeilen nicht gelesen)'},
     'Folder': {
         'en': 'Folder',
         'de': 'Ordner'},
@@ -4143,6 +4134,17 @@ TEXTS = {
     'A change is running: wait for it, or cancel it.': {
         'en': 'A change is running: wait for it, or cancel it.',
         'de': 'Eine Änderung läuft: Warten Sie darauf, oder brechen Sie sie ab.'},
+    '{title}: not started - another change began while it was asked about. Start it again once that one has ended.': {
+        'en': '{title}: not started - another change began while it was asked about. Start it again once that one '
+              'has ended.',
+        'de': '{title}: nicht gestartet - eine andere Änderung begann, während danach gefragt wurde. Starten Sie es '
+              'erneut, sobald diese beendet ist.'},
+    'A removal is running: wait for it.': {
+        'en': 'A removal is running: wait for it.',
+        'de': 'Ein Entfernen läuft: Warten Sie darauf.'},
+    'Another extension is edited now: {path} was not added.': {
+        'en': 'Another extension is edited now: {path} was not added.',
+        'de': 'Inzwischen wird eine andere Erweiterung bearbeitet: {path} wurde nicht hinzugefügt.'},
     '{title}: cancelled. What sandbox-ai did up to then stays; Refresh shows the kits.': {
         'en': '{title}: cancelled. What sandbox-ai did up to then stays; Refresh shows the kits.',
         'de': '{title}: abgebrochen. Was sandbox-ai bis dahin getan hat, bleibt; Neu laden zeigt die Kits.'},
@@ -4248,9 +4250,6 @@ TEXTS = {
     'Copying to the host…': {
         'en': 'Copying to the host…',
         'de': 'Wird auf den Host kopiert…'},
-    "Copying into the sandbox's folder…": {
-        'en': "Copying into the sandbox's folder…",
-        'de': 'Wird in den Ordner der Sandbox kopiert…'},
     'Copied without the executable bit (make a file executable yourself once you trust it): {list}': {
         'en': 'Copied without the executable bit (make a file executable yourself once you trust it): {list}',
         'de': 'Ohne Ausführungsrecht kopiert (eine Datei erst selbst ausführbar machen, wenn ihr vertraut wird): {list}'},
@@ -5067,6 +5066,113 @@ TEXTS = {
     'Use the checkout at': {
         'en': 'Use the checkout at',
         'de': 'Den Checkout verwenden unter'},
+    # -- Kits & plugins: the plugin store at the top, each list's actions above it, installs in the background --
+    'Read the kits and the marketplaces again': {
+        'en': 'Read the kits and the marketplaces again',
+        'de': 'Die Kits und die Marktplätze neu lesen'},
+    'Plugin store (every Claude sandbox)': {
+        'en': 'Plugin store (every Claude sandbox)',
+        'de': 'Plugin-Speicher (jede Claude-Sandbox)'},
+    "Install the kits' plugins": {
+        'en': "Install the kits' plugins",
+        'de': 'Plugins der Kits installieren'},
+    'sandbox-ai plugins claude, in the background: downloads every plugin the kits declare into the plugin store, which every Claude sandbox reads (with --kit for the built-in kits this project uses). It needs no running sandbox; what it writes goes to the log window.': {
+        'en': 'sandbox-ai plugins claude, in the background: downloads every plugin the kits declare into the plugin store, which every Claude sandbox reads (with --kit for the built-in kits this project uses). It needs no running sandbox; what it writes goes to the log window.',
+        'de': 'sandbox-ai plugins claude, im Hintergrund: lädt jedes Plugin, das die Kits angeben, in den Plugin-Speicher, den jede Claude-Sandbox liest (mit --kit für die eingebauten Kits, die dieses Projekt nutzt). Es braucht keine laufende Sandbox; was es schreibt, steht im Protokollfenster.'},
+    'Update installed plugins': {
+        'en': 'Update installed plugins',
+        'de': 'Installierte Plugins aktualisieren'},
+    'sandbox-ai plugins claude --update, in the background: the marketplaces and the installed plugins fetched again': {
+        'en': 'sandbox-ai plugins claude --update, in the background: the marketplaces and the installed plugins fetched again',
+        'de': 'sandbox-ai plugins claude --update, im Hintergrund: die Marktplätze und die installierten Plugins neu geholt'},
+    'Show what is installed': {
+        'en': 'Show what is installed',
+        'de': 'Zeigen, was installiert ist'},
+    'Adding a plugin to a kit only declares it; installing downloads what the kits declare into this store. A sandbox enables a plugin when a kit of its start declares it and it is installed.': {
+        'en': 'Adding a plugin to a kit only declares it; installing downloads what the kits declare into this store. A sandbox enables a plugin when a kit of its start declares it and it is installed.',
+        'de': 'Ein Plugin zu einem Kit hinzufügen gibt es nur an; Installieren lädt, was die Kits angeben, in diesen Speicher. Eine Sandbox schaltet ein Plugin ein, wenn ein Kit ihres Starts es angibt und es installiert ist.'},
+    'Put a skill, a plugin, a marketplace or a hook into the selected kit (a kit of yours; else you choose or create one first)': {
+        'en': 'Put a skill, a plugin, a marketplace or a hook into the selected kit (a kit of yours; else you choose or create one first)',
+        'de': 'Einen Skill, ein Plugin, einen Marktplatz oder einen Hook in das gewählte Kit legen (ein eigenes; sonst wählen oder erstellen Sie zuerst eines)'},
+    'Skill from a folder…': {
+        'en': 'Skill from a folder…',
+        'de': 'Skill aus einem Ordner…'},
+    'sandbox-ai kits add-skill: a copy of a skill folder (with its SKILL.md)': {
+        'en': 'sandbox-ai kits add-skill: a copy of a skill folder (with its SKILL.md)',
+        'de': 'sandbox-ai kits add-skill: eine Kopie eines Skill-Ordners (mit seiner SKILL.md)'},
+    "sandbox-ai kits new-skill: a skill from sandbox-ai's template, to edit": {
+        'en': "sandbox-ai kits new-skill: a skill from sandbox-ai's template, to edit",
+        'de': 'sandbox-ai kits new-skill: ein Skill aus der Vorlage von sandbox-ai, zum Bearbeiten'},
+    'Plugin by its name…': {
+        'en': 'Plugin by its name…',
+        'de': 'Plugin über seinen Namen…'},
+    "sandbox-ai kits add-plugin NAME@MARKETPLACE: the kit declares the plugin, its sandboxes enable it. Nothing is downloaded: Install the kits' plugins does that. To pick one from a list: the Marketplaces tab.": {
+        'en': "sandbox-ai kits add-plugin NAME@MARKETPLACE: the kit declares the plugin, its sandboxes enable it. Nothing is downloaded: Install the kits' plugins does that. To pick one from a list: the Marketplaces tab.",
+        'de': 'sandbox-ai kits add-plugin NAME@MARKETPLACE: Das Kit gibt das Plugin an, seine Sandboxen schalten es ein. Nichts wird geladen: Das macht Plugins der Kits installieren. Eines aus einer Liste wählen: der Reiter Marktplätze.'},
+    'Marketplace…': {
+        'en': 'Marketplace…',
+        'de': 'Marktplatz…'},
+    "sandbox-ai kits add-marketplace: where the kit's plugins come from (GitHub OWNER/REPO or a Git URL)": {
+        'en': "sandbox-ai kits add-marketplace: where the kit's plugins come from (GitHub OWNER/REPO or a Git URL)",
+        'de': 'sandbox-ai kits add-marketplace: woher die Plugins des Kits kommen (GitHub OWNER/REPO oder eine Git-URL)'},
+    'Hook…': {
+        'en': 'Hook…',
+        'de': 'Hook…'},
+    "Take the hooks' approval back": {
+        'en': "Take the hooks' approval back",
+        'de': 'Freigabe der Hooks zurücknehmen'},
+    'Add a marketplace by its source…': {
+        'en': 'Add a marketplace by its source…',
+        'de': 'Marktplatz über seine Quelle hinzufügen…'},
+    'sandbox-ai kits add-marketplace: a marketplace not listed here, from GitHub (OWNER/REPO) or a Git server (https://…)': {
+        'en': 'sandbox-ai kits add-marketplace: a marketplace not listed here, from GitHub (OWNER/REPO) or a Git server (https://…)',
+        'de': 'sandbox-ai kits add-marketplace: ein hier nicht aufgeführter Marktplatz, von GitHub (OWNER/REPO) oder einem Git-Server (https://…)'},
+    'Remove the marketplace from the kit…': {
+        'en': 'Remove the marketplace from the kit…',
+        'de': 'Den Marktplatz aus dem Kit entfernen…'},
+    "sandbox-ai kits add-plugin: every later start with the kit enables it; Install the kits' plugins downloads it": {
+        'en': "sandbox-ai kits add-plugin: every later start with the kit enables it; Install the kits' plugins downloads it",
+        'de': 'sandbox-ai kits add-plugin: Jeder spätere Start mit dem Kit schaltet es ein; Plugins der Kits installieren lädt es'},
+    "Fetching the plugin lists of the kits' marketplaces (nothing is installed)…": {
+        'en': "Fetching the plugin lists of the kits' marketplaces (nothing is installed)…",
+        'de': 'Die Plugin-Listen der Marktplätze der Kits werden geholt (nichts wird installiert)…'},
+    'Plugin lists fetched': {
+        'en': 'Plugin lists fetched',
+        'de': 'Plugin-Listen geholt'},
+    'Plugin lists not fetched': {
+        'en': 'Plugin lists not fetched',
+        'de': 'Plugin-Listen nicht geholt'},
+    "sandbox-ai plugins claude --marketplaces-only, in the background: fetches the kits' marketplaces (their plugin lists) in the plugin store's sandbox, which reaches only their hosts. It installs nothing; the lists are read again afterwards.": {
+        'en': "sandbox-ai plugins claude --marketplaces-only, in the background: fetches the kits' marketplaces (their plugin lists) in the plugin store's sandbox, which reaches only their hosts. It installs nothing; the lists are read again afterwards.",
+        'de': 'sandbox-ai plugins claude --marketplaces-only, im Hintergrund: holt die Marktplätze der Kits (ihre Plugin-Listen) in der Sandbox des Plugin-Speichers, die nur deren Hosts erreicht. Es installiert nichts; die Listen werden danach neu gelesen.'},
+    'The plugin lists are fetched in the background (nothing is installed).': {
+        'en': 'The plugin lists are fetched in the background (nothing is installed).',
+        'de': 'Die Plugin-Listen werden im Hintergrund geholt (nichts wird installiert).'},
+    'Updating the installed plugins…': {
+        'en': 'Updating the installed plugins…',
+        'de': 'Die installierten Plugins werden aktualisiert…'},
+    "Installing the kits' plugins into the plugin store…": {
+        'en': "Installing the kits' plugins into the plugin store…",
+        'de': 'Die Plugins der Kits werden in den Plugin-Speicher installiert…'},
+    'Plugins updated': {
+        'en': 'Plugins updated',
+        'de': 'Plugins aktualisiert'},
+    'Plugins installed': {
+        'en': 'Plugins installed',
+        'de': 'Plugins installiert'},
+    'Plugins not updated': {
+        'en': 'Plugins not updated',
+        'de': 'Plugins nicht aktualisiert'},
+    'Plugins not installed': {
+        'en': 'Plugins not installed',
+        'de': 'Plugins nicht installiert'},
+    '{title}: cancelled.': {
+        'en': '{title}: cancelled.',
+        'de': '{title}: abgebrochen.'},
+    # -- answers from a question's notification: one answer settles it everywhere --
+    'Allow always…': {
+        'en': 'Allow always…',
+        'de': 'Immer erlauben…'},
     'Widest answer': {
         'en': 'Widest answer',
         'de': 'Weiteste Antwort'},
@@ -5497,21 +5603,12 @@ TEXTS = {
     'Add marketplace': {
         'en': 'Add marketplace',
         'de': 'Marktplatz hinzufügen'},
-    'Add marketplace…': {
-        'en': 'Add marketplace…',
-        'de': 'Marktplatz hinzufügen…'},
     'Add plugin': {
         'en': 'Add plugin',
         'de': 'Plugin hinzufügen'},
-    'Add plugin…': {
-        'en': 'Add plugin…',
-        'de': 'Plugin hinzufügen…'},
     'Add skill': {
         'en': 'Add skill',
         'de': 'Skill hinzufügen'},
-    'Add skill from a folder…': {
-        'en': 'Add skill from a folder…',
-        'de': 'Skill aus einem Ordner…'},
     'Agents': {
         'en': 'Agents',
         'de': 'Agenten'},
@@ -5563,9 +5660,6 @@ TEXTS = {
     'Insight': {
         'en': 'Insight',
         'de': 'Einblick'},
-    'Install plugins': {
-        'en': 'Install plugins',
-        'de': 'Plugins installieren'},
     'It does not run.': {
         'en': 'It does not run.',
         'de': 'Sie läuft nicht.'},
@@ -5788,9 +5882,6 @@ TEXTS = {
     'This sandbox-ai has no kits command (sandbox-ai kits); update it with: sandbox-ai update': {
         'en': 'This sandbox-ai has no kits command (sandbox-ai kits); update it with: sandbox-ai update',
         'de': 'Diese sandbox-ai hat keinen Befehl kits (sandbox-ai kits); aktualisieren mit: sandbox-ai update'},
-    'Update plugins': {
-        'en': 'Update plugins',
-        'de': 'Plugins aktualisieren'},
     'Use in the current project…': {
         'en': 'Use in the current project…',
         'de': 'Im aktuellen Projekt nutzen…'},
@@ -5875,12 +5966,6 @@ TEXTS = {
     'sandbox-ai kits new: a kit of your own in ~/.local/share/sandbox-ai/kits': {
         'en': 'sandbox-ai kits new: a kit of your own in ~/.local/share/sandbox-ai/kits',
         'de': 'sandbox-ai kits new: ein eigenes Kit in ~/.local/share/sandbox-ai/kits'},
-    'sandbox-ai plugins claude --update, in a terminal': {
-        'en': 'sandbox-ai plugins claude --update, in a terminal',
-        'de': 'sandbox-ai plugins claude --update, in einem Terminal'},
-    'sandbox-ai plugins claude, in a terminal: installs what the kits declare into the plugin store (with --kit for the built-in kits this project uses)': {
-        'en': 'sandbox-ai plugins claude, in a terminal: installs what the kits declare into the plugin store (with --kit for the built-in kits this project uses)',
-        'de': 'sandbox-ai plugins claude, in einem Terminal: installiert, was die Kits angeben, in den Plugin-Speicher (mit --kit für die eingebauten Kits dieses Projekts)'},
     "sandbox-ai's own kits are read-only: create a kit of your own (New kit…).": {
         'en': "sandbox-ai's own kits are read-only: create a kit of your own (New kit…).",
         'de': 'Die eigenen Kits von sandbox-ai sind schreibgeschützt: legen Sie ein eigenes Kit an (Neues Kit…).'},
@@ -6103,9 +6188,6 @@ TEXTS = {
     'What is known of it is in the log window (and app.log).': {
         'en': 'What is known of it is in the log window (and app.log).',
         'de': 'Was darüber bekannt ist, steht im Protokollfenster (und in app.log).'},
-    'Allow always': {
-        'en': 'Allow always',
-        'de': 'Immer erlauben'},
     'Block': {
         'en': 'Block',
         'de': 'Blockieren'},
@@ -6445,6 +6527,272 @@ TEXTS = {
     'Approvals and rules': {
         'en': 'Approvals and rules',
         'de': 'Freigaben und Regeln'},
+    # == the Files page's file manager: "..", drag and drop, the editor (file_editor.py), the context menu, the clipboard, Properties (file_properties.py) ==
+    'Careful: this text holds invisible, direction-changing or control characters (the first: U+{code} at character {at}); what is shown may differ from what tools read. The hex editor shows every byte.': {
+        'en': 'Careful: this text holds invisible, direction-changing or control characters (the first: U+{code} at character {at}); what is shown may differ from what tools read. The hex editor shows every byte.',
+        'de': 'Vorsicht: Dieser Text enthält unsichtbare, richtungsändernde oder Steuerzeichen (das erste: U+{code} bei Zeichen {at}); was angezeigt wird, kann von dem abweichen, was Werkzeuge lesen. Der Hex-Editor zeigt jedes Byte.'},
+    'Bytes of the file': {
+        'en': 'Bytes of the file',
+        'de': 'Bytes der Datei'},
+    'Text of the file': {
+        'en': 'Text of the file',
+        'de': 'Text der Datei'},
+    'Text': {
+        'en': 'Text',
+        'de': 'Text'},
+    'Show the file as text (UTF-8)': {
+        'en': 'Show the file as text (UTF-8)',
+        'de': 'Die Datei als Text zeigen (UTF-8)'},
+    'Hex': {
+        'en': 'Hex',
+        'de': 'Hex'},
+    "Show the file's bytes (hex editor)": {
+        'en': "Show the file's bytes (hex editor)",
+        'de': 'Die Bytes der Datei zeigen (Hex-Editor)'},
+    'Wrap lines': {
+        'en': 'Wrap lines',
+        'de': 'Zeilen umbrechen'},
+    'Save (Ctrl+S)': {
+        'en': 'Save (Ctrl+S)',
+        'de': 'Speichern (Strg+S)'},
+    'Write the file back (asks first if it changed on disk meanwhile)': {
+        'en': 'Write the file back (asks first if it changed on disk meanwhile)',
+        'de': 'Die Datei zurückschreiben (fragt zuerst, wenn sie sich inzwischen auf der Platte geändert hat)'},
+    'Read the file again from disk': {
+        'en': 'Read the file again from disk',
+        'de': 'Die Datei erneut von der Platte lesen'},
+    'Close the window (asks first about changes not saved)': {
+        'en': 'Close the window (asks first about changes not saved)',
+        'de': 'Das Fenster schließen (fragt zuerst nach nicht gespeicherten Änderungen)'},
+    'Saved {name} ({size}).': {
+        'en': 'Saved {name} ({size}).',
+        'de': '{name} gespeichert ({size}).'},
+    'Saved {name} ({size}); what was changed while it was saved is not saved yet.': {
+        'en': 'Saved {name} ({size}); what was changed while it was saved is not saved yet.',
+        'de': '{name} gespeichert ({size}); was während des Speicherns geändert wurde, ist noch nicht gespeichert.'},
+    '{name} (read-only)': {
+        'en': '{name} (read-only)',
+        'de': '{name} (nur lesen)'},
+    'Cannot open {name}: {error}': {
+        'en': 'Cannot open {name}: {error}',
+        'de': '{name} lässt sich nicht öffnen: {error}'},
+    'Only the first {shown} of {size} are shown; a file this big is not changed here.': {
+        'en': 'Only the first {shown} of {size} are shown; a file this big is not changed here.',
+        'de': 'Nur die ersten {shown} von {size} werden gezeigt; eine so große Datei wird hier nicht geändert.'},
+    'Not text (UTF-8 without NUL bytes, at most {size}): shown in the hex editor.': {
+        'en': 'Not text (UTF-8 without NUL bytes, at most {size}): shown in the hex editor.',
+        'de': 'Kein Text (UTF-8 ohne NUL-Bytes, höchstens {size}): im Hex-Editor gezeigt.'},
+    'Line {line}, column {column}': {
+        'en': 'Line {line}, column {column}',
+        'de': 'Zeile {line}, Spalte {column}'},
+    'Replace the changed file?': {
+        'en': 'Replace the changed file?',
+        'de': 'Die geänderte Datei ersetzen?'},
+    '{name} changed on disk since it was opened here (the agent or another program wrote it). Replace it with what is shown here? Reload shows what is on disk now.': {
+        'en': '{name} changed on disk since it was opened here (the agent or another program wrote it). Replace it with what is shown here? Reload shows what is on disk now.',
+        'de': '{name} hat sich auf der Platte geändert, seit die Datei hier geöffnet wurde (der Agent oder ein anderes Programm hat sie geschrieben). Durch das hier Gezeigte ersetzen? Neu laden zeigt, was jetzt auf der Platte steht.'},
+    'Not saved: {name} changed on disk meanwhile.': {
+        'en': 'Not saved: {name} changed on disk meanwhile.',
+        'de': 'Nicht gespeichert: {name} hat sich inzwischen auf der Platte geändert.'},
+    'Not saved: {error}': {
+        'en': 'Not saved: {error}',
+        'de': 'Nicht gespeichert: {error}'},
+    'Discard changes?': {
+        'en': 'Discard changes?',
+        'de': 'Änderungen verwerfen?'},
+    '{name} has changes that are not saved. Close and discard them?': {
+        'en': '{name} has changes that are not saved. Close and discard them?',
+        'de': '{name} hat nicht gespeicherte Änderungen. Schließen und sie verwerfen?'},
+    '{name} has changes that are not saved. Read it again from disk and discard them?': {
+        'en': '{name} has changes that are not saved. Read it again from disk and discard them?',
+        'de': '{name} hat nicht gespeicherte Änderungen. Erneut von der Platte lesen und sie verwerfen?'},
+    '{name} – editor': {
+        'en': '{name} – editor',
+        'de': '{name} – Editor'},
+    'This text has mixed line endings or characters the editor would change: it is shown read-only; the hex editor changes it byte by byte.': {
+        'en': 'This text has mixed line endings or characters the editor would change: it is shown read-only; the hex editor changes it byte by byte.',
+        'de': 'Dieser Text hat gemischte Zeilenenden oder Zeichen, die der Editor verändern würde: Er wird nur zum Lesen gezeigt; der Hex-Editor ändert ihn Byte für Byte.'},
+    'Offset {offset} of {size} bytes': {
+        'en': 'Offset {offset} of {size} bytes',
+        'de': 'Position {offset} von {size} Bytes'},
+    'Empty file': {
+        'en': 'Empty file',
+        'de': 'Leere Datei'},
+    'These bytes are no text the editor can show unchanged (UTF-8 without NUL bytes, one kind of line ending).': {
+        'en': 'These bytes are no text the editor can show unchanged (UTF-8 without NUL bytes, one kind of line ending).',
+        'de': 'Diese Bytes sind kein Text, den der Editor unverändert zeigen kann (UTF-8 ohne NUL-Bytes, eine Art von Zeilenende).'},
+    'Keep editing': {
+        'en': 'Keep editing',
+        'de': 'Weiter bearbeiten'},
+    'Others': {
+        'en': 'Others',
+        'de': 'Andere'},
+    'Read': {
+        'en': 'Read',
+        'de': 'Lesen'},
+    'Write': {
+        'en': 'Write',
+        'de': 'Schreiben'},
+    'Execute': {
+        'en': 'Execute',
+        'de': 'Ausführen'},
+    'Set user ID': {
+        'en': 'Set user ID',
+        'de': 'Set-User-ID'},
+    'Set group ID': {
+        'en': 'Set group ID',
+        'de': 'Set-Group-ID'},
+    'Sticky': {
+        'en': 'Sticky',
+        'de': 'Sticky'},
+    '{size} ({bytes} bytes) in {files} file(s) and {folders} folder(s)': {
+        'en': '{size} ({bytes} bytes) in {files} file(s) and {folders} folder(s)',
+        'de': '{size} ({bytes} Bytes) in {files} Datei(en) und {folders} Ordner(n)'},
+    '{count} items': {
+        'en': '{count} items',
+        'de': '{count} Einträge'},
+    'Properties of {name}': {
+        'en': 'Properties of {name}',
+        'de': 'Eigenschaften von {name}'},
+    'Compute size': {
+        'en': 'Compute size',
+        'de': 'Größe berechnen'},
+    'Count what the folders hold (links are not followed; at most {count} entries)': {
+        'en': 'Count what the folders hold (links are not followed; at most {count} entries)',
+        'de': 'Zählen, was die Ordner enthalten (Links werden nicht verfolgt; höchstens {count} Einträge)'},
+    'Apply': {
+        'en': 'Apply',
+        'de': 'Anwenden'},
+    'Set these permission bits': {
+        'en': 'Set these permission bits',
+        'de': 'Diese Berechtigungen setzen'},
+    '{size} ({bytes} bytes)': {
+        'en': '{size} ({bytes} bytes)',
+        'de': '{size} ({bytes} Bytes)'},
+    'at least {text}': {
+        'en': 'at least {text}',
+        'de': 'mindestens {text}'},
+    'Mode {octal} ({text})': {
+        'en': 'Mode {octal} ({text})',
+        'de': 'Modus {octal} ({text})'},
+    'Counting…': {
+        'en': 'Counting…',
+        'de': 'Zähle…'},
+    'A symbolic link has no permissions of its own; what it points to is not changed here.': {
+        'en': 'A symbolic link has no permissions of its own; what it points to is not changed here.',
+        'de': 'Ein symbolischer Link hat keine eigenen Berechtigungen; worauf er zeigt, wird hier nicht geändert.'},
+    'The folder shown at the top of a pane is changed from the folder above it.': {
+        'en': 'The folder shown at the top of a pane is changed from the folder above it.',
+        'de': 'Der oberste Ordner eines Bereichs wird vom Ordner darüber aus geändert.'},
+    "Set-user-ID, set-group-ID and sticky bits are never set in a sandbox's folder.": {
+        'en': "Set-user-ID, set-group-ID and sticky bits are never set in a sandbox's folder.",
+        'de': 'Set-User-ID-, Set-Group-ID- und Sticky-Bits werden im Ordner einer Sandbox nie gesetzt.'},
+    'Close the window': {
+        'en': 'Close the window',
+        'de': 'Das Fenster schließen'},
+    'Accessed': {
+        'en': 'Accessed',
+        'de': 'Zugegriffen'},
+    'Status changed': {
+        'en': 'Status changed',
+        'de': 'Status geändert'},
+    '{who}: {what}': {
+        'en': '{who}: {what}',
+        'de': '{who}: {what}'},
+    'Give the items to you or one of your groups': {
+        'en': 'Give the items to you or one of your groups',
+        'de': 'Die Einträge Ihnen oder einer Ihrer Gruppen geben'},
+    'folders: not counted yet': {
+        'en': 'folders: not counted yet',
+        'de': 'Ordner: noch nicht gezählt'},
+    '{name} changed since it was opened.': {
+        'en': '{name} changed since it was opened.',
+        'de': '{name} hat sich geändert, seit die Datei geöffnet wurde.'},
+    'Folders nested more than {count} deep are not counted.': {
+        'en': 'Folders nested more than {count} deep are not counted.',
+        'de': 'Ordner, die tiefer als {count} Ebenen verschachtelt sind, werden nicht gezählt.'},
+    'copy': {
+        'en': 'copy',
+        'de': 'Kopie'},
+    'copy {number}': {
+        'en': 'copy {number}',
+        'de': 'Kopie {number}'},
+    'Drop: {rest}': {
+        'en': 'Drop: {rest}',
+        'de': 'Ablegen: {rest}'},
+    'Drop: copy {count} item(s) into {folder}.': {
+        'en': 'Drop: copy {count} item(s) into {folder}.',
+        'de': 'Ablegen: {count} Eintrag/Einträge nach {folder} kopieren.'},
+    'Drop: move {count} item(s) into {folder}.': {
+        'en': 'Drop: move {count} item(s) into {folder}.',
+        'de': 'Ablegen: {count} Eintrag/Einträge nach {folder} verschieben.'},
+    'Drop: copy {count} item(s) into {folder} (with Shift: move).': {
+        'en': 'Drop: copy {count} item(s) into {folder} (with Shift: move).',
+        'de': 'Ablegen: {count} Eintrag/Einträge nach {folder} kopieren (mit Umschalt: verschieben).'},
+    'Copied to the clipboard: {paths}': {
+        'en': 'Copied to the clipboard: {paths}',
+        'de': 'In die Zwischenablage kopiert: {paths}'},
+    '{count} paths': {
+        'en': '{count} paths',
+        'de': '{count} Pfade'},
+    'File actions': {
+        'en': 'File actions',
+        'de': 'Dateiaktionen'},
+    'New folder…': {
+        'en': 'New folder…',
+        'de': 'Neuer Ordner…'},
+    'Copy path': {
+        'en': 'Copy path',
+        'de': 'Pfad kopieren'},
+    'Properties…': {
+        'en': 'Properties…',
+        'de': 'Eigenschaften…'},
+    'Nothing to paste: copy or cut files first (Ctrl+C, Ctrl+X).': {
+        'en': 'Nothing to paste: copy or cut files first (Ctrl+C, Ctrl+X).',
+        'de': 'Nichts einzufügen: Kopieren oder ausschneiden Sie zuerst Dateien (Strg+C, Strg+X).'},
+    'Select a file first.': {
+        'en': 'Select a file first.',
+        'de': 'Wählen Sie zuerst eine Datei.'},
+    '{name} is a folder.': {
+        'en': '{name} is a folder.',
+        'de': '{name} ist ein Ordner.'},
+    'Open': {
+        'en': 'Open',
+        'de': 'Öffnen'},
+    'View': {
+        'en': 'View',
+        'de': 'Ansehen'},
+    'Edit': {
+        'en': 'Edit',
+        'de': 'Bearbeiten'},
+    'Open with the hex editor': {
+        'en': 'Open with the hex editor',
+        'de': 'Mit dem Hex-Editor öffnen'},
+    'Paste into {name}': {
+        'en': 'Paste into {name}',
+        'de': 'In {name} einfügen'},
+    'Copy to the other pane': {
+        'en': 'Copy to the other pane',
+        'de': 'In den anderen Bereich kopieren'},
+    'Move to the other pane': {
+        'en': 'Move to the other pane',
+        'de': 'In den anderen Bereich verschieben'},
+    'Of the folder shown': {
+        'en': 'Of the folder shown',
+        'de': 'Des gezeigten Ordners'},
+    '{count} item(s) cut: Paste (Ctrl+V) moves them into the folder shown.': {
+        'en': '{count} item(s) cut: Paste (Ctrl+V) moves them into the folder shown.',
+        'de': '{count} Eintrag/Einträge ausgeschnitten: Einfügen (Strg+V) verschiebt sie in den gezeigten Ordner.'},
+    '{count} item(s) copied: Paste (Ctrl+V) copies them into the folder shown.': {
+        'en': '{count} item(s) copied: Paste (Ctrl+V) copies them into the folder shown.',
+        'de': '{count} Eintrag/Einträge kopiert: Einfügen (Strg+V) kopiert sie in den gezeigten Ordner.'},
+    'They are in this folder already.': {
+        'en': 'They are in this folder already.',
+        'de': 'Sie sind schon in diesem Ordner.'},
+    '{name}: too many copies here already.': {
+        'en': '{name}: too many copies here already.',
+        'de': '{name}: Hier gibt es schon zu viele Kopien.'},
+    # == end of the file manager block ==
     # == --ask in words (ask_choice.py; the web page has the same): allow asks nothing, every question allowed ==
     'Ask me (default)': {
         'en': 'Ask me (default)',
@@ -6470,9 +6818,6 @@ TEXTS = {
     'LLM server': {
         'en': 'LLM server',
         'de': 'LLM-Server'},
-    'Fill in {placeholder}: {what}.': {
-        'en': 'Fill in {placeholder}: {what}.',
-        'de': '{placeholder} ausfüllen: {what}.'},
     'Ask before what the options do not allow; rulesets allow, ask or deny each request and MCP tool call': {
         'en': 'Ask before what the options do not allow; rulesets allow, ask or deny each request and MCP tool call',
         'de': 'Nachfragen bei allem, was die Optionen nicht erlauben; Regelsätze erlauben, fragen nach oder verweigern jede Anfrage und jeden MCP-Tool-Aufruf'},
@@ -6518,9 +6863,6 @@ TEXTS = {
     'VPN {vpn} · {network}': {
         'en': 'VPN {vpn} · {network}',
         'de': 'VPN {vpn} · {network}'},
-    'Placeholders to fill in: {count}. Select the parts outlined in red.': {
-        'en': 'Placeholders to fill in: {count}. Select the parts outlined in red.',
-        'de': 'Auszufüllende Platzhalter: {count}. Wählen Sie die rot umrandeten Teile.'},
     'score {score}': {
         'en': 'score {score}',
         'de': 'Wertung {score}'},
@@ -7490,9 +7832,6 @@ TEXTS = {
     'Hook file': {
         'en': 'Hook file',
         'de': 'Hook-Datei'},
-    'Add hook…': {
-        'en': 'Add hook…',
-        'de': 'Hook hinzufügen…'},
     'sandbox-ai kits add-hook: a hook script, a hooks.json or an OpenCode plugin; it runs once approved': {
         'en': 'sandbox-ai kits add-hook: a hook script, a hooks.json or an OpenCode plugin; it runs once approved',
         'de': 'sandbox-ai kits add-hook: ein Hook-Skript, eine hooks.json oder ein OpenCode-Plugin; es läuft nach der Freigabe'},
@@ -7682,6 +8021,114 @@ TEXTS = {
     'none yet': {
         'en': 'none yet',
         'de': 'noch keine'},
+    'Copy all': {
+        'en': 'Copy all',
+        'de': 'Alles kopieren'},
+    'The model of the model server {name} (--llm {name}:MODEL); the agent\'s own models are not used with a server': {
+        'en': 'The model of the model server {name} (--llm {name}:MODEL); the agent\'s own models are not used with a server',
+        'de': 'Das Modell des Modellservers {name} (--llm {name}:MODELL); die eigenen Modelle des Agenten gelten mit einem Server nicht'},
+    '{model} (named with the server)': {
+        'en': '{model} (named with the server)',
+        'de': '{model} (mit dem Server angegeben)'},
+    '{model} (the default model of {name})': {
+        'en': '{model} (the default model of {name})',
+        'de': '{model} (das voreingestellte Modell von {name})'},
+    '{model} (the only model of {name})': {
+        'en': '{model} (the only model of {name})',
+        'de': '{model} (das einzige Modell von {name})'},
+    'the default of {name} (the server decides; choose NAME:MODEL to name one)': {
+        'en': 'the default of {name} (the server decides; choose NAME:MODEL to name one)',
+        'de': 'die Voreinstellung von {name} (der Server entscheidet; NAME:MODELL wählen, um eines festzulegen)'},
+    'Fill in \u201c{label}\u201d in {where}: {what}.': {
+        'en': 'Fill in \u201c{label}\u201d in {where}: {what}.',
+        'de': '\u201e{label}\u201c in {where} ausfüllen: {what}.'},
+    'the agent\'s task (Agent arguments)': {
+        'en': 'the agent\'s task (Agent arguments)',
+        'de': 'der Aufgabe des Agenten (Agent-Argumente)'},
+    'the start\'s options': {
+        'en': 'the start\'s options',
+        'de': 'den Optionen des Starts'},
+    'To fill in: {names}. Start asks for them; the parts are outlined in red.': {
+        'en': 'To fill in: {names}. Start asks for them; the parts are outlined in red.',
+        'de': 'Auszufüllen: {names}. Start fragt danach; die Teile sind rot umrandet.'},
+    'the board': {
+        'en': 'the board',
+        'de': 'die Tafel'},
+    'Fill in': {
+        'en': 'Fill in',
+        'de': 'Ausfüllen'},
+    'identity': {
+        'en': 'identity',
+        'de': 'Identität'},
+    'image variant': {
+        'en': 'image variant',
+        'de': 'Image-Variante'},
+    'Made for the start: {list}.': {
+        'en': 'Made for the start: {list}.',
+        'de': 'Für den Start angelegt: {list}.'},
+    'Image variant {names}: no recipe of that name - make it on the Images page (sandbox-ai images new NAME --from {agent}).': {
+        'en': 'Image variant {names}: no recipe of that name - make it on the Images page (sandbox-ai images new NAME --from {agent}).',
+        'de': 'Image-Variante {names}: kein Rezept dieses Namens - legen Sie sie auf der Seite Images an (sandbox-ai images new NAME --from {agent}).'},
+    'Preparing what the start needs…': {
+        'en': 'Preparing what the start needs…',
+        'de': 'Was der Start braucht, wird vorbereitet…'},
+    'VPN profile {name}': {
+        'en': 'VPN profile {name}',
+        'de': 'VPN-Profil {name}'},
+    'This start goes through the VPN profile {name}, which is not on {host}. A Tor profile needs nothing filled in and is made now; another kind (WireGuard, OpenVPN, Mullvad, Tailscale) needs its keys or login on the VPN page.': {
+        'en': 'This start goes through the VPN profile {name}, which is not on {host}. A Tor profile needs nothing filled in and is made now; another kind (WireGuard, OpenVPN, Mullvad, Tailscale) needs its keys or login on the VPN page.',
+        'de': 'Dieser Start geht über das VPN-Profil {name}, das es auf {host} nicht gibt. Ein Tor-Profil braucht keine Angaben und wird jetzt angelegt; eine andere Art (WireGuard, OpenVPN, Mullvad, Tailscale) braucht ihre Schlüssel oder ihr Login auf der Seite VPN.'},
+    'Make a Tor profile': {
+        'en': 'Make a Tor profile',
+        'de': 'Tor-Profil anlegen'},
+    'I make it on the VPN page': {
+        'en': 'I make it on the VPN page',
+        'de': 'Ich lege es auf der Seite VPN an'},
+    'Still preparing what the start needs…': {
+        'en': 'Still preparing what the start needs…',
+        'de': 'Was der Start braucht, wird noch vorbereitet…'},
+    'VPN profile {names}: make it on the VPN page (it needs its keys or login), then start again.': {
+        'en': 'VPN profile {names}: make it on the VPN page (it needs its keys or login), then start again.',
+        'de': 'VPN-Profil {names}: auf der Seite VPN anlegen (es braucht seine Schlüssel oder sein Login), dann erneut starten.'},
+    'Image variant {names}: not built (sandbox-ai build --variant NAME).': {
+        'en': 'Image variant {names}: not built (sandbox-ai build --variant NAME).',
+        'de': 'Image-Variante {names}: nicht gebaut (sandbox-ai build --variant NAME).'},
+    'MCP servers {names}: not added (the MCP page adds them from a catalog).': {
+        'en': 'MCP servers {names}: not added (the MCP page adds them from a catalog).',
+        'de': 'MCP-Server {names}: nicht hinzugefügt (die Seite MCP fügt sie aus einem Katalog hinzu).'},
+    'built': {
+        'en': 'built',
+        'de': 'gebaut'},
+    'This start needs the image variant {names}{made}. Build it now? It takes some minutes and room on the disk; the output goes to the log window, and the start goes on when it is built.': {
+        'en': 'This start needs the image variant {names}{made}. Build it now? It takes some minutes and room on the disk; the output goes to the log window, and the start goes on when it is built.',
+        'de': 'Dieser Start braucht die Image-Variante {names}{made}. Jetzt bauen? Das dauert einige Minuten und braucht Platz auf der Platte; die Ausgabe geht ins Protokollfenster, und der Start geht weiter, sobald sie gebaut ist.'},
+    'This start uses the MCP servers {names}, which are not added on {host}. Add them from their catalogs now (their images are pulled)?': {
+        'en': 'This start uses the MCP servers {names}, which are not added on {host}. Add them from their catalogs now (their images are pulled)?',
+        'de': 'Dieser Start nutzt die MCP-Server {names}, die auf {host} nicht hinzugefügt sind. Jetzt aus ihren Katalogen hinzufügen (ihre Images werden geladen)?'},
+    'Not everything could be made (the log window has the output):': {
+        'en': 'Not everything could be made (the log window has the output):',
+        'de': 'Nicht alles ließ sich anlegen (das Protokollfenster hat die Ausgabe):'},
+    ' (made from its recipe first)': {
+        'en': ' (made from its recipe first)',
+        'de': ' (zuerst aus ihrem Rezept angelegt)'},
+    'Preparing the start': {
+        'en': 'Preparing the start',
+        'de': 'Der Start wird vorbereitet'},
+    'A dialog of this page is open: answer it first': {
+        'en': 'A dialog of this page is open: answer it first',
+        'de': 'Ein Dialog dieser Seite ist offen: zuerst beantworten'},
+    'Own window': {
+        'en': 'Own window',
+        'de': 'Eigenes Fenster'},
+    'The log in a window of its own, usable while a dialog is open (Ctrl+Shift+L)': {
+        'en': 'The log in a window of its own, usable while a dialog is open (Ctrl+Shift+L)',
+        'de': 'Das Protokoll in einem eigenen Fenster, auch bedienbar, während ein Dialog offen ist (Strg+Umschalt+L)'},
+    'Log in its own window': {
+        'en': 'Log in its own window',
+        'de': 'Protokoll in eigenem Fenster'},
+    'sandbox-ai: log': {
+        'en': 'sandbox-ai: log',
+        'de': 'sandbox-ai: Protokoll'},
     'Show the log': {
         'en': 'Show the log',
         'de': 'Protokoll anzeigen'},
@@ -9686,6 +10133,126 @@ TEXTS = {
     'Close the panel (View > Panels brings it back)': {
         'en': 'Close the panel (View > Panels brings it back)',
         'de': 'Bereich schließen (Ansicht > Bereiche holt ihn zurück)'},
+    # == Back and Forward (the mouse's side buttons, Alt+Left/Alt+Right, Go menu), Copy in every list, several rows
+    # chosen at once (Ctrl, Shift) and what acts on all of them ==
+    'Forward': {
+        'en': 'Forward',
+        'de': 'Vorwärts'},
+    "{what} ({keys}, or the mouse's side button)": {
+        'en': "{what} ({keys}, or the mouse's side button)",
+        'de': '{what} ({keys} oder die Seitentaste der Maus)'},
+    'Copy cell': {
+        'en': 'Copy cell',
+        'de': 'Zelle kopieren'},
+    '{count} rows are selected: Stop, Pause, Resume and Delete act on each of them; the other buttons on one row.': {
+        'en': '{count} rows are selected: Stop, Pause, Resume and Delete act on each of them; the other buttons on one row.',
+        'de': '{count} Zeilen sind ausgewählt: Stoppen, Pausieren, Fortsetzen und Löschen wirken auf jede davon, die übrigen Schaltflächen auf eine Zeile.'},
+    'It has not registered with sandbox-ai (yet).': {
+        'en': 'It has not registered with sandbox-ai (yet).',
+        'de': 'Er hat sich (noch) nicht bei sandbox-ai angemeldet.'},
+    '{name} on {host}': {
+        'en': '{name} on {host}',
+        'de': '{name} auf {host}'},
+    'This sandbox-ai cannot stop it from outside: end it in its terminal.': {
+        'en': 'This sandbox-ai cannot stop it from outside: end it in its terminal.',
+        'de': 'Dieses sandbox-ai kann ihn nicht von außen stoppen: In seinem Terminal beenden.'},
+    'An MCP server only stops.': {
+        'en': 'An MCP server only stops.',
+        'de': 'Ein MCP-Server wird nur gestoppt.'},
+    "Stop these {count} starts? Their agents end; what they did not save is lost (a session's HOME is kept).": {
+        'en': "Stop these {count} starts? Their agents end; what they did not save is lost (a session's HOME is kept).",
+        'de': 'Diese {count} Starts stoppen? Ihre Agenten enden; was sie nicht gespeichert haben, geht verloren (das HOME einer Sitzung bleibt).'},
+    'Pause these {count} starts?': {
+        'en': 'Pause these {count} starts?',
+        'de': 'Diese {count} Starts pausieren?'},
+    'Resume these {count} starts?': {
+        'en': 'Resume these {count} starts?',
+        'de': 'Diese {count} Starts fortsetzen?'},
+    'Delete these {count} sessions and their HOME? This cannot be undone.': {
+        'en': 'Delete these {count} sessions and their HOME? This cannot be undone.',
+        'de': 'Diese {count} Sitzungen und ihr HOME löschen? Das lässt sich nicht rückgängig machen.'},
+    'None of the selected can: {why}': {
+        'en': 'None of the selected can: {why}',
+        'de': 'Keine der ausgewählten kann das: {why}'},
+    '{action}: {count} of the {total} selected': {
+        'en': '{action}: {count} of the {total} selected',
+        'de': '{action}: {count} der {total} ausgewählten'},
+    'Left out:': {
+        'en': 'Left out:',
+        'de': 'Ausgelassen:'},
+    'Stopped: resume it alone (its HOME is reviewed first).': {
+        'en': 'Stopped: resume it alone (its HOME is reviewed first).',
+        'de': 'Gestoppt: einzeln fortsetzen (sein HOME wird zuerst geprüft).'},
+    '{failed} of {count} failed:': {
+        'en': '{failed} of {count} failed:',
+        'de': '{failed} von {count} fehlgeschlagen:'},
+    'not done': {
+        'en': 'not done',
+        'de': 'nicht ausgeführt'},
+    'Remove these {count} secrets? Every start, VPN profile and Git login that names one goes without it.': {
+        'en': 'Remove these {count} secrets? Every start, VPN profile and Git login that names one goes without it.',
+        'de': 'Diese {count} Geheimnisse entfernen? Jeder Start, jedes VPN-Profil und jeder Git-Login, der eines davon nennt, bekommt es dann nicht mehr.'},
+    'Removed {count} of {total}.': {
+        'en': 'Removed {count} of {total}.',
+        'de': '{count} von {total} entfernt.'},
+    'Remove these {count} logins? Their secrets stay.': {
+        'en': 'Remove these {count} logins? Their secrets stay.',
+        'de': 'Diese {count} Logins entfernen? Ihre Geheimnisse bleiben.'},
+    'Acts on one host: {count} are selected.': {
+        'en': 'Acts on one host: {count} are selected.',
+        'de': 'Wirkt auf einen Host: {count} sind ausgewählt.'},
+    'Remove these {count} hosts from the list of hosts? Their sandbox-ai and their starts stay there; this app and sandbox-ai web no longer reach them (their approvals are no longer answered from here).': {
+        'en': 'Remove these {count} hosts from the list of hosts? Their sandbox-ai and their starts stay there; this app and sandbox-ai web no longer reach them (their approvals are no longer answered from here).',
+        'de': 'Diese {count} Hosts aus der Liste der Hosts entfernen? Ihr sandbox-ai und ihre Starts bleiben dort; diese App und sandbox-ai web erreichen sie nicht mehr (ihre Freigaben werden von hier nicht mehr beantwortet).'},
+    'Acts on one row: {count} are selected.': {
+        'en': 'Acts on one row: {count} are selected.',
+        'de': 'Wirkt auf eine Zeile: {count} sind ausgewählt.'},
+    'Remove these {count} identities? Their secrets stay in sandbox-ai secrets.': {
+        'en': 'Remove these {count} identities? Their secrets stay in sandbox-ai secrets.',
+        'de': 'Diese {count} Identitäten entfernen? Ihre Secrets bleiben in sandbox-ai secrets.'},
+    'Delete these {count} kits with everything in them? Projects that use one can no longer start until you remove its --kit.': {
+        'en': 'Delete these {count} kits with everything in them? Projects that use one can no longer start until you remove its --kit.',
+        'de': 'Diese {count} Kits mit allem darin löschen? Projekte, die eines davon nutzen, starten erst wieder, wenn sein --kit entfernt ist.'},
+    'Deleting {count} kits…': {
+        'en': 'Deleting {count} kits…',
+        'de': '{count} Kits werden gelöscht…'},
+    "Left out (sandbox-ai's own kits are read-only): {names}": {
+        'en': "Left out (sandbox-ai's own kits are read-only): {names}",
+        'de': 'Ausgelassen (die eigenen Kits von sandbox-ai sind schreibgeschützt): {names}'},
+    'Forget these {count} LLM servers on {host}? Starts with --llm and one of them cannot start until it is added again.': {
+        'en': 'Forget these {count} LLM servers on {host}? Starts with --llm and one of them cannot start until it is added again.',
+        'de': 'Diese {count} LLM-Server auf {host} vergessen? Starts mit --llm und einem davon können nicht starten, bis er wieder hinzugefügt ist.'},
+    'Their records are damaged: only Delete… is left.': {
+        'en': 'Their records are damaged: only Delete… is left.',
+        'de': 'Ihre Einträge sind beschädigt: Nur Löschen… bleibt.'},
+    'Stop every member of these {count} teams on {host} and their boards? What runs in them ends now.': {
+        'en': 'Stop every member of these {count} teams on {host} and their boards? What runs in them ends now.',
+        'de': 'Jedes Mitglied dieser {count} Teams auf {host} und ihre Tafeln stoppen? Was in ihnen läuft, endet jetzt.'},
+    'Delete these {count} teams on {host}? Their members are stopped, then their HOMEs and the boards are removed for good; the workspaces stay.': {
+        'en': 'Delete these {count} teams on {host}? Their members are stopped, then their HOMEs and the boards are removed for good; the workspaces stay.',
+        'de': 'Diese {count} Teams auf {host} löschen? Ihre Mitglieder werden gestoppt, dann werden ihre HOMEs und die Tafeln endgültig entfernt; die Arbeitsordner bleiben.'},
+    '{done} of {total} done.': {
+        'en': '{done} of {total} done.',
+        'de': '{done} von {total} erledigt.'},
+    'Remove these {count} VPN profiles?': {
+        'en': 'Remove these {count} VPN profiles?',
+        'de': 'Diese {count} VPN-Profile entfernen?'},
+    'Delete these {count} variants? Their images stay; projects that start one with --image-variant stop working.': {
+        'en': 'Delete these {count} variants? Their images stay; projects that start one with --image-variant stop working.',
+        'de': 'Diese {count} Varianten löschen? Ihre Images bleiben; Projekte, die eine davon mit --image-variant starten, funktionieren dann nicht mehr.'},
+    'Delete these {count} variants and their images? Projects that start one with --image-variant stop working.': {
+        'en': 'Delete these {count} variants and their images? Projects that start one with --image-variant stop working.',
+        'de': 'Diese {count} Varianten und ihre Images löschen? Projekte, die eine davon mit --image-variant starten, funktionieren dann nicht mehr.'},
+    "Forget these {count} entries? Their projects' next sandboxes ask again. Sandboxes running now keep what they already allowed until they end (take it back there with Sandboxes › Revoke…, sandbox-ai net revoke).": {
+        'en': "Forget these {count} entries? Their projects' next sandboxes ask again. Sandboxes running now keep what they already allowed until they end (take it back there with Sandboxes › Revoke…, sandbox-ai net revoke).",
+        'de': 'Diese {count} Einträge vergessen? Die nächsten Sandboxen ihrer Projekte fragen wieder. Laufende Sandboxen behalten, was sie schon erlaubt bekommen haben, bis sie enden (dort zurücknehmen mit Sandboxen › Zurücknehmen…, sandbox-ai net revoke).'},
+    'Forgotten: {count} of {total}.': {
+        'en': 'Forgotten: {count} of {total}.',
+        'de': 'Vergessen: {count} von {total}.'},
+    'Stop these {count} MCP servers? Agents that use one lose it until it is started again.': {
+        'en': 'Stop these {count} MCP servers? Agents that use one lose it until it is started again.',
+        'de': 'Diese {count} MCP-Server stoppen? Agenten, die einen davon nutzen, verlieren ihn, bis er wieder gestartet ist.'},
+    # (end of the section)
     # == the Board's Cut, Copy and Paste (a part's context menu, Ctrl+X/C/V) ==
     'Properties': {
         'en': 'Properties',
@@ -9969,6 +10536,24 @@ TEXTS = {
     'It can start on {host}.': {
         'en': 'It can start on {host}.',
         'de': 'Sie kann auf {host} starten.'},
+    'Replace a session of that name there': {
+        'en': 'Replace a session of that name there',
+        'de': 'Eine Sitzung dieses Namens dort ersetzen'},
+    'A session of that name on the host is deleted first, its HOME there too (--replace). Without, the copy is refused when there is one: started again, it would keep its own options, not these.': {
+        'en': 'A session of that name on the host is deleted first, its HOME there too (--replace). Without, the copy is refused when there is one: started again, it would keep its own options, not these.',
+        'de': 'Eine Sitzung dieses Namens auf dem Host wird zuerst gelöscht, ihr HOME dort auch (--replace). Ohne das wird die Kopie abgelehnt, wenn es eine gibt: Erneut gestartet, behielte sie ihre eigenen Optionen, nicht diese.'},
+    'Replace on host': {
+        'en': 'Replace on host',
+        'de': 'Auf dem Host ersetzen'},
+    'Delete the session {new} on {host} first, its HOME there too, if there is one?': {
+        'en': 'Delete the session {new} on {host} first, its HOME there too, if there is one?',
+        'de': 'Die Sitzung {new} auf {host} zuerst löschen, ihr HOME dort auch, falls es sie gibt?'},
+    'It can start on {host}, with warnings: see below.': {
+        'en': 'It can start on {host}, with warnings: see below.',
+        'de': 'Sie kann auf {host} starten, mit Warnungen: siehe unten.'},
+    'Done: it runs on {host}, with warnings: see below.': {
+        'en': 'Done: it runs on {host}, with warnings: see below.',
+        'de': 'Erledigt: Sie läuft auf {host}, mit Warnungen: siehe unten.'},
     'Its configuration starts again there as a session of its own, checked there first; then it is stopped here (its HOME stays until it is deleted).': {
         'en': 'Its configuration starts again there as a session of its own, checked there first; then it is stopped here (its HOME stays until it is deleted).',
         'de': 'Ihre Konfiguration startet dort erneut als eigene Sitzung, dort zuerst geprüft; dann wird sie hier gestoppt (ihr HOME bleibt, bis sie gelöscht wird).'},
@@ -10177,4 +10762,43 @@ TEXTS = {
     '{path}: inside the workspace {workspace}; the start refuses it (the agent could change its own rules there)': {
         'en': '{path}: inside the workspace {workspace}; the start refuses it (the agent could change its own rules there)',
         'de': '{path}: im Workspace {workspace}; der Start lehnt sie ab (der Agent könnte dort seine eigenen Regeln ändern)'},
+    'Started for {name}: it belongs to that start and is shown below it.': {
+        'en': 'Started for {name}: it belongs to that start and is shown below it.',
+        'de': 'Für {name} gestartet: Er gehört zu diesem Start und steht unter ihm.'},
+    '{name} uses it: it belongs to that start and is shown below it.': {
+        'en': '{name} uses it: it belongs to that start and is shown below it.',
+        'de': '{name} nutzt ihn: Er gehört zu diesem Start und steht unter ihm.'},
+    'It belongs to {name} (as sandbox-ai list shows it) and is shown below it.': {
+        'en': 'It belongs to {name} (as sandbox-ai list shows it) and is shown below it.',
+        'de': 'Er gehört zu {name} (wie sandbox-ai list es zeigt) und steht unter ihm.'},
+    'A helper of {name}: it belongs to that start and is shown below it.': {
+        'en': 'A helper of {name}: it belongs to that start and is shown below it.',
+        'de': 'Ein Helfer von {name}: Er gehört zu diesem Start und steht unter ihm.'},
+    'A member of the team {name} leads: shown below the lead.': {
+        'en': 'A member of the team {name} leads: shown below the lead.',
+        'de': 'Ein Mitglied des Teams, das {name} leitet: Es steht unter der Leitung.'},
+    'Shown below {name}, which started at the same time: the sandbox-ai that started it did not record whom it belongs to, so this is a guess.': {
+        'en': 'Shown below {name}, which started at the same time: the sandbox-ai that started it did not record whom it belongs to, so this is a guess.',
+        'de': 'Unter {name} gezeigt, der zur selben Zeit startete: Das sandbox-ai, das ihn startete, hat nicht vermerkt, zu wem er gehört, daher ist das eine Vermutung.'},
+    'These MCP servers belong to no start listed here: started on their own (sandbox-ai mcp start), or the start they were started for ended and none uses them. Stop one when nothing needs it.': {
+        'en': 'These MCP servers belong to no start listed here: started on their own (sandbox-ai mcp start), or the start they were started for ended and none uses them. Stop one when nothing needs it.',
+        'de': 'Diese MCP-Server gehören zu keinem hier aufgeführten Start: für sich gestartet (sandbox-ai mcp start), oder der Start, für den sie gestartet wurden, endete und keiner nutzt sie. Stoppen Sie einen, wenn nichts ihn braucht.'},
+    'Belongs to no start': {
+        'en': 'Belongs to no start',
+        'de': 'Gehört zu keinem Start'},
+    'MCP servers: {count}': {
+        'en': 'MCP servers: {count}',
+        'de': 'MCP-Server: {count}'},
+    'MCP servers that belong to no start: select one of them below to act on it.': {
+        'en': 'MCP servers that belong to no start: select one of them below to act on it.',
+        'de': 'MCP-Server, die zu keinem Start gehören: Wählen Sie einen darunter, um auf ihn zu wirken.'},
+    'An MCP server that belongs to no start that runs: started on its own (sandbox-ai mcp start), or the start it was started for ended.': {
+        'en': 'An MCP server that belongs to no start that runs: started on its own (sandbox-ai mcp start), or the start it was started for ended.',
+        'de': 'Ein MCP-Server, der zu keinem laufenden Start gehört: für sich gestartet (sandbox-ai mcp start), oder der Start, für den er gestartet wurde, endete.'},
+    'belongs to no start': {
+        'en': 'belongs to no start',
+        'de': 'gehört zu keinem Start'},
+    'Belongs to {name}': {
+        'en': 'Belongs to {name}',
+        'de': 'Gehört zu {name}'},
 }

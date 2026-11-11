@@ -36,7 +36,8 @@ MCP servers. Each start is followed by what belongs to it (its MCP servers and h
 its own. Colour on a terminal only (--no-color, NO_COLOR). --json writes the same as a list of objects, for
 scripts and the desktop app; "attachable" says whether attach can bring a start's terminal here, and "attach_why"
 why not (mcp, damaged, stopped, foreground, paused; null when it can); "listed_under" the start a row is shown
-below, an MCP server's "serves" the starts that use it (the one it was started for first, "started_for").
+below, an MCP server's "serves" the starts that use it (the one it was started for first, "started_for";
+"owner_recorded": its mcp.json says whom it was started for), a team member's "lead" its lead's name.
 
 Every start has a name: --name NAME, or a codename of three words such as brisk-otter-lantern (codenames.py),
 or with --name-style project or "name_style": "project" in defaults.json AGENT-PROJECT-xxxx (PROJECT:
@@ -57,7 +58,6 @@ reach it. stop ends its pod and records the end; a kept start is then resumed as
 Standard library only.
 """
 import argparse
-import calendar
 import importlib.util
 import json
 import os
@@ -81,13 +81,23 @@ _modules = {}
 
 def module(name):
     """sandbox-ai's module NAME (agent_sandbox, sessions, net, mcp, textout), loaded once by path (the
-    commands run with python -I: the script directory is not on sys.path)."""
+    commands run with python -I: the script directory is not on sys.path). One launcher for all of them, loaded when
+    the first needs it: a listing (`sandbox-ai list`, which the app asks every few seconds) loads none."""
     if name not in _modules:
         spec = importlib.util.spec_from_file_location(f"sandbox_ai_{name}_for_starts", HERE / f"{name}.py")
         loaded = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(loaded)
-        if name != "agent_sandbox" and hasattr(loaded, "_launcher"):
-            loaded._launcher = module("agent_sandbox")  # one launcher for all of them
+        if name == "agent_sandbox":
+            for other in _modules.values():  # those loaded before it
+                if getattr(other, "_launcher", False) is None:
+                    other._launcher = loaded
+        elif hasattr(loaded, "_launcher"):
+            if "agent_sandbox" in _modules:
+                loaded._launcher = _modules["agent_sandbox"]
+            elif hasattr(loaded, "_launcher_source"):
+                loaded._launcher_source = launcher
+            else:
+                loaded._launcher = module("agent_sandbox")
         if name != "liveness" and hasattr(loaded, "_liveness"):
             loaded._liveness = module("liveness")  # one Podman listing (cached) for all of them
         _modules[name] = loaded
@@ -107,7 +117,7 @@ def now():
 
 
 def valid_name(name):
-    return isinstance(name, str) and re.fullmatch(launcher().SESSION_NAME, name) is not None
+    return isinstance(name, str) and re.fullmatch(module("sessions").SESSION_NAME, name) is not None
 
 
 def check_name(name, option="name"):
@@ -327,6 +337,7 @@ def keep_days():
 
 def seconds(value):
     """An ISO time of a record (UTC) as seconds since the epoch, or None."""
+    import calendar
     try:
         return calendar.timegm(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:
@@ -376,7 +387,7 @@ def start_entries(prune=True):
         return found
     for directory in directories:
         key = directory.name
-        if not (directory / "session.json").exists() or not re.fullmatch(launcher().START_ID, key):
+        if not (directory / "session.json").exists() or not re.fullmatch(sessions.START_ID, key):
             continue
         if prune and sessions.prune(key):
             continue  # ended without a kept HOME: only its history is left
@@ -478,7 +489,10 @@ def mcp_entries(include_stopped=False):
                        "backend": text(data.get("backend")), "state": state, "home": None, "attachable": False,
                        "run": None, "pid": data.get("pid") if state == "running" else None,
                        "started": text(data.get("started")), "workspace": None, "directory": str(directory),
-                       "serves": [], "started_for": started_for(data)}
+                       "serves": [], "started_for": started_for(data),
+                       # Whether its mcp.json says whom it was started for (null there: on its own); not before 0.1.78,
+                       # whose servers the app shows below the start of their host started at the same time.
+                       "owner_recorded": "started_for" in data}
     return found
 
 
@@ -517,20 +531,34 @@ def attach_why(entry):
 
 
 POD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+AGENTS = ("claude", "codex", "opencode")  # the launcher's AUTH_TARGETS (a test keeps both the same)
 TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.py's TEAM_NAME
 
 
-def grouping(entry, records):
-    """The grouping fields of ENTRY (pod, companions, helper_of, teams) from its run's record in RECORDS. A
+def team_lead(team, leads):
+    """The name of the start that leads team TEAM (sandbox-ai team: NAME-AGENT of its record's lead), or None (no
+    record, a damaged one). LEADS caches the answers of one listing."""
+    if team not in leads:
+        try:
+            data = module("team").load(team)
+            leads[team] = f"{team}-{data['lead']}"
+        except (OSError, ValueError, KeyError, TypeError):
+            leads[team] = None
+    return leads[team]
+
+
+def grouping(entry, records, leads=None):
+    """The grouping fields of ENTRY (pod, companions, helper_of, teams, lead) from its run's record in RECORDS. A
     run.json is read from disk and may be damaged: each field is checked and a bad value is left out (None, [])
-    instead of failing the listing. helper_of names another run that runs now; companions are known agents."""
+    instead of failing the listing. helper_of names another run that runs now; companions are known agents; lead
+    the start that leads the team ENTRY is a member of (its name NAME-AGENT; None for the lead itself). LEADS: the
+    teams' leads read so far (team_lead)."""
     run = entry.get("run")
     record_ = records.get(run) if isinstance(run, str) else None
     record_ = record_ if isinstance(record_, dict) else {}
     pod = record_.get("pod")
     companions = record_.get("companions")
-    agents = getattr(launcher(), "AUTH_TARGETS", None) or ("claude", "codex", "opencode")
-    companions = list(dict.fromkeys(c for c in companions if isinstance(c, str) and c in agents)) \
+    companions = list(dict.fromkeys(c for c in companions if isinstance(c, str) and c in AGENTS)) \
         if isinstance(companions, list) else []
     helper_of = record_.get("helper_of")
     if not (isinstance(helper_of, str) and helper_of != run and isinstance(records.get(helper_of), dict)):
@@ -541,8 +569,12 @@ def grouping(entry, records):
         names += value if isinstance(value, list) else []
     teams = sorted({n[len("team-"):] for n in names
                     if isinstance(n, str) and n.startswith("team-") and TEAM_NAME.fullmatch(n[len("team-"):])})
+    leads = {} if leads is None else leads
+    lead = next((found for found in (team_lead(team, leads) for team in teams if entry.get("kind") != "mcp"
+                                     and str(entry.get("name")).startswith(f"{team}-"))
+                 if found and found != entry.get("name")), None)
     return {"pod": pod if isinstance(pod, str) and POD_NAME.fullmatch(pod) else None, "companions": companions,
-            "helper_of": helper_of, "teams": teams}
+            "helper_of": helper_of, "teams": teams, "lead": lead}
 
 
 def break_helper_cycles(found):
@@ -620,9 +652,10 @@ def entries(include_all=False, prune=True):
     for entry in found:
         entry["attach_why"] = attach_why(entry)
     # What belongs together (the app and the web group by it): a running start's pod (Podman), the agents --with in
-    # its sandbox, whose helper it is, and the teams it belongs to (its team-NAME board servers).
+    # its sandbox, whose helper it is, the teams it belongs to (its team-NAME board servers) and their lead.
+    leads = {}
     for entry in found:
-        entry.update(grouping(entry, records))
+        entry.update(grouping(entry, records, leads))
     break_helper_cycles(found)
     # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach); the
     # start it was started for (its mcp.json says so) first, if it is one of them. That one is named in "started_for"
@@ -650,7 +683,7 @@ def entries(include_all=False, prune=True):
 def parents(found):
     """{index: index} of the rows of FOUND (entries, in their order) that the grouped listing shows below another
     one: an MCP server below the first start it serves ("serves": the start it was started for comes first), a start
-    below its lead ("helper_of": the lead's run). One level deep, as in the app and the web: a row goes below the
+    below its lead ("helper_of": the lead's run; "lead": a team's lead, by name). One level deep, as in the app and the web: a row goes below the
     top of its chain (a lead's helper's MCP server below the lead); rows that name each other round in a circle stay
     at the top. Rows without such a link (an MCP server no listed start uses, older records) stay at the top."""
     refs = {}
@@ -661,7 +694,7 @@ def parents(found):
                     refs.setdefault(ref, index)
     direct = {}
     for index, entry in enumerate(found):
-        named = entry.get("serves") if entry.get("kind") == "mcp" else [entry.get("helper_of")]
+        named = entry.get("serves") if entry.get("kind") == "mcp" else [entry.get("helper_of"), entry.get("lead")]
         for ref in named if isinstance(named, list) else []:
             parent = refs.get(ref) if isinstance(ref, str) else None
             if parent is not None and parent != index:
@@ -1042,7 +1075,7 @@ def row(entry, colour, mark="", under=None):
     """One row of the table for ENTRY: MARK before its name (the tree marker of a row below another), UNDER the name
     of the start it is shown below (its other users are named instead of all of them)."""
     t = module("textout")
-    printable = launcher().printable
+    printable = module("sessions").printable  # the launcher's (a listing loads no launcher)
     serves = entry.get("serves") or []
     if under is None:
         where = entry.get("workspace") or ("serves " + ", ".join(serves) if serves else "-")

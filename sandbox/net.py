@@ -22,7 +22,6 @@ open. A sandbox is ended with `sandbox-ai stop NAME` (any start: a run, a sessio
 Standard library only.
 """
 import argparse
-import calendar
 import contextlib
 import fcntl
 import hashlib
@@ -53,6 +52,7 @@ STOP_WAIT = 30
 # later than this after the registration is another one (records without "pid_start").
 START_SLACK = 5
 _launcher = None
+_launcher_source = None  # starts.py's launcher() when starts.py loaded this module: one launcher for all of its modules
 _textout = None
 
 
@@ -70,6 +70,8 @@ def textout():
 
 def launcher():
     global _launcher
+    if _launcher is None and _launcher_source is not None:
+        _launcher = _launcher_source()
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_net", HERE / "agent_sandbox.py")
         with LOADING:  # published only once loaded: another thread never sees a half-made module
@@ -78,6 +80,37 @@ def launcher():
                 spec.loader.exec_module(loaded)
                 _launcher = loaded
     return _launcher
+
+
+_procinfo = None
+
+
+def procinfo():
+    """procinfo.py (start times, command lines, owners of processes): the launcher's once that is loaded, else one of
+    its own - `net list`, `list` and the app's looks at the running sandboxes load no launcher for it."""
+    global _procinfo
+    if _launcher is not None:
+        return _launcher.procinfo()
+    if _procinfo is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_procinfo_for_net", HERE / "procinfo.py")
+        with LOADING:
+            if _procinfo is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _procinfo = loaded
+    return _procinfo
+
+
+def process_start(pid):
+    """launcher().process_start(PID), without loading the launcher for it (a test keeps both the same)."""
+    return _launcher.process_start(pid) if _launcher is not None else procinfo().start_time(pid)
+
+
+def printable(text):
+    """launcher().printable, without loading the launcher for it (a test keeps both the same): TEXT safe for a
+    terminal, control, bidi and other non-printable characters escaped."""
+    return "".join(c if c in "\n\t" or c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256
+                   else f"\\u{ord(c):04x}" for c in str(text))
 
 
 _liveness = None
@@ -107,7 +140,7 @@ def alive(pid, start=None):
     except (PermissionError, ValueError, TypeError):
         return True
     if isinstance(start, int) and not isinstance(start, bool):
-        now = launcher().process_start(int(pid))
+        now = process_start(int(pid))
         if now is not None and now != start:
             return False
     return True
@@ -376,6 +409,19 @@ def vpn_resolver(record):
     if not (isinstance(record, dict) and record.get("vpn_container")):
         return None
     return launcher().load_vpn_module().resolver_for_run(record)
+
+
+def tor_record(record):
+    """Whether the run RECORD (run.json) is behind a Tor profile: its "vpn_type", or for a run of an older version its
+    profile's type (a profile that cannot be read counts as Tor: nothing is opened past it on a guess)."""
+    if not isinstance(record, dict) or not record.get("vpn_profile"):
+        return False
+    if record.get("vpn_type"):
+        return record["vpn_type"] == "tor"
+    try:
+        return launcher().load_vpn_module().load_profile(record["vpn_profile"]).get("type") == "tor"
+    except (OSError, ValueError, AttributeError):
+        return True
 
 
 def resolve_with(one):
@@ -948,6 +994,7 @@ def launcher_process(record):
     """(PID, start ticks) of the launcher RECORD registered, after checking that the PID still is that
     launcher: this user's, of the recorded start time (or, for records without one, started no later
     than the registration) and running agent_sandbox.py. ValueError otherwise."""
+    import calendar
     name, pid = record.get("run"), record.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
         raise ValueError(f"{name}: its record names no usable PID")
@@ -1190,7 +1237,10 @@ def seconds(value):
     return number
 
 
-def parser():
+def parser(lean=False):
+    """LEAN: allow and revoke without their options, which ask the launcher (its presets, nameservers and short
+    options): for a command line that argparse never hands to them (`net list`, which the app asks every few
+    seconds, loads no launcher)."""
     p = argparse.ArgumentParser(prog="sandbox-ai net", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
                                 epilog="\n".join(__doc__.split("\n\n")[1:3]))
@@ -1216,6 +1266,8 @@ def parser():
                          help=f"how long to wait for it to end (default {STOP_WAIT}; 0: do not wait)")
     for name in ("allow", "revoke"):
         command = commands.add_parser(name, help=f"{name} destinations while the sandbox runs")
+        if lean:
+            continue
         command.add_argument("run", nargs="?")
         command.add_argument("-A", "--allow-host", action="append", default=[], metavar="HOST", type=str.lower,
                              help="pin HOST in the sandbox's /etc/hosts and allow TCP/443 to it")
@@ -1554,11 +1606,12 @@ def relay_main(argv):
 def main(argv, out=print, resolver=resolve):
     if argv[:1] == ["--internal-relay"]:
         return relay_main(argv[1:])
-    args = parser().parse_args(argv)
+    # The first word names the command (the parser has no option but --help before it): only allow and revoke need
+    # their options.
+    args = parser(lean=argv[:1] in (["list"], ["show"], ["untaint"], ["stop"])).parse_args(argv)
     try:
         runs = running()
         if args.command == "list":
-            printable = launcher().printable
             if args.json:
                 out(json.dumps([{"run": name, "name": r.get("name"), "agent": r.get("agent"),
                                  "workspace": r.get("workspace"), "started": r.get("started"),
@@ -1651,6 +1704,10 @@ def main(argv, out=print, resolver=resolve):
             if not record.get("host_relay"):
                 raise ValueError(f"{launcher().printable(record.get('run', args.run))} cannot relay host ports: it was "
                                  "started by a sandbox-ai older than 0.1.37; start it again with --allow-host-port")
+            if tor_record(record) and not record.get("vpn_bypass_host_ports"):
+                # As at the start: a host port lies past Tor (vpn.check_tor_host_ports).
+                raise ValueError(f"{launcher().printable(record.get('run', args.run))}: " + launcher().load_vpn_module()
+                                 .host_ports_past_tor(sorted(ports), "--vpn", record["vpn_profile"]))
         if args.command == "allow":
             inside_subnet(record, request)
             # The run's security mode (run.json): what it refuses at the start stays closed during the run. The

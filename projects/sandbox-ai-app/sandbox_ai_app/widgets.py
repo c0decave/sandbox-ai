@@ -426,21 +426,512 @@ def _box(parent, icon, title_text, text, details=None):
 
 
 def inform(parent, title_text, text, details=None, warning=False, modal=True):
-    """A message with OK. Not MODAL (the outcome of a finished background job): shown without blocking
-    anything, so the Approvals page stays usable while it is open; inform() then returns at once."""
+    """A message with OK; inform() returns at once - no one waits for an OK (an event loop waiting for it would hold
+    back every answer given meanwhile: nested loops return last-in, first-out). MODAL: the page PARENT is on waits
+    behind a veil until OK (show_veiled); not MODAL (the outcome of a finished background job): nothing is veiled,
+    the Approvals page stays usable while it is open."""
     if AUTO_ANSWER is not None:
         SHOWN.append((title_text, text, details))
         return
     box = _box(parent, QMessageBox.Icon.Warning if warning else QMessageBox.Icon.Information, title_text, text, details)
     box.addButton(tr("OK"), QMessageBox.ButtonRole.AcceptRole)
-    if modal:
-        box.exec()
-        return
-    show_modeless(box)
+    (show_veiled if modal else show_modeless)(box)
 
 
 def warn(parent, title_text, text, details=None, modal=True):
     inform(parent, title_text, text, details, warning=True, modal=modal)
+
+
+# The log in a window of its own (set by the main window): Ctrl+Shift+L opens it from any dialog too.
+LOG_WINDOW_OPENER = None
+LOG_WINDOW_KEYS = "Ctrl+Shift+L"
+
+
+def page_of(widget):
+    """The page WIDGET is on, else WIDGET itself when it is no window; None for a window (a dialog of the main window
+    veils nothing). The page: the widget directly in a QStackedWidget (a page of the window, of a wizard...) - not in
+    a QTabWidget's own: a tab's dialog veils the page the tabs are on (the other tabs would change what it asks
+    about), or the tabs as a whole where they lie in a window directly. A widget kept elsewhere for its page (the
+    Board's panels in docks of the window) names that page: its attribute veil_page."""
+    from PySide6.QtWidgets import QStackedWidget, QTabWidget
+    current, tabs, seen = widget, None, set()
+    while current is not None and not current.isWindow():
+        owner = getattr(current, "veil_page", None)
+        if owner is not None and id(owner) not in seen:
+            seen.add(id(owner))
+            current = owner
+            continue
+        parent = current.parentWidget()
+        if isinstance(parent, QTabWidget):
+            tabs = parent  # (the outermost counts)
+        elif isinstance(parent, QStackedWidget) and not isinstance(parent.parentWidget(), QTabWidget):
+            return current
+        current = parent
+    if tabs is not None:
+        return tabs
+    return widget if widget is not None and not widget.isWindow() else None
+
+
+def veiled_parts(widget):
+    """What a dialog of WIDGET veils: its page (page_of) and what the page names besides with veil_also() (the
+    Board: its panels in docks of the window), none twice and none inside another. Empty for a window."""
+    page = page_of(widget)
+    if page is None:
+        return []
+    also, current, seen = [], widget, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        named = getattr(current, "veil_also", None)
+        if callable(named):
+            also = list(named())
+            break
+        if current is page:
+            break
+        current = getattr(current, "veil_page", None) or current.parentWidget()
+    parts = [page]
+    for part in also:
+        try:
+            if part is not None and not any(p is part or p.isAncestorOf(part) for p in parts):
+                parts.append(part)
+        except RuntimeError:  # (deleted)
+            continue
+    return parts
+
+
+def _alive(widget):
+    try:
+        from shiboken6 import isValid
+    except ImportError:  # pragma: no cover
+        return widget is not None
+    return widget is not None and isValid(widget)
+
+
+class PageVeil(QWidget):
+    """A translucent cover over the page a dialog came from, while the dialog is open: clicks on the page bring
+    the dialog up instead (the page's folder, host or board stay as the question saw them). Disabling the page
+    would disable the dialog too (Qt disables child windows with their parent). Nested dialogs of one page share
+    one veil. The keyboard does not reach the page either: the focus moves from the page to the veil (and back when
+    it goes), Tab stays there, and the page's own shortcuts do nothing meanwhile (the window's own still work)."""
+
+    @classmethod
+    def over(cls, page, dialog):
+        if page is None:
+            return None
+        veil = page.findChild(PageVeil, "pageVeil", Qt.FindChildOption.FindDirectChildrenOnly)
+        if veil is None:
+            veil = cls(page)
+        veil.dialogs.append(dialog)
+        veil.setGeometry(page.rect())
+        veil.show()
+        veil.raise_()
+        veil.guard_shortcuts()
+        veil.take_focus()
+        return veil
+
+    def __init__(self, page):
+        super().__init__(page)
+        self.setObjectName("pageVeil")
+        self.dialogs = []
+        self.previous = None  # where the focus was in the page: it goes back there
+        self.guarded = []  # the page's QActions and QShortcuts held back meanwhile
+        self.setCursor(Qt.CursorShape.ForbiddenCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(tr("A dialog of this page is open: answer it first"))
+        page.installEventFilter(self)  # (its own page only: follows its size)
+        QApplication.instance().focusChanged.connect(self.focus_moved)
+
+    def guard_shortcuts(self):
+        """The page's shortcuts (its QActions and QShortcuts with a key, whatever their context) do nothing while it
+        is veiled: their shortcut events are held back here (a filter on each of them, never on the application)."""
+        from PySide6.QtGui import QAction, QShortcut
+        page = self.parentWidget()
+        for found in [*page.findChildren(QAction), *page.findChildren(QShortcut)]:
+            keyed = bool(found.shortcuts()) if isinstance(found, QAction) else not found.key().isEmpty()
+            if keyed and not any(found is g for g in self.guarded):
+                found.installEventFilter(self)
+                self.guarded.append(found)
+
+    def take_focus(self):
+        """The focus of the page's window, if it is in the page, to the veil (the window gives it back to the veil
+        when it is active again)."""
+        page = self.parentWidget()
+        focus = page.window().focusWidget()
+        if focus is not None and focus is not self and page.isAncestorOf(focus):
+            if self.previous is None:
+                self.previous = focus
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def focus_moved(self, _old, now):
+        """The focus went into the veiled page some other way (Tab from outside it, a widget's setFocus): to the
+        veil instead."""
+        try:
+            page = self.parentWidget()
+            if now is not None and now is not self and self.isVisible() and page is not None and \
+                    page.isAncestorOf(now):
+                self.setFocus(Qt.FocusReason.OtherFocusReason)
+        except RuntimeError:  # (deleted meanwhile)
+            pass
+
+    def focusNextPrevChild(self, _next):  # noqa: N802
+        return True  # Tab stays on the veil
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Type.Shortcut and watched is not self.parentWidget():
+            self.bring_up()  # one of the page's shortcuts: held back
+            return True
+        if event.type() == QEvent.Type.Resize and watched is self.parentWidget():
+            self.setGeometry(watched.rect())
+        return False
+
+    def paintEvent(self, event):  # noqa: N802
+        painter = QPainter(self)
+        color = QColor(self.palette().color(QPalette.ColorRole.Window))
+        color.setAlpha(150)
+        painter.fillRect(self.rect(), color)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        self.bring_up()
+        event.accept()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        self.bring_up()
+        event.accept()
+
+    def bring_up(self):
+        for dialog in reversed(self.dialogs):
+            try:
+                if dialog.isVisible():
+                    dialog.raise_()
+                    dialog.activateWindow()
+                    return
+            except RuntimeError:
+                continue
+
+    def release(self, dialog):
+        """DIALOG ended; the veil goes with the page's last one (the focus back where it was in the page)."""
+        self.dialogs = [d for d in self.dialogs if d is not dialog]
+        if self.dialogs:
+            return
+        try:
+            QApplication.instance().focusChanged.disconnect(self.focus_moved)
+        except (RuntimeError, TypeError):
+            pass
+        for guarded in self.guarded:
+            if _alive(guarded):
+                guarded.removeEventFilter(self)
+        self.guarded = []
+        try:
+            self.setObjectName("")  # (deleted later: a dialog asked meanwhile gets a veil of its own)
+            page = self.parentWidget()
+            if page is not None:
+                page.removeEventFilter(self)
+                previous = self.previous
+                if page.window().focusWidget() is self and _alive(previous) and previous.isVisible() and \
+                        page.isAncestorOf(previous):
+                    previous.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.previous = None
+            self.hide()
+            self.deleteLater()
+        except RuntimeError:  # the page went first
+            pass
+
+
+def veil(parent, dialog):
+    """Veil what a dialog of PARENT veils (veiled_parts) while DIALOG is open; returns the veils."""
+    return [PageVeil.over(part, dialog) for part in veiled_parts(parent)] if parent is not None else []
+
+
+RUNNING_DIALOGS = {}  # (class name, the window it belongs to) -> the dialog of nonblocking_dialogs() waiting for it
+
+
+def open_veiled(dialog, key=None):
+    """DIALOG (about to be shown) veils its page (veil) until it ends - when it is finished or deleted, at once (not
+    when the event loop its caller waits in returns: nested loops return last-in, first-out, and an answer given while
+    another dialog waits would keep its page veiled until that one is answered); its entry KEY of RUNNING_DIALOGS goes
+    then too. Returns the function that ends it (once; the caller calls it as well when it stops waiting)."""
+    veils = veil(dialog.parentWidget(), dialog)
+    done = []
+
+    def end(*_):
+        if done:
+            return
+        done.append(True)
+        if key is not None and RUNNING_DIALOGS.get(key) is dialog:
+            del RUNNING_DIALOGS[key]
+        for each in veils:
+            each.release(dialog)
+        for signal_ in (dialog.finished, dialog.destroyed):
+            try:
+                signal_.disconnect(end)
+            except (RuntimeError, TypeError):
+                pass
+    dialog.finished.connect(end)
+    dialog.destroyed.connect(end)
+    return end
+
+
+def show_veiled(dialog):
+    """Show DIALOG (a message with OK only, a text to read) without anyone waiting for it: it blocks nothing, its page
+    waits behind a veil until it is closed; deleted when it is closed. Returns DIALOG."""
+    log_window_shortcut(dialog)
+    dialog.setWindowModality(Qt.WindowModality.NonModal)
+    dialog.setModal(False)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    open_veiled(dialog)
+    dialog.show()
+    dialog.raise_()
+    dialog.activateWindow()
+    return dialog
+
+
+def nonblocking_dialogs(platform=sys.platform):
+    """Every dialog run with exec() is a window of its own that blocks nothing: the main window, the log window and
+    the other dialogs stay usable while it is open (Qt's exec() made it application modal: one dialog left open
+    blocked the whole app). The caller still waits for the answer - in an event loop of its own, while the app goes
+    on. A second exec() of a dialog of the same kind for the same window brings the open one to the front and is
+    cancelled (no two of the same stacked on each other). File dialogs block their window only (a native one
+    needs it), a dialog given a modality of its own keeps it, and on macOS a file dialog is a sheet as before.
+    Ctrl+Shift+L opens the log window from any of them. Once per process."""
+    if getattr(QDialog.exec, "nonblocking", False):
+        return
+    original = QDialog.exec
+    from PySide6.QtCore import QEventLoop
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+
+    def exec_nonblocking(dialog, *args):
+        log_window_shortcut(dialog)
+        if isinstance(dialog, QMessageBox):  # (Qt makes every message box application modal itself)
+            dialog.setWindowModality(Qt.WindowModality.NonModal)
+        if dialog.windowModality() != Qt.WindowModality.NonModal:  # a modality chosen for it (the open questions
+            return original(dialog, *args)  # above a dialog)
+        if isinstance(dialog, QFileDialog):
+            if platform != "darwin" and dialog.parentWidget() is not None:
+                dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            return original(dialog, *args)
+        parent = dialog.parentWidget()
+        # Only a dialog class of the app's own is kept to one per parent (Settings, the wizard...): a message box,
+        # a plain QDialog and a second question of another part are all shown - none answered for the human.
+        own = type(dialog) not in (QDialog, QMessageBox, MessageDialog, QInputDialog)
+        key = (type(dialog).__name__, id(parent)) if own and parent is not None else None
+        running = RUNNING_DIALOGS.get(key) if key is not None else None
+        if running is not None and running is not dialog:
+            try:
+                if running.isVisible():
+                    running.raise_()
+                    running.activateWindow()
+                    dialog.setResult(QDialog.DialogCode.Rejected)
+                    return QDialog.DialogCode.Rejected
+            except RuntimeError:  # deleted meanwhile
+                pass
+        if key is not None:
+            RUNNING_DIALOGS[key] = dialog
+        dialog.setModal(False)  # (a message box makes itself modal)
+        # The part of the window that asked waits behind a veil: what the answer acts on (its folder, its host,
+        # its board) cannot change under the question. The rest of the app stays usable. The veil goes as soon as
+        # the dialog ends, even while the caller still waits for another dialog's loop to return (open_veiled).
+        close = open_veiled(dialog, key)
+        loop = QEventLoop()
+        ended = []
+
+        def end(*_):
+            ended.append(True)
+            loop.quit()
+
+        def finished(code):
+            results.append(code)  # (a dialog deleted on close cannot be asked afterwards)
+            end()
+        results = []
+        dialog.finished.connect(finished)
+        dialog.destroyed.connect(end)  # (deleted with its parent: the caller is not left waiting for ever)
+        try:
+            dialog.setResult(QDialog.DialogCode.Rejected)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            if not ended:
+                loop.exec()
+        finally:
+            close()
+            for signal, slot in ((dialog.finished, finished), (dialog.destroyed, end)):
+                try:
+                    signal.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
+        try:
+            ending = QApplication.closingDown() or bool(getattr(parent.window(), "shut_down", False)) \
+                if parent is not None else QApplication.closingDown()
+        except RuntimeError:  # its window is gone
+            ending = True
+        if ending:  # the window ended while it was open: what the answer would start does not run any more
+            return QDialog.DialogCode.Rejected
+        if results:
+            return results[-1]
+        try:
+            return dialog.result()
+        except RuntimeError:  # deleted: cancelled
+            return QDialog.DialogCode.Rejected
+    exec_nonblocking.nonblocking = True
+    exec_nonblocking.__doc__ = original.__doc__
+    QDialog.exec = exec_nonblocking
+    # Qt's own QMessageBox.information/warning/critical/question run their box in C++ (application modal): the same
+    # box, made here and run with the exec() above.
+    icons = {"information": QMessageBox.Icon.Information, "warning": QMessageBox.Icon.Warning,
+             "critical": QMessageBox.Icon.Critical, "question": QMessageBox.Icon.Question}
+    for name, icon in icons.items():
+        def static(parent, title, text, buttons=None, defaultButton=QMessageBox.StandardButton.NoButton,  # noqa: N803
+                   icon=icon, name=name):
+            if buttons is None:
+                buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No if name == "question" \
+                    else QMessageBox.StandardButton.Ok
+            box = QMessageBox(icon, title, text, buttons, parent)
+            if defaultButton != QMessageBox.StandardButton.NoButton:
+                box.setDefaultButton(defaultButton)
+            box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            answer = box.exec()
+            try:
+                return QMessageBox.StandardButton(answer)
+            except ValueError:
+                return QMessageBox.StandardButton.NoButton
+        setattr(QMessageBox, name, staticmethod(static))
+    input_statics()
+
+
+INT_LIMIT = 2147483647  # Qt's own defaults of QInputDialog.getInt/getDouble
+
+
+def input_statics():
+    """Qt's QInputDialog.getText/getMultiLineText/getItem/getInt/getDouble run their dialog in C++ (application
+    modal, the whole app blocked): the same dialog, with the same arguments and defaults, made here and run with the
+    exec() of nonblocking_dialogs (its page veiled, nothing blocked). Each returns what Qt's does: (value, ok), the
+    value when cancelled as Qt's (getText: "", getItem: the current item, getInt/getDouble: the value given)."""
+    from PySide6.QtWidgets import QInputDialog
+
+    def run(dialog, read, cancelled):
+        try:
+            code = dialog.exec()
+            ok = int(getattr(code, "value", code)) != 0
+            value = read() if ok else cancelled
+        except RuntimeError:  # deleted with its parent meanwhile: cancelled
+            return cancelled, False
+        try:
+            dialog.deleteLater()
+        except RuntimeError:
+            pass
+        return value, ok
+
+    def made(parent, title, label, flags):
+        dialog = QInputDialog(parent) if flags is None else QInputDialog(parent, flags)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText(label)
+        return dialog
+
+    def get_text(parent, title, label, echo=QLineEdit.EchoMode.Normal, text="", flags=None,
+                 inputMethodHints=Qt.InputMethodHint.ImhNone):  # noqa: N803
+        dialog = made(parent, title, label, flags)
+        dialog.setTextEchoMode(echo)
+        dialog.setTextValue(text)
+        dialog.setInputMethodHints(inputMethodHints)
+        return run(dialog, dialog.textValue, "")
+
+    def get_multi_line_text(parent, title, label, text="", flags=None,
+                            inputMethodHints=Qt.InputMethodHint.ImhNone):  # noqa: N803
+        dialog = made(parent, title, label, flags)
+        dialog.setOption(QInputDialog.InputDialogOption.UsePlainTextEditForTextInput, True)
+        dialog.setTextValue(text)
+        dialog.setInputMethodHints(inputMethodHints)
+        return run(dialog, dialog.textValue, "")
+
+    def get_item(parent, title, label, items, current=0, editable=True, flags=None,
+                 inputMethodHints=Qt.InputMethodHint.ImhNone):  # noqa: N803
+        items = [str(item) for item in items]
+        text = items[current] if 0 <= current < len(items) else ""
+        dialog = made(parent, title, label, flags)
+        dialog.setComboBoxItems(items)
+        dialog.setTextValue(text)
+        dialog.setComboBoxEditable(editable)
+        dialog.setInputMethodHints(inputMethodHints)
+        return run(dialog, dialog.textValue, text)
+
+    def get_int(parent, title, label, value=0, minValue=-INT_LIMIT, maxValue=INT_LIMIT, step=1,  # noqa: N803
+                flags=None):
+        dialog = made(parent, title, label, flags)
+        dialog.setIntRange(minValue, maxValue)
+        dialog.setIntValue(value)
+        dialog.setIntStep(step)
+        return run(dialog, dialog.intValue, value)
+
+    def get_double(parent, title, label, value=0.0, minValue=-INT_LIMIT, maxValue=INT_LIMIT, decimals=1,  # noqa: N803
+                   flags=None, step=1.0):
+        dialog = made(parent, title, label, flags)
+        dialog.setDoubleDecimals(decimals)
+        dialog.setDoubleRange(minValue, maxValue)
+        dialog.setDoubleStep(step)
+        dialog.setDoubleValue(value)
+        return run(dialog, dialog.doubleValue, value)
+    for name, function in (("getText", get_text), ("getMultiLineText", get_multi_line_text), ("getItem", get_item),
+                           ("getInt", get_int), ("getDouble", get_double)):
+        setattr(QInputDialog, name, staticmethod(function))
+
+
+TITLE_BAR = 32  # what a window manager's frame adds above a window, about (unknown before the window is shown)
+SCREEN_MARGIN = 8
+
+
+def fit_on_screen(widget):
+    """WIDGET (a dialog about to be shown) no larger than the free area of its screen (the screen of the window it
+    belongs to) and inside it: a dialog sized for its content reached past the screen's edge, its buttons out of
+    reach. Its minimum size gives way where it must."""
+    parent = widget.parentWidget()
+    screen = (parent.window().screen() if parent is not None else None) or widget.screen() or \
+        QApplication.primaryScreen()
+    if screen is None:
+        return
+    area = screen.availableGeometry().adjusted(SCREEN_MARGIN, SCREEN_MARGIN + TITLE_BAR, -SCREEN_MARGIN,
+                                                -SCREEN_MARGIN)
+    if area.width() < 200 or area.height() < 150:
+        return
+    width, height = min(widget.width(), area.width()), min(widget.height(), area.height())
+    if widget.minimumWidth() > width:
+        widget.setMinimumWidth(width)
+    if widget.minimumHeight() > height:
+        widget.setMinimumHeight(height)
+    if (width, height) != (widget.width(), widget.height()):
+        widget.resize(width, height)
+    x = min(max(widget.x(), area.left()), area.right() - width + 1)
+    y = min(max(widget.y(), area.top()), area.bottom() - height + 1)
+    if (x, y) != (widget.x(), widget.y()):
+        widget.move(x, y)
+
+
+def fitting_dialogs():
+    """Every dialog and message box fits on its screen when it is shown (fit_on_screen). Once per process."""
+    from PySide6.QtWidgets import QMessageBox as Box
+    for cls in (QDialog, Box):
+        original = cls.showEvent
+        if getattr(original, "fits", False):
+            continue
+
+        def show_event(dialog, event, original=original):
+            if not event.spontaneous():
+                try:
+                    fit_on_screen(dialog)
+                except RuntimeError:  # (deleted meanwhile)
+                    pass
+            return original(dialog, event)
+        show_event.fits = True
+        cls.showEvent = show_event
+
+
+def log_window_shortcut(dialog):
+    """Ctrl+Shift+L in DIALOG opens the log window of its own (once per dialog; nothing before the window set
+    LOG_WINDOW_OPENER)."""
+    if LOG_WINDOW_OPENER is None or dialog.property("logWindowKeys"):
+        return
+    from PySide6.QtGui import QKeySequence, QShortcut
+    shortcut = QShortcut(QKeySequence(LOG_WINDOW_KEYS), dialog)
+    shortcut.activated.connect(lambda: LOG_WINDOW_OPENER is not None and LOG_WINDOW_OPENER())
+    dialog.setProperty("logWindowKeys", True)
 
 
 def show_modeless(dialog):
@@ -464,8 +955,12 @@ def confirm(parent, title_text, text, accept, destructive=False, details=None, r
         yes.setProperty("role", "danger")
     box.setDefaultButton(no if destructive else yes)
     box.setEscapeButton(no)
+    # The answer as it is clicked: the box is gone afterwards when its parent went while it was open (an editor
+    # closed meanwhile) - not chosen then.
+    chosen = []
+    yes.clicked.connect(lambda *_: chosen.append(True))
     box.exec()
-    return box.clickedButton() is yes
+    return bool(chosen)
 
 
 def ask_first(parent, action, title_text, text, accept, detail=None, details=None, reject=None):
@@ -549,7 +1044,7 @@ def mark_secret(edit, secret=True):
 
 
 def show_text(parent, title_text, text, modal=True):
-    """TEXT in a read-only view; not MODAL: shown without blocking (see inform)."""
+    """TEXT in a read-only view; returns at once, MODAL: its page veiled until it is closed (see inform)."""
     if AUTO_ANSWER is not None:
         SHOWN.append((title_text, text, None))
         return
@@ -565,10 +1060,7 @@ def show_text(parent, title_text, text, modal=True):
     buttons.addButton(tr("Close"), QDialogButtonBox.ButtonRole.RejectRole)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
-    if modal:
-        dialog.exec()
-        return
-    show_modeless(dialog)
+    (show_veiled if modal else show_modeless)(dialog)
 
 
 class Notice(QWidget):
@@ -783,9 +1275,24 @@ class _Workers:
         self.lock = threading.Lock()
         self.waiting = []  # [_Worker] with nothing to do
         self.made = 0
+        self.held = None  # [function] while calls are held (hold_background), else None
+
+    def hold(self):
+        with self.lock:
+            if self.held is None:
+                self.held = []
+
+    def release(self):
+        with self.lock:
+            held, self.held = self.held or [], None
+        for function in held:
+            self.run(function)
 
     def run(self, function):
         with self.lock:
+            if self.held is not None:
+                self.held.append(function)
+                return
             worker = self.waiting.pop() if self.waiting else None
             if worker is None:
                 self.made += 1
@@ -847,6 +1354,18 @@ class _Worker:
 
 
 _workers = _Workers()
+
+
+def hold_background():
+    """The calls started from now on wait, in their order, until release_background(): while the window makes itself
+    and paints for the first time, the first pages' reads (sandbox-ai's modules loaded and run in their threads, a
+    preset catalogue read) would share Python with it - about a seventh of the time to the first paint."""
+    _workers.hold()
+
+
+def release_background():
+    """The calls held since hold_background() start now, in their order; those started later at once. (Again: nothing.)"""
+    _workers.release()
 
 
 def _keeper():
@@ -1179,6 +1698,105 @@ def background(function, *args, done, source=None, owner=None, timeout=None, wor
         state.timer.timeout.connect(state.expired)
         state.timer.start(int(timeout * 1000))
     return call.start()
+
+
+# -- several rows chosen at once (Ctrl+click, Shift+click): one question, then each in turn, the failures together --
+
+LISTED = 12  # names a question about several names in full (the rest: "and N more")
+
+
+def listing(names, limit=LISTED):
+    """NAMES one per line for a question about several (only the first LIMIT, then how many more)."""
+    names = [str(name) for name in names]
+    lines = ["- " + name for name in names[:limit]]
+    if len(names) > limit:
+        lines.append(tr("… and {count} more", count=len(names) - limit))
+    return "\n".join(lines)
+
+
+def several(text, names):
+    """A question's TEXT (it names how many) and below it the NAMES it is about."""
+    return text + "\n\n" + listing(names)
+
+
+def multi_select(view):
+    """VIEW takes several rows: Ctrl+click adds or drops one, Shift+click a range from the last one (and Ctrl+A)."""
+    view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    return view
+
+
+def delete_key(view, slot, text=None):
+    """The Delete key in VIEW does SLOT (what its Remove button does, to the selected rows)."""
+    from PySide6.QtGui import QAction, QKeySequence
+    action = QAction(text or tr("Remove…"), view)
+    action.setObjectName("deleteAction")
+    action.setShortcuts([key for key in QKeySequence.keyBindings(QKeySequence.StandardKey.Delete) if not key.isEmpty()]
+                        or [QKeySequence("Del")])
+    action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+    action.triggered.connect(lambda _=False: slot())
+    view.addAction(action)
+    return action
+
+
+def one_only(view, buttons):
+    """BUTTONS act on one row of VIEW: greyed out (saying why) while several are selected."""
+    def update():
+        count = len(selected_rows(view))
+        for button in buttons:
+            if button is not None and not held(button):
+                set_enabled(button, count <= 1, tr("Acts on one row: {count} are selected.", count=count)
+                            if count > 1 else None)
+    view.itemSelectionChanged.connect(update) if hasattr(view, "itemSelectionChanged") else \
+        view.selectionModel().selectionChanged.connect(lambda *_: update())
+    return update
+
+
+def run_each(function, items, *, done, owner=None, source=None, timeout=None, work=True):
+    """FUNCTION(ITEM) for each of ITEMS, one after the other in one background() thread (never at once: the same
+    sandbox-ai, the same files); DONE([(item, result, error), ...]) on the GUI thread, in the order of ITEMS - an
+    exception of one is its error, the others go on. TIMEOUT is for all of them together."""
+    items = list(items)
+
+    def each():
+        outcomes = []
+        for item in items:
+            try:
+                outcomes.append((item, function(item), None))
+            except Exception as exc:  # noqa: BLE001 - the next one still runs; said in DONE
+                outcomes.append((item, None, exc))
+        return outcomes
+    return background(each, owner=owner, source=source, work=work, timeout=timeout,
+                      done=lambda result, error: done(result if error is None else [(i, None, error) for i in items]))
+
+
+def failed(outcomes):
+    """(item, why) of each of run_each's OUTCOMES that failed: an exception, or a (status, out, err) result with a
+    status other than 0, or a result of False."""
+    found = []
+    for item, result, error in outcomes:
+        if error is not None:
+            found.append((item, str(error)))
+        elif isinstance(result, tuple) and len(result) == 3 and result[0] != 0:
+            found.append((item, (str(result[2] or "") + str(result[1] or "")).strip() or
+                          tr("exit status {status}", status=result[0])))
+        elif result is False:
+            found.append((item, tr("not done")))
+    return found
+
+
+def report_each(parent, title, outcomes, name_of=str, modal=False):
+    """What run_each's OUTCOMES did, in one message: nothing when all went well, else which failed and why (each by
+    NAME_OF(item), its last lines) and how many went well. Returns the items that failed."""
+    failures = failed(outcomes)
+    if not failures:
+        return []
+    lines = []
+    for item, why in failures:
+        last = [line for line in why.strip().splitlines() if line.strip()][-3:]
+        lines.append(f"- {name_of(item)}: " + " / ".join(last))
+    text = tr("{failed} of {count} failed:", failed=len(failures), count=len(outcomes)) + "\n" + "\n".join(lines)
+    warn(parent, title, text, modal=modal)
+    return [item for item, _ in failures]
 
 
 def busy(owner):
@@ -1561,10 +2179,11 @@ class ModelTable(QTableView):
     setCurrentCell, cellDoubleClicked, itemSelectionChanged) are here too."""
     cellDoubleClicked = Signal(int, int)
     itemSelectionChanged = Signal()
+    model_class = RowModel  # (a subclass may keep rows of its own in place: the Files page's "..")
 
     def __init__(self, headers, numeric=(), stretch=None):
         super().__init__()
-        self.rows_model = RowModel(headers, numeric, stretch, self)
+        self.rows_model = self.model_class(headers, numeric, stretch, self)
         self.setModel(self.rows_model)
         self.doubleClicked.connect(lambda index: self.cellDoubleClicked.emit(index.row(), index.column()))
         self.selectionModel().selectionChanged.connect(lambda *_: self.itemSelectionChanged.emit())
@@ -1609,14 +2228,14 @@ class SortItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
-def table(headers, multi=False, stretch=None, numeric=(), sortable=True, compact=(), many=False):
+def table(headers, multi=False, stretch=None, numeric=(), sortable=True, compact=(), many=False, view=None):
     """A read-only table; STRETCH is the column that takes the free width, NUMERIC columns are right-aligned;
     NUMERIC and COMPACT columns are as wide as their content (tables.py fits the columns at every fill()).
     A SORTABLE table keeps the order fill() was given until the user clicks a column header; rows may then
     be in any order, so pages find what a row stands for with row_key(), never from its position. MANY: for
-    thousands of rows (a ModelTable: filled in one step, whatever the number)."""
+    thousands of rows (a ModelTable: filled in one step, whatever the number; VIEW: a subclass of it to make)."""
     if many:
-        widget = ModelTable(headers, numeric, stretch)
+        widget = (view or ModelTable)(headers, numeric, stretch)
     else:
         widget = QTableWidget(0, len(headers))
         widget.setHorizontalHeaderLabels(headers)

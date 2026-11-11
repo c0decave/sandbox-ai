@@ -104,7 +104,7 @@ def test_the_helper_starts_with_its_login_provider_rules_and_server(isolated, tm
     monkeypatch.setattr(mcp.launcher(), "remove_stale_pod", Mock(return_value=False))
     assert mcp.ensure_running(name, a) == "started"
     cmd = launched["cmd"]
-    assert cmd[:4] == [sys.executable, "-I", str(ROOT / "sandbox/agent_sandbox.py"), "codex"]
+    assert cmd[:4] == [sys.executable, "-I", str(ROOT / "sandbox/launcher/agent_sandbox.py"), "codex"]
     assert "--no-auth" not in cmd and "--no-provider-defaults" not in cmd, "its login and its provider's hosts"
     assert cmd[cmd.index("--helper-of") + 1] == name and "--dangerously-skip-permissions" in cmd
     given = [cmd[i + 1] for i, value in enumerate(cmd) if value == "--rules"]

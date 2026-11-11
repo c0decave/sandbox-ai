@@ -760,6 +760,30 @@ def test_plugins_sync_reports_failures_and_renamed_marketplaces(tmp_path):
     assert any("not installed: tool@theirs, marketplace claude-plugins-official" in line for line in lines)
 
 
+def test_a_plugin_missing_from_a_stale_marketplace_copy_is_installed_after_updating_it():
+    """Claude installs from its copy of a marketplace's plugin list: an older copy without the plugin answers
+    "not found in marketplace"; the marketplace is then updated once and the install tried again."""
+    class Stale(FakeClaude):
+        updated = False
+
+        def __call__(self, command):
+            args = command[command.index("--", command.index("--state-dir")) + 1:][1:]
+            if args[:2] == ["marketplace", "update"]:
+                self.updated = True
+            if args[:1] == ["install"] and not self.updated:
+                self.commands.append(command)
+                return subprocess.CompletedProcess(command, 1)
+            return super().__call__(command)
+
+    fake, lines = Stale(), []
+    assert plugins.sync(out=lines.append, runner=fake) == 0
+    steps = [c[c.index("plugin") + 1:] for c in fake.commands]
+    assert steps[-3:] == [["install", "sandcastle@sandbox-ai"], ["marketplace", "update", "sandbox-ai"],
+                          ["install", "sandcastle@sandbox-ai"]]
+    assert any("updating the marketplace sandbox-ai and trying sandcastle@sandbox-ai again" in line for line in lines)
+    assert not any("not installed" in line for line in lines)
+
+
 def test_plugins_update_and_passthrough(tmp_path, monkeypatch):
     plugins.sync(out=lambda line: None, runner=FakeClaude())
     fake = FakeClaude()

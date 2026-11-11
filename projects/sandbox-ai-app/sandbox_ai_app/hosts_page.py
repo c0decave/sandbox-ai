@@ -33,8 +33,8 @@ from .files import printable
 from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
-    MONO, Task, ask_first, background, compact_combo, confirm, fill, flow, inform, plain_label, row_key, safe_tooltip,
-    selected_rows, set_enabled, table, warn,
+    MONO, Task, ask_first, background, compact_combo, confirm, fill, flow, inform, multi_select, plain_label, report_each,
+    row_key, run_each, safe_tooltip, selected_rows, set_enabled, several, table, warn,
 )
 
 # Security modes in rising strictness (sandbox-ai's modes.NAMES) and its default when defaults.json names none; the
@@ -604,6 +604,7 @@ class HostsPage(QWidget):
         self.table = table([tr("Host"), tr("SSH"), tr("Answers"), tr("sandbox-ai"), tr("Running"), tr("Questions")],
                            stretch=0, compact=(2, 3, 4, 5))
         self.table.setAccessibleName(tr("Hosts"))
+        multi_select(self.table)  # several at once (Ctrl, Shift): Remove… takes them all, the rest acts on one
         self.table.itemSelectionChanged.connect(self.host_changed)
         left_layout.addWidget(self.table, 1)
 
@@ -787,6 +788,10 @@ class HostsPage(QWidget):
         rows = selected_rows(self.table)
         return row_key(self.table, rows[0]) if rows else None
 
+    def hosts(self):
+        """The hosts selected, top to bottom."""
+        return [row_key(self.table, row) for row in selected_rows(self.table)]
+
     def entry(self, name):
         return next((e for e in self.entries if e.get("name") == name), {})
 
@@ -912,6 +917,13 @@ class HostsPage(QWidget):
             self.defaults_note.setText("")
             if self.isVisible() and name is not None:
                 self.load_defaults()
+        names = self.hosts()
+        if len(names) > 1:  # several: Remove… takes those it can, the rest acts on one host
+            why = tr("Acts on one host: {count} are selected.", count=len(names))
+            for widget in (self.edit_button, self.starts_button, self.questions_button, self.test_button,
+                           self.doctor_button, self.install_button, self.from_here_button, self.update_button):
+                set_enabled(widget, False, why)
+            set_enabled(self.remove_button, any(n != "local" for n in names), tr("This machine is always in the list."))
 
     def showEvent(self, event):  # noqa: N802
         """The chosen host's defaults are asked when the page is shown, not when the window is built (no SSH at
@@ -964,7 +976,11 @@ class HostsPage(QWidget):
                    if error else self.load_hosts(name))
 
     def remove(self):
-        name = self.host()
+        names = [name for name in self.hosts() if name not in (None, "local")]
+        if len(names) > 1:
+            self.remove_several(names)
+            return
+        name = names[0] if names else None
         if name in (None, "local"):
             return
         if not ask_first(self, "host-remove", tr("Remove host"), tr(
@@ -982,6 +998,24 @@ class HostsPage(QWidget):
             self.host_removed.emit(name)  # its starts and questions leave the other pages at once
             self.load_hosts()
         background(self.sai.host_remove, name, owner=self, work=True, source=self.remove_button, timeout=60, done=done)
+
+    def remove_several(self, names):
+        """Remove… with several hosts selected: one question naming them, then each (sandbox-ai hosts remove)."""
+        if not ask_first(self, "host-remove", tr("Remove host"), several(tr(
+                "Remove these {count} hosts from the list of hosts? Their sandbox-ai and their starts stay there; this "
+                "app and sandbox-ai web no longer reach them (their approvals are no longer answered from here).",
+                count=len(names)), [self.label(name) for name in names]), tr("Remove")):
+            return
+
+        def done(outcomes):
+            gone = [name for name, _, error in outcomes if error is None]
+            for name in gone:
+                self.fleet.pop(name, None)
+                self.question_counts.pop(name, None)
+                self.host_removed.emit(name)  # its starts and questions leave the other pages at once
+            report_each(self, tr("Remove"), outcomes, self.label)
+            self.load_hosts()
+        run_each(self.sai.host_remove, names, owner=self, source=self.remove_button, timeout=60 * len(names), done=done)
 
     def test(self):
         name = self.host()

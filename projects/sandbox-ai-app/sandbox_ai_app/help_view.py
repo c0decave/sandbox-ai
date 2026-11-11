@@ -180,20 +180,20 @@ class HelpPopover(QFrame):
         layout.addWidget(self.title)
         layout.addWidget(self.what)
         self.does = plain_label(H.say(self.tip.does) if self.tip.does else "")
-        self.does.setVisible(self.tip.does is not None)
         layout.addWidget(self.does)
+        self.does.setVisible(self.tip.does is not None)
         self.cli = plain_label(tr("Command line: {cli}", cli=self.tip.cli) if self.tip.cli else "", role="secondary")
         self.cli.setFont(MONO)
-        self.cli.setVisible(bool(self.tip.cli))
         layout.addWidget(self.cli)
+        self.cli.setVisible(bool(self.tip.cli))
         row = QHBoxLayout()
         row.addStretch(1)
         self.more = QPushButton(tr("More in Help"))
         self.more.setProperty("role", "primary")
         self.more.clicked.connect(lambda _=False: self.more_in_help())
-        self.more.setVisible(bool(self.tip.section))
         row.addWidget(self.more)
         layout.addLayout(row)
+        self.more.setVisible(bool(self.tip.section))
 
     def more_in_help(self):
         section, owner = self.tip.section, self.parentWidget()
@@ -613,6 +613,7 @@ ALL_TOURS = "tours"  # the index entry listing every tour
 class HelpPage(QWidget):
     """The Help area: search, the sections by group, the text, the tours to start."""
     tour_requested = Signal(str)  # a task tour's id, or area:PAGE
+    section_shown = Signal(str)  # a section's id (or ALL_TOURS): the window's Back and Forward come back to it
 
     def __init__(self, parent=None, with_tours=True):
         super().__init__(parent)
@@ -782,6 +783,7 @@ class HelpPage(QWidget):
             self.index.setCurrentItem(item)
             self.index.blockSignals(False)
             self.index.scrollToItem(item)
+        self.section_shown.emit(ident)
         return True
 
     def set_tours(self, idents):

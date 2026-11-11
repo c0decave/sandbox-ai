@@ -53,8 +53,9 @@ def settle(*panes):
 
 
 def names(pane):
+    """The entries listed (not "..", the folder above)."""
     settle(pane)
-    return sorted(pane.table.item(r, 0).text() for r in range(pane.table.rowCount()))
+    return sorted(text for text in (pane.table.item(r, 0).text() for r in range(pane.table.rowCount())) if text != "..")
 
 
 def select(pane, *wanted):

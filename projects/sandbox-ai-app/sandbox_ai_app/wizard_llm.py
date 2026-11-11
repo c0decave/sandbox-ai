@@ -612,6 +612,26 @@ def clear(board):
     return board
 
 
+def used_model(board, endpoints):
+    """(model, source) the agent of BOARD works with through its model server (--llm), as far as known here: the
+    model named in --llm NAME:MODEL ("named"), else the server's default (llm add --model: "default"), else the one
+    model it listed ("only"); ("", "unknown") when the server decides (several models and no default: the launcher
+    asks for NAME:MODEL; none listed yet: not known). None without a model server."""
+    if not uses_server(board):
+        return None
+    name, model = parse_value(board.first("llm").props.get("--llm"))
+    if model:
+        return model, "named"
+    endpoint = next((e for e in endpoints or [] if isinstance(e, dict) and e.get("name") == name), None)
+    if endpoint is None:
+        return "", "unknown"
+    if valid_model(str(endpoint.get("model") or "")):
+        return str(endpoint["model"]), "default"
+    models = [m for m in endpoint.get("models") or [] if valid_model(m)] if isinstance(endpoint.get("models"), list) \
+        else []
+    return (models[0], "only") if len(models) == 1 else ("", "unknown")
+
+
 def uses_server(board):
     """Whether BOARD starts with --llm (a value or a placeholder still to fill in): no --model then."""
     node = board.first("llm")

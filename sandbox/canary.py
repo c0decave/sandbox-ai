@@ -163,7 +163,10 @@ def credential_files():
          "describe": "an SSH private key", "tokens": {"key": key_token}, "content": key},
         {"id": "gh", "path": ".config/gh/hosts.yml", "reads": "log", "describe": f"a gh login ({gh_host})",
          "tokens": {"oauth_token": gh_token},
-         "content": f"{gh_host}:\n    users:\n        {user}:\n            oauth_token: {gh_token}\n"
+         # github.com first, without a login: gh takes the first host of hosts.yml as its default, and a sandbox
+         # given a real token (GH_TOKEN for github.com) sent its gh calls to the decoy's host instead.
+         "content": f"github.com:\n    git_protocol: https\n"
+                    f"{gh_host}:\n    users:\n        {user}:\n            oauth_token: {gh_token}\n"
                     f"    git_protocol: https\n    oauth_token: {gh_token}\n    user: {user}\n"},
         {"id": "netrc", "path": ".netrc", "reads": "log", "describe": f"a .netrc login ({netrc_host})",
          "tokens": {"password": netrc_password},

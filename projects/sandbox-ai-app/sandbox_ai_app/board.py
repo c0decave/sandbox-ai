@@ -91,7 +91,7 @@ KINDS = {kind.key: kind for kind in (
                                     "--nameserver", "--offline", "--egress-all-allow", "--network", "--ip", "--ip6",
                                     "--subnet", "--subnet6"),
          required=True, column=3, help=N_("Where connections may go: hosts, presets, addresses, ports, DNS")),
-    Kind("vpn", N_("VPN"), ("--vpn", "--vpn-check"), column=2,
+    Kind("vpn", N_("VPN"), ("--vpn", "--vpn-check", "--vpn-bypass-host-ports"), column=2,
          help=N_("A VPN profile in front (sandbox-ai vpn): everything leaves through the tunnel, a kill switch "
                  "blocks the rest, addresses and DNS are checked before the start")),
     Kind("devices", N_("Devices and GPU"), ("--device", "--gpu"), column=0,
@@ -173,6 +173,7 @@ class Board:
 
     def __init__(self):
         self.nodes, self.edges, self.extra, self.document_extra = [], set(), [], {}
+        self.labels = {}  # {placeholder: [what it is, where to get it]} of the preset the board came from
         self._ids = itertools.count(1)
 
     # -- nodes and edges --
@@ -239,7 +240,8 @@ class Board:
         return {"nodes": [{"id": n.id, "kind": n.kind, "props": json.loads(json.dumps(n.props)), "x": n.x, "y": n.y}
                           for n in self.nodes],
                 "edges": sorted(map(list, self.edges)), "extra": list(self.extra),
-                "document_extra": json.loads(json.dumps(self.document_extra))}
+                "document_extra": json.loads(json.dumps(self.document_extra)),
+                **({"labels": json.loads(json.dumps(self.labels))} if self.labels else {})}
 
     @classmethod
     def from_state(cls, state):
@@ -248,6 +250,10 @@ class Board:
                        for n in state["nodes"]]
         board.edges = {tuple(e) for e in state["edges"]}
         board.extra, board.document_extra = list(state["extra"]), json.loads(json.dumps(state["document_extra"]))
+        labels = state.get("labels") if isinstance(state.get("labels"), dict) else {}
+        board.labels = {key: [str(v)[:300] for v in value[:2]] for key, value in labels.items()
+                        if isinstance(key, str) and PLACEHOLDER.fullmatch(key) and isinstance(value, list)
+                        and all(isinstance(v, str) for v in value[:2])}
         board._ids = itertools.count(max([n.id for n in board.nodes] or [0]) + 1)
         return board
 
@@ -548,6 +554,24 @@ def launcher_argv(sai, board, local=True):
     return document_argv(board) + to_argv(sai, board) + copy + ["--no-config"]
 
 
+def check_argv(sai, board, local=True):
+    """launcher_argv for a dry run: without the MCP servers the project itself defines (project_servers). The
+    launcher knows them only from the trusted project file, which a board start with them uses (Apply writes it);
+    with --no-config the dry run refused them as unknown although the start finds them. The board checks them."""
+    own, argv, result, index = set(project_servers(board)), launcher_argv(sai, board, local), [], 0
+    while index < len(argv):
+        item = argv[index]
+        if item == "--mcp" and index + 1 < len(argv) and argv[index + 1] in own:
+            index += 2
+            continue
+        if item.startswith("--mcp=") and item[len("--mcp="):] in own:
+            index += 1
+            continue
+        result.append(item)
+        index += 1
+    return result
+
+
 def project_servers(board):
     """The names of the MCP servers the board uses that the project itself defines (.sandbox-ai.json
     "mcp_servers", e.g. a preset's search server). The launcher knows them only from the trusted project file:
@@ -637,6 +661,30 @@ def _replace(value, function):
     if isinstance(value, dict):
         return {key: _replace(item, function) for key, item in value.items()}
     return value
+
+
+def placeholder_label(board, marker):
+    """The preset's label for MARKER, else its name (<text:question>: question)."""
+    label = (board.labels.get(marker) or [""])[0]
+    return label or PLACEHOLDER.fullmatch(marker)[2].replace("-", " ")
+
+
+def placeholder_text(board, marker, node_id=None):
+    """What is still to be filled in for MARKER, in words: the preset's own label for it ("What to find out ..."),
+    the part it is in and where to get it - not only the bare <kind:name> and "a value"."""
+    match = PLACEHOLDER.fullmatch(marker)
+    kind, name = match[1], match[2]
+    label, hint = placeholder_label(board, marker), (list(board.labels.get(marker) or []) + ["", ""])[1]
+    node = board.node(node_id) if node_id is not None else None
+    where = node.title() if node is not None else tr("the start's options")
+    if node is not None and node.kind == "agent" and \
+            marker in str(node.props.get("arguments", "")):
+        where = tr("the agent's task (Agent arguments)")
+    text = tr("Fill in \u201c{label}\u201d in {where}: {what}.", label=label, where=where,
+              what=tr(PLACEHOLDER_KINDS[kind]))
+    if hint:
+        text += " " + hint
+    return printable(text) + f" ({marker})"
 
 
 def placeholders(board):
@@ -751,9 +799,7 @@ def problems(sai, board, policy=None):
     def add(level, text, node=None):
         found.append(Problem(level, text, node.id if node is not None else None))
     for marker, node_id in placeholders(board):
-        kind = PLACEHOLDER.fullmatch(marker)[1]
-        found.append(Problem("error", tr("Fill in {placeholder}: {what}.", placeholder=marker,
-                                         what=tr(PLACEHOLDER_KINDS[kind])), node_id))
+        found.append(Problem("error", placeholder_text(board, marker, node_id), node_id))
     known = tuple(getattr(sai, "agents", AGENTS))
     if agent not in known:
         add("error", tr("Unknown agent {agent}: this sandbox-ai has {list}.", agent=printable(agent) or "?",

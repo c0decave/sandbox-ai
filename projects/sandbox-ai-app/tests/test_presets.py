@@ -74,7 +74,7 @@ def test_every_preset_builds_and_says_what_is_left_to_fill_in(preset, tmp_path):
     markers = [m for m, _ in B.placeholders(board)]
     assert sorted(markers) == sorted(p.marker for p in preset.placeholders), "declared and on the board alike"
     errors = [p for p in B.problems(sai, board) if p.level == "error"]
-    assert [e.text for e in errors if not e.text.startswith("Fill in <")] == []
+    assert [e.text for e in errors if not e.text.startswith("Fill in \u201c")] == []
     assert len(errors) == len(markers) and all(e.node is not None for e in errors)
     assert B.values(board)[0] == (preset.agent or "claude")
     # laid out: on the grid, no two parts on top of each other
@@ -102,12 +102,14 @@ def test_every_preset_passes_the_launchers_checks_once_filled_in(registered, pre
     problems = [p.text for p in B.problems(sai, board) if p.level == "error"]
     assert problems == []
     agent, _, _ = B.values(board)
-    plan, message = sai.dry_run(agent, B.launcher_argv(sai, board))
+    from test_presets_all import registered_servers
+    registered_servers(root, board)  # the servers filled in for <mcp:…> are ones a user registered
+    plan, message = sai.dry_run(agent, B.check_argv(sai, board))
     if preset.id == "gpu" and plan is None:  # this machine has no GPU: only that may be refused
         assert message.splitlines()[-1].startswith("agent-sandbox: --gpu dri"), message
         without = B.Board.from_state(board.state())
         without.first("devices").props.pop("--gpu")
-        plan, message = sai.dry_run(agent, B.launcher_argv(sai, without))
+        plan, message = sai.dry_run(agent, B.check_argv(sai, without))
     assert plan is not None, message
     # the project file (and the layout next to it) bring back the same board
     document, main = B.project_document(sai, board)
@@ -269,3 +271,15 @@ def test_own_presets_this_version_cannot_read_are_never_dropped(tmp_path, monkey
         with pytest.raises(ValueError):
             PR.remove_mine(sai, "from-a-newer-app")
         assert PR.store_path().read_text() == damaged, "a store that cannot be read is never replaced"
+
+
+def test_a_value_still_to_fill_in_is_named_by_the_presets_label(registered):
+    """"<text:question> ausfüllen: ein Wert" said nothing: the problem names the preset's label for it, the part it is
+    in and where to get it; the labels stay with the board's state (undo, the draft)."""
+    sai, root = registered
+    board = B.from_argv(sai, "claude", [], ["Research: <text:question>"], [str(root)])
+    board.labels = {"<text:question>": ["What to find out (a service, a forum, a leak, a claim)", ""]}
+    text = next(p.text for p in B.problems(sai, board) if "<text:question>" in p.text)
+    assert "What to find out" in text and "Agent arguments" in text, text
+    again = B.Board.from_state(board.state())
+    assert again.labels == board.labels

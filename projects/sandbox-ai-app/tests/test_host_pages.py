@@ -223,7 +223,9 @@ def test_kits_of_a_host(qapp, sai, monkeypatch):
     assert opened[-1] == (["ssh", "-tt", "ct1", "sandbox-ai", "kits", "trust-hooks", "--", "mine"],
                           "sandbox-ai kits trust-hooks mine (ct1)")
     page.install(True)
-    assert opened[-1][0][-3:] == ["plugins", "claude", "--update"] and opened[-1][0][2] == "ct1"
+    assert wait_until(qapp, lambda: not page.task.running, 30)
+    assert ("plugins", "claude", "--update") in asked(sai), "on ct1, in the background (no terminal)"
+    assert opened[-1][0][-3:] == ["trust-hooks", "--", "mine"]
     answer(sai, ["plugins", "--status"], "claude    plugin store /x\n          plugins: none")
     page.status_button.click()
     assert widgets.SHOWN[-1][0] == "Plugins on ct1" and "plugin store" in widgets.SHOWN[-1][1]
@@ -423,3 +425,158 @@ def test_images_of_a_host(qapp, sai, monkeypatch):
     page.delete_variant(keep_image=True)
     assert tasks[-1][0] == prefix + ["images", "remove", "gpu", "--keep-image"]
     page.deleteLater()
+
+
+# -- an answer goes to the host its question named: the chooser moved to another host while it was open --
+# (Questions and dialogs block nothing: the host chooser can change while one is open.)
+
+def with_ct2(sai, monkeypatch):
+    monkeypatch.setattr(sai, "host_entries", lambda: [{"name": "local", "kind": "local"},
+                                                      {"name": "ct1", "kind": "ssh", "ssh": "admin@192.0.2.10"},
+                                                      {"name": "ct2", "kind": "ssh", "ssh": "admin@192.0.2.11"}])
+
+
+def switching(chooser, to="ct2", accepted=True):
+    """A question answered after the chooser went to TO meanwhile."""
+    def ask(*args, **kwargs):
+        choose(chooser, to)
+        return accepted
+    return ask
+
+
+def select_rows(view, rows):
+    view.clearSelection()
+    model = view.selectionModel()
+    for row in rows:
+        model.select(view.model().index(row, 0), model.SelectionFlag.Select | model.SelectionFlag.Rows)
+
+
+def test_removals_of_credentials_go_to_the_host_the_question_named(qapp, sai, monkeypatch):
+    from sandbox_ai_app import credentials_page, identities_page
+    with_ct2(sai, monkeypatch)
+    for host in ("ct1", "ct2"):
+        answer(sai, ["git-logins", "list", "--json"], [{"url": "https://a.example.org", "user": "", "secret": "G"},
+                                                       {"url": "https://b.example.org", "user": "", "secret": "G"}],
+               host=host)
+        answer(sai, ["identities", "list", "--json"], {"work": {"name": "W", "git": [], "publish": []},
+                                                       "home": {"name": "H", "git": [], "publish": []}}, host=host)
+    page = credentials_page.CredentialsPage(sai, lambda argv, title, **kw: None)
+    monkeypatch.setattr(credentials_page, "ask_first", switching(page.hosts))
+    monkeypatch.setattr(identities_page, "ask_first", switching(page.hosts))
+    removals = lambda host: [a for a in asked(sai, host) if "remove" in a]  # noqa: E731
+    for rows, box in (([0], page.git), ([0, 1], page.git), ([0], page.identities), ([0, 1], page.identities)):
+        choose(page.hosts, "ct1")
+        assert box.host == "ct1" and box.list.rowCount() == 2
+        select_rows(box.list, rows)
+        box.remove()
+        assert box.host == "ct2"
+        assert len(removals("ct1")) == len(rows) and not removals("ct2"), (box, rows)
+        sai.asked.clear()
+    page.deleteLater()
+
+
+def test_images_changes_go_to_the_host_the_question_named(qapp, sai, monkeypatch):
+    from sandbox_ai_app import images_page
+    with_ct2(sai, monkeypatch)
+    tasks = []
+    page = images_page.ImagesPage(sai, lambda argv, title, **kw: tasks.append((argv, title)))
+    monkeypatch.setattr(page.list_command, "start", lambda argv, input=None: True)
+    monkeypatch.setattr(page.task, "run", lambda argv, done, text, source=None, input=None, **kw:
+                        tasks.append((argv, text)))
+    ct1 = sai.command("hosts", "run", "ct1", "--")
+    rows = [{"agent": "claude", "present": True, "image": "localhost/claude-sandbox:latest", "extended": True,
+             "status": "current"},
+            {"agent": "claude", "variant": "gpu", "target": "gpu", "present": True,
+             "image": "localhost/claude-sandbox-gpu:latest"}]
+
+    def on_ct1(row):
+        choose(page.hosts, "ct1")
+        page.show_images(rows)
+        page.images.selectRow(row)
+    monkeypatch.setattr(images_page, "ask_first", switching(page.hosts))
+    on_ct1(1)
+    page.delete_variant()
+    assert tasks[-1][0] == ct1 + ["images", "remove", "gpu"]
+    on_ct1(0)
+    page.drop_extension()
+    assert tasks[-1][0] == ct1 + ["images", "remove", "claude"]
+
+    def variant(dialog):
+        choose(page.hosts, "ct2")
+        dialog.name.setText("web")
+        return True
+    monkeypatch.setattr(images_page.NewVariantDialog, "exec", variant)
+    on_ct1(0)
+    page.new_variant()
+    assert tasks[-1][0][:len(ct1) + 3] == ct1 + ["images", "new", "web"]
+
+    def accepted(dialog):
+        choose(page.hosts, "ct2")
+        return True
+    monkeypatch.setattr(images_page.RecipeDialog, "exec", accepted)
+    on_ct1(0)
+    page.new_from_recipe()
+    assert tasks[-1][0][:len(ct1) + 2] == ct1 + ["images", "recipe"]
+    monkeypatch.setattr(images_page.BuildDialog, "exec", accepted)
+    on_ct1(0)
+    page.build_with_options()
+    assert tasks[-1][1].endswith("(ct1)") and tasks[-1][0][:3] == ["ssh", "-tt", "ct1"]
+    # A file for the extension edited when the dialogs opened: never added to another one's.
+    on_ct1(0)
+    page.description, page.target, page.pending_files = {"agent": "claude", "files": []}, "claude", []
+    warned = []
+    monkeypatch.setattr(images_page, "warn", lambda parent, title, text, **kw: warned.append(text))
+    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/tool", True))
+    monkeypatch.setattr(images_page.FileTargetDialog, "exec", accepted)
+    page.add_file()
+    assert page.pending_files == [] and warned == ["Another extension is edited now: /srv/tool was not added."]
+    page.deleteLater()
+
+
+def test_a_confirmed_kits_deletion_is_never_dropped_without_a_word(qapp, sai, monkeypatch):
+    """Another kits change started while the question was open: the deletion does not start then - and says so."""
+    import threading
+    from conftest import wait_until
+    from sandbox_ai_app import kits_page
+    page = kits_page.KitsPage(sai, lambda argv, title, **kw: None)
+    answer(sai, ["kits", "list", "--json"], {"kits": [
+        {"name": n, "kind": "user", "path": f"/home/admin/kits/{n}", "agents": {}} for n in ("one", "two")],
+        "kits_dir": "/home/admin/kits"})
+    choose(page.hosts)
+    page.refresh()
+    assert page.table.rowCount() == 2
+    release = threading.Event()
+
+    def meanwhile(*args, **kwargs):
+        page.start_change(lambda: release.wait(10) and (0, "", ""), "Other", "Another change…")
+        return True
+    monkeypatch.setattr(kits_page, "ask_first", meanwhile)
+    page.delete_several([page.kits[f"user:{n}"] for n in ("one", "two")])
+    assert "not started" in page.message.text() and "Delete" in page.message.text()
+    release.set()
+    assert wait_until(qapp, lambda: not page.task.running, 30)
+    assert not [a for a in asked(sai) if a[:2] == ("kits", "delete")]
+    page.deleteLater()
+
+
+def test_a_second_remove_waits_for_the_first(qapp, sai, monkeypatch):
+    """VPN profiles: Remove… and the Delete key are off while a removal runs (a second one reported false
+    failures)."""
+    from sandbox_ai_app import vpn_page
+    answer(sai, ["vpn", "list", "--json"], [{"profile": "a", "type": "tor"}, {"profile": "b", "type": "tor"}])
+    box = vpn_page.VpnBox(sai)
+    box.set_host("ct1")
+    sources = []
+    monkeypatch.setattr(vpn_page, "run_each", lambda work, names, **kw: sources.append(kw.get("source")))
+    monkeypatch.setattr(vpn_page, "background", lambda *a, **kw: sources.append(kw.get("source")))
+    box.profiles.selectAll()
+    box.remove()
+    box.profiles.selectRow(0)
+    box.remove()
+    assert len(sources) == 2 and all(box.remove_button in (s if isinstance(s, list) else [s]) for s in sources)
+    widgets._hold(box.remove_button)
+    count = len(widgets.SHOWN)
+    box.remove()  # the Delete key while one runs
+    assert len(widgets.SHOWN) == count and "running" in box.message.text()
+    widgets._release(box.remove_button)
+    box.deleteLater()

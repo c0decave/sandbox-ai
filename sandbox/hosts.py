@@ -93,22 +93,11 @@ def known_hosts_file():
     return config_file().with_name("known_hosts")
 
 
-_launcher = None
-
-
 def printable(text):
-    """TEXT safe for a terminal: the launcher's printable (one implementation for every command)."""
-    global _launcher
-    if _launcher is None:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("agent_sandbox_for_hosts",
-                                                      Path(__file__).resolve().parent / "agent_sandbox.py")
-        with LOADING:  # published only once loaded: another thread never sees a half-made module
-            if _launcher is None:
-                loaded = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(loaded)
-                _launcher = loaded
-    return _launcher.printable(str(text))
+    """TEXT safe for a terminal: the launcher's printable, control, bidi and other non-printable characters escaped (a
+    test keeps both the same; the launcher took a third of `hosts list` to load for it)."""
+    return "".join(c if c in "\n\t" or c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256
+                   else f"\\u{ord(c):04x}" for c in str(text))
 
 
 def check(name, entry):

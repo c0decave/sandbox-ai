@@ -40,7 +40,6 @@ refused at once.
 Standard library only.
 """
 import argparse
-import calendar
 import contextlib
 import fcntl
 import importlib.util
@@ -589,6 +588,7 @@ def question_times(question, now=None):
     an answer carries its own "timeout" (the sandbox's, a device's, a canary's); one without (a browser
     question: nothing in the sandbox waits for it, it stays open until answered or the run ends) has no
     deadline: both are None."""
+    import calendar
     timeout = question.get("timeout")
     if question.get("kind") == "browser" or isinstance(timeout, bool) or \
             not (isinstance(timeout, (int, float)) and 0 < timeout <= 86400):
@@ -776,6 +776,10 @@ def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None,
                 raise ValueError("only http(s) URLs are opened")
             if no_open:
                 notes.append("not opened on this host (--no-open): open it where you are")
+            elif net().tor_record(record):
+                # Your browser would reach the agent's URL from your own address, past the run's Tor.
+                notes.append("not opened: this run goes through Tor, and your browser would open the URL from your "
+                             "own address; open it in Tor Browser if you mean to")
             else:
                 (opener or open_browser)(url)
         path = Path(record["directory"]) / "approvals" / f"{ident}.answer"

@@ -322,9 +322,11 @@ AREA_TOURS = {
               "Skills, Agenten, Befehle, Prompts, Memory-Vorlagen, Hooks und Plugins, in Kits, die ein Projekt mit "
               "--kit nutzt."),
              ("Select a kit to see what it holds.", "Wählen Sie ein Kit, um zu sehen, was es enthält.")),
-        step("new_skill_button", ("Your own skill", "Ein eigener Skill"),
-             ("A new skill in a kit of yours: a SKILL.md the agent reads when it fits the task.",
-              "Ein neuer Skill in einem Ihrer Kits: eine SKILL.md, die der Agent liest, wenn sie zur Aufgabe passt."),
+        step("add_menu_button", ("Your own skill", "Ein eigener Skill"),
+             ("Add to the kit › New skill…: a SKILL.md in a kit of yours, which the agent reads when it fits the "
+              "task. The same menu adds a plugin, a marketplace or a hook.",
+              "Zum Kit hinzufügen › Neuer Skill…: eine SKILL.md in einem Ihrer Kits, die der Agent liest, wenn sie zur "
+              "Aufgabe passt. Dasselbe Menü fügt ein Plugin, einen Marktplatz oder einen Hook hinzu."),
              ("Create one with a short description.", "Legen Sie einen mit kurzer Beschreibung an.")),
         step("use_button", ("Use it", "Verwenden"),
              ("Adds the kit to the current project's configuration.",

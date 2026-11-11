@@ -105,7 +105,7 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 # the parity section: the Manage pages, Activity, Statistics and Teams on every host
                 "host_listing", "host_vpn_profiles", "host_git_logins", "host_publish_logins", "host_identities",
                 "host_save_identity", "host_login_status", "host_kits_inventory", "host_kit_command", "revoke_hooks",
-                "plugins_status", "host_canary_log", "canary_runs", "canary_run", "canary_resume", "host_preset_dirs",
+                "plugins_status", "host_plugins", "host_canary_log", "canary_runs", "canary_run", "canary_resume", "host_preset_dirs",
                 "host_preset_dir_command", "trusted_projects", "forget_trusted", "host_activity", "host_statistics",
                 "teams", "team_show", "team_post", "team_stop", "team_delete", "kits_inventory", "kit_command",
                 "canary_log", "preset_dirs", "preset_dir_command", "identities", "save_identity", "git_logins",
@@ -146,7 +146,8 @@ BLOCKING_WAITS = {"waitForFinished", "waitForStarted", "waitForReadyRead", "wait
 BLOCKING_BACKEND = {"read_connections"}
 # files.py: copies (up to 1 GiB), moves, deletes and owner changes of whole trees, podman unshare (the Files page
 # runs them in Task.thread). Called as root.NAME(...) or files.NAME(...): matched by the name alone.
-BLOCKING_FILES = {"copy_out", "copy_in", "copy_entry", "move_entry", "delete_entry", "chown_entry", "take_ownership"}
+BLOCKING_FILES = {"copy_out", "copy_in", "copy_entry", "move_entry", "delete_entry", "chown_entry", "take_ownership",
+                  "read_file", "write_file", "measure"}  # (the editor reads and writes whole files; Properties counts)
 # wizard_llm's functions that run `sandbox-ai llm list|add|check|models|detect` (called as WL.NAME or
 # wizard_llm.NAME), and
 # presets' host_documents (`sandbox-ai presets list --json` on a host: PR.NAME or presets.NAME).
@@ -158,7 +159,7 @@ BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models", "de
                     # name_fields.read_names: a host's secrets or VPN profiles (`secrets list`, `vpn list` there)
                     "name_fields": {"read_names"}, "NF": {"read_names"}}
 # widgets.background, ThreadCall, Task.thread and call_watched; the Kits page's start_change (its Task.call_watched)
-WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change"}
+WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change", "run_each"}
 # The modules not checked call by call: backend.py (what is slow is declared above), widgets.py (background, ThreadCall
 # and Task themselves; the waits of the app's end), and the helpers whose slow functions the pages may only hand to a
 # wrapper (files.py, wizard_llm.py, presets.py, name_fields.py, chromium.py: BLOCKING_FILES, BLOCKING_HELPERS) or that
@@ -432,6 +433,7 @@ MUTATIONS = {
     "web-cert-renew": ["host_web_cert"],
     "web-listen": [("serve",)],
     "session-move": ["session_move", ("session", "move")],
+    "session-replace": ["session_copy", "session_move"],
     "home-restore": ["restore_home"],
     "rules-reload": ["rules_reload"],
 }

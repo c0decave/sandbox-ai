@@ -324,7 +324,7 @@ def test_git_login_add_and_remove_name_the_host_and_put_the_url_after_a_double_d
     box = credentials_page.GitLoginsBox(sai, lambda: None)
     box.host = "ct1"
     ran = []
-    monkeypatch.setattr(box, "run", lambda *args, what: ran.append(args))
+    monkeypatch.setattr(box, "run", lambda *args, what, host=None: ran.append(args))
 
     class Dialog:
         def __init__(self, *a, **k): pass

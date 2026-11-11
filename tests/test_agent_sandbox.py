@@ -99,9 +99,29 @@ class SandboxTests(unittest.TestCase):
             self.assertFalse((Path(d) / "one").exists() or (Path(d) / "two").exists())
 
     def test_workspace_permission_error_aborts(self):
-        with tempfile.TemporaryDirectory() as d, patch.object(s.Path, "mkdir", side_effect=PermissionError("denied")):
-            with self.assertRaises(PermissionError):
+        with tempfile.TemporaryDirectory() as d, patch.object(s.Path, "mkdir",
+                                                              side_effect=PermissionError(13, "denied", "/mnt/ext")):
+            with self.assertRaisesRegex(ValueError, "new cannot be created: /mnt/ext is not writable for you"):
                 s.prepare_workspace(Path(d) / "new")
+
+    def test_a_workspace_that_cannot_be_created_is_refused_by_the_checks_a_dry_run_too(self):
+        """Regression ("[Errno 13] Permission denied: '/mnt/ext'" after a check on another host said it can start):
+        a workspace that is not there and whose nearest existing folder is not writable is refused before the start
+        - by the dry run too - naming that folder."""
+        with tempfile.TemporaryDirectory() as d:
+            locked = Path(d) / "mnt"
+            locked.mkdir()
+            workspace = locked / "ext" / "home" / "project"
+            writable = lambda path, mode: Path(path) != locked  # noqa: E731 - (root may write anything: patched)
+            with patch.object(s.os, "access", side_effect=writable):
+                with self.assertRaisesRegex(ValueError, f"{workspace} does not exist and cannot be created: "
+                                                        f"{locked} is not writable for you"):
+                    s.validate(s.parse_args(["codex", "--workspace", str(workspace), "--dry-run"]))
+                s.validate(s.parse_args(["codex", "--workspace", str(Path(d) / "elsewhere" / "p")]))
+                locked_existing = locked / "there"
+                locked_existing.mkdir()
+                s.validate(s.parse_args(["codex", "--workspace", str(locked_existing)]))  # there already: as before
+            self.assertFalse((locked / "ext").exists())
 
     def test_missing_workspace_dry_run_never_creates_directory(self):
         with tempfile.TemporaryDirectory() as d:

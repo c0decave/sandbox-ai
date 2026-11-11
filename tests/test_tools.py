@@ -273,6 +273,38 @@ def test_log_record_counts(scenario, tmp_path):
     assert skipped == max(0, len(files) - 2) and records == files[-2:]
 
 
+def test_logs_read_a_bounded_amount_of_many_large_logs(tmp_path, monkeypatch):
+    """A log directory of many runs (one connections-*.jsonl each) is read up to TOTAL_BYTES, newest files first, each
+    up to TAIL_BYTES, one record at a time: read whole it took gigabytes and a machine froze swapping. A line longer
+    than LINE_BYTES is skipped; what was left out is said (about, in lines)."""
+    monkeypatch.setattr(logs, "TAIL_BYTES", 4000)
+    monkeypatch.setattr(logs, "TOTAL_BYTES", 10000)
+    monkeypatch.setattr(logs, "LINE_BYTES", 500)
+    directory = tmp_path / "logs"
+    directory.mkdir()
+    line = json.dumps({"event": "http", "host": "api.example", "pad": "x" * 60}) + "\n"
+    for run in range(10):  # 10 runs of ~8 KB each; the newest says new.example
+        host = "new.example" if run == 9 else "api.example"
+        (directory / f"connections-20261111-1000{run:02d}-claude-{run}.jsonl").write_text(
+            line * 100 + json.dumps({"event": "http", "host": host}) + "\n")
+    (directory / "processes.jsonl").write_text('{"command": "' + "y" * 2000 + '"}\n' + '{"command": "/usr/bin/git"}\n')
+    seen = logs.telemetry(directory)
+    assert ("new.example", 1) in seen["hosts"]  # the newest file is read first
+    assert 50 < seen["requests"] < 200  # 10000 bytes of ~110-byte lines, not all 1010
+    assert seen["older_lines_skipped"] > 800
+    assert seen["processes"] == 1 and seen["programs"] == [("git", 1)]  # the overlong line skipped
+    # A file still written while it is read: only what was there when it was opened.
+    path = directory / "connections-20261111-100009-claude-9.jsonl"
+    budget = logs.new_budget()
+    lines = logs.iter_lines(path, budget)
+    first = next(lines)
+    with open(path, "a") as stream:
+        stream.write(line * 1000)
+    assert first and sum(1 for _ in lines) < 60 and budget["left"] > 0
+    # A cut first line (the file read from its middle) is not taken.
+    assert all(json.loads(record) for record in logs.iter_lines(path, logs.new_budget(), tail=1000))
+
+
 def test_doctor_hint_is_quoted(tmp_path, monkeypatch):
     project = tmp_path / "evil $(touch x)\x1b[2J"
     project.mkdir()
@@ -617,3 +649,25 @@ def test_readmes_name_the_update_paths_hosts_and_approvals_rely_on():
         text = (ROOT / readme).read_text()
         assert "sandbox-ai hosts update ct1 --from-here" in text and "hosts update NAME --from-here" in text, readme
         assert "sandbox-ai approvals allow ID --no-open" in text, readme
+
+
+def test_logs_keep_the_line_at_the_cut_and_the_firewalls_refusals(tmp_path, monkeypatch):
+    """Review: a cut that fell on the first byte of a line lost that line; the connection logs used up the budget of
+    refusals() before egress-denied.jsonl (DNS and firewall refusals) was read; an abandoned handshake counted."""
+    path = tmp_path / "x.jsonl"
+    path.write_bytes(b"aa\nbb\ncc\n")
+    assert list(logs.iter_lines(path, logs.new_budget(), tail=6)) == [b"bb\n", b"cc\n"]
+    assert list(logs.iter_lines(path, logs.new_budget(), tail=5)) == [b"cc\n"]
+    directory = tmp_path / "logs"
+    directory.mkdir()
+    monkeypatch.setattr(logs, "TOTAL_BYTES", 400)
+    big = json.dumps({"event": "http", "host": "a.example", "pad": "x" * 100}) + "\n"
+    for n in range(3):
+        (directory / f"connections-20261111-10000{n}-claude-{n}.jsonl").write_text(big * 5)
+    (directory / "egress-denied.jsonl").write_text(json.dumps({"host": "evil.example", "time": "t"}) + "\n")
+    assert any("evil.example" in r["what"] for r in logs.refusals(directory))
+    (directory / "connections-20261111-100009-claude-9.jsonl").write_text(json.dumps(
+        {"event": "tls-refused", "destination": "api.anthropic.com:443", "abandoned": True}) + "\n")
+    monkeypatch.setattr(logs, "TOTAL_BYTES", 1 << 20)
+    assert not logs.telemetry(directory)["refused"]
+    assert not any("anthropic" in r["what"] for r in logs.refusals(directory))

@@ -38,6 +38,7 @@ from .files import printable
 # sandbox-ai's own modules (the launcher's parser, approvals.ID, secret_store.NAME and LIMIT, ...).
 AGENTS = ("claude", "codex", "opencode")
 MIN_VERSION = "0.1.21"  # the first release with approvals, secrets, images and log telemetry
+PLUGINS_WAIT = 1800  # seconds `sandbox-ai plugins claude` may take (each marketplace and plugin is fetched)
 TRANSFER_SECONDS = 1200  # sandbox-ai session copy|move: its dry run there (up to 180 s) and the start (up to 900 s)
 # What the app uses of sandbox-ai: a development checkout may have it before its version number says so.
 REQUIRED = {"approvals": ("questions", "answer", "describe", "ID"), "secret_store": ("store", "FileStore", "NAME"),
@@ -82,7 +83,7 @@ GROUPS = {
     "Network": ["--ask", "--profile", "--allow-host", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",
-                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--llm"],
+                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--llm"],
     "Proxy & privacy": ["--mode", "--mode-at-least", "--no-proxy", "--no-inspect", "--rules", "--privacy-check", "--privacy-rules",
                         "--canaries", "--no-canaries", "--telemetry", "--log-dir", "--log-debug"],
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
@@ -515,6 +516,10 @@ class SandboxAI:
         sessions = self.module("sessions")
         return hasattr(sessions, "copy_to_host") and hasattr(sessions, "plan_json")
 
+    def session_replace_supported(self):
+        """Whether this sandbox-ai's session copy|move has --replace (a session of that name there deleted first)."""
+        return hasattr(self.module("sessions"), "remote_session")
+
     def session_transfer_plan(self, name):
         """(host paths, problems) of session NAME's copy to another host (`sandbox-ai session plan NAME --json`, a
         process of its own: reading the plan changes directory, which in this process would move every thread's):
@@ -536,14 +541,16 @@ class SandboxAI:
             raise ValueError("sandbox-ai session plan: not a plan")
         return [str(p) for p in paths if isinstance(p, str)], [str(p) for p in problems]
 
-    def session_copy(self, name, host, new_name=None, maps=(), check=False):
-        """`sandbox-ai session copy NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check]`: a dry run on HOST over
-        SSH, then the start there (minutes, at most). (status, out, err)."""
-        return self.call(*session_transfer_args("copy", name, host, new_name, maps, check), timeout=TRANSFER_SECONDS)
+    def session_copy(self, name, host, new_name=None, maps=(), check=False, replace=False):
+        """`sandbox-ai session copy NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check] [--replace]`: a dry run on
+        HOST over SSH, then the start there (minutes, at most). (status, out, err)."""
+        return self.call(*session_transfer_args("copy", name, host, new_name, maps, check, replace),
+                         timeout=TRANSFER_SECONDS)
 
-    def session_move(self, name, host, new_name=None, maps=(), check=False):
+    def session_move(self, name, host, new_name=None, maps=(), check=False, replace=False):
         """`sandbox-ai session move ...`: as session_copy, then the session here is stopped (its HOME stays)."""
-        return self.call(*session_transfer_args("move", name, host, new_name, maps, check), timeout=TRANSFER_SECONDS)
+        return self.call(*session_transfer_args("move", name, host, new_name, maps, check, replace),
+                         timeout=TRANSFER_SECONDS)
 
     def session_ids(self):
         """{name: id} of the named sessions: the id is the session's directory, which stays when it is renamed. The
@@ -1230,10 +1237,17 @@ class SandboxAI:
                                   agent=agent, backend=engine, started=record.get("started") or created, state=state,
                                   proxy=record.get("proxy") if run else None, pid=record.get("pid"), record=record,
                                   foreground=self.foreground_start(name, ids.get(name)), ident=ident))
+        by_pid = {record.get("pid"): run for run, record in runs.items()
+                  if isinstance(record, dict) and record.get("kind") == "mcp" and record.get("pid")}
         for name, state in servers.items():
-            run = f"mcp-{name}" if f"mcp-{name}" in runs else None
-            record = runs.get(run, {}) if run else {}
+            # Its run: mcp-NAME with Podman; with Bubblewrap the launcher names it AGENT-xxxx, found by its PID (as
+            # sandbox-ai list finds it): never a "run" of its own beside the server, with a tab of its own.
+            run = f"mcp-{name}" if f"mcp-{name}" in runs else by_pid.get(state.get("pid")) if state.get("pid") else None
+            record = dict(runs.get(run, {})) if run else {}
             used.add(run)
+            # Whom it was started for (mcp.json, since 0.1.78): the Sandboxes page shows it below that start
+            # (start_tree.owners); "owner_recorded": the key is there (None: started on its own).
+            record.update({"started_for": state.get("started_for"), "owner_recorded": "started_for" in state})
             found.append(Instance("mcp", f"mcp:{name}", name, run=run, mcp=name, project=record.get("workspace", ""),
                                   agent="mcp", backend=state.get("backend") or record.get("backend", ""),
                                   started=state.get("started") or record.get("started", ""), state="running",
@@ -1242,9 +1256,10 @@ class SandboxAI:
             if name in used:
                 continue
             session = session_of(record)
-            kind = "session" if session else "mcp" if name.startswith("mcp-") else "run"
-            found.append(Instance(kind, f"run:{name}", session or (name[4:] if kind == "mcp" else name), run=name,
-                                  session=session, mcp=name[4:] if kind == "mcp" else None,
+            kind = "session" if session else "mcp" if name.startswith("mcp-") or record.get("kind") == "mcp" else "run"
+            server = (name[4:] if name.startswith("mcp-") else name) if kind == "mcp" else None
+            found.append(Instance(kind, f"run:{name}", session or server or name, run=name,
+                                  session=session, mcp=server,
                                   project=record.get("workspace", ""), agent=record.get("agent", ""),
                                   backend=record.get("backend", ""), started=record.get("started", ""),
                                   state=run_state(record), proxy=record.get("proxy"), pid=record.get("pid"),
@@ -1256,11 +1271,41 @@ class SandboxAI:
                 continue
             paths = paths_from_options(self.launcher, argv, cwd)
             project = paths["workspaces"][0] if paths["workspaces"] else cwd
+            options = argv[:argv.index("--")] if "--" in argv else argv
+            # An MCP server's (or a helper's) launcher that has not registered yet: it belongs to the start that is
+            # starting it (start_tree.owners, by the time).
+            server = any(o == "--mcp-socket-dir" or o.startswith("--mcp-socket-dir=") for o in options)
             found.append(Instance("unregistered", f"pid:{pid}", f"pid {pid}", project=project or "", agent=agent,
                                   backend=option_value(argv, "--backend") or "",
                                   started=process_started(pid, proc, info) or "",
-                                  state="starting", pid=pid))
+                                  state="starting", pid=pid, record={"mcp_server": True} if server else None))
+        self.add_team_leads(found)
         return found, problems
+
+    def add_team_leads(self, found):
+        """The members of a team (sandbox-ai team: a start that reaches the board team-NAME) learn their lead's
+        start ("lead" in their record, as sandbox-ai list --json says it): the Sandboxes page shows them below it,
+        and they open no tab of their own. Read from the team's record; nothing for the lead itself, or when there
+        is no record (an older sandbox-ai, a damaged one)."""
+        leads = {}
+        for instance in found:
+            if instance.kind not in ("session", "run") or not isinstance(instance.record, dict):
+                continue
+            record = instance.record
+            names = [n for key in ("mcp_servers", "mcp") for n in (record.get(key) if isinstance(record.get(key), list)
+                                                                   else [])]
+            for name in dict.fromkeys(n for n in names if isinstance(n, str) and n.startswith("team-")):
+                team = name[len("team-"):]
+                if team not in leads:
+                    try:
+                        data = self.module("team").load(team)
+                        leads[team] = f"{team}-{data['lead']}"
+                    except Exception:  # noqa: BLE001 - no team of that name, a damaged record, an older sandbox-ai
+                        leads[team] = None
+                lead = leads[team]
+                if lead and lead != instance.name and instance.name.startswith(f"{team}-"):
+                    instance.record = {**record, "lead": lead}
+                    break
 
     def stop_run(self, run):
         """`sandbox-ai net stop RUN`: SIGTERM to the launcher of a one-off run, which cleans up and ends."""
@@ -1425,17 +1470,29 @@ class SandboxAI:
             return 2, "", "invalid argument"
         return self.call("kits", action, *options, "--", name, *arguments, timeout=300)
 
+    def source_text(self, name):
+        """The text of sandbox-ai's module NAME, read once per version of the file (its mtime and size): the
+        capability checks (has_kit_hooks, has_canary_log, ...) ran on the GUI thread at every refresh and read
+        files of thousands of lines each time. OSError if it cannot be read."""
+        path = self.directory / name
+        info = path.stat()
+        cache = self.__dict__.setdefault("_source_texts", {})
+        key = (str(path), info.st_mtime_ns, info.st_size)
+        if cache.get(name, (None,))[0] != key:
+            cache[name] = (key, path.read_text())
+        return cache[name][1]
+
     def has_kit_hooks(self):
         """This sandbox-ai's kits carry hooks (sandbox-ai kits add-hook, trust-hooks)."""
         try:
-            return "trust-hooks" in (self.directory / "kitctl.py").read_text()
+            return "trust-hooks" in self.source_text("kitctl.py")
         except OSError:
             return False
 
     def has_canary_log(self):
         """This sandbox-ai has `sandbox-ai canaries log` (every canary event with its process and links)."""
         try:
-            return "def show_log(" in (self.directory / "canary.py").read_text()
+            return "def show_log(" in self.source_text("canary.py")
         except OSError:
             return False
 
@@ -1497,7 +1554,7 @@ class SandboxAI:
     def has_marketplaces(self):
         """This sandbox-ai lists every marketplace (`sandbox-ai plugins marketplaces`, since 0.1.78)."""
         try:
-            return "def marketplaces_cli(" in (self.directory / "plugins.py").read_text()
+            return "def marketplaces_cli(" in self.source_text("plugins.py")
         except OSError:
             return False
 
@@ -1515,15 +1572,19 @@ class SandboxAI:
         """`sandbox-ai plugins claude [--update] [--marketplaces-only] [--kit NAME]...` (built-in kits when this
         sandbox-ai can). --marketplaces-only fetches the kits' marketplaces (their plugin lists) in the plugin store's
         sandbox and installs nothing."""
+        return self.command(*self.plugins_args(update=update, kits=kits, marketplaces_only=marketplaces_only))
+
+    def plugins_args(self, update=False, kits=(), marketplaces_only=False):
+        """The arguments of plugins_argv: `plugins claude [--update] [--marketplaces-only] [--kit NAME]...`."""
         argv = ["plugins", "claude"] + (["--update"] if update else []) + \
             (["--marketplaces-only"] if marketplaces_only else [])
         try:
-            supports = "--kit" in (self.directory / "plugins.py").read_text()
+            supports = "--kit" in self.source_text("plugins.py")
         except OSError:
             supports = False
         if supports:
             argv += [token for name in kits if re.fullmatch(KIT_NAME, name) for token in ("--kit", name)]
-        return self.command(*argv)
+        return argv
 
     # -- statistics --
 
@@ -1915,20 +1976,8 @@ class SandboxAI:
     def host_instances(self, name, timeout=60):
         """The starts on host NAME (`sandbox-ai list --json` there, over SSH) as [Instance] with HOST set: what the
         Sandboxes page lists beside this account's own."""
-        found = []
-        for entry in self.host_json(name, "list", "--json", timeout=timeout):
-            # The other host (and a sandbox on it) chooses these: only a start's name may come back as an argument
-            # (never one that reads as an option there).
-            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or \
-                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", entry["name"]):
-                continue
-            kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
-            ident = start_id(entry)
-            found.append(Instance(kind, remote_key(name, ident), entry["name"], run=None, project=str(
-                entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
-                state=str(entry.get("state") or ""), record=entry, host=name, backend=printable(entry.get("backend"))[:20]
-                if isinstance(entry.get("backend"), str) else "", ident=ident))
-        return found
+        return [i for i in (listed_instance(name, entry) for entry in self.host_json(name, "list", "--json",
+                                                                                  timeout=timeout)) if i is not None]
 
     def ended_starts(self, name="local"):
         """The starts that ended on host NAME (this machine for "local"), as `sandbox-ai list --all --json` there lists
@@ -2261,7 +2310,7 @@ class SandboxAI:
     def has_preset_dirs(self):
         """This sandbox-ai reads presets from extra directories (defaults.json's preset_dirs)."""
         try:
-            return "def dirs_main" in (self.directory / "presets.py").read_text()
+            return "def dirs_main" in self.source_text("presets.py")
         except OSError:
             return False
 
@@ -2675,6 +2724,18 @@ class SandboxAI:
         return self.host_terminal(host, "plugins", "claude", *(["--update"] if update else []),
                                   *(["--marketplaces-only"] if marketplaces_only else []),
                                   *[token for kit in kits if re.fullmatch(KIT_NAME, kit) for token in ("--kit", kit)])
+
+    def host_plugins(self, host, update=False, kits=(), marketplaces_only=False, timeout=PLUGINS_WAIT):
+        """(status, out, err) of `sandbox-ai plugins claude [--update] [--marketplaces-only] [--kit NAME]...` on
+        HOST, without a terminal: it asks nothing (each step runs in the plugin store's own sandbox); its output comes
+        as it is written inside watching() (the Kits page's Task)."""
+        if host == "local":
+            return self.call(*self.plugins_args(update=update, kits=kits, marketplaces_only=marketplaces_only),
+                             timeout=timeout)
+        return self.host_run(host, "plugins", "claude", *(["--update"] if update else []),
+                             *(["--marketplaces-only"] if marketplaces_only else []),
+                             *[token for kit in kits if re.fullmatch(KIT_NAME, kit) for token in ("--kit", kit)],
+                             timeout=timeout)
 
     def plugins_status(self, host):
         """(status, out, err) of `sandbox-ai plugins --status` on HOST: what is declared and what is installed."""
@@ -3333,8 +3394,8 @@ class SandboxAI:
         (the first ASK_MODELS) that lists no models since its last check, `llm models NAME --json` - so NAME:MODEL is
         offered for that host's servers, not this machine's. A server that does not answer keeps what the list said."""
         endpoints = [dict(e) for e in self.host_llm_endpoints(host)]
-        if host == "local":
-            return endpoints
+        # (this machine's too: a server added without --model, e.g. LM Studio on a laptop, listed no models, and only
+        # its bare name was offered)
         for endpoint in [e for e in endpoints if not e.get("models")][:ask_models]:
             try:
                 endpoint["models"] = self.host_llm_models(host, endpoint["name"])
@@ -3656,6 +3717,8 @@ APP_NEEDS_CONFIRM = {
     # sandbox-ai session move: no route of the web interface does it
     "session-move": "moving a session stops it here once it runs on the other host (its HOME stays here until it is "
                     "deleted; logins and HOME are not copied)",
+    # sandbox-ai session copy|move --replace: a session of that name on the other host is deleted first
+    "session-replace": "replacing deletes the session of that name on the other host first, its HOME there too",
     "preset-delete": "deleting a preset of your own removes it for good (export it first to keep a copy)",
     "files-delete": "deleting removes the files or folders for good (there is no wastebasket)",
     "files-replace": "replacing overwrites what is there now with what is copied or moved",
@@ -3665,6 +3728,7 @@ APP_NEEDS_CONFIRM = {
     "startup-risk": "sandbox-ai's code or the app lies where a sandbox writes: loading it runs what a sandbox may have "
                     "changed",
     "board-discard": "dropping the board's unapplied changes loses them",
+    "editor-discard": "closing or reloading the file manager's editor loses the changes not saved to the file",
     "board-remove-part": "the part and its connections go from the board (Undo brings them back)",
     "tab-close": "closing the tab drops the board's unapplied changes",
     "terminal-end": "ending the command of a terminal tab loses what it did not save",
@@ -3708,6 +3772,8 @@ def needs_confirm(action, detail=None):
     if action == "workspace-writable" and detail.get("read_only") is True:
         return None
     if action == "secret-replace" and detail.get("exists") is False:
+        return None
+    if action == "session-replace" and detail.get("replace") is False:  # a copy without --replace deletes nothing
         return None
     if action == "board-remove-part" and detail.get("ask") is False:  # Settings: remove without asking
         return None
@@ -3812,6 +3878,21 @@ def remote_key(host, ident):
     never equals a key of this account's own (session:, run:, mcp:, pid:), whatever the host is called. By its id, not
     its name: a start renamed keeps its row, its selection and its tab."""
     return f"host:{host}:{ident}"
+
+
+def listed_instance(host, entry):
+    """A start of HOST as `sandbox-ai list --json` there gives it (ENTRY) as an Instance with HOST set, or None when it
+    is not one. The other host (and a sandbox on it) chooses these: only a start's name may come back as an argument
+    (never one that reads as an option there)."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or \
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}", entry["name"]):
+        return None
+    kind = entry.get("kind") if entry.get("kind") in ("session", "run", "mcp") else "run"
+    ident = start_id(entry)
+    return Instance(kind, remote_key(host, ident), entry["name"], run=None, project=str(
+        entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
+        state=str(entry.get("state") or ""), record=entry, host=host, backend=printable(entry.get("backend"))[:20]
+        if isinstance(entry.get("backend"), str) else "", ident=ident)
 
 
 def start_id(entry):
@@ -5384,11 +5465,11 @@ REMOTE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # a host of sandbo
 TRANSFER_MAPS = 64  # --map options one copy takes at most
 
 
-def session_transfer_args(command, name, host, new_name=None, maps=(), check=False):
-    """The words after `sandbox-ai` of `session copy|move NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check]`,
-    checked: COMMAND copy or move, NAME and NEW session names, HOST one of sandbox-ai hosts (never this machine), MAPS
-    [(local, remote)] absolute paths (a local one without '='); a pair that does not move anything is left out.
-    ValueError says what is wrong."""
+def session_transfer_args(command, name, host, new_name=None, maps=(), check=False, replace=False):
+    """The words after `sandbox-ai` of `session copy|move NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check]
+    [--replace]`, checked: COMMAND copy or move, NAME and NEW session names, HOST one of sandbox-ai hosts (never this
+    machine), MAPS [(local, remote)] absolute paths (a local one without '='); a pair that does not move anything is
+    left out. REPLACE: a session of that name there is deleted first. ValueError says what is wrong."""
     if command not in ("copy", "move"):
         raise ValueError(f"not copy or move: {printable(command)}")
     if not isinstance(name, str) or not SESSION_NAME.fullmatch(name):
@@ -5412,7 +5493,7 @@ def session_transfer_args(command, name, host, new_name=None, maps=(), check=Fal
             args.append(f"--map={local}={remote}")
     if moved > TRANSFER_MAPS:
         raise ValueError("too many folders at once")
-    return args + (["--check"] if check else [])
+    return args + (["--check"] if check else []) + (["--replace"] if replace else [])
 
 
 LIVE_HELPERS =("claude", "codex", "opencode")  # mcp attach --helper AGENT: the agents a helper can be

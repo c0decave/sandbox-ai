@@ -47,6 +47,7 @@ import contextlib
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -90,10 +91,13 @@ BUILTIN = {"demo": {"command": ["python3", "-I", "/opt/sandbox-ai/mcp_demo.py"],
                     "options": ["--offline", "--mount", f"{HERE / 'mcp_demo.py'}:/opt/sandbox-ai/mcp_demo.py:ro"],
                     "description": "Test server: list_directory and version"}}
 _launcher = None
+_launcher_source = None  # starts.py's launcher() when starts.py loaded this module: one launcher for all of its modules
 
 
 def launcher():
     global _launcher
+    if _launcher is None and _launcher_source is not None:
+        _launcher = _launcher_source()
     if _launcher is None:
         spec = importlib.util.spec_from_file_location("agent_sandbox_for_mcp", HERE / "agent_sandbox.py")
         with LOADING:  # published only once loaded: another thread never sees a half-made module
@@ -299,12 +303,51 @@ def mount_records(definition):
 TOR_USERS = {"950", "debian-tor", "tor", "_tor", "toranon"}
 
 
-def check_tor_image_user(name, image, inspect=None):
+def image_passwd(image, run=None):
+    """The text of IMAGE's /etc/passwd, read without running anything of the image: a container is created (never
+    started), the file copied out of it as a tar stream (podman cp CONTAINER:/etc/passwd -), the container removed.
+    None when it cannot be read."""
+    import tarfile
+    run = run or (lambda command: subprocess.run(command, capture_output=True, timeout=60))
+    try:
+        created = run(["podman", "create", "--pull=never", "--network=none", "--entrypoint=/nonexistent", image])
+        if created.returncode != 0:
+            return None
+        container = created.stdout.decode().strip().splitlines()[-1]
+        try:
+            copied = run(["podman", "cp", f"{container}:/etc/passwd", "-"])
+        finally:
+            run(["podman", "rm", "--force", container])
+        if copied.returncode != 0:
+            return None
+        with tarfile.open(fileobj=io.BytesIO(copied.stdout)) as archive:
+            for member in archive.getmembers():
+                if member.isfile() and member.size <= 1 << 20:
+                    return archive.extractfile(member).read().decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError, tarfile.TarError, IndexError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def passwd_uid(text, user):
+    """The uid of USER in the passwd TEXT as the container engine reads it (Go's user package: each line trimmed,
+    the first match), or None."""
+    for line in (text or "").splitlines():
+        fields = line.strip().split(":")
+        if len(fields) >= 3 and fields[0].strip() == user:
+            try:
+                return int(fields[2].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def check_tor_image_user(name, image, inspect=None, passwd=None):
     """An image server behind a tor profile must not run as tor's own user: the kill switch lets that user's
     packets out past Tor (it shares the VPN container's network namespace). The container cannot become it
     (--cap-drop=ALL, no-new-privileges), so only the image's configured user counts: refused when it is tor's
-    uid or one of the usual names for it. A user name the image maps to that uid by its own /etc/passwd is not
-    seen here (README: the limits of a tor profile)."""
+    uid, one of the usual names for it, or a name the image's own /etc/passwd (PASSWD: its text, read with
+    image_passwd) gives that uid; and refused when the uid of a name cannot be found (it could be tor's)."""
     inspect = inspect or (lambda: subprocess.run(["podman", "image", "inspect", "--format", "{{.Config.User}}", image],
                                                  capture_output=True, text=True, timeout=30))
     try:
@@ -312,9 +355,24 @@ def check_tor_image_user(name, image, inspect=None):
     except (OSError, subprocess.SubprocessError):
         return
     user = (result.stdout or "").strip().split(":", 1)[0] if result.returncode == 0 else ""
+    refused = (f"MCP server {name}: its image runs as {user!r}, the user tor's kill switch lets out past Tor; it "
+               "cannot go behind a tor profile (use an image with another user)")
     if user in TOR_USERS:
-        raise ValueError(f"MCP server {name}: its image runs as {user!r}, the user tor's kill switch lets out past "
-                         "Tor; it cannot go behind a tor profile (use an image with another user)")
+        raise ValueError(refused)
+    tor_uid = int(launcher().load_vpn_module().runtime().TOR_UID)
+    if re.fullmatch(r"[+-]?[0-9]+", user):  # a number as the engine reads it: "0950" is 950
+        if int(user) == tor_uid:
+            raise ValueError(refused)
+        return
+    if not user or user == "root":
+        return
+    text = passwd() if passwd is not None else image_passwd(image)
+    uid = passwd_uid(text, user)
+    if uid is None:
+        raise ValueError(f"MCP server {name}: its image runs as {user!r}, whose uid its /etc/passwd does not say; "
+                         "behind a tor profile the uid must be known (tor's own, 950, would pass the kill switch)")
+    if uid == tor_uid:
+        raise ValueError(refused.replace(f"{user!r}", f"{user!r} (uid {uid})", 1))
 
 
 def image_command(definition, engine="podman", vpn_container=None):
@@ -649,8 +707,36 @@ def pod_name(name):
     return f"agent-mcp-{name}"
 
 
+# What a server's state needs of the launcher, without loading it (`sandbox-ai list` and `mcp list`, which the app
+# asks every few seconds): through the launcher once that is loaded, else the same here (a test keeps both the same).
+_procinfo = None
+
+
+def socket_dir(name):
+    """launcher().mcp_socket_dir(NAME): the host directory holding the Unix socket of MCP server NAME."""
+    if _launcher is not None:
+        return _launcher.mcp_socket_dir(name)
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    return state / "sandbox-ai" / "mcp" / name / "sock"
+
+
+def process_cmdline(pid, start, proc):
+    """launcher().process_cmdline."""
+    global _procinfo
+    if _launcher is not None:
+        return _launcher.process_cmdline(pid, start, proc)
+    if _procinfo is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_procinfo_for_mcp", HERE / "procinfo.py")
+        with LOADING:
+            if _procinfo is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _procinfo = loaded
+    return _procinfo.recorded_cmdline(pid, start, proc)
+
+
 def state_dir(name):
-    return launcher().mcp_socket_dir(name).parent
+    return socket_dir(name).parent
 
 
 def load_state(name):
@@ -675,8 +761,8 @@ def status(name):
     Decided by the supervisor alone: the socket directory is writable by the
     untrusted server, which could otherwise fake being stopped."""
     state = load_state(name)
-    cmdline = launcher().process_cmdline(state.get("pid"), state.get("pid_start"), PROC)
-    directory = os.fsencode(str(launcher().mcp_socket_dir(name)))
+    cmdline = process_cmdline(state.get("pid"), state.get("pid_start"), PROC)
+    directory = os.fsencode(str(socket_dir(name)))
     return "running" if any(arg == directory or arg == directory + b"/server.sock" for arg in cmdline) else "stopped"
 
 
@@ -740,6 +826,132 @@ def server_lock(name, timeout=180):
         os.close(fd)
 
 
+def network_of(definition):
+    """(reaches the network, its own VPN profile or None) of the server DEFINITION: an image's "network" and "vpn", a
+    command's options (--offline, --vpn), a helper (it reaches its provider; its VPN is the one it is started with)."""
+    if "image" in definition or "rootfs" in definition:
+        return definition.get("network", "none") != "none", definition.get("vpn")
+    if "helper" in definition:
+        return True, None
+    l = launcher()
+    options = l.canonical_options(definition.get("options", []))
+    # --offline, or --profile offline (modes.mcp_has_network reads both, as the security modes do).
+    return l.MODES.mcp_has_network(definition, l), option_value(options, "--vpn")
+
+
+def vpn_conflicts(name, definition, vpn, tor):
+    """Why the command server NAME cannot be started behind the start's VPN (its own start would refuse it, after the
+    agent's start had begun), or None: its own resolvers (--nameserver), with Tor no connection proxy (--no-proxy) or
+    the host's ports without --vpn-bypass-host-ports."""
+    if "command" not in definition:
+        return None
+    options = launcher().canonical_options(definition.get("options", []))
+    given = {token.split("=", 1)[0] for token in options}
+    if "--nameserver" in given:
+        return (f"MCP server {name} names resolvers of its own (--nameserver), which conflicts with the start's "
+                f"--vpn {vpn}: drop it from its options (the VPN's resolvers answer)")
+    if tor and "--no-proxy" in given:
+        return (f"MCP server {name} has --no-proxy, and behind the start's Tor profile {vpn} the connection proxy is "
+                "what hands its connections to Tor: drop it from its options")
+    if tor and "--vpn-bypass-host-ports" not in given:
+        # Host ports the options give outright, or bring along (--llm of this host's loopback, a Git login of a
+        # server on localhost): read as its own start reads them.
+        ports = []
+        try:
+            parsed = launcher().parse_args([definition.get("agent", "codex"), *options])
+            ports = list(launcher().host_ports(parsed))
+        except (SystemExit, ValueError, OSError, KeyError, AttributeError):
+            ports = ["?"] if "--allow-host-port" in given else []
+        if ports:
+            return (f"MCP server {name} reaches the host's ports ({', '.join(map(str, ports))}: --allow-host-port, or "
+                    f"what opens one), which lie past the start's Tor profile {vpn}: drop what opens them, or give it "
+                    "--vpn-bypass-host-ports if you mean it")
+    return None
+
+
+def server_options(definition, vpn):
+    """The options a command server's own start gets: --vpn-bypass-host-ports only with a VPN in front (given to
+    this start, or its own --vpn); without one its start refused the option and never came up."""
+    options = list(definition.get("options", []))
+    if vpn or option_value(launcher().canonical_options(options), "--vpn"):
+        return options
+    return [token for token in options if token.split("=", 1)[0] != "--vpn-bypass-host-ports"]
+
+
+def vpn_for_servers(a, names, profile_type=None):
+    """{name: the VPN to start the server NAME behind for this start, or None (none needed: its own, or no network)}
+    for a start A with --vpn: the servers reach the network behind the start's VPN too - a server outside it (its
+    own sandbox, its own network) reached the internet from your address while the agent went through the VPN
+    (a Tor start's browser server showed your own IP). A server with a VPN of its own keeps it; with a Tor profile
+    it must be Tor too. ValueError for a server that would leave outside Tor. PROFILE_TYPE: the start's profile type
+    (read when not given)."""
+    if not getattr(a, "vpn", None):
+        return {name: None for name in names}
+    servers = {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
+    vpn_module = launcher().load_vpn_module()
+    if profile_type is None:
+        profile_type = (getattr(a, "vpn_profile", None) or vpn_module.load_profile(a.vpn)).get("type")
+    found = {}
+    for name in names:
+        definition = servers.get(name)
+        if definition is None:
+            found[name] = None  # (unknown: ensure_running says so)
+            continue
+        reaches, own = network_of(definition)
+        if not reaches:
+            found[name] = None
+        elif own:
+            if profile_type == "tor" and own != a.vpn:
+                try:
+                    own_type = vpn_module.load_profile(own).get("type")
+                except (OSError, ValueError):
+                    own_type = None
+                if own_type != "tor":
+                    raise ValueError(f"MCP server {name} reaches the network through the VPN {own}, not through Tor: "
+                                     f"with --vpn {a.vpn} (Tor) every connection must go through Tor. Give it a Tor "
+                                     f"profile (sandbox-ai mcp add {name} ... --vpn {a.vpn}) or start without it")
+            found[name] = None
+        else:
+            if "rootfs" in definition and "image" not in definition:
+                raise ValueError(f"MCP server {name} reaches the network and runs under Bubblewrap only, where no VPN "
+                                 f"can be put in front of it: with --vpn {a.vpn} it would leave from your own address. "
+                                 "Add its Podman form, or start without it")
+            conflict = vpn_conflicts(name, definition, a.vpn, profile_type == "tor")
+            if conflict:
+                raise ValueError(conflict)
+            found[name] = a.vpn
+    return found
+
+
+def server_vpn(a, name, explicit=None):
+    """The VPN to start the server NAME behind for the start A (vpn_for_servers), with EXPLICIT (mcp start --vpn)
+    in its place where given: with a Tor start that one must be a Tor profile too. ValueError where the server
+    would leave outside the start's VPN."""
+    behind = vpn_for_servers(a, [name]).get(name)
+    if explicit is None or explicit == behind:
+        return behind
+    if getattr(a, "vpn", None):
+        vpn_module = launcher().load_vpn_module()
+        kinds = {}
+        for profile in (a.vpn, explicit):
+            try:
+                kinds[profile] = vpn_module.load_profile(profile).get("type")
+            except (OSError, ValueError):
+                kinds[profile] = None
+        if kinds[a.vpn] == "tor" and kinds[explicit] != "tor":
+            raise ValueError(f"--vpn {explicit} is not a Tor profile, and the start goes through Tor (--vpn {a.vpn}): "
+                             f"MCP server {name} would leave outside Tor. Leave --vpn out, or name a Tor profile")
+    return explicit
+
+
+def check_running_vpn(name, vpn):
+    """A server NAME that runs already, but not behind VPN (the one the start puts it behind), is refused: it would
+    serve the start from outside that VPN. Nothing to check for VPN None or a server that does not run."""
+    if vpn is not None and status(name) == "running" and load_state(name).get("vpn") != vpn:
+        raise ValueError(f"MCP server {name} is running without the VPN {vpn}; stop it first: sandbox-ai mcp stop "
+                         f"{name}")
+
+
 def ensure_running(name, a, vpn=None):
     """Start the server sandbox for NAME unless it already runs; returns 'running' or 'started'. VPN (sandbox-ai
     mcp start --vpn) puts that VPN profile in front for this start, whatever the definition says."""
@@ -771,7 +983,7 @@ def helper_command(name, definition, a, directory, sock, gateway, vpn=None):
     pod = pod_name(name)
     serve = ["python3", "-I", f"/opt/sandbox-ai/{AGENT_MCP.name}", agent,
              *(["--skip-permissions"] if definition.get("skip_permissions") else [])]
-    return [sys.executable, "-I", str(HERE / "agent_sandbox.py"), agent,
+    return [sys.executable, "-I", str(launcher().launcher_script()), agent,
             "--backend", a.backend, *(["--podman-url", a.podman_url] if a.podman_url else []),
             "--no-config", "--helper-of", name, *[value for path in rules for value in ("--rules", path)],
             # What narrows the lead narrows its helper: the security mode, a read-only workspace, no login.
@@ -782,7 +994,7 @@ def helper_command(name, definition, a, directory, sock, gateway, vpn=None):
             "--state-dir", str(directory / "home"), "--mcp-socket-dir", str(sock),
             *(["--pod-name", pod] if a.backend == "podman" else []),
             *(["--mcp-approvals-dir", str(directory / "approvals")] if gateway and gateway.get("approvals") else []),
-            *(["--vpn", vpn] if vpn else []),
+            *(["--vpn", vpn, "--vpn-check", "stop"] if vpn else []),
             "--mount", f"{AGENT_MCP}:/opt/sandbox-ai/{AGENT_MCP.name}:ro",
             "--workspace", definition["workspace"], "--binary", "python3",
             "--", "-I", "/sandbox/runtime.py", "--internal-mcp-serve", f"{launcher().MCP_SERVE_DIR}/server.sock",
@@ -827,9 +1039,7 @@ def ensure_running_locked(name, a, vpn=None):
             # for it: they must not hold for this agent instead of its own.
             raise ValueError(f"MCP server {name} is running with a different definition or other rules; "
                              f"stop it first: sandbox-ai mcp stop {name}")
-        if vpn is not None and load_state(name).get("vpn") != vpn:
-            raise ValueError(f"MCP server {name} is running without the VPN {vpn}; stop it first: sandbox-ai mcp stop "
-                             f"{name}")
+        check_running_vpn(name, vpn)
         if machine_ready(name, a).get("ready", (launcher().mcp_socket_dir(name) / "server.sock").exists)():
             return "running"
         stop_locked(name)  # alive but its socket is gone: replace it rather than start a second one
@@ -851,6 +1061,12 @@ def ensure_running_locked(name, a, vpn=None):
         # the socket with its stdio. Bubblewrap when the run's backend is bwrap and the rootfs is there, or when
         # there is only the rootfs.
         engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) else "podman"
+        if engine == "bwrap" and definition.get("vpn"):
+            if "image" not in definition:
+                raise ValueError(f"MCP server {name} runs under Bubblewrap only, where no VPN can be put in front of "
+                                 f"it: with the VPN {definition['vpn']} it would leave from your own address. Add its "
+                                 "Podman form (sandbox-ai mcp add ... --backend podman)")
+            engine = "podman"  # its VPN is a container's network namespace: the image, not the rootfs
         bridge = [sys.executable, "-I", str(HERE / "runtime.py"), "--internal-mcp-serve", str(sock / "server.sock"),
                   *gateway_arguments(gateway), "--"]
         if engine == "bwrap":
@@ -916,13 +1132,14 @@ def ensure_running_locked(name, a, vpn=None):
         wait_for_socket(sock / "server.sock", directory / "supervisor.log", process, **machine_ready(name, a))
         print(f"agent-sandbox: helper {definition['helper']} ({name}) started in its own sandbox", file=sys.stderr)
         return "started"
-    cmd = [sys.executable, "-I", str(HERE / "agent_sandbox.py"), definition.get("agent", "codex"),
+    cmd = [sys.executable, "-I", str(launcher().launcher_script()), definition.get("agent", "codex"),
            "--backend", a.backend, *(["--podman-url", a.podman_url] if a.podman_url else []),
-           "--no-provider-defaults", *definition.get("options", []), "--no-auth", "--no-config",
+           "--no-provider-defaults", *server_options(definition, vpn), "--no-auth", "--no-config",
            "--state-dir", str(directory / "home"), "--mcp-socket-dir", str(sock),
            *(["--pod-name", pod] if a.backend == "podman" else []),
            *(["--mcp-approvals-dir", str(directory / "approvals")] if gateway and gateway.get("approvals") else []),
-           *(["--vpn", vpn] if vpn else []),
+           # Behind the start's VPN: a failed check stops the server, whatever its own options say.
+           *(["--vpn", vpn, "--vpn-check", "stop"] if vpn else []),
            "--workspace", definition.get("workspace") or str(directory / "work"), "--binary", "python3",
            "--", "-I", "/sandbox/runtime.py", "--internal-mcp-serve", f"{launcher().MCP_SERVE_DIR}/server.sock",
            *gateway_arguments(gateway), "--", *definition["command"]]
@@ -1143,6 +1360,10 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
     servers = definitions(a.project_document)
     if name not in servers:
         raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+    if getattr(a, "vpn", None):
+        # A server that would leave outside the start's VPN (Tor: outside Tor), or one running already without it, is
+        # refused now: not after a restart has stopped the start.
+        check_running_vpn(name, server_vpn(a, name, vpn))
     running = entry["state"] in ("running", "paused")
     result = {"server": name, "start": entry["name"], "state": entry["state"], "server_started": False}
     named = name in starts.mcp_names(data["options"])
@@ -1153,7 +1374,8 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
         return result
     if start_server:
         a.started_for = {"start": key, "run": entry.get("run")}
-        result["server_started"] = ensure_running(name, a, vpn) == "started"
+        # As the start starts it: behind its VPN where the server reaches the network (with Tor: Tor only).
+        result["server_started"] = ensure_running(name, a, server_vpn(a, name, vpn)) == "started"
     if running and not restart and ask is not None:
         restart = ask(f"{shown} runs; {LIVE}. Restart it now with {name}? The agent continues its conversation.")
     if running and restart:
@@ -1490,7 +1712,12 @@ def attach_live(name, start, helper=None, out=print):
               "server_started": False, "agent": agent, "agent_config": None,
               "agent_restart": LIVE_AGENTS[agent]["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
     a.started_for = {"start": entry.get("id") if entry.get("directory") else None, "run": record.get("run")}
-    result["server_started"] = ensure_running(name, a) == "started"  # its own checks, as at a start
+    if record.get("vpn_profile"):
+        # The VPN the run has (its --llm server's, say), whatever its kept options say now.
+        a.vpn, a.vpn_profile = record["vpn_profile"], None
+    # Its own checks, as at a start; behind the run's VPN where it reaches the network (with Tor: Tor only). A server
+    # that runs already without it is refused (ensure_running).
+    result["server_started"] = ensure_running(name, a, server_vpn(a, name)) == "started"
     with run_lock(record):
         # Read under the run's lock: another attach or detach may have changed it since the look above.
         listed = net.ask(record["directory"], {"op": "mcp-list"})
@@ -1602,10 +1829,23 @@ def detach(name, start, helper=None, live=False, out=print):
     return result
 
 
+class LauncherVersion(argparse._VersionAction):
+    """-V/--version: sandbox-ai's version, from the launcher, which is loaded only when it is asked for (a listing
+    loads none)."""
+
+    @property
+    def version(self):
+        return f"sandbox-ai {launcher().__version__}"
+
+    @version.setter
+    def version(self, value):
+        pass
+
+
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-ai mcp", description="Manage local MCP servers that run in their "
                                      "own sandboxes. Agents use them with --mcp NAME.")
-    parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
+    parser.add_argument("-V", "--version", action=LauncherVersion)
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="Defined servers, their status and the starts they serve")
     listing.add_argument("-j", "--json", action="store_true")

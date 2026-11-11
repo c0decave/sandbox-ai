@@ -17,7 +17,8 @@ from .i18n import tr
 from .host_choice import on_host
 from .name_fields import NameField
 from . import tables
-from .widgets import ask_first, background, fill, outcome, plain_label, selected, show_text, table
+from .widgets import (ask_first, background, delete_key, fill, held, multi_select, one_only, outcome, plain_label,
+                      report_each, run_each, selected, selected_keys, several, show_text, table)
 
 LOCAL = "local"
 
@@ -61,6 +62,10 @@ class IdentitiesBox(QGroupBox):
         self.message = plain_label()
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
+        # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Edit… one
+        multi_select(self.list)
+        delete_key(self.list, self.remove)
+        one_only(self.list, [self.edit_button])
 
     def set_host(self, host):
         """HOST's identities from now on (the Credentials page's host chooser)."""
@@ -98,21 +103,23 @@ class IdentitiesBox(QGroupBox):
             self.on_change()
 
     def edit(self, name):
-        if name is not None and name not in self.known:
+        # The host and its identities as they were when the dialog opened: the answer is saved there, whatever the
+        # chooser shows by then.
+        host, known = self.host, self.known
+        if name is not None and name not in known:
             return
-        dialog = IdentityDialog(self, name, self.known.get(name), self.secret_names, set(self.known))
+        dialog = IdentityDialog(self, name, known.get(name), self.secret_names, set(known))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         target, new = dialog.result_identity()
-        old = self.known.get(target)
+        old = known.get(target)
         # Logins taken from the identity are taken from every later start that uses it: asked first (login-remove).
         gone = [step[-1] for step in self.sai.identity_steps(target, old, new) if step[1] in ("logout", "unpublish")]
-        if gone and not ask_first(self, "login-remove", tr("Remove"), on_host(self.host, tr(
+        if gone and not ask_first(self, "login-remove", tr("Remove"), on_host(host, tr(
                 "Remove these logins from the identity {name}: {list}? Their secrets stay in sandbox-ai secrets.",
                 name=printable(target), list=", ".join(printable(value) for value in gone))), tr("Remove")):
             return
         self.message.setText(tr("Saving {name}…", name=target))
-        host = self.host
 
         def work():
             if host == LOCAL:
@@ -126,19 +133,45 @@ class IdentitiesBox(QGroupBox):
         self.message.setText(tr("{name} saved.", name=name) if status == 0 else printable(said)[-1500:])
         self.refresh()
 
+    def remove_several(self, names, host=None):
+        """Remove… with several identities selected: one question naming them, then each (identities remove) on HOST
+        (default: the one chosen; taken before the question)."""
+        host = self.host if host is None else host
+        if not ask_first(self, "login-remove", tr("Remove identity"), on_host(host, several(tr(
+                "Remove these {count} identities? Their secrets stay in sandbox-ai secrets.", count=len(names)),
+                [printable(name) for name in names])), tr("Remove")):
+            return
+
+        def work(name):
+            if host == LOCAL:
+                return self.sai.call("identities", "remove", "--", name, timeout=60)
+            return self.sai.host_run(host, "identities", "remove", "--", name, timeout=90)
+
+        def done(outcomes):
+            failures = report_each(self, tr("Remove identity"), outcomes, printable)
+            self.message.setText(tr("Removed {count} of {total}.", count=len(names) - len(failures), total=len(names)))
+            self.refresh()
+        run_each(work, names, owner=self, source=self.buttons(), timeout=120 * len(names), done=done)
+
     def remove(self):
+        if held(self.remove_button):  # (the Delete key while a removal runs)
+            self.message.setText(tr("A removal is running: wait for it."))
+            return
+        names, host = [name for name in selected_keys(self.list) if name], self.host
+        if len(names) > 1:
+            self.remove_several(names, host)
+            return
         name = selected(self.list)
-        if not name or not ask_first(self, "login-remove", tr("Remove identity"), on_host(self.host, tr(
+        if not name or not ask_first(self, "login-remove", tr("Remove identity"), on_host(host, tr(
                 "Remove the identity {name}? Its secrets stay in sandbox-ai secrets.", name=printable(name))),
                 tr("Remove")):
             return
-        host = self.host
 
         def work():
             if host == LOCAL:
                 return self.sai.call("identities", "remove", "--", name, timeout=60)
             return self.sai.host_run(host, "identities", "remove", "--", name, timeout=90)
-        background(work, owner=self, work=True, timeout=120,
+        background(work, owner=self, work=True, timeout=120, source=self.buttons(),
                    done=lambda result, error: self.saved(name, (result[0], result[1] + result[2]) if error is None
                                                          else (1, str(error)), None))
 

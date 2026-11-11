@@ -354,13 +354,18 @@ def test_marketplaces_are_added_imported_and_removed(browser, monkeypatch):
     assert act(page, page.new_marketplace) == ("add-marketplace", "default", "team2", "https://git.example.org/p.git")
 
 
-def test_the_plugin_lists_are_fetched_in_a_terminal_installing_nothing(browser):
+def test_the_plugin_lists_are_fetched_in_the_background_installing_nothing(browser, monkeypatch):
     page = browser
     assert "installs nothing" in page.fetch_button.toolTip()
+    ran = []
+    call = page.sai.call
+    monkeypatch.setattr(page.sai, "call", lambda *args, **kw: (ran.append(args) or (0, "", ""))
+                        if args[:2] == ("plugins", "claude") else call(*args, **kw))
+    started = len(page.window_.started)
     page.fetch_lists()
-    argv = page.window_.started[-1]
-    assert argv[0] == "term" and argv[-3:] == ["plugins", "claude", "--marketplaces-only"]
     assert "nothing is installed" in page.market_status.text()
+    assert page.wait(lambda: ran and not page.task.running, 10)
+    assert ran == [("plugins", "claude", "--marketplaces-only")] and len(page.window_.started) == started
     assert page.calls == []
 
 
@@ -440,8 +445,8 @@ def test_the_browser_on_a_host(qapp, remote):
     assert sai.asked[-3][1] == ("kits", "add-plugin", "--agent=claude", "--source=acme/plugins", "--", "default",
                                 "fmt@acme"), "then the kits and marketplaces read again"
     page.fetch_lists()
-    assert page.opened[-1] == (["ssh", "-tt", "ct1", "sandbox-ai", "plugins", "claude", "--marketplaces-only"],
-                               "sandbox-ai plugins claude --marketplaces-only (ct1)")
+    assert sai.asked[-3] == ("ct1", ("plugins", "claude", "--marketplaces-only")), "there, in the background"
+    assert page.opened == [], "no terminal"
     page.deleteLater()
 
 
@@ -479,6 +484,9 @@ def test_every_argv_the_page_builds_is_what_the_real_parsers_read(window, monkey
     def call(*args, timeout=120, input=None):
         if args[:1] == ("kits",) and args[1] not in ("list",):
             sent.append(args[1:])
+            return 0, "", ""
+        if args[:2] == ("plugins", "claude"):
+            sent.append(args)
             return 0, "", ""
         return backend.SandboxAI.call(sai, *args, timeout=timeout, input=input)
     monkeypatch.setattr(sai, "call", call)
@@ -527,9 +535,11 @@ def test_every_argv_the_page_builds_is_what_the_real_parsers_read(window, monkey
     pick(page, kits_page.OPENCODE, "opencode-foo@1.0")
     a = parse(run(page.plugin_action, "add-plugin"))
     assert (a.command, a.name, a.plugin, a.agent) == ("add-plugin", "default", "opencode-foo@1.0", "opencode")
-    # the terminal's command: plugins claude --marketplaces-only, as plugins.cli reads it
+    # the background's command: plugins claude --marketplaces-only, as plugins.cli reads it
+    before = len(sent)
     page.fetch_lists()
-    argv = window.started[-1][window.started[-1].index("plugins") + 1:]
+    assert wait(lambda: len(sent) > before and not page.task.running, 10)
+    argv = sent[-1][1:]
     seen = []
     original = argparse.ArgumentParser.parse_known_args
 

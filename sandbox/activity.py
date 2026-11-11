@@ -22,7 +22,6 @@ redacted (the patterns of the connection log, and the values of --env and --secr
 values are never copied. Standard library only.
 """
 import argparse
-import calendar
 import contextlib
 from collections import deque
 import hashlib
@@ -87,6 +86,7 @@ ISO = re.compile(r"(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)(?:[.,](\d{1,9})
 
 def epoch(value):
     """Seconds since the epoch of VALUE (ISO 8601 text, or a number of seconds or milliseconds), or None."""
+    import calendar
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -1866,7 +1866,7 @@ class Connections:
                                    "findings": push.get("findings") if isinstance(push.get("findings"), list) else None,
                                    **extra}, key=f"proxy:{offset}", source=self.source))
                 continue
-            verdict = "denied" if event in REFUSED_EVENTS else "allowed"
+            verdict = "denied" if event in REFUSED_EVENTS and not record.get("abandoned") else "allowed"
             key = (verdict, event if verdict == "denied" else "", target)
             entry = self.repeats.get(key)
             if entry is not None:
@@ -2145,6 +2145,12 @@ def read_records(path, keep=None, tail=0, position=None):
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return []
         os.set_blocking(fd, True)
+        if tail:  # the last TAIL: read from the end, only as far back as needed (the file holds every run)
+            tails = module("jsonltail")
+            end = tails.complete_end(fd, os.fstat(fd).st_size)
+            if position is not None:
+                position.inode, position.offset = os.fstat(fd).st_ino, end
+            return tails.newest(fd, end, activity_record, keep, tail)
         if position is not None:
             position.inode, position.offset = os.fstat(fd).st_ino, 0
         with os.fdopen(os.dup(fd), "rb") as stream:
@@ -2159,6 +2165,12 @@ def read_records(path, keep=None, tail=0, position=None):
     finally:
         os.close(fd)
     return list(found)
+
+
+def activity_record(line):
+    """One line of activity.jsonl as its record, or None (damaged, or not an event)."""
+    record = json_object(line)
+    return record if record is not None and isinstance(record.get("kind"), str) else None
 
 
 def matcher(run=None, session=None, kinds=None, since=None, text=None):
@@ -2183,10 +2195,31 @@ def matcher(run=None, session=None, kinds=None, since=None, text=None):
     return keep
 
 
+def each_record(path):
+    """The records of activity.jsonl PATH one at a time, from its start (none held: the file holds every run)."""
+    try:
+        fd = os.open(path, FILE_FLAGS)
+    except OSError:
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return
+        os.set_blocking(fd, True)
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    break
+                record = activity_record(line)
+                if record is not None:
+                    yield record
+    finally:
+        os.close(fd)
+
+
 def runs_in(path):
     """[{run, session, agent, first, last, events, kinds, status}] of the runs in activity.jsonl PATH."""
     runs = {}
-    for record in read_records(path):
+    for record in each_record(path):
         run = record.get("run") or "-"
         entry = runs.setdefault(run, {"run": run, "session": record.get("session"), "agent": record.get("agent"),
                                       "first": record.get("time"), "last": record.get("time"), "events": 0,
@@ -2273,7 +2306,22 @@ def session_log_dir(name):
     if a.log_dir:
         return (Path(data["cwd"]) / Path(a.log_dir).expanduser()).resolve()
     workspace = (Path(data["cwd"]) / a.workspaces[0]).resolve()
-    return module("agent_sandbox").default_log_dir(workspace)
+    return default_log_dir(workspace)
+
+
+def default_log_dir(project):
+    """launcher().default_log_dir, without loading the launcher for it (a test keeps both the same): the log
+    directory the wizard uses for PROJECT, per project, also for equal directory names."""
+    project = Path(project)
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    digest = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:12]
+    return state / "sandbox-ai" / "logs" / f"{project.name or 'root'}-{digest}"
+
+
+def printable(text):
+    """launcher().printable, without loading the launcher for it (a test keeps both the same)."""
+    return "".join(c if c in "\n\t" or c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256
+                   else f"\\u{ord(c):04x}" for c in str(text))
 
 
 # -- the human-readable timeline --
@@ -2283,7 +2331,7 @@ KIND_STYLES = {"prompt": "accent", "reply": "bold", "tool": None, "command": "wa
 
 
 def safe(value):
-    return module("agent_sandbox").printable(value).replace("\n", "\\n").replace("\t", " ")
+    return printable(value).replace("\n", "\\n").replace("\t", " ")
 
 
 def record_style(record):
@@ -2445,13 +2493,13 @@ def locate(a):
     if a.session:
         return session_log_dir(a.session), a.run, session_key(a.session)
     if a.project:
-        return module("agent_sandbox").default_log_dir(a.project.expanduser().resolve()), a.run, None
+        return default_log_dir(a.project.expanduser().resolve()), a.run, None
     if a.run:
         directory = find_run(a.run)
         if directory is None:
             raise ValueError(f"no activity of a run {a.run!r} found (a run with --log-dir elsewhere: add --log-dir)")
         return directory, a.run, None
-    return module("agent_sandbox").default_log_dir(Path(os.getcwd()).resolve()), None, None
+    return default_log_dir(Path(os.getcwd()).resolve()), None, None
 
 
 def print_runs(runs, out=print, as_json=False):

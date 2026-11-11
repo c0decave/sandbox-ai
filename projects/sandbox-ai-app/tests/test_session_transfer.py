@@ -160,7 +160,7 @@ def test_the_page_opens_the_dialog_and_reads_again_after_a_copy(ui, sai, monkeyp
     monkeypatch.setattr(page, "refresh_remote", lambda hosts=None, polled=False: refreshed.append(hosts))
 
     def run(dialog):
-        opened.append((dialog.name, dialog.move, dialog.windowTitle()))
+        opened.append((dialog.name, dialog.moving, dialog.windowTitle()))
         dialog.run()
         return 0
     from sandbox_ai_app import session_transfer
@@ -243,6 +243,62 @@ def test_without_a_host_nothing_can_run(ui, sai, monkeypatch):
     assert not dialog.go_button.isEnabled() and "Choose a host first" in dialog.go_button.toolTip()
     assert not dialog.check_button.isEnabled()
     assert "No folder or file" in dialog.status.text()
+    dialog.close()
+
+
+def test_close_closes_the_dialog_after_a_run_failed_or_not(ui, sai, monkeypatch, qapp):
+    """Regression ("TypeError: 'bool' object is not callable", Close pressed again and again): the dialog kept
+    whether it was done in self.done, which hid QDialog.done - reject() calls done() - so Close did nothing."""
+    from PySide6.QtWidgets import QDialog
+    for answer in ((1, "", "agent-sandbox: [Errno 13] Permission denied: '/mnt/ext'\n"),
+                   (0, "sandbox-ai session copy: web runs on ct1 as web (attach: …)\n", "")):
+        dialog, _ = dialog_of(ui, sai, monkeypatch)
+        assert callable(dialog.done) and callable(dialog.move), "no attribute hides a method of QDialog"
+        dialog.show()
+        sai.answer = answer
+        dialog.go_button.click()
+        assert dialog.isVisible()
+        dialog.close_button.click()
+        assert not dialog.isVisible() and dialog.result() == QDialog.DialogCode.Rejected
+        dialog.deleteLater()
+
+
+def test_a_session_of_that_name_there_is_replaced_only_when_chosen_and_asked(ui, sai, monkeypatch):
+    monkeypatch.setattr(sai, "session_replace_supported", lambda: True)
+    dialog, succeeded = dialog_of(ui, sai, monkeypatch)
+    assert not dialog.replace.isHidden() and not dialog.replace.isChecked()
+    sai.answer = (1, "sandbox-ai session copy: ct1 has a session web already; ... (--replace: ...)\n", "")
+    dialog.go_button.click()
+    assert sai.calls[-1] == ("session", "copy", "web", "ct1") and ui.asked == [], "not chosen: nothing asked"
+    dialog.replace.setChecked(True)
+    dialog.check_button.click()  # a check deletes nothing: not asked
+    assert sai.calls[-1] == ("session", "copy", "web", "ct1", "--check", "--replace") and ui.asked == []
+    ui.answer_yes = False
+    calls = len(sai.calls)
+    dialog.go_button.click()
+    assert [action for action, *_ in ui.asked] == ["session-replace"] and len(sai.calls) == calls, "declined"
+    ui.answer_yes = True
+    sai.answer = (0, "sandbox-ai session copy: web runs on ct1 as web (attach: …)\n", "")
+    dialog.go_button.click()
+    assert sai.calls[-1] == ("session", "copy", "web", "ct1", "--replace") and succeeded == ["ct1"]
+    dialog.close()
+    # A sandbox-ai without --replace: not offered, and never passed.
+    monkeypatch.setattr(sai, "session_replace_supported", lambda: False)
+    dialog, _ = dialog_of(ui, sai, monkeypatch)
+    assert dialog.replace.isHidden()
+    dialog.replace.setChecked(True)
+    dialog.check_button.click()
+    assert sai.calls[-1] == ("session", "copy", "web", "ct1", "--check")
+    dialog.close()
+
+
+def test_the_checks_warnings_are_named_in_the_status(ui, sai, monkeypatch):
+    dialog, _ = dialog_of(ui, sai, monkeypatch)
+    sai.answer = (0, "sandbox-ai session copy: warning: ct1 has no codex login for its sandboxes (logins are not "
+                     "copied): log in there once, in a terminal: sandbox-ai hosts run ct1 login codex\n"
+                     "sandbox-ai session copy: web can start on ct1 (checked, not started)\n", "")
+    dialog.check_button.click()
+    assert "with warnings" in dialog.status.text() and "hosts run ct1 login codex" in dialog.output.toPlainText()
     dialog.close()
 
 

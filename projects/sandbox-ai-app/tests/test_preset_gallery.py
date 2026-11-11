@@ -140,7 +140,7 @@ def test_the_board_page_creates_from_a_preset(env):
     page.directory = str(root / "project")
     board = page.new_from_preset("vpn-all")
     assert page.board is board and board.first("vpn").props["--vpn"] == "<vpn:wireguard>"
-    assert "Placeholders to fill in: 1" in page.notice.text()
+    assert "To fill in: WireGuard profile" in page.notice.text()  # by the preset's label
     vpn = board.first("vpn")
     assert page.items[vpn.id].pen().color().name() == theme.color("bad"), "outlined until filled in"
     assert not page.apply() and not page.start(), "a placeholder stops Apply and Start"

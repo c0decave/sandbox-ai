@@ -574,15 +574,31 @@ def test_failed_first_start_leaves_no_directory(scenario, tmp_path, monkeypatch)
     def fail(a, argv, key=None):
         if scenario != "sad":
             raise ValueError("image missing")
-        m.save("x", {"agent": "codex"})  # saved before failing: kept as a stopped session
-        raise ValueError("timeout")
+        # Saved, then its supervisor ended before it was ready: never ran, so not kept either (a session that a
+        # `--session x` or resume would start again with the options that failed).
+        m.save("x", {"agent": "codex", "ready": False})
+        raise RuntimeError("Session failed to start (status 1)")
     monkeypatch.setattr(m, "start_locked", fail)
     a = m.launcher().parse_args(["codex", "--session", "x"])
     if scenario == "edge":
         m.session_dir("x").mkdir(parents=True)  # existed before: never removed
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, RuntimeError)):
         m.start(a, ["codex", "--session", "x"])
-    assert m.session_dir("x").exists() == (scenario != "happy")
+    assert m.session_dir("x").exists() == (scenario == "edge")
+
+
+def test_a_first_start_that_ran_or_still_runs_is_kept(tmp_path, monkeypatch):
+    """Only a session that never ran goes: one that was ready once, or whose supervisor still runs (a start that
+    took too long), stays."""
+    for name, data, state in (("ran", {"ready": True}, "stopped"), ("slow", {"ready": False}, "running")):
+        def fail(a, argv, key=None, data=data, name=name):
+            m.save(name, {"agent": "codex", **data})
+            raise RuntimeError("Session did not become ready")
+        monkeypatch.setattr(m, "start_locked", fail)
+        monkeypatch.setattr(m, "status", lambda key, data, state=state: state)
+        with pytest.raises(RuntimeError):
+            m.start(m.launcher().parse_args(["codex", "--session", name]), ["codex", "--session", name])
+        assert m.session_dir(name).exists(), name
 
 
 # --- every interactive start is a session --------------------------------------------------------------------
@@ -1109,10 +1125,12 @@ def test_a_session_is_copied_to_a_host_checked_first_with_its_folders_mapped(tmp
 
     def run(host, args, timeout=120):
         calls.append((host, args))
-        return 0, "", ""
+        return (1, "", "sandbox-ai session: No session named work\n") if args[:2] == ["session", "plan"] else (0, "", "")
     status = m.copy_to_host("work", "ct1", maps=["/srv=/home/me/srv"], run=run, out=lines.append)
     assert status == 0
-    check, start = calls
+    asked, check, login, start = calls
+    assert login == ("ct1", ["login", "--status"]), "the host's own login of the agent: said when missing"
+    assert asked == ("ct1", ["session", "plan", "work", "--json"]), "is there a session of that name already?"
     assert check == ("ct1", ["codex", "--dry-run", "--no-config", "--workspace", "/home/me/srv/w", "--mount",
                              "/home/me/srv/data:/mnt/data:ro", "--backend", "podman", "--allow-host", "pypi.org"])
     assert start[1][:4] == ["codex", "--session", "work", "--no-config"]
@@ -1128,7 +1146,7 @@ def test_a_copy_that_cannot_start_there_starts_nothing(monkeypatch):
         calls.append(args)
         return 2, "", "agent-sandbox: workspace /srv/w does not exist\n"
     assert m.copy_to_host("work", "ct1", run=run, out=lines.append) == 1
-    assert len(calls) == 1 and "--dry-run" in calls[0], "only checked"
+    assert len(calls) == 2 and "--dry-run" in calls[1], "only checked"
     assert any("does not exist" in line for line in lines) and any("--map" in line for line in lines)
 
 
@@ -1142,7 +1160,112 @@ def test_move_stops_the_session_here_and_check_starts_nothing(monkeypatch):
     assert calls[-1][:3] == ["codex", "--session", "work-2"] and stopped == ["work"]
     calls.clear()
     assert m.copy_to_host("work", "ct1", start=False, run=run, out=lambda _l: None) == 0
-    assert len(calls) == 1 and "--dry-run" in calls[0]
+    assert len(calls) == 3 and calls[0][:2] == ["session", "plan"] and "--dry-run" in calls[1]
+    assert calls[2] == ["login", "--status"]
+
+
+class Remote:
+    """A host for session copy: its sessions (name: saved options), the answers of its dry run and its start, and
+    every command it was given."""
+
+    def __init__(self, sessions=None, check=(0, "{}", ""), start=(0, "", ""), logins=None):
+        self.sessions, self.check, self.start, self.calls = dict(sessions or {}), check, start, []
+        self.logins = logins or ("claude    host         logged in  (/h/.claude/.credentials.json)\n"
+                                 "codex     login store  logged in  (/s/codex/auth.json)\n")
+
+    def __call__(self, host, args, timeout=120):
+        self.calls.append(list(args))
+        if args[:2] == ["session", "plan"]:
+            if args[2] not in self.sessions:
+                return 1, "", f"sandbox-ai session: No session named {args[2]}\n"
+            return 0, json.dumps({"agent": "codex", "options": self.sessions[args[2]], "agent_args": [],
+                                  "paths": [], "problems": []}), ""
+        if args[:2] == ["session", "delete"]:
+            if args[2] not in self.sessions:
+                return 1, "", f"sandbox-ai session: No session named {args[2]}\n"
+            del self.sessions[args[2]]
+            return 0, "", ""
+        if args == ["login", "--status"]:
+            return 0, self.logins, ""
+        if "--dry-run" in args:
+            return self.check
+        if "--session" in args:
+            self.sessions[args[args.index("--session") + 1]] = [a for a in args[1:] if a != "--session"]
+            return self.start
+        return 1, "", "unexpected"
+
+
+def test_a_session_of_that_name_there_is_refused_unless_replaced(monkeypatch):
+    """Regression: a copy that found a session of its name there started that one again with its own saved options
+    (the workspace of this machine) and only warned that the new ones were ignored."""
+    make_session("work")
+    remote, lines = Remote({"work": ["--workspace", "/mnt/ext/w"]}), []
+    assert m.copy_to_host("work", "ct1", maps=["/srv=/home/me"], run=remote, out=lines.append) == 1
+    assert "has a session work already" in lines[-1] and "/mnt/ext/w" in lines[-1] and "--replace" in lines[-1]
+    assert [c[:2] for c in remote.calls] == [["session", "plan"]], "nothing checked or started"
+    # The check says it too, and with --replace what will happen.
+    lines.clear()
+    assert m.copy_to_host("work", "ct1", start=False, run=remote, out=lines.append) == 1
+    assert m.copy_to_host("work", "ct1", start=False, run=remote, out=lines.append, replace=True) == 0
+    assert "is replaced (--replace)" in lines[-1] and "work" in remote.sessions, "a check deletes nothing"
+    # --replace: deleted there first, then started with the folders as mapped now.
+    remote.calls.clear()
+    assert m.copy_to_host("work", "ct1", maps=["/srv=/home/me"], run=remote, out=lines.append, replace=True) == 0
+    assert [c[:2] for c in remote.calls] == [["session", "plan"], ["codex", "--dry-run"], ["login", "--status"],
+                                             ["session", "delete"], ["codex", "--session"]]
+    assert remote.calls[3] == ["session", "delete", "work", "--yes"]
+    assert remote.sessions["work"][:4] == ["work", "--no-config", "--workspace", "/home/me/w"]
+
+
+def test_a_start_there_that_fails_leaves_no_session_there(monkeypatch):
+    """Regression: a failed start left a stopped session there, which the next try (with another --map) resumed with
+    the options that failed."""
+    make_session("work")
+    remote, lines = Remote(start=(1, "", "agent-sandbox: [Errno 13] Permission denied: '/srv'\n")), []
+    assert m.copy_to_host("work", "ct1", run=remote, out=lines.append) == 1
+    assert remote.calls[-1] == ["session", "delete", "work", "--yes"] and "work" not in remote.sessions
+    assert "half-made session work on ct1 was removed" in lines[-1]
+    # SSH failed or the start may still go on: nothing is deleted.
+    for status in (124, 255):
+        remote = Remote(start=(status, "", ""))
+        assert m.copy_to_host("work", "ct1", run=remote, out=lambda _l: None) == status
+        assert remote.calls[-1][:2] == ["codex", "--session"]
+
+
+def test_the_check_says_a_missing_login_there_and_the_launchers_warnings():
+    """Regression: the check said it can start, then the start said "the host has no claude login"."""
+    make_session("work")
+    remote = Remote(check=(0, "{}", "agent-sandbox: warning: something to know\n"),
+                    logins="claude    host         no login  (/h/.claude/.credentials.json)\n"
+                           "codex     host         no login  (/h/.codex/auth.json)\n")
+    lines = []
+    assert m.copy_to_host("work", "ct1", start=False, run=remote, out=lines.append) == 0
+    assert any("ct1 has no codex login" in line and "sandbox-ai hosts run ct1 login codex" in line for line in lines)
+    assert any(line.endswith("warning: something to know") for line in lines)
+    assert "can start on ct1" in lines[-1]
+    # Logged in there, or a start that brings its own login (--no-auth): nothing to say, not even asked.
+    for logins, options in ((None, []), (remote.logins, ["--no-auth"])):
+        data = m.load("work")
+        data["options"] = ["--workspace", "/srv/w", *options]
+        m.save("work", data)
+        remote, lines = Remote(logins=logins), []
+        assert m.copy_to_host("work", "ct1", start=False, run=remote, out=lines.append) == 0
+        assert not any("login" in line for line in lines)
+        assert (["login", "--status"] in remote.calls) == (not options)
+
+
+def test_every_folder_of_the_options_is_mapped():
+    """Each folder of a --workspace list, --workspace-name's and a preset's folder are mapped; --workspace-ro is a
+    switch (it took the next option for its value, so a --mount after it was never mapped)."""
+    options = ["--workspace", "/srv/a,/srv/b", "--workspace-ro", "--mount", "/srv/d:/mnt/d:ro",
+               "--workspace-name", "bee=/srv/b", "--preset-value", "samples=/srv/s", "--preset-value", "vpn=/x",
+               "--git-token-file=github.com=/srv/t", "--allow-host", "/srv/no"]
+    maps = m.parse_maps(["/srv=/data"])
+    assert m.map_options(options, maps) == [
+        "--workspace", "/data/a,/data/b", "--workspace-ro", "--mount", "/data/d:/mnt/d:ro",
+        "--workspace-name", "bee=/data/b", "--preset-value", "samples=/data/s", "--preset-value", "vpn=/x",
+        "--git-token-file=github.com=/data/t", "--allow-host", "/srv/no"]
+    assert m.option_paths(options) == ["/srv/a", "/srv/b", "/srv/d", "/srv/s", "/x", "/srv/t"]
 
 
 def test_what_cannot_go_along_is_said_and_bad_input_refused(monkeypatch, tmp_path):
@@ -1337,3 +1460,48 @@ def test_restore_home_puts_back_the_recorded_text(scenario, tmp_path):
         assert m.restore_home("web", yes=True, out=lines.append) == 0
         assert not any((tmp_path / "elsewhere").iterdir())
         assert any(".claude" in line and "left as it is" in line for line in lines)
+
+
+def test_a_resume_names_mcp_servers_that_are_not_defined_and_how_to_resume_without_them(tmp_path, monkeypatch):
+    """Regression ("Unknown MCP server: search; defined: demo, yara" in the supervisor's log at every resume): a
+    session started with --no-config and the project's own servers (an older board start) cannot find them; the resume
+    says so before anything starts, why, and how to resume without them (--drop-option mcp=NAME)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    project = tmp_path / "tor-network"
+    project.mkdir()
+    (project / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "mcp_servers": {
+        "search": {"command": ["uvx", "duckduckgo-mcp-server"]}}}))
+    data = make_session("s")
+    data["options"] = ["--no-config", "--workspace", str(project), "--mcp", "search", "--mcp", "demo"]
+    m.save("s", data)
+    monkeypatch.setattr(m, "launch", Mock(side_effect=AssertionError("must not start")))
+    with pytest.raises(ValueError) as caught:
+        m.resume("s")
+    said = str(caught.value)
+    assert "Unknown MCP server: search; defined: demo" in said and "--no-config" in said
+    assert "sandbox-ai resume s --drop-option mcp=search" in said
+    with pytest.raises(ValueError, match="--drop-option mcp=search"):  # `--session s` again: the same
+        m.start_locked(m.launcher().parse_args(["codex", "--session", "s"]), ["codex", "--session", "s"], "s")
+    # Without it, it starts.
+    monkeypatch.setattr(m, "launch", Mock(return_value=0))
+    data["options"] = ["--no-config", "--workspace", str(project), "--mcp", "demo"]
+    m.save("s", data)
+    assert m.resume("s") == 0
+
+
+def test_a_host_that_cannot_say_whether_it_has_the_session_never_loses_it(monkeypatch):
+    """Review: "could not tell" (an older sandbox-ai without `session plan`, SSH failing on that call) was taken for
+    "none there"; a failed start then deleted that host's own stopped session, HOME included."""
+    make_session("work")
+
+    class Older(Remote):
+        def __call__(self, host, args, timeout=120):
+            if args[:2] == ["session", "plan"]:
+                self.calls.append(list(args))
+                return 2, "", "sandbox-ai session: invalid choice: 'plan'\n"
+            return super().__call__(host, args, timeout)
+    remote, lines = Older({"work": ["--workspace", "/home/me/own"]},
+                          start=(1, "", "agent-sandbox: Session failed to start (status 1)\n")), []
+    assert m.copy_to_host("work", "ct1", run=remote, out=lines.append) == 1
+    assert "could not be told" in "\n".join(lines)
+    assert ["session", "delete", "work", "--yes"] not in remote.calls and "work" in remote.sessions

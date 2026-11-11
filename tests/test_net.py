@@ -766,6 +766,22 @@ def test_allow_host_port_refusals(sandbox, monkeypatch, host_service, capsys):
     assert net.relay_running(sandbox["run"], host_service) is None and sandbox["network"].relays == {}
 
 
+def test_a_tor_run_takes_no_host_port_during_the_run(sandbox, monkeypatch, host_service, capsys):
+    """Bypass: `sandbox-ai net allow --allow-host-port` during a Tor run would relay a port of your loopback into it
+    past Tor (a local proxy there reaches the internet from your own address). Refused as at the start, unless the
+    run was started with --vpn-bypass-host-ports; a run of an older version is judged by its profile's type."""
+    relay_ready(sandbox, monkeypatch, vpn_profile="anon", vpn_type="tor")
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 1
+    assert f"the host's port {host_service} would be reached past Tor" in capsys.readouterr().err
+    assert net.relay_running(sandbox["run"], host_service) is None
+    record = {"vpn_profile": "anon"}  # no vpn_type: an older run; a profile that cannot be read counts as Tor
+    assert net.tor_record(record) is True
+    assert net.tor_record({"vpn_profile": "corp", "vpn_type": "wireguard"}) is False and not net.tor_record({})
+    relay_ready(sandbox, monkeypatch, vpn_profile="anon", vpn_type="tor", vpn_bypass_host_ports=True)
+    assert run_net(["allow", "--allow-host-port", str(host_service)])[0] == 0, capsys.readouterr().err
+    assert run_net(["revoke", "--allow-host-port", str(host_service)])[0] == 0
+
+
 def test_the_supervisor_refuses_relays_it_must_not_open(tmp_path):
     """A request written by hand meets the policy and the mode in the supervisor too."""
     short = Path(tempfile.mkdtemp(prefix="net-", dir="/tmp"))

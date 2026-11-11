@@ -22,10 +22,12 @@ from PySide6.QtWidgets import (
 from . import theme, widgets
 from .backend import SandboxAI
 from .files import printable
+from .copying import copy_entries
 from .i18n import N_, tr
 from .host_choice import on_host
 from .name_fields import NameField, publish as publish_names
-from .widgets import ask_first, background, fill, inform, outcome, plain_label, safe_tooltip, selected, show_text, table
+from .widgets import (ask_first, background, delete_key, fill, inform, multi_select, one_only, outcome, plain_label,
+                      report_each, run_each, safe_tooltip, selected, selected_keys, several, show_text, table)
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
 # The overview's kinds, in the order of the tabs.
@@ -46,7 +48,7 @@ class LoginsBox(QGroupBox):
         self.secrets_known = False  # whether secret_names are what the host said (else a replace is asked about)
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(self.about(), role="secondary"))
-        self.list = table([tr(h) for h in self.headers], stretch=self.stretch, compact=self.compact)
+        self.list = multi_select(table([tr(h) for h in self.headers], stretch=self.stretch, compact=self.compact))
         layout.addWidget(self.list, 1)
         row = QHBoxLayout()
         self.add_button, self.remove_button, self.check_button = \
@@ -60,16 +62,67 @@ class LoginsBox(QGroupBox):
         layout.addLayout(row)
         self.message = plain_label()
         layout.addWidget(self.message)
+        # several at once (Ctrl, Shift): Remove… and the Delete key take them all; what acts on one login waits
+        delete_key(self.list, self.remove)
+        one_only(self.list, self.single_buttons())
 
     def more_buttons(self):
         return []
 
+    def single_buttons(self):
+        """The buttons that act on one login (greyed out while several are selected)."""
+        return []
+
+    # what Remove… says and runs, for one login (KEY: its first column) and for several
+    def remove_text(self, key):
+        return ""
+
+    def remove_args(self, key):
+        return []
+
+    def remove(self):
+        """Remove… (and the Delete key): the selected login, or every one of several after one question - on the host
+        the question named (taken before it is asked: the chooser may show another one by the answer)."""
+        if widgets.held(self.remove_button):  # (the Delete key while a removal runs)
+            self.message.setText(tr("A removal is running: wait for it."))
+            return
+        keys = [key for key in selected_keys(self.list) if key]
+        host, command = self.host, self.command
+        if len(keys) <= 1:
+            key = selected(self.list)
+            if key and ask_first(self, "login-remove", tr("Remove"), on_host(host, self.remove_text(key)),
+                                 tr("Remove")):
+                self.run(*self.remove_args(key), what="remove", host=host)
+            return
+        if not keys or not ask_first(self, "login-remove", tr("Remove"), on_host(host, several(tr(
+                "Remove these {count} logins? Their secrets stay.", count=len(keys)), [printable(k) for k in keys])),
+                tr("Remove")):
+            return
+        self.message.setText(tr("Working…"))
+
+        def work(key):
+            if host == LOCAL:
+                return self.sai.call(command, *self.remove_args(key), timeout=60)
+            return self.sai.host_run(host, command, *self.remove_args(key), timeout=90)
+
+        def done(outcomes):
+            failures = report_each(self, tr(self.title), outcomes, printable)
+            self.message.setText(tr("Removed {count} of {total}.", count=len(keys) - len(failures), total=len(keys)))
+            self.changed()
+        run_each(work, keys, owner=self, source=self.buttons(), timeout=120 * len(keys), done=done)
+
     def buttons(self):
         return [self.add_button, self.remove_button, self.check_button, *self.more_buttons()]
 
-    def replaces(self, values):
-        """The server or kind of an entry the login of VALUES replaces, or None."""
+    def replaces(self, values, entries=()):
+        """The server or kind of an entry (of ENTRIES, the logins listed) the login of VALUES replaces, or None."""
         return None
+
+    def seen(self):
+        """What the box shows now - the host, its logins and secret names - taken before a dialog or a question: the
+        answer acts on that host with what was known of it, whatever the chooser shows by then."""
+        return {"host": self.host, "entries": self.entries, "secret_names": self.secret_names,
+                "known": self.secrets_known}
 
     def show_entries(self, entries, secret_names, known=True):
         self.entries, self.secret_names, self.secrets_known = entries, secret_names, bool(known)
@@ -80,10 +133,10 @@ class LoginsBox(QGroupBox):
         return tr("ready") if entry.get("secret") in self.secret_names else \
             tr("secret {name} missing", name=printable(entry.get("secret", "")))
 
-    def run(self, *args, what):
-        """`sandbox-ai COMMAND ARGS` on the host chosen, in the background."""
+    def run(self, *args, what, host=None):
+        """`sandbox-ai COMMAND ARGS` on HOST (default: the one chosen), in the background."""
         self.message.setText(tr("Working…"))
-        host = self.host
+        host = self.host if host is None else host
 
         def work():
             if host == LOCAL:
@@ -106,31 +159,32 @@ class LoginsBox(QGroupBox):
     def check(self):
         self.run("check", what="check")
 
-    def add_with_token(self, add_args, values, what="add"):
-        """ADD_ARGS (after the command; they name --secret) on the host chosen; a token typed in the dialog is kept
-        first as that secret (`secrets set NAME`, the value on standard input), asked first when a secret of that name
-        is there or may be (the host's names not read)."""
+    def add_with_token(self, add_args, values, what="add", seen=None):
+        """ADD_ARGS (after the command; they name --secret) on the host chosen (SEEN: what seen() said before the
+        dialog - its host); a token typed in the dialog is kept first as that secret (`secrets set NAME`, the value on
+        standard input), asked first when a secret of that name is there or may be (the host's names not read)."""
+        seen = seen or self.seen()
+        host, command = seen["host"], self.command
         secret, value = values["secret"], values.get("value")
-        replaced = self.replaces(values)
-        if replaced and not ask_first(self, "login-replace", tr(self.title), on_host(self.host, tr(
+        replaced = self.replaces(values, seen["entries"])
+        if replaced and not ask_first(self, "login-replace", tr(self.title), on_host(host, tr(
                 "A login for {name} is there already: its token is replaced by the secret {secret}'s for every later "
                 "start that uses it. Replace it?", name=printable(replaced), secret=printable(secret))),
                 tr("Replace")):
             self.message.setText(tr("Not added: the login for {name} stays as it is.", name=printable(replaced)))
             return False
         if not value:  # a secret kept already: the add alone
-            self.run(*add_args, what=what)
+            self.run(*add_args, what=what, host=host)
             return True
         if value:
-            exists = (secret in self.secret_names) if self.secrets_known else None
-            if not ask_first(self, "secret-replace", tr(self.title), on_host(self.host, tr(
+            exists = (secret in seen["secret_names"]) if seen["known"] else None
+            if not ask_first(self, "secret-replace", tr(self.title), on_host(host, tr(
                     "A secret {name} is kept already (or may be): the token typed replaces its value, for everything "
                     "that names it. Replace it?", name=printable(secret))), tr("Replace"), detail={"exists": exists}):
                 self.message.setText(tr("Not added: the secret {name} stays as it is.", name=printable(secret)))
                 return False
         self.message.setText(tr("Working…"))
-        host, command = self.host, self.command
-        known = (secret in self.secret_names) if self.secrets_known else None
+        known = exists
 
         def work():
             existed = known
@@ -158,9 +212,9 @@ class GitLoginsBox(LoginsBox):
     def row(self, entry):
         return [entry.get("url", ""), entry.get("user", ""), entry.get("secret", ""), self.state(entry)]
 
-    def replaces(self, values):
+    def replaces(self, values, entries=()):
         url = (values.get("url") or "").strip().rstrip("/").lower()
-        return next((e.get("url") for e in self.entries if str(e.get("url", "")).rstrip("/").lower() == url), None)
+        return next((e.get("url") for e in entries if str(e.get("url", "")).rstrip("/").lower() == url), None)
 
     def more_buttons(self):
         if not hasattr(self, "give_button"):
@@ -173,17 +227,22 @@ class GitLoginsBox(LoginsBox):
             self.list.customContextMenuRequested.connect(self.menu)
         return [self.give_button]
 
+    def single_buttons(self):
+        return [self.give_button]
+
     def menu(self, point):
         """A login's menu: give it to a running sandbox, check, remove."""
         row = self.list.rowAt(point.y())
         if row < 0:
             return
-        self.list.selectRow(row)
+        if row not in widgets.selected_rows(self.list):  # a right click in the selection keeps it (Remove… takes all)
+            self.list.selectRow(row)
         menu = QMenu(self)
-        menu.addAction(tr("Give to a running sandbox…"), self.give)
+        menu.addAction(tr("Give to a running sandbox…"), self.give).setEnabled(len(widgets.selected_rows(self.list)) == 1)
         menu.addAction(tr("Check"), self.check)
         menu.addSeparator()
         menu.addAction(tr("Remove…"), self.remove)
+        copy_entries(menu, self.list, point)
         menu.exec(self.list.viewport().mapToGlobal(point))
 
     def chosen(self):
@@ -238,28 +297,28 @@ class GitLoginsBox(LoginsBox):
                                            (err or out).strip().splitlines()[-1] or tr("Not given")))
 
     def add(self):
-        dialog = LoginDialog(self, tr("New Git login"), self.secret_names,
+        seen = self.seen()
+        dialog = LoginDialog(self, tr("New Git login"), seen["secret_names"],
                              ((tr("Git server"), "url", "https://git.example.org"),
-                              (tr("User"), "user", "x-access-token")), host=self.host)
+                              (tr("User"), "user", "x-access-token")), host=seen["host"])
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
         dialog.forget_value()
         # Every sandbox's proxy logs in there from now on: asked first (git-login-add).
-        if not ask_first(self, "git-login-add", tr("New Git login"), on_host(self.host, "\n\n".join(
+        if not ask_first(self, "git-login-add", tr("New Git login"), on_host(seen["host"], "\n\n".join(
                 [printable(values["url"]), self.about()])), tr("Add")):
             return None
         args = ["add", "--secret", values["secret"], *(["--user", values["user"]] if values["user"] else []),
                 "--", values["url"]]  # the URL after "--": never read as an option
-        self.add_with_token(args, values)
+        self.add_with_token(args, values, seen=seen)
         return {k: v for k, v in values.items() if k != "value"}
 
-    def remove(self):
-        url = selected(self.list)
-        if not url or not ask_first(self, "login-remove", tr("Remove"), on_host(self.host, tr(
-                "Remove the Git login for {name}? Its secret stays.", name=printable(url))), tr("Remove")):
-            return
-        self.run("remove", "--", url, what="remove")
+    def remove_text(self, key):
+        return tr("Remove the Git login for {name}? Its secret stays.", name=printable(key))
+
+    def remove_args(self, key):
+        return ["remove", "--", key]  # the URL after "--": never read as an option
 
 
 class PublishLoginsBox(LoginsBox):
@@ -283,27 +342,27 @@ class PublishLoginsBox(LoginsBox):
     def row(self, entry):
         return [entry.get("kind", ""), entry.get("host", ""), entry.get("secret", ""), self.state(entry)]
 
-    def replaces(self, values):
-        return values.get("kind") if any(e.get("kind") == values.get("kind") for e in self.entries) else None
+    def replaces(self, values, entries=()):
+        return values.get("kind") if any(e.get("kind") == values.get("kind") for e in entries) else None
 
     def add(self):
-        dialog = LoginDialog(self, tr("New publish login"), self.secret_names,
+        seen = self.seen()
+        dialog = LoginDialog(self, tr("New publish login"), seen["secret_names"],
                              ((tr("Own server (optional)"), "url", "https://gitlab.example.org"),),
-                             kinds=tuple(SandboxAI.PUBLISH_HOSTS), host=self.host)
+                             kinds=tuple(SandboxAI.PUBLISH_HOSTS), host=seen["host"])
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
         dialog.forget_value()
         self.add_with_token(["add", values["kind"], "--secret", values["secret"],
-                             *(["--url", values["url"]] if values["url"] else [])], values)
+                             *(["--url", values["url"]] if values["url"] else [])], values, seen=seen)
         return {k: v for k, v in values.items() if k != "value"}
 
-    def remove(self):
-        kind = selected(self.list)
-        if not kind or not ask_first(self, "login-remove", tr("Remove"), on_host(self.host, tr(
-                "Remove the publish login for {name}? Its secret stays.", name=printable(kind))), tr("Remove")):
-            return
-        self.run("remove", kind, what="remove")
+    def remove_text(self, key):
+        return tr("Remove the publish login for {name}? Its secret stays.", name=printable(key))
+
+    def remove_args(self, key):
+        return ["remove", key]
 
 
 class LoginDialog(QDialog):
@@ -479,7 +538,7 @@ class CredentialsPage(QWidget):
         # Where a secret kept now goes on the chosen host (`sandbox-ai secrets backend` there: keyring or file).
         self.store_label, self.store_token = plain_label(role="secondary"), 0
         secrets_layout.addWidget(self.store_label)
-        self.secrets = table([tr("Name"), tr("Kept in"), tr("Used by")], stretch=2, compact=(1,))
+        self.secrets = multi_select(table([tr("Name"), tr("Kept in"), tr("Used by")], stretch=2, compact=(1,)))
         self.secrets.itemSelectionChanged.connect(lambda: self.name.setText(selected(self.secrets) or self.name.text()))
         secrets_layout.addWidget(self.secrets, 1)
         form = QFormLayout()
@@ -507,6 +566,9 @@ class CredentialsPage(QWidget):
         give.clicked.connect(lambda _=False: self.give_secret())
         self.secrets.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.secrets.customContextMenuRequested.connect(self.secret_menu)
+        # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Give… one
+        delete_key(self.secrets, self.delete_secret)
+        one_only(self.secrets, [give])
         self.secret_buttons = [keep, delete]
         self.generation = 0
         for widget in (keep, delete, give):
@@ -540,11 +602,14 @@ class CredentialsPage(QWidget):
         row = self.secrets.rowAt(point.y())
         if row < 0:
             return
-        self.secrets.selectRow(row)
+        if row not in widgets.selected_rows(self.secrets):  # a right click in the selection keeps it
+            self.secrets.selectRow(row)
         menu = QMenu(self)
-        menu.addAction(tr("Give to a running sandbox…"), self.give_secret)
+        menu.addAction(tr("Give to a running sandbox…"), self.give_secret).setEnabled(
+            len(widgets.selected_rows(self.secrets)) == 1)
         menu.addSeparator()
         menu.addAction(tr("Remove…"), self.delete_secret)
+        copy_entries(menu, self.secrets, point)
         menu.exec(self.secrets.viewport().mapToGlobal(point))
 
     def give_secret(self):
@@ -948,6 +1013,10 @@ class CredentialsPage(QWidget):
         self.refresh()
 
     def delete_secret(self):
+        names = [name for name in selected_keys(self.secrets) if name]
+        if len(names) > 1:
+            self.delete_secrets(names)
+            return
         name, host = self.name.text().strip() or selected(self.secrets), self.secret_host_of()
         if not name or not self.sai.valid_secret(name):
             QMessageBox.information(self, tr("Secret"), tr("Select a secret first."))
@@ -964,6 +1033,25 @@ class CredentialsPage(QWidget):
         else:
             background(lambda: self.sai.delete_secret(name, host=host), owner=self, source=self.secret_buttons,
                        work=True, timeout=120, done=self.secret_deleted)
+
+    def delete_secrets(self, names):
+        """Remove… with several secrets selected: one question naming them, then each (secrets delete NAME)."""
+        host = self.secret_host_of()
+        names = [name for name in names if self.sai.valid_secret(name)]
+        text = several(tr("Remove these {count} secrets? Every start, VPN profile and Git login that names one goes "
+                          "without it.", count=len(names)), [printable(name) for name in names])
+        if host != "local":
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not names or not ask_first(self, "secret-delete", tr("Remove secret"), text, tr("Remove")):
+            return
+
+        def done(outcomes):
+            failures = report_each(self, tr("Remove secret"), outcomes, printable)
+            self.message.setText(tr("Removed {count} of {total}.", count=len(names) - len(failures), total=len(names)))
+            self.secrets_changed()
+        run_each(lambda name: self.sai.delete_secret(name) if host == "local" else
+                 self.sai.delete_secret(name, host=host), names, owner=self, source=self.secret_buttons,
+                 timeout=120 * len(names), done=done)
 
     def secret_deleted(self, result, error):
         status, out, err = outcome(result, error)

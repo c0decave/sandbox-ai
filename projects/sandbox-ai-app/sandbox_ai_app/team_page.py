@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
 from .files import printable
 from .i18n import N_, tr
 from .widgets import (
-    ask_first, background, fill, flow, outcome, plain_label, safe_tooltip, selected_keys, set_enabled, table, warn,
+    ask_first, background, fill, flow, multi_select, outcome, plain_label, report_each, run_each, safe_tooltip,
+    selected_keys, set_enabled, several, table, warn,
 )
 
 LOCAL = "local"
@@ -77,13 +78,13 @@ class StartDialog(QDialog):
         self.workspace = QLineEdit(folder)
         self.workspace.setPlaceholderText(tr("the shared workspace (an absolute path on that host)"))
         browse = QPushButton(tr("Folder…"))
-        browse.setVisible(not remote)
         browse.clicked.connect(lambda _=False: self.choose())
         where = QWidget()
         where_row = QHBoxLayout(where)
         where_row.setContentsMargins(0, 0, 0, 0)
         where_row.addWidget(self.workspace, 1)
         where_row.addWidget(browse)
+        browse.setVisible(not remote)  # (in its row first: else a window of its own for a moment)
         self.options = QLineEdit()
         self.options.setPlaceholderText(OPTIONS_EXAMPLE)
         self.options.setToolTip(tr("Launcher options for every member (as on the command line)"))
@@ -188,6 +189,7 @@ class TeamPage(QWidget):
         left_layout = QVBoxLayout(left)
         self.table = table([tr("Team"), tr("Members"), tr("Workspace")], stretch=2, compact=(1,))
         self.table.setAccessibleName(tr("Teams"))
+        multi_select(self.table)  # several at once (Ctrl, Shift): Stop… and Delete… take them all
         self.table.itemSelectionChanged.connect(self.selection_changed)
         left_layout.addWidget(self.table, 1)
         right = QGroupBox(tr("Members and board"))
@@ -311,6 +313,10 @@ class TeamPage(QWidget):
         keys = selected_keys(self.table)
         return valid_team(keys[0]) if keys else None
 
+    def chosen_teams(self):
+        """The teams selected (valid names), top to bottom."""
+        return [name for name in (valid_team(key) for key in selected_keys(self.table)) if name]
+
     def selection_changed(self):
         self.update_buttons()
         name = self.chosen()
@@ -376,6 +382,13 @@ class TeamPage(QWidget):
         why = tr("Select a team first.")
         for button in (self.attach_button, self.post_button, self.stop_button, self.delete_button):
             set_enabled(button, name is not None, why)
+        teams = self.chosen_teams()
+        if len(teams) > 1:  # several: Stop… and Delete… take them all; Attach and Post one team
+            for button in (self.attach_button, self.post_button):
+                set_enabled(button, False, tr("Acts on one row: {count} are selected.", count=len(teams)))
+            set_enabled(self.stop_button, any(not self.damaged(t) for t in teams),
+                        tr("Their records are damaged: only Delete… is left."))
+            return
         if name is not None and self.damaged(name):
             for button in (self.attach_button, self.post_button, self.stop_button):
                 set_enabled(button, False, tr("Its record is damaged: only Delete… is left."))
@@ -433,7 +446,40 @@ class TeamPage(QWidget):
         background(lambda: self.sai.team_post(host, name, agent, task), owner=self, work=True, source=self.post_button,
                    timeout=POST_SECONDS + 15, done=lambda result, error: self.done(name, result, error))
 
+    def several_teams(self, action):
+        """Stop… or Delete… (ACTION "stop" or "delete") with several teams selected: one question naming them (a
+        damaged record is only deleted), then each in turn; what failed is said together."""
+        host = self.acting_host()
+        teams = [t for t in self.chosen_teams() if action == "delete" or not self.damaged(t)]
+        if host is None or not teams:
+            return
+        label = self.hosts.label(host)
+        if action == "stop":
+            question, title = tr("Stop every member of these {count} teams on {host} and their boards? What runs in "
+                                 "them ends now.", count=len(teams), host=label), tr("Stop…").rstrip("…")
+        else:
+            question, title = tr("Delete these {count} teams on {host}? Their members are stopped, then their HOMEs "
+                                 "and the boards are removed for good; the workspaces stay.", count=len(teams),
+                                 host=label), tr("Delete…").rstrip("…")
+        accept = tr("Stop") if action == "stop" else tr("Delete")
+        text = several(question, teams)
+        if not (ask_first(self, "team-stop", title, text, accept) if action == "stop" else
+                ask_first(self, "team-delete", title, text, accept)):
+            return
+        self.status.setText(tr("Working…"))
+        call = self.sai.team_stop if action == "stop" else self.sai.team_delete
+
+        def done(outcomes):
+            failures = report_each(self, title, outcomes)
+            self.status.setText(tr("{done} of {total} done.", done=len(teams) - len(failures), total=len(teams)))
+            self.refresh()
+        run_each(lambda name: call(host, name), teams, owner=self, source=[self.stop_button, self.delete_button],
+                 timeout=(STOP_SECONDS + 30) * len(teams), done=done)
+
     def stop(self):
+        if len(self.chosen_teams()) > 1:
+            self.several_teams("stop")
+            return
         name, host = self.chosen(), self.acting_host()
         if name is None or host is None:
             return
@@ -446,6 +492,9 @@ class TeamPage(QWidget):
                    work=True, timeout=STOP_SECONDS + 30, done=lambda result, error: self.done(name, result, error))
 
     def delete(self):
+        if len(self.chosen_teams()) > 1:
+            self.several_teams("delete")
+            return
         name, host = self.chosen(), self.acting_host()
         if name is None or host is None:
             return

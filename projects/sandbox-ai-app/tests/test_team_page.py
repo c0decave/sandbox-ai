@@ -120,6 +120,32 @@ def test_a_team_its_board_and_every_action(qapp, sai, monkeypatch, host):
     page.deleteLater()
 
 
+def test_several_teams_stop_and_are_deleted_at_once(qapp, sai, monkeypatch):
+    """Ctrl/Shift: several teams; Stop… and Delete… take each after one question naming them; Attach and Post wait."""
+    monkeypatch.setattr(widgets, "background", synchronous)  # (run_each's)
+    sai.answers[("local", ("team", "list"))] = (0, "review   claude, codex   /srv/work\n"
+                                                   "docs     claude          /srv/docs\n", "")
+    page = team_page.TeamPage(sai, lambda argv, title, **kw: None)
+    page.refresh()
+    assert cells(page.table) == ["review", "docs"]
+    assert page.table.selectionMode() == QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+    page.table.selectAll()
+    assert page.chosen_teams() == ["review", "docs"]
+    assert page.stop_button.isEnabled() and page.delete_button.isEnabled()
+    assert not page.attach_button.isEnabled() and not page.post_button.isEnabled()
+    sai.answers[("local", ("team", "delete", "--yes", "--", "docs"))] = (1, "", "team docs: busy")
+    page.stop()
+    assert widgets.SHOWN[-1][1].startswith("Stop every member of these 2 teams on")
+    page.table.selectAll()
+    page.delete()
+    asked = [a for _, a in sai.asked if a[:2] in (("team", "stop"), ("team", "delete"))]
+    assert asked == [("team", "stop", "--", "review"), ("team", "stop", "--", "docs"),
+                     ("team", "delete", "--yes", "--", "review"), ("team", "delete", "--yes", "--", "docs")]
+    assert any(text.startswith("Delete these 2 teams") for _, text, _ in widgets.SHOWN)
+    assert widgets.SHOWN[-1][1].startswith("1 of 2 failed:") and "docs: team docs: busy" in widgets.SHOWN[-1][1]
+    page.deleteLater()
+
+
 def test_the_start_dialog_checks_what_it_is_given(qapp, env):
     dialog = team_page.StartDialog(None, "local", False)
     for name, workspace, options, text in (("Bad Name", "/w", "", "team's name"), ("t", "relative", "", "absolute"),

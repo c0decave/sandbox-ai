@@ -1,11 +1,16 @@
 """The Sandboxes page's tree: the hosts at the top (this machine, each host of `sandbox-ai hosts`), under each host its
-starts, under each start what belongs to it (the MCP servers it reaches, its helpers, its pod with Podman; the
-starts an MCP server serves). Only the starts are rows to act on; the hosts and what hangs below a start only show.
+starts, under each start the starts that belong to it (owners(): the MCP servers and helpers started for it or that
+only it uses, the members of a team it leads) and what else belongs to it (the MCP servers it reaches, its helpers,
+its pod with Podman; the starts an MCP server serves). MCP servers that belong to no start stand together below
+their host, said so (orphans()). Only the starts are rows to act on; the hosts and what hangs below a start only show.
 
 StartTree offers what the page and its tests know of a table: rowCount(), item(row, column), selectRow(row) and
 row_keys count the start rows only (in the order shown, wherever they hang), so widgets.find_row() and row_key()
 work on it as on a table filled by widgets.fill()."""
 from __future__ import annotations
+
+import calendar
+import time
 
 from PySide6.QtCore import QItemSelectionModel, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -18,6 +23,7 @@ ID_ROLE = Qt.ItemDataRole.UserRole + 20  # row_id(host, id) of a row: what its s
 KIND_ROLE = Qt.ItemDataRole.UserRole + 21  # "host", "start" or "part" (what hangs below a start)
 KEY_ROLE = Qt.ItemDataRole.UserRole + 22  # a start row's Instance.key; a part's: the key of the row it stands for
 HELPER_PREFIX = "helper-"  # agent_sandbox.HELPER_PREFIX: an MCP server that is another agent, a helper of the start
+TEAM_PREFIX = "team-"  # team.server_name: the board of a team (sandbox-ai team), an MCP server
 
 
 def server_name(instance):
@@ -85,6 +91,123 @@ def related(instances):
     return found
 
 
+GUESS_SECONDS = 120  # an MCP server of an older sandbox-ai belongs to the start of its host started this close to it
+ORPHANS = "\norphans"  # the row id (below a host) of the MCP servers that belong to no start
+
+
+def _moment(value):
+    """A time as sandbox-ai writes it (UTC, "YYYY-MM-DDTHH:MM:SSZ") in seconds, or None."""
+    if not isinstance(value, str) or len(value) < 19:
+        return None
+    try:
+        return calendar.timegm(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def refs(instance):
+    """The names a start goes by in records of others (its name, its id, its run's id, its start's id)."""
+    record = instance.record if isinstance(instance.record, dict) else {}
+    found = [instance.name, getattr(instance, "ident", None), instance.run] + \
+        [record.get(key) for key in ("run", "id", "start")]
+    return {ref for ref in found if isinstance(ref, str) and ref}
+
+
+def started_for(record, by_ref):
+    """The start of BY_REF ({ref: Instance}: refs()) an MCP server's RECORD says it was started for: "started_for"
+    as backend.instances gives it ({"start", "run"}) or as sandbox-ai list --json does (the start's name); else None."""
+    link = record.get("started_for") if isinstance(record, dict) else None
+    wanted = [link] if isinstance(link, str) else [link.get("start"), link.get("run")] if isinstance(link, dict) else []
+    return next((by_ref[ref] for ref in wanted if isinstance(ref, str) and ref in by_ref), None)
+
+
+def is_server(instance):
+    """True for an MCP server's sandbox, also one whose launcher has not registered yet (backend.instances)."""
+    record = instance.record if isinstance(instance.record, dict) else {}
+    return instance.kind == "mcp" or instance.kind == "unregistered" and bool(record.get("mcp_server"))
+
+
+def owners(instances):
+    """{Instance.key: (owner's key, how)} of the starts of INSTANCES (one host's) that belong to another one: what is
+    shown below that start, and gets no tab of its own when it starts. HOW says why:
+
+      "started"  an MCP server (or helper) started for that start (its mcp.json's "started_for", since 0.1.78);
+      "uses"     an MCP server that start reaches (now first, then at its next start), when none is recorded;
+      "listed"   as sandbox-ai list says ("listed_under"), when the fields above say nothing;
+      "helper"   a start that is a helper of that start ("helper_of");
+      "team"     a member of a team below its lead ("lead": list --json, backend.instances), else below the start
+                 its team's board server (team-NAME) was started for;
+      "time"     an MCP server of an older sandbox-ai, which did not record whom it was started for, that no start
+                 uses: the start of its host started closest to it, within GUESS_SECONDS (a guess, said so).
+
+    Each goes below the top of its chain (a lead's helper's MCP server below the lead); starts that name each other
+    round in a circle stay at the top. An MCP server none of this links to belongs to no start: orphans()."""
+    starts = [i for i in instances if not is_server(i)]
+    by_ref = {}
+    for i in starts:
+        for ref in refs(i):
+            by_ref.setdefault(ref, i)
+    servers = {}
+    for i in instances:
+        if i.kind == "mcp":
+            servers.setdefault(server_name(i), i)
+    direct = {}
+    for i in instances:
+        record = i.record if isinstance(i.record, dict) else {}
+        found = None
+        if is_server(i):
+            owner = started_for(record, by_ref)
+            if owner is not None:
+                found = (owner, "started")
+            name = server_name(i) if i.kind == "mcp" else None
+            users = [s for s in starts if name is not None and any(n == name for n, _ in reached(s))]
+            if found is None and users:
+                users.sort(key=lambda s: (not any(n == name and now for n, now in reached(s)), str(s.started)))
+                found = (users[0], "uses")
+            listed = record.get("listed_under")
+            if found is None and isinstance(listed, str) and listed in by_ref:
+                found = (by_ref[listed], "listed")
+            if found is None and not record.get("owner_recorded"):
+                moment = _moment(i.started)
+                near = [(abs(_moment(s.started) - moment), str(s.started), s) for s in starts
+                        if moment is not None and _moment(s.started) is not None
+                        and abs(_moment(s.started) - moment) <= GUESS_SECONDS]
+                if near:
+                    found = (min(near, key=lambda n: n[:2])[2], "time")
+        else:
+            helper = record.get("helper_of")
+            lead = record.get("lead")
+            if isinstance(helper, str) and helper in by_ref:
+                found = (by_ref[helper], "helper")
+            elif isinstance(lead, str) and lead in by_ref:
+                found = (by_ref[lead], "team")
+            else:
+                for name, _ in reached(i):
+                    board = servers.get(name) if name.startswith(TEAM_PREFIX) else None
+                    owner = started_for(board.record, by_ref) if board is not None else None
+                    if owner is not None:
+                        found = (owner, "team")
+                        break
+        if found is not None and found[0] is not i:
+            direct[i.key] = (found[0].key, found[1])
+    top = {}
+    for key, (owner, how) in direct.items():
+        seen, at = {key}, owner
+        while at in direct and at not in seen:
+            seen.add(at)
+            at = direct[at][0]
+        if at not in seen:
+            top[key] = (at, how)
+    return top
+
+
+def orphans(instances, owned=None):
+    """The keys of the MCP servers of INSTANCES (one host's) that belong to no start (owners()): started on their
+    own (sandbox-ai mcp start), or the start they were started for ended and none uses them."""
+    owned = owners(instances) if owned is None else owned
+    return [i.key for i in instances if is_server(i) and i.key not in owned]
+
+
 def row_id(host, ident=""):
     """The id of a row: its HOST and IDENT (a start's Instance.key, "" for the host's own row, more for a part), as one
     string (Qt keeps a string as it is, a tuple as a list)."""
@@ -147,7 +270,8 @@ class StartTree(QTreeWidget):
         self.setColumnCount(len(headers))
         self.setHeaderLabels(headers)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # several at once (Ctrl+click, Shift+click): Stop, Pause, Resume and Delete act on each (SandboxesPage.bulk)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setUniformRowHeights(True)
         self.setAlternatingRowColors(True)

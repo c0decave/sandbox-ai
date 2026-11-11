@@ -326,6 +326,36 @@ def test_the_tor_preset_takes_only_a_tor_profile(host, capsys):
         {**PRESETS["tor"], "values": {"tor": {"label": "x", "kind": "text", "vpn_type": "tor"}}}))
 
 
+
+def test_the_tor_promise_holds_against_the_command_line(host, capsys):
+    """The command line wins over a preset's options; it must not undo "Everything through Tor": a --vpn of another
+    type there, or --vpn-check warn (a leak found during the run would only be said), is refused. Another Tor
+    profile on the command line is fine."""
+    _, _, work = host
+    base = ["codex", "--backend", "podman", "--workspace", str(work), "--no-tmux", "--preset", "tor",
+            "--preset-value", "tor=anon"]
+    with pytest.raises(ValueError, match="--vpn home on the command line is of type wireguard; this preset needs a "
+                                         "tor profile"):
+        P.apply([*base, "--vpn", "home"], canonical=s.canonical_options)
+    with pytest.raises(ValueError, match="needs a tor profile"):
+        P.apply([*base, "-vp", "home"], canonical=s.canonical_options)  # the short form too
+    with pytest.raises(ValueError, match="drop --vpn-check warn"):
+        P.apply([*base, "--vpn-check", "warn"], canonical=s.canonical_options)
+    with pytest.raises(ValueError, match="drop --vpn-check warn"):
+        P.apply([*base, "--vpn-check=warn"], canonical=s.canonical_options)
+    applied = P.apply([*base, "--vpn", "anon", "--vpn-check", "stop"], canonical=s.canonical_options)
+    assert applied.count("--vpn") == 2 and P.last_value(applied, "--vpn") == "anon"
+
+
+def test_an_identity_a_preset_names_is_checked_with_how_to_make_it(host):
+    preset = {**PRESETS["tor"], "id": "t", "options": [*PRESETS["tor"]["options"], "--identity", "{who}"],
+              "values": {**PRESETS["tor"]["values"], "who": {"label": "identity", "kind": "text", "optional": True}}}
+    found = P.missing(preset, {"tor": "anon", "who": "investigation"}, "codex")
+    assert len(found) == 1 and "--identity investigation: no such identity yet" in found[0]
+    assert "sandbox-ai identities add investigation" in found[0] and "--preset-value who=" in found[0]
+    assert P.missing(preset, {"tor": "anon"}, "codex") == []  # left out: no identity, nothing to check
+    assert P.missing(preset, {"tor": "anon", "who": "default"}, "codex") == []
+
 # --- Bubblewrap, what a plan keeps beyond the network, the commands the notes name ------------------------------
 
 def loopback_llm(values):
@@ -461,6 +491,8 @@ def test_the_commands_and_options_the_presets_name_exist(host):
                 if word not in commands:
                     wrong.append((preset["id"], f"no command {word}", text))
                     continue
+                if word == "build":
+                    helps.append("--variant")  # sandbox-ai build --variant NAME (build_image.sh: no --help)
                 if word in ("build", "update", "claude", "codex", "opencode"):
                     continue
                 top = help_text([word])

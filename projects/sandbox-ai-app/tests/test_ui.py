@@ -9,6 +9,7 @@ import sys
 import time
 
 import pytest
+import shiboken6
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6 import QtCore, QtGui  # noqa: E402
@@ -605,7 +606,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     assert "not followed" in page.message.text() and left.relative == ""
     left.open_row(row_of(left.table, "src"))
     settle_files(page)
-    assert left.relative == "src" and left.table.item(0, 0).text() == "main.py"
+    assert left.relative == "src" and [left.table.item(r, 0).text() for r in range(2)] == ["..", "main.py"]
     left.up()
     settle_files(page)
     assert left.relative == ""
@@ -627,7 +628,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     report = copy(page, wait, lambda: page.copy_selected(left))
     assert (host / "src" / "main.py").read_text() == "print(1)\n" and (host / "notes.txt").read_text() == "hello"
     assert not (host / "outside").exists() and any("symbolic link" in line for line in report)
-    assert {right.table.item(r, 0).text() for r in range(right.table.rowCount())} == {"src", "notes.txt"}
+    assert {right.table.item(r, 0).text() for r in range(right.table.rowCount())} == {"..", "src", "notes.txt"}
     # Into the sandbox: a host file into the folder shown on the left.
     outbox = tmp_path / "outbox"
     outbox.mkdir()
@@ -715,7 +716,7 @@ def test_files_selection_does_not_follow_a_name_into_a_subfolder(window, env, wa
     assert [e.name for e in page.chosen()] == ["other.txt"]
     page.up()
     settle_files(page)
-    assert page.chosen() == []
+    assert [e.name for e in page.chosen()] == ["src"], "up: the folder come from is selected (by the app, not by a name)"
 
 
 # -- images --
@@ -790,7 +791,7 @@ def test_a_refresh_during_the_discard_question_asks_no_second_one(window, monkey
         try:
             page.show_images([claude, gpu])
         finally:
-            modal = QtWidgets.QApplication.activeModalWidget()
+            modal = open_dialog()
             if modal is not None:
                 modal.reject()
     net = close_modals_after(5)
@@ -1288,13 +1289,23 @@ def test_an_answer_that_hangs_frees_the_buttons_after_a_while(window, env, monke
 
 
 
+def open_dialog():
+    """The dialog open now: a modal one, else the newest visible dialog (exec() no longer makes them modal)."""
+    modal = QtWidgets.QApplication.activeModalWidget()
+    if modal is not None:
+        return modal
+    shown = [w for w in QtWidgets.QApplication.topLevelWidgets() if isinstance(w, QtWidgets.QDialog) and w.isVisible()]
+    return shown[-1] if shown else None
+
+
 def close_modals_after(seconds):
     """A safety net for tests that open a real modal dialog: whatever is modal after SECONDS is closed, and
     again every second after that (a test that fails must not leave exec() running for ever). The timer."""
     def close():
         timer.setInterval(1000)
         for widget in QtWidgets.QApplication.topLevelWidgets():
-            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible() and widget.isModal():
+            # (dialogs run with exec() are not modal any more - widgets.nonblocking_dialogs: every one open goes)
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
                 widget.reject()
     timer = QtCore.QTimer()
     timer.timeout.connect(close)
@@ -1302,11 +1313,11 @@ def close_modals_after(seconds):
     return timer
 
 
-def test_a_question_can_be_answered_while_a_modal_dialog_is_open(window, env, monkeypatch, wait):
+def test_a_question_can_be_answered_while_a_dialog_is_open(window, env, monkeypatch, wait):
     """Regression: a modal dialog (a message, confirm(), the wizard, Settings) blocked the main window and with
-    it Allow and Deny; a question asked meanwhile was refused unanswered after 60 s. It is offered in a window
-    above the dialog, and answered from there through the same path."""
-    from PySide6.QtTest import QTest
+    it Allow and Deny; a question asked meanwhile was refused unanswered after 60 s. Dialogs block no window now
+    (widgets.nonblocking_dialogs): the Approvals page answers while one is open; the Questions window is offered
+    only above a dialog that is still modal (a file dialog)."""
     monkeypatch.setattr(widgets, "AUTO_ANSWER", None)  # real dialogs
     run = fake_run(env)
     page = window.approvals
@@ -1315,33 +1326,27 @@ def test_a_question_can_be_answered_while_a_modal_dialog_is_open(window, env, mo
 
     def while_open():
         try:
+            seen["dialog"] = open_dialog()
             seen["modal"] = QtWidgets.QApplication.activeModalWidget()
             ask(run, "1700000000-1-7", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
             page.poll()
-            questions = page.questions_window
-            seen["shown"] = questions is not None and questions.isVisible()
-            if not seen["shown"]:
-                return
-            QTest.qWaitForWindowExposed(questions)
-            deny = questions.deny_button
-            QTest.mouseClick(questions.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
-                             deny.mapTo(questions, deny.rect().center()))
-            seen["answering"] = page.answering is not None
-            seen["answered"] = wait(lambda: page.answering is None, 60)
-            seen["closed"] = wait(lambda: not questions.isVisible(), 5)
+            seen["blocked"] = page.blocked_by_dialog()
+            seen["listed"] = wait(lambda: page.current() is not None, 10)
+            page.answer("deny")
+            seen["answered"] = wait(lambda: page.answering is None and
+                                    (run / "approvals" / "1700000000-1-7.answer").exists(), 60)
         finally:
-            if seen.get("modal") is not None:
-                seen["modal"].reject()
+            if seen.get("dialog") is not None:
+                seen["dialog"].reject()
     net = close_modals_after(90)
     QtCore.QTimer.singleShot(200, while_open)
     widgets.confirm(window, "Something else", "A question of another page", "OK")
     widgets.AUTO_ANSWER = True  # the window's teardown asks no real questions
     net.stop()
-    assert seen.get("modal") is not None, "confirm() was open"
-    assert seen.get("shown"), "the question was offered above the dialog"
-    assert seen.get("answering") and seen.get("answered"), "Deny could be clicked while the dialog was open"
+    assert seen.get("dialog") is not None and seen.get("modal") is None, "confirm() was open, blocking nothing"
+    assert seen.get("blocked") is False and seen.get("listed")
+    assert seen.get("answered"), "Deny worked on the page while the dialog was open"
     assert json.loads((run / "approvals" / "1700000000-1-7.answer").read_text())["decision"] == "deny"
-    assert seen.get("closed"), "the window goes when nothing is open any more"
 
 
 def test_results_of_background_jobs_do_not_block(window, monkeypatch, wait):
@@ -2699,6 +2704,99 @@ def test_a_notification_selects_its_question(window, env, wait):
     assert window.approvals.current() is not None and window.approvals.current()[1]["name"] in ("a.example", "b.example")
 
 
+def question_toast(window, qapp, key):
+    toast = window.question_toasts.get(key)
+    assert toast is not None and toast.isVisible(), "the question came as a toast with its answers"
+    return toast, {button.text(): button for button in toast.actions}
+
+
+def test_allow_on_a_question_s_toast_is_the_answer_no_second_question(window, env, wait, qapp, monkeypatch):
+    """User report: Allow clicked on the themed notification, and the app asked "Allow this request?" once more. The
+    toast's Allow and Block are the answer; nothing asks again, and the question is settled everywhere: its toast
+    goes, the Questions window never offers it, the page's buttons are off while the answer is on its way."""
+    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notify_style": "themed"}.get(
+        key, backend.SETTINGS.get(key)))
+    run = fake_run(env)
+    ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
+    page = window.approvals
+    page.poll()
+    key = ("local", "claude-abc", "1700000000-1-1")
+    toast, buttons = question_toast(window, qapp, key)
+    assert list(buttons) == ["Allow", "Allow always…", "Block", "Block always…", "Open approvals"]
+    widgets.SHOWN.clear()
+    buttons["Allow"].click()
+    qapp.processEvents()  # the toast runs its action from the event loop
+    assert widgets.SHOWN == [], "no second question after Allow on the toast"
+    assert page.settled(key) and page.open_keys() == [], "settled: the Questions window offers it no more"
+    assert key not in window.question_toasts and not (shiboken6.isValid(toast) and toast.isVisible())
+    assert wait(lambda: page.answering is None, 90)
+    assert json.loads((run / "approvals" / "1700000000-1-1.answer").read_text()) == {"decision": "allow",
+                                                                                     "scope": "once"}
+    assert widgets.SHOWN == []
+    # Block on the toast: for the run, also without a question.
+    ask(run, "1700000000-1-2", kind="dns", name="b.example")
+    page.poll()
+    _, buttons = question_toast(window, qapp, ("local", "claude-abc", "1700000000-1-2"))
+    buttons["Block"].click()
+    qapp.processEvents()
+    assert wait(lambda: page.answering is None, 90) and widgets.SHOWN == []
+    assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text()) == {"decision": "deny", "scope": "run"}
+
+
+def test_allow_always_on_a_toast_asks_once_and_that_is_the_answer(window, env, wait, qapp, monkeypatch):
+    """"Always" outlives the run: its one confirmation is where it is answered (the button says "…"), and nothing
+    asks after it."""
+    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notify_style": "themed"}.get(
+        key, backend.SETTINGS.get(key)))
+    run = fake_run(env)
+    ask(run, "1700000000-1-3", kind="connect", destination="192.0.2.8:443", address="192.0.2.8", port=443)
+    page = window.approvals
+    page.poll()
+    _, buttons = question_toast(window, qapp, ("local", "claude-abc", "1700000000-1-3"))
+    widgets.SHOWN.clear()
+    buttons["Allow always…"].click()
+    qapp.processEvents()
+    assert wait(lambda: page.answering is None, 90)
+    assert [title for title, _, _ in widgets.SHOWN] == ["Allow this request?"], "exactly one confirmation"
+    assert json.loads((run / "approvals" / "1700000000-1-3.answer").read_text())["decision"] == "allow"
+
+
+def test_a_question_answered_elsewhere_closes_its_toast(window, env, wait, qapp, monkeypatch):
+    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notify_style": "themed"}.get(
+        key, backend.SETTINGS.get(key)))
+    run = fake_run(env)
+    ask(run, "1700000000-1-4", kind="dns", name="c.example")
+    page = window.approvals
+    page.poll()
+    key = ("local", "claude-abc", "1700000000-1-4")
+    toast, buttons = question_toast(window, qapp, key)
+    # Answered on the command line (or the web, or the Approvals page): gone from the scan, so the toast goes.
+    (run / "approvals" / "1700000000-1-4.json").unlink()
+    page.poll()
+    assert key not in window.question_toasts and not (shiboken6.isValid(toast) and toast.isVisible())
+    # A toast's answer for a question no longer open sends nothing and says so.
+    notes = []
+    window.notify = lambda title, text, **_: notes.append(title)
+    window.answer_question(key, "allow", "once")
+    assert notes == ["Not answered"] and not (run / "approvals" / "1700000000-1-4.answer").exists()
+
+
+def test_the_questions_window_leaves_out_a_question_answered_from_its_toast(window, env, monkeypatch):
+    from sandbox_ai_app import pages
+    run = fake_run(env)
+    ask(run, "1700000000-1-5", kind="dns", name="d.example")
+    ask(run, "1700000000-1-6", kind="dns", name="e.example")
+    page = window.approvals
+    window.notify = lambda *a, **k: None
+    page.poll()
+    first = ("local", "claude-abc", "1700000000-1-5")
+    page.answers[first] = object()  # its answer is on its way (sent from its toast)
+    questions = pages.QuestionsWindow(page)
+    questions.show_questions()
+    assert questions.table.rowCount() == 1 and "e.example" in questions.table.item(0, 1).text()
+    page.answers.clear()
+
+
 def test_a_host_that_stops_answering_loses_its_questions_after_a_grace_and_an_answer_is_not_sent_twice(
         window, monkeypatch, wait):
     """Review round 3 (A6): after an answer there the question stayed answerable until the next read, and a host
@@ -3031,19 +3129,20 @@ def test_the_sandboxes_tree_groups_each_hosts_starts_and_what_belongs_to_them(wi
     # Only the starts are rows to act on (rowCount, item, find_row, row_key count them alone).
     assert [widgets.row_key(tree, r) for r in range(tree.rowCount())] == [
         "session:work", "mcp:fetch", backend.remote_key("ct1", "web"), backend.remote_key("ct1", "mcp-docs")]
-    # Under a start: the MCP servers it reaches (with their state), its helper, its pod.
+    # Under a start: the MCP server it uses as a start row of its own (its buttons act on it), its helper, its pod.
     work = tree_item(page, "local", "session:work")
     assert children(work) == ["MCP server", "Helper", "Pod"]
     assert children(work, 1) == ["fetch", "helper-codex-1234abcd", "sandbox-work"]
     assert children(work, 6) == ["running", "not running", "running"]
-    assert "while it runs" in work.child(0).toolTip(0)
-    # Under an MCP server: whom it serves.
-    assert children(tree_item(page, "local", "mcp:fetch")) == ["Serves"]
-    assert children(tree_item(page, "local", "mcp:fetch"), 1) == ["work"]
+    fetch = work.child(0)
+    assert fetch.data(0, start_tree.KIND_ROLE) == "start" and fetch.data(0, start_tree.KEY_ROLE) == "mcp:fetch"
+    assert "work uses it" in fetch.toolTip(0)
+    assert "while it runs" in work.child(1).toolTip(0)
+    # Under an MCP server: whom it serves besides the start it stands below (here: nobody).
+    assert children(fetch) == []
     web = tree_item(page, "ct1", backend.remote_key("ct1", "web"))
-    assert children(web, 1) == ["docs"] and children(web, 6) == ["running"], "mcp-docs is the server docs"
-    assert "next start" in web.child(0).toolTip(0)
-    assert children(tree_item(page, "ct1", backend.remote_key("ct1", "mcp-docs")), 1) == ["web"]
+    assert children(web, 1) == ["mcp-docs"] and children(web, 6) == ["running"], "mcp-docs is the server docs"
+    assert web.child(0).data(0, start_tree.KIND_ROLE) == "start"
     # Local or remote on every row.
     assert {item.text(8) for item in tree.every_item()} == {"this machine", "ct1", "ct2"}
     assert all(item.text(8) == "ct1" for item in tree.every_item()
@@ -3067,8 +3166,8 @@ def test_the_rows_of_the_sandboxes_tree_that_are_not_starts_have_no_actions(wind
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
     assert page.current().key == "session:work"
     assert page.stop_button.isEnabled() and page.session_buttons["pause"].isEnabled()
-    # Double-click on an MCP server below a start: that server's own row, which stops.
-    page.open_part(tree_item(page, "local", "session:work").child(0))
+    # The MCP server below a start is its own row, which stops.
+    page.table.select_item(tree_item(page, "local", "session:work").child(0))
     assert page.current().key == "mcp:fetch" and page.stop_button.isEnabled()
     page.open_part(pod)  # stands for no row of its own: the selection stays
     assert page.current().key == "mcp:fetch"

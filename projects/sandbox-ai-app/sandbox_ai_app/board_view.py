@@ -29,14 +29,16 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import applog, backend, board as B
+from . import applog, backend, board as B, widgets
+from .prerequisites import Prerequisites
 from . import help_view, labels as OL, project_trust as PT, rules_tools, tables, theme
 from .files import printable
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
+from .copying import copy_entries
 from .i18n import tr
 from .widgets import (
-    MONO, ElidedLabel, StartControls, ask_first, background, disclosure, flow, inform, plain_label, safe_tooltip, warn,
+    MONO, ElidedLabel, StartControls, ask_first, background, confirm, disclosure, flow, inform, plain_label, safe_tooltip, warn,
 )
 
 NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
@@ -317,11 +319,16 @@ class NodeItem(QGraphicsRectItem):
         self.setPos(node.x, node.y)
         self.update_from(node, None, True)
 
-    def update_from(self, node, level, included):
+    def update_from(self, node, level, included, why=()):
         """The node's texts, the colour of its worst problem and whether it counts; nothing is done again when none
-        of them changed (every step of the board updates every node)."""
+        of them changed (every step of the board updates every node). WHY: its problems' texts - a part outlined in
+        red says why on it (its first error) and in its tooltip (all of them)."""
         color = {"error": theme.color("bad"), "warning": theme.color("warn")}.get(level, theme.colors()["border"])
-        shown = (node.title(), summary(node), tr(B.KINDS[node.kind].help), color, bool(level), bool(included))
+        detail = summary(node)
+        if why:
+            detail = ("✘ " if level == "error" else "! ") + why[0]
+        help_text = "\n".join([*(f"- {text}" for text in why), *([""] if why else []), tr(B.KINDS[node.kind].help)])
+        shown = (node.title(), detail, help_text, color, bool(level), bool(included))
         if shown == getattr(self, "shown", None):
             return
         self.shown = shown
@@ -918,6 +925,7 @@ class PartsList(QListWidget):
         add = menu.addAction(tr("Add to the board"), lambda: self.chosen.emit(item.data(Qt.ItemDataRole.UserRole)))
         add.setEnabled(bool(item.flags() & Qt.ItemFlag.ItemIsEnabled))
         menu.addAction(tr("What is this?"), lambda: self.explain(self.row(item)))
+        copy_entries(menu, self, event.pos())
         menu.exec(event.globalPos())
 
 
@@ -965,8 +973,10 @@ def summary(node):
         reaches, hosts, vpn = B.server_network(definition)
         network = (", ".join(hosts) or tr("every destination")) if reaches else tr("no network")
         return printable(tr("VPN {vpn} · {network}", vpn=vpn, network=network) if vpn else network)
-    if node.kind == "llm":
-        return tr("its address and port only")
+    if node.kind == "llm":  # which server (and model, when named) the agent works with, on the board at a glance
+        value = str(props.get("--llm") or "")
+        return printable(f"{elide(value, 40)} · {tr('its address and port only')}") if value \
+            else tr("its address and port only")
     if node.kind == "kits" and props.get("--kit"):
         return printable(", ".join(props["--kit"]))
     if node.kind == "network":
@@ -1128,7 +1138,7 @@ class HostCombo(QComboBox):
         return True
 
 
-class BoardPage(QWidget):
+class BoardPage(Prerequisites, QWidget):
     """The board of one sandbox, its checks, and Apply / Dry run / Start."""
     opened = Signal(str)  # a project folder was opened
 
@@ -1148,6 +1158,7 @@ class BoardPage(QWidget):
         self.project_request = None  # the window: open a folder dropped on the board as the project (in its tab)
         self.inspector_request = None  # the window: show the inspector's panel again (a part was selected)
         self.fold_request = None  # the window: fold the inspector's docked panel (Esc, the empty canvas); True if so
+        self.close_request = None  # the window: close the properties, folded or floating (their OK and Cancel)
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
         self.llm_servers, self.llm_loading = None, False  # sandbox-ai llm list --json, for the agent's Model server
         self.state, self.saved_boards, self.restored = None, {}, set()  # drafts and zoom kept between starts
@@ -1287,6 +1298,10 @@ class BoardPage(QWidget):
         findings_layout.addWidget(self.score)
         findings_layout.addWidget(self.findings, 1)
         self.findings_panel.hide()
+        # The panels are the Board's wherever they are (in the window: docks of their own): a dialog of one of them
+        # veils the Board, a dialog of the Board veils them too (widgets.page_of, veil_also).
+        for panel in (self.parts_panel, right, self.findings_panel):
+            panel.veil_page = self
         split.addWidget(self.parts_panel)
         split.addWidget(self.view)
         split.addWidget(right)
@@ -2056,13 +2071,17 @@ class BoardPage(QWidget):
     def refresh(self):
         problems = B.problems(self.sai, self.board, self.policy())
         score, badges = B.badges(self.board, self.policy())
-        levels = {}
+        levels, why = {}, {}
         for problem in problems:
             if problem.node is not None and levels.get(problem.node) != "error":
                 levels[problem.node] = problem.level
+        for problem in sorted(problems, key=lambda p: p.level != "error"):  # errors first
+            if problem.node is not None:
+                why.setdefault(problem.node, []).append(problem.text)
         for node in self.board.nodes:
             if node.id in self.items:
-                self.items[node.id].update_from(node, levels.get(node.id), self.board.connected(node))
+                self.items[node.id].update_from(node, levels.get(node.id), self.board.connected(node),
+                                                tuple(why.get(node.id, ())))
         self.findings.clear()
         for problem in problems:
             item = QListWidgetItem(("✘ " if problem.level == "error" else "! ") + problem.text)
@@ -2098,7 +2117,7 @@ class BoardPage(QWidget):
         self.check_token += 1
         token = self.check_token
         self.check_running, self.check_pending = True, False
-        background(self.sai.host_dry_run, host, agent, B.launcher_argv(self.sai, self.board, local=host == LOCAL),
+        background(self.sai.host_dry_run, host, agent, B.check_argv(self.sai, self.board, local=host == LOCAL),
                    timeout=120,
                    done=lambda result, error: self.checked(token, result, error, host))
 
@@ -2172,6 +2191,10 @@ class BoardPage(QWidget):
         if self.inspector_request is not None:
             self.inspector_request()
 
+    def veil_also(self):
+        """What a dialog of the Board veils besides the page: its panels (in docks of the window)."""
+        return [self.parts_panel, self.side, self.findings_panel]
+
     def fold_inspector(self):
         """Esc or a click on the empty canvas: the inspector's panel folds to its strip if it is docked and unfolded
         (a floating one stays as it is). True if it folded."""
@@ -2234,7 +2257,10 @@ class BoardPage(QWidget):
         if not keep and self.undo is getattr(self, "edit_stack", None) and self.undo.index() != self.edit_index:
             self.undo.setIndex(self.edit_index)
         self.edit_index = self.undo.index()
-        self.fold_inspector()
+        if self.close_request is not None:
+            self.close_request()
+        else:
+            self.fold_inspector()
         self.inspect_timer.start()
 
     def inspect_rows(self, node):
@@ -2576,7 +2602,18 @@ class BoardPage(QWidget):
         combo.activated.connect(lambda _i: self.set_prop(node.id, "model", models.combo_value(combo)))
         combo.lineEdit().editingFinished.connect(lambda: self.set_prop(node.id, "model", models.combo_value(combo)))
         from . import wizard_llm as WL
-        if WL.uses_server(self.board):  # the launcher refuses --model with --llm: the model is the server's
+        used = WL.used_model(self.board, self.llm_servers)
+        if used is not None:  # the launcher refuses --model with --llm: the model is the server's, shown as such
+            model, source = used
+            name, _ = WL.parse_value(self.board.first("llm").props.get("--llm"))
+            shown = {"named": tr("{model} (named with the server)", model=model),
+                     "default": tr("{model} (the default model of {name})", model=model, name=name),
+                     "only": tr("{model} (the only model of {name})", model=model, name=name)}.get(
+                source, tr("the default of {name} (the server decides; choose NAME:MODEL to name one)", name=name))
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem(printable(shown), "")
+            combo.blockSignals(False)
             combo.setEnabled(False)
             combo.setToolTip(tr("With a model server the model is the server's: choose NAME:MODEL as the model "
                                 "server"))
@@ -2692,9 +2729,9 @@ class BoardPage(QWidget):
         if box is None:
             return
         note = plain_label(f"{AC.WARN} {tr(AC.ALLOW_HELP)}", role="notice-warn")
-        note.setVisible(AC.warned("--ask", box.currentText()))
         box.currentIndexChanged.connect(lambda _i, b=box, n=note: n.setVisible(AC.warned("--ask", b.currentText())))
         self.inspector.addRow("", note)
+        note.setVisible(AC.warned("--ask", box.currentText()))  # (in the inspector first: no window of its own)
 
     def disable_if_forbidden(self, widget, option):
         if None in self.forbidden.get(option, set()):
@@ -3041,11 +3078,60 @@ class BoardPage(QWidget):
         board = presets.build(self.sai, preset, directory, agent=self.default_agent(), values=values,
                               grid=self.grid(), backend=self.settings().get("default_backend"))
         self.load(board, directory, positioned=True)
-        left = B.placeholders(board)
-        if left:
-            self.show_notice(tr("Placeholders to fill in: {count}. Select the parts outlined in red.",
-                                count=len(left)), "notice-warn")
+        if B.placeholders(board) and values is not None:  # values given and some left empty: asked again, by name
+            self.fill_in()
+        self.say_left_to_fill()
+        self.check_prerequisites(why="preset")  # what the preset needs (an identity, an image variant) made now
         return board
+
+    def prerequisite_argv(self):
+        """The launcher options the board starts with (what prerequisites.Prerequisites reads its needs from)."""
+        return B.launcher_argv(self.sai, self.board, local=self.host() == LOCAL)
+
+    def prerequisite_agent(self):
+        return B.values(self.board)[0]
+
+    def prerequisite_own_servers(self):
+        return set(B.project_servers(self.board))
+
+    def prerequisite_context(self):
+        return (self.host(), id(self.board), str(getattr(self, "directory", "") or ""))
+
+    def say_left_to_fill(self):
+        """The placeholders still to fill in, by the preset's names for them (the parts are outlined in red)."""
+        left = B.placeholders(self.board)
+        if left:
+            names = ", ".join(B.placeholder_label(self.board, marker) for marker, _ in left)
+            self.show_notice(tr("To fill in: {names}. Start asks for them; the parts are outlined in red.",
+                                names=printable(names)), "notice-warn")
+
+    def fill_in(self):
+        """A form for every placeholder still on the board (the preset's labels and hints, the same fields as the
+        gallery's): what is filled in goes onto the board as one undo step. True when none is left."""
+        left = B.placeholders(self.board)
+        if not left:
+            return True
+        from .preset_gallery import PlaceholderForm
+        from . import presets as PR
+
+        class Left:  # what PlaceholderForm reads of a preset
+            agent = None
+            title = tr("the board")
+            placeholders = tuple(PR.Placeholder(marker, B.placeholder_label(self.board, marker),
+                                                (self.board.labels.get(marker) or ["", ""])[1] if
+                                                len(self.board.labels.get(marker) or []) > 1 else "")
+                                 for marker, _ in left)
+
+            @staticmethod
+            def text(value):
+                return value
+        form = PlaceholderForm(self.sai, Left, self, agent=B.values(self.board)[0], host=self.host())
+        if widgets.AUTO_ANSWER is not None or form.exec() != QDialog.DialogCode.Accepted:
+            return False
+        values = {k: v for k, v in (form.values() or {}).items() if str(v or "").strip()}
+        if values:
+            self.change(tr("Fill in"), lambda: B.fill(self.board, values))
+        return not B.placeholders(self.board)
 
     def new_from_template(self, name=None):
         """A built-in preset by name, its placeholders left to fill in (kept for older callers)."""
@@ -3187,7 +3273,7 @@ class BoardPage(QWidget):
         agent, _, _ = B.values(self.board)
         self.read_host_options(self.host(), agent, now=True)  # on demand, also after a failed read
         background(self.sai.host_dry_run, self.host(), agent,
-                   B.launcher_argv(self.sai, self.board, local=self.host() == LOCAL), owner=self,
+                   B.check_argv(self.sai, self.board, local=self.host() == LOCAL), owner=self,
                    source=self.dry_button, timeout=120, done=self.dry_run_done)
 
     def dry_run_done(self, result, error):
@@ -3200,6 +3286,9 @@ class BoardPage(QWidget):
 
     def start(self, embedded=False, session=None):
         """Start exactly the board (--no-config: a project file is not merged in on top)."""
+        if B.placeholders(self.board) and not self.fill_in():  # asked for, by name, before anything else
+            self.say_left_to_fill()
+            return False
         errors = self.errors()
         if errors:
             warn(self, tr("Not started"), "\n".join(p.text for p in errors))
@@ -3236,6 +3325,10 @@ class BoardPage(QWidget):
                                              "it holds only for starts on this machine. On {host}, give it as a "
                                              "ruleset file there (--rules FILE), or start on this machine.",
                                              host=printable(host)))
+            return False
+        # What it needs on the host (an identity, an image variant, a VPN profile, MCP servers) made last, once every
+        # check above passed - nothing is made for a start that is refused anyway; then the start goes on.
+        if self.check_prerequisites(then=lambda: self.start(embedded, session)):
             return False
         if servers:
             return self.start_from_project_file(servers, embedded, session)

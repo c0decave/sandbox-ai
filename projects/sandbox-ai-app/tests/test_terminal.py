@@ -329,3 +329,23 @@ def test_the_app_quits_cleanly_with_terminal_tabs_open(terminal, stub_web, tmp_p
     assert "tabs: 2" in result.stderr, result.stderr[-3000:]
     assert result.returncode == 0, result.stderr[-3000:]
     assert "shared QObject was deleted directly" not in result.stderr and "Fatal Python error" not in result.stderr
+
+
+def test_the_window_is_an_opengl_window_before_the_first_terminal_tab(qapp, monkeypatch):
+    """A web view put into a window made without OpenGL made Qt destroy and make the whole window again (it vanished
+    and came back at the first terminal tab): a hidden OpenGL widget of no size makes it one from the start."""
+    from PySide6.QtWidgets import QMainWindow
+    from sandbox_ai_app import terminal
+    monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
+    window = QMainWindow()
+    try:
+        surface = terminal.prepare_window(window, platform="xcb", environ={})
+        assert surface is not None and surface.parent() is window and surface.isHidden()
+        assert surface.size().isEmpty()
+        assert terminal.prepare_window(window, wanted=False, platform="xcb", environ={}) is None  # a terminal window
+        assert terminal.prepare_window(window, platform="offscreen", environ={}) is None
+        assert terminal.prepare_window(window, platform="xcb", environ={"SANDBOX_AI_APP_NO_GL_WINDOW": "1"}) is None
+        monkeypatch.setattr(terminal, "available", lambda web=None: (False, "no QtWebEngine"))
+        assert terminal.prepare_window(window, platform="xcb", environ={}) is None
+    finally:
+        window.deleteLater()

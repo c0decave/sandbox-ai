@@ -129,7 +129,12 @@ def test_the_model_servers_of_a_host(sai, monkeypatch):
     assert sai.host_llm_servers("ct1")[0]["models"] == [], "a server that does not answer keeps what was listed"
     monkeypatch.setattr(sai, "llm_endpoints", lambda: [{"name": "here"}])
     sai.calls.clear()
-    assert sai.host_llm_servers("local") == [{"name": "here"}] and sai.calls == [], "this machine's: its own module"
+    # This machine's servers from its own module; one that lists no models is asked for them as another host's is
+    # (one added without --model offered only its bare name).
+    sai.answers[("llm", "models", "here")] = (0, json.dumps([{"name": "qwen3"}]), "")
+    here = sai.host_llm_servers("local")
+    assert here == [{"name": "here", "models": ["qwen3"]}]
+    assert sai.calls and all(call[:2] != ("hosts", "run") for call in sai.calls), "asked here, not over SSH"
 
 
 def test_the_connection_log_of_a_host(sai):

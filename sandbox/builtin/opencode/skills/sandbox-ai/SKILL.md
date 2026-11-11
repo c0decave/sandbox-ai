@@ -62,7 +62,10 @@ answers it, then the name is open for the run (`example.com` itself only if allo
   `.onion` names resolve: every one with `--dns` at the start, else only those on the allow-list
   (`net allow` during the run cannot add one). If the profile has `--socks`,
   `socks5h://127.0.0.1:9050` is Tor's SocksPort (Tor Browser with `TOR_SKIP_LAUNCH=1`,
-  `--proxy-server=socks5://127.0.0.1:9050`, `torsocks`).
+  `--proxy-server=socks5://127.0.0.1:9050`, `torsocks`). Nothing reaches the human's own address:
+  the MCP servers go through the same Tor, `xdg-open` reaches no browser of theirs (give them the
+  URL to open in Tor Browser), and the host's ports stay closed unless they started with
+  `--vpn-bypass-host-ports`. An exit that is no Tor exit ends the run.
 
 ## Security mode
 

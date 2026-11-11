@@ -33,7 +33,6 @@ Standard library only.
 import argparse
 import base64
 import contextlib
-import http.client
 import importlib.util
 import ipaddress
 import json
@@ -41,14 +40,14 @@ import os
 from pathlib import Path
 import re
 import socket
-import ssl
 import stat
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
-import urllib.request
 
+LOADING = threading.RLock()  # the lazily made request handlers
 HERE = Path(__file__).resolve().parent
 
 
@@ -380,6 +379,7 @@ def check_ca(text, source):
     """TEXT holds PEM certificates the TLS library accepts as CAs."""
     if "-----BEGIN CERTIFICATE-----" not in text:
         raise ValueError(f"--ca {source}: no PEM certificate (-----BEGIN CERTIFICATE-----)")
+    import ssl
     try:
         ssl.create_default_context().load_verify_locations(cadata=text)
     except (ssl.SSLError, ValueError) as exc:
@@ -416,42 +416,70 @@ def secret_values(endpoint, get=None):
 
 
 # --- talking to a server from the host (models, check) ---------------------------------------------------
+# urllib.request, http.client and ssl are loaded where a request is made: they take about 20 ms to load, half of an
+# `llm list` (which the app asks every host for), which talks to no server.
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    """A redirect would carry the key to wherever the server points; never followed."""
+_handlers = None
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, f"redirect to {printable(newurl)[:200]} not followed",
-                                     headers, fp)
+
+def handlers():
+    """(NoRedirect, PinnedHTTPConnection, PinnedHTTPHandler), made once, at the first request."""
+    global _handlers
+    if _handlers is None:
+        with LOADING:
+            if _handlers is None:
+                _handlers = http_handlers()
+    return _handlers
+
+
+def http_handlers():
+    import http.client
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        """A redirect would carry the key to wherever the server points; never followed."""
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise urllib.error.HTTPError(req.full_url, code, f"redirect to {printable(newurl)[:200]} not followed",
+                                         headers, fp)
+
+    class PinnedHTTPConnection(http.client.HTTPConnection):
+        """A plain http connection to ADDRESS, the address checked (plain_http_problem) for the URL's host name: not
+        one the name resolves to a moment later."""
+
+        def __init__(self, host, address=None, **kwargs):
+            super().__init__(host, **kwargs)
+            self.pinned = address
+
+        def connect(self):
+            self.sock = socket.create_connection((self.pinned, self.port), self.timeout, self.source_address)
+
+    class PinnedHTTPHandler(urllib.request.HTTPHandler):
+        def __init__(self, address):
+            super().__init__()
+            self.address = address
+
+        def http_open(self, req):
+            return self.do_open(lambda host, **kwargs: PinnedHTTPConnection(host, address=self.address, **kwargs), req)
+
+    return NoRedirect, PinnedHTTPConnection, PinnedHTTPHandler
+
+
+def __getattr__(name):
+    """llm.NoRedirect, llm.PinnedHTTPConnection and llm.PinnedHTTPHandler, made on first use."""
+    names = ("NoRedirect", "PinnedHTTPConnection", "PinnedHTTPHandler")
+    if name in names:
+        return handlers()[names.index(name)]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def tls_context(endpoint):
+    import ssl
     context = ssl.create_default_context()
     ca = ca_text(endpoint)
     if ca:
         context.load_verify_locations(cadata=ca)
     return context
-
-
-class PinnedHTTPConnection(http.client.HTTPConnection):
-    """A plain http connection to ADDRESS, the address checked (plain_http_problem) for the URL's host name: not one
-    the name resolves to a moment later."""
-
-    def __init__(self, host, address=None, **kwargs):
-        super().__init__(host, **kwargs)
-        self.pinned = address
-
-    def connect(self):
-        self.sock = socket.create_connection((self.pinned, self.port), self.timeout, self.source_address)
-
-
-class PinnedHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, address):
-        super().__init__()
-        self.address = address
-
-    def http_open(self, req):
-        return self.do_open(lambda host, **kwargs: PinnedHTTPConnection(host, address=self.address, **kwargs), req)
 
 
 class Client:
@@ -473,8 +501,9 @@ class Client:
             and not endpoint.get("insecure_http")
         context = tls_context(endpoint) if parsed["scheme"] == "https" else None
         self.given = opener
+        import urllib.request
         # A remote server must not be reached through the host's HTTP proxy variables.
-        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
+        self.opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}), handlers()[0](),
                                                             urllib.request.HTTPSHandler(context=context))
 
     def checked_opener(self, resolver=None):
@@ -491,12 +520,15 @@ class Client:
         problem = plain_http_problem(parsed, addresses)
         if problem or not addresses:
             raise ValueError(f"{problem or 'no address'} (the API key would go with it; nothing was sent)")
-        return self.given or urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
-                                                         PinnedHTTPHandler(addresses[0]))
+        import urllib.request
+        no_redirect, _, pinned_handler = handlers()
+        return self.given or urllib.request.build_opener(urllib.request.ProxyHandler({}), no_redirect(),
+                                                         pinned_handler(addresses[0]))
 
     def call(self, path, body=None):
         """(status, bytes) of GET PATH (POST with BODY, a dict) below the endpoint's root; OSError when there is no
         answer at all; ValueError for a key that would go over plain http to a public address."""
+        import urllib.request
         data = None if body is None else json.dumps(body).encode()
         headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
         request = urllib.request.Request(self.endpoint["url"] + path, data=data, headers=headers,
@@ -516,6 +548,7 @@ class Client:
     def json(self, path, parse=json.loads, body=None):
         """The JSON answer of GET PATH (POST with BODY, a dict); ValueError says what went wrong (never with a
         secret)."""
+        import ssl
         try:
             status, data = self.call(path, body)
         except (OSError, ssl.SSLError) as exc:
@@ -1241,12 +1274,13 @@ def model_context(kind, fetch, model, post=None):
     return None
 
 
-def context_window(endpoint, model, get=None, client=None):
+def context_window(endpoint, model, get=None, client=None, behind_vpn=False):
     """The context window of MODEL at ENDPOINT for a start: the one remembered (llm models), else what the server
     reports now (CONTEXT_TIMEOUT per request); None when neither says (or the server sits behind its VPN, which
-    the host does not reach). Never raises: the agent's own guess stays then."""
+    the host does not reach). BEHIND_VPN (a start with --vpn): never asked from this host, whose own address the
+    server would see beside the sandbox's VPN (Tor) exit. Never raises: the agent's own guess stays then."""
     known = context_value((endpoint.get("contexts") or {}).get(model))
-    if known or endpoint.get("vpn") or os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
+    if known or endpoint.get("vpn") or behind_vpn or os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
         return known
     try:
         client = client or Client(endpoint, get, timeout=CONTEXT_TIMEOUT)
@@ -1279,7 +1313,8 @@ def lan_address():
 
 def plain_fetch(url, timeout=DETECT_TIMEOUT):
     """The JSON of GET URL: no proxy (a local server is never reached through one), no redirects."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    import urllib.request
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), handlers()[0]())
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "sandbox-ai"})
     with opener.open(request, timeout=timeout) as response:
         return json.loads(response.read(RESPONSE_LIMIT + 1)[:RESPONSE_LIMIT])
@@ -1699,14 +1734,15 @@ def prepare_home(a, home, replace_private, update_json_defaults, state_limit):
     found, model = selection(a)
     if a.agent == "opencode":
         contexts = dict(found.get("contexts") or {})
-        contexts[model] = context_window(found, model)
+        contexts[model] = context_window(found, model, behind_vpn=bool(getattr(a, "vpn", None)))
         config = opencode_config(found, model, only=a.no_provider_defaults, allowed=selected_models(a) or None,
                                  contexts=contexts)
         replace_private((json.dumps(config, indent=2) + "\n").encode(), home, OPENCODE_CONFIG)
         return [OPENCODE_CONFIG]
     if a.agent == "codex":
         relative = f".codex/{CODEX_PROFILE}.config.toml"
-        replace_private(codex_profile(found, model, context_window(found, model)).encode(), home, relative)
+        context = context_window(found, model, behind_vpn=bool(getattr(a, "vpn", None)))
+        replace_private(codex_profile(found, model, context).encode(), home, relative)
         return [relative]
     written = []
     for relative, apply, limit in ((".claude/settings.json", claude_settings, None), (".claude.json", claude_state,
@@ -1776,6 +1812,7 @@ def probe(client, path):
     """Whether the server has the API at PATH: a POST of an empty object is refused as a bad request by a server
     that has it, and as unknown (404, 405, LM Studio's "Unexpected endpoint") by one that does not. Nothing is
     generated. Returns "yes", "no", "auth" (key refused) or an error text."""
+    import ssl
     try:
         status, data = client.call(path, body={})
     except (OSError, ssl.SSLError) as exc:
@@ -1798,6 +1835,7 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
     """Reachability, TLS, the key, the models and the APIs the agents need, line by line; True if nothing failed.
     TUNNEL (an endpoint added with --vpn: its profile's tunnel, vpn.channel): every lookup, connection and request
     goes through it, as the agent's will."""
+    import ssl
     parsed, failed = endpoint["parsed"], []
 
     def line(ok, text):

@@ -639,10 +639,195 @@ def test_an_image_running_as_tors_user_cannot_go_behind_tor(user, refused):
     import subprocess
     mcp = load("sandbox_mcp_tor_test", "mcp.py")
     inspect = lambda: subprocess.CompletedProcess([], 0, user + "\n", "")  # noqa: E731
+    passwd = lambda: "root:x:0:0::/root:/bin/sh\nnode:x:1000:1000::/home/node:/bin/sh\n"  # noqa: E731
     if refused:
         with pytest.raises(ValueError, match="the user tor's kill switch lets out past Tor"):
-            mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect)
+            mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect, passwd)
     else:
-        mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect)
+        mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect, passwd)
     failed = lambda: subprocess.CompletedProcess([], 125, "", "no such image")  # noqa: E731
     mcp.check_tor_image_user("osint", "missing", failed)  # podman's own error comes at the start
+
+
+def test_an_image_user_whose_uid_is_tors_cannot_go_behind_tor():
+    """Bypass: an image whose USER is an innocent name that its own /etc/passwd maps to uid 950 (tor's): its packets
+    would pass the kill switch as tor's. The uid is read from the image's passwd; an unknown one is refused too."""
+    import subprocess
+    mcp = load("sandbox_mcp_tor_uid_test", "mcp.py")
+    inspect = lambda: subprocess.CompletedProcess([], 0, "scraper\n", "")  # noqa: E731
+    with pytest.raises(ValueError, match=r"'scraper' \(uid 950\).*past Tor"):
+        mcp.check_tor_image_user("osint", "img", inspect, lambda: "scraper:x:950:950::/:/bin/sh\n")
+    with pytest.raises(ValueError, match="whose uid its /etc/passwd does not say"):
+        mcp.check_tor_image_user("osint", "img", inspect, lambda: None)
+    mcp.check_tor_image_user("osint", "img", inspect, lambda: "scraper:x:1001:1001::/:/bin/sh\n")
+
+
+def test_the_image_passwd_is_read_without_starting_the_image(tmp_path):
+    import io
+    import subprocess
+    import tarfile
+    mcp = load("sandbox_mcp_tor_passwd_test", "mcp.py")
+    data = b"app:x:950:950::/:/bin/sh\n"
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo("passwd")
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    commands = []
+
+    def run(command):
+        commands.append(command)
+        if command[1] == "create":
+            return subprocess.CompletedProcess(command, 0, b"c0ffee\n", b"")
+        if command[1] == "cp":
+            return subprocess.CompletedProcess(command, 0, buffer.getvalue(), b"")
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+    assert mcp.image_passwd("img", run) == data.decode()
+    assert commands[0][:2] == ["podman", "create"] and "--network=none" in commands[0]
+    assert ["podman", "cp", "c0ffee:/etc/passwd", "-"] in commands and ["podman", "rm", "--force", "c0ffee"] in commands
+    assert not any(command[1] in ("run", "start") for command in commands)
+    assert mcp.image_passwd("img", lambda command: subprocess.CompletedProcess(command, 125, b"", b"")) is None
+
+
+# --- the guarantee during the run --------------------------------------------------------------------------------
+
+def test_an_exit_that_is_no_tor_exit_is_a_leak_and_ends_the_run(home, tmp_path):
+    """Behind Tor any address the Tor Project does not know as an exit is traffic past Tor, whether it is this host's
+    own or not (a home address that changed, a provider's NAT, another VPN on the host): a leak, which ends the run
+    unless --vpn-check warn. Judged without asking check.torproject.org from this host's own address."""
+    said, stopped, asked = [], [], []
+    a = types.SimpleNamespace(log_dir=str(tmp_path), run_id="r1", vpn_check="stop")
+    seen = tor_inside(ipv4={"ip": "203.0.113.50", "vpn": False, "url": rt.TOR_CHECK})
+    verdict = v.evaluate(tor_profile(), TOR_TUNNEL, seen, {})
+    assert verdict["leaks"] == ["IPv4: the Tor Project says 203.0.113.50 is not a Tor exit"]
+    verdict = v.rechecked(a, tor_profile(), {"tunnel": TOR_TUNNEL}, {"checks": seen}, said.append,
+                          baseline=lambda settings: asked.append(settings) or HOST, stop=lambda: stopped.append(1))
+    assert verdict["leaks"] and stopped == [1] and asked == []
+    assert "the run is stopped: traffic leaves past Tor (start with --vpn-check warn to only be told)" in said
+    # A Tor exit: nothing to say, nothing stopped; a check that got no answer is said, not a leak (Tor is slow).
+    stopped.clear()
+    assert not v.rechecked(a, tor_profile(), {"tunnel": TOR_TUNNEL}, {"checks": tor_inside()}, said.append,
+                           stop=lambda: stopped.append(1))["failures"]
+    stalled = tor_inside(ipv4={"error": "timed out", "kind": "blocked"})
+    verdict = v.rechecked(a, tor_profile(), {"tunnel": TOR_TUNNEL}, {"checks": stalled}, said.append,
+                          stop=lambda: stopped.append(1))
+    assert verdict["failures"] and not verdict["leaks"] and stopped == []
+
+
+def test_tor_is_checked_again_soon_after_the_start_and_never_only_at_it(home):
+    settings = v.check_settings(tor_profile())
+    assert settings["recheck"] == rt.RECHECK and settings["first_recheck"] == rt.FIRST_RECHECK == 60
+    checks = v.profiles_dir() / "checks.json"
+    checks.parent.mkdir(parents=True, exist_ok=True)
+    checks.write_text(json.dumps({"recheck": 0}))  # "only at the start" does not hold for Tor
+    checks.chmod(0o600)
+    assert v.check_settings(tor_profile())["recheck"] == rt.RECHECK
+    checks.write_text(json.dumps({"recheck": 3600}))
+    assert v.check_settings(tor_profile())["first_recheck"] == 60
+    assert "first_recheck" not in v.check_settings({"type": "wireguard", "name": "w"})
+
+
+def test_the_checks_sockets_carry_their_mark(monkeypatch):
+    """The VPN container marks the sockets of its checks and lookups (CHECK_MARK) once it serves, so that the agent's
+    firewall in the namespace lets them pass to the tunnel; without CAP_NET_ADMIN (the baseline's plain container)
+    they stay unmarked rather than fail."""
+    marks = []
+
+    class Socket:
+        fail = False
+
+        def __init__(self, family, kind):
+            self.family, self.kind = family, kind
+
+        def setsockopt(self, level, option, value):
+            if self.fail:
+                raise PermissionError(1, "Operation not permitted")
+            marks.append((option, value))
+
+        def settimeout(self, value):
+            pass
+
+        def connect(self, address):
+            self.address = address
+
+        def close(self):
+            pass
+    monkeypatch.setattr(rt.socket, "socket", Socket)
+    monkeypatch.setattr(rt, "_check_mark", None)
+    rt.check_connection(("203.0.113.5", 443), 5)
+    assert marks == []  # not serving: no mark
+    rt.use_check_mark()
+    sock = rt.check_connection(("2001:db8::5", 443), 5)
+    assert marks == [(getattr(rt.socket, "SO_MARK", 36), rt.CHECK_MARK)] and sock.address == ("2001:db8::5", 443)
+    Socket.fail = True
+    assert rt.check_socket(rt.socket.AF_INET, rt.socket.SOCK_DGRAM).kind == rt.socket.SOCK_DGRAM
+    assert rt.CHECK_MARK not in (rt.MARK, rt.TAILSCALE_MARK[0]) and rt.CHECK_MARK & rt.TAILSCALE_MARK[1] == 0
+
+
+def test_the_agents_firewall_lets_the_marked_checks_pass_before_its_own_rules():
+    rules = s.firewall_rules([], [], proxy={"port": s.PROXY_PORT, "loopback": []}, vpn_mark=f"meta skuid {rt.TOR_UID}",
+                             vpn_rules=v.tor_agent_rules(False, s.PROXY_UID), check_mark=rt.CHECK_MARK)
+    output = chain(rules, "output").splitlines()
+    assert output.index(f"  meta mark {rt.CHECK_MARK:#x} accept") < output.index(f"  ip daddr {rt.TOR_DNS} drop")
+    proxy = chain(rules, "proxy").splitlines()
+    assert proxy.index(f"  meta mark {rt.CHECK_MARK:#x} return") < next(
+        i for i, line in enumerate(proxy) if "redirect to" in line)
+    assert "meta mark" not in s.firewall_rules([], [])  # without a VPN: no exemption at all
+
+
+# --- what a Tor start reaches past Tor: nothing, unless it says so -----------------------------------------------
+
+def tor_args(*extra):
+    v.main(["add", "anon", "--tor"])
+    return s.parse_args(["codex", "--backend", "podman", "--vpn", "anon", *extra])
+
+
+@pytest.mark.parametrize("extra, refused", [
+    ([], None),
+    (["--allow-host-port", "3000"], "the host's port 3000 would be reached past Tor"),
+    (["--allow-host-port", "3000", "--allow-host-port", "11434"], "the host's ports 3000, 11434 would be reached"),
+    (["--allow-host-port", "3000", "--vpn-bypass-host-ports"], None),
+])
+def test_a_tor_start_reaches_the_hosts_ports_only_when_it_says_so(home, extra, refused):
+    """Bypass: a host port is pasta's forward to your loopback, outside the namespace and its kill switch; a local
+    proxy, your own Tor's or VPN's SocksPort, a server that fetches URLs there would reach the internet from your
+    own address."""
+    a = tor_args(*extra)
+    if refused:
+        with pytest.raises(ValueError, match=refused):
+            v.validate(a)
+    else:
+        v.validate(a)
+        assert a.vpn_check_mark == rt.CHECK_MARK
+
+
+def test_the_bypass_belongs_to_a_vpn(home):
+    a = s.parse_args(["codex", "--backend", "podman", "--vpn-bypass-host-ports"])
+    with pytest.raises(ValueError, match="goes with --vpn"):
+        v.validate(a)
+    assert "--vpn-bypass-host-ports" in s.SHORT_OPTIONS and "--vpn-bypass-host-ports" in s.MODES.WEAKENING_OPTIONS
+
+
+def test_an_llm_server_in_the_local_network_is_refused_behind_tor(home, monkeypatch):
+    llm = s.load_llm_module()
+    monkeypatch.setattr(s, "load_llm_module", lambda: llm)  # (a fresh module at each call; vpn.py sees these)
+    found = {"name": "lan", "url": "http://192.168.1.20:8000",
+             "parsed": {"address": "192.168.1.20", "loopback": False, "host": "192.168.1.20"}}
+    monkeypatch.setattr(llm, "selection", lambda a: (found, "m"))
+    a = tor_args()
+    a.llm = "lan"
+    with pytest.raises(ValueError, match="lies in your local network, which a Tor start cannot reach"):
+        v.validate(a)
+    found.update(url="https://llm.example.org", parsed={"address": None, "loopback": False, "host": "llm.example.org"})
+    v.validate(a)  # a server on the internet: through Tor like everything else
+
+
+def test_the_host_does_not_ask_an_llm_server_for_its_context_beside_a_vpn_start():
+    llm = s.load_llm_module()
+
+    class Client:
+        def json(self, *args, **kwargs):
+            raise AssertionError("asked from the host")
+    endpoint = {"kind": "ollama", "url": "https://llm.example.org", "contexts": {}, "vpn": None}
+    assert llm.context_window(endpoint, "m", client=Client(), behind_vpn=True) is None
+    assert llm.context_window(endpoint, "m", client=Client()) is None  # without a VPN it asks (and fails here)

@@ -3,6 +3,7 @@ include LICENSE README.md README_DE.md QUICKSTART.md QUICKSTART_DE.md SANDBOX.md
 include install.sh sandbox-ai
 recursive-include sandbox Containerfile.* build_image.sh release-signers mcp-signers public_suffix_list.dat
 graft sandbox/web
+graft sandbox/launcher
 graft sandbox/presets
 graft sandbox/templates
 graft sandbox/builtin

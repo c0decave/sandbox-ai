@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from . import theme
 from .files import printable
+from .copying import copy_entries
 from .i18n import N_, tr
 from .widgets import plain_label, safe_tooltip
 
@@ -350,11 +351,12 @@ class DoctorView(QWidget):
     def menu(self, point):
         item = self.tree.itemAt(point)
         command = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else ""
-        if not command:
-            return
         menu = QMenu(self)
-        menu.addAction(tr("Copy the fix command"), lambda: self.copy_item(item))
-        menu.exec(self.tree.viewport().mapToGlobal(point))
+        if command:
+            menu.addAction(tr("Copy the fix command"), lambda: self.copy_item(item))
+        copy_entries(menu, self.tree, point)
+        if menu.actions():
+            menu.exec(self.tree.viewport().mapToGlobal(point))
 
 
 def theme_brush(status):

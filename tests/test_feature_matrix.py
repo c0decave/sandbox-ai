@@ -257,7 +257,7 @@ def m(request, tmp_path, monkeypatch, capsys):
         return real_thread(target=lambda *a: None, daemon=True)
     monkeypatch.setattr(s.threading, "Thread", thread)
     mcp = s.load_mcp_module()
-    monkeypatch.setattr(mcp, "ensure_running", lambda name, a: matrix.mcp_started.append(name))
+    monkeypatch.setattr(mcp, "ensure_running", lambda name, a, vpn=None: matrix.mcp_started.append(name))
     monkeypatch.setattr(s, "load_mcp_module", lambda: mcp)
     matrix.vpn = s.load_vpn_module()  # it sees this launcher (with the fakes above) as its own
     monkeypatch.setattr(s, "load_vpn_module", lambda: matrix.vpn)
@@ -1744,8 +1744,9 @@ def subnet_moves_only_the_sandbox(m):
     # Nothing else follows the sandbox's address: the firewall, the proxy's redirect (to loopback), the resolver
     # files and what the proxy allows are those of a start without --subnet.
     assert run.firewall == plain.firewall and "redirect to :" in run.firewall
+    own = re.compile(r" agent-[a-z]+-[0-9a-f]+")  # (the run's own host name differs from run to run)
     for name in ("resolv.conf", "nsswitch.conf", "hosts"):
-        assert run.files[name] == plain.files[name], name
+        assert own.sub("", run.files[name]) == own.sub("", plain.files[name]), name
     assert run.proxy["allow"] == plain.proxy["allow"]
     assert "10.20.0" not in run.firewall + json.dumps(run.proxy) + json.dumps(run.config)
     assert run.run_record["subnets"] == ["10.20.0.0/24"] and plain.run_record["subnets"] == []
@@ -2284,6 +2285,49 @@ def vpn_tor_refusals_and_failed_checks(m):
     assert "FAILED: IPv4: the Tor Project says 203.0.113.50 is not a Tor exit" in run.err
     m.policy(allow_within=["10.0.0.0/16"])
     assert rt.TOR_VIRTUAL_NET not in m.plan("--vpn", "anon")["allow"]  # .onion only where the policy allows it
+
+
+@vpn
+def vpn_tor_reaches_nothing_past_tor(m):
+    """The incident: a Tor start must reach nothing from your own address. The host's ports (pasta's forwards to your
+    loopback, where a proxy, your own Tor or a server that fetches URLs may listen) are refused unless the start
+    accepts them; no URL of the agent goes to your browser; the VPN container's checks during the run pass the
+    agent's firewall (else they measured the agent's proxy, not Tor)."""
+    rt, tunnel, inside = tor_vpn(m)
+    if m.backend == "bwrap":
+        return
+    m.refused("--vpn", "anon", "--allow-host-port", "3000", match="the host's port 3000 would be reached past Tor")
+    m.refused("--allow-host-port", "3000", "--vpn-bypass-host-ports", match="--vpn-bypass-host-ports goes with --vpn")
+    m.fake_vpn(tunnel=tunnel, inside=inside)
+    m.threads.clear()
+    run = m.run("--vpn", "anon")
+    assert run.run_record["vpn_type"] == "tor" and run.run_record["vpn_bypass_host_ports"] is False
+    # Bypass: the agent's xdg-open (an OAuth page, a URL it wants opened) reaching your browser, which would fetch it
+    # from your own address. No relay, no question, nothing opened.
+    assert "BROWSER" not in run.env and not run.env.get("PATH", "").startswith("/sandbox/session/bin:")
+    assert "serve_browser" not in m.threads and str(s.BROWSER_DIR) not in run.joined
+    assert run.config["ask"] is True  # the other questions are asked as always
+    # The checks during the run: marked, they pass the agent's firewall before tor's DNSPort is closed to it, and
+    # are not handed to the connection proxy; the kill switch still sends them through Tor.
+    marked = f"  meta mark {rt.CHECK_MARK:#x} accept"
+    assert run.firewall.index(marked) < run.firewall.index(f"  ip daddr {rt.TOR_DNS} drop")
+    assert run.firewall.index(f"  meta mark {rt.CHECK_MARK:#x} return") < run.firewall.index("redirect to :")
+    m.fake_vpn(tunnel=tunnel, inside=inside)
+    run = m.run("--vpn", "anon", "--allow-host-port", "3000", "--vpn-bypass-host-ports")
+    assert run.run_record["vpn_bypass_host_ports"] is True and "-T,3000" in ",".join(run.create)
+
+
+@vpn
+def vpn_other_than_tor_keeps_the_browser_and_host_ports(m):
+    m.vpn_profile()
+    if m.backend == "bwrap":
+        return
+    m.fake_vpn()
+    m.threads.clear()
+    run = m.run("--vpn", "corp", "--allow-host-port", "3000")
+    assert run.run_record["vpn_type"] == "wireguard" and "serve_browser" in m.threads
+    assert run.env["BROWSER"] == "/sandbox/session/bin/xdg-open"
+    assert f"  meta mark {m.vpn.runtime().CHECK_MARK:#x} accept" in run.firewall
 
 
 @vpn

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QToolTip, QVBoxLayout, QWidget,
 )
 
-from . import theme
+from . import theme, widgets
 from .files import printable
 from .host_choice import on_host
 from .i18n import tr
@@ -526,6 +526,10 @@ class ImagesPage(QWidget):
         self.images = table([tr("Image"), tr("Agent"), tr("Built"), tr("Extension"), tr("Agent version"),
                              tr("Created"), tr("Size"), tr("Name")], stretch=0, compact=(1, 2, 4, 5, 6))
         self.images.setAccessibleName(tr("Images"))
+        # several at once (Ctrl, Shift): Delete variant… (and the Delete key) takes the variants among them; the
+        # extension shown and the builds are the first one's
+        widgets.multi_select(self.images)
+        widgets.delete_key(self.images, lambda: self.delete_variant(), tr("Delete variant…"))
         self.images.itemSelectionChanged.connect(self.selection_changed)
         self.asking = False  # selection_changed's question is open
         images_layout.addWidget(self.images)
@@ -688,9 +692,10 @@ class ImagesPage(QWidget):
     def host(self):
         return self.hosts.host() or LOCAL
 
-    def run_argv(self, *args):
-        """argv of `sandbox-ai ARGS` on the host chosen (without a terminal)."""
-        return self.sai.host_command(self.host(), *args)
+    def run_argv(self, *args, host=None):
+        """argv of `sandbox-ai ARGS` on HOST (default: the one chosen; one taken before a question or dialog: the
+        chooser may show another by the answer), without a terminal."""
+        return self.sai.host_command(self.host() if host is None else host, *args)
 
     def host_changed(self):
         """Another host: nothing of the last one stays (its lists, its extension in the editor)."""
@@ -754,10 +759,19 @@ class ImagesPage(QWidget):
         entry = self.entry()
         return entry["target"] if entry else None
 
+    def chosen_entries(self):
+        """The images and variants selected, top to bottom."""
+        keys = selected_keys(self.images)
+        by_target = {e["target"]: e for e in self.entries}
+        return [by_target[key] for key in keys if key in by_target]
+
     def update_buttons(self):
         entry = self.entry()
-        self.build_button.setEnabled(entry is not None)
-        self.delete_button.setEnabled(bool(entry and entry["variant"]))
+        chosen = self.chosen_entries()
+        several = len(chosen) > 1
+        widgets.set_enabled(self.build_button, entry is not None and not several,
+                            tr("Acts on one row: {count} are selected.", count=len(chosen)) if several else None)
+        self.delete_button.setEnabled(any(e["variant"] for e in chosen) if several else bool(entry and entry["variant"]))
 
     def selection_changed(self):
         if self.asking:  # the question below is open: its answer decides where the selection goes
@@ -792,9 +806,10 @@ class ImagesPage(QWidget):
 
     rebuild = build
 
-    def start_build(self, target, options, embedded=None):
-        """`sandbox-ai build [OPTIONS] TARGET` in a terminal on the host chosen (ssh -tt for another host)."""
-        host = self.host()
+    def start_build(self, target, options, embedded=None, host=None):
+        """`sandbox-ai build [OPTIONS] TARGET` in a terminal on HOST (default: the one chosen; ssh -tt for another
+        host)."""
+        host = self.host() if host is None else host
         try:
             argv = self.sai.command("build", *(["--extension-only"] if options.get("extension_only") else []),
                                     target) if host == LOCAL and not any(
@@ -817,9 +832,10 @@ class ImagesPage(QWidget):
         if self.dirty() and target == self.target:
             warn(self, tr("Images"), tr("Save the extension first: a build uses what is saved."))
             return
+        host = self.host()
         dialog = BuildDialog(self, target)
         if dialog.exec():
-            self.start_build(target, dialog.options())
+            self.start_build(target, dialog.options(), host=host)
 
     def build_all(self):
         host = self.host()
@@ -913,6 +929,7 @@ class ImagesPage(QWidget):
     def add_file(self):
         if self.description is None:
             return
+        editing = (self.host(), self.target)
         if self.host() != LOCAL:
             # A file of that host: its path there, typed (this machine's file dialog cannot see it).
             from PySide6.QtWidgets import QInputDialog
@@ -929,6 +946,10 @@ class ImagesPage(QWidget):
             return
         dialog = FileTargetDialog(self, source)
         if dialog.exec():
+            if (self.host(), self.target) != editing or self.description is None:
+                warn(self, tr("Images"), tr("Another extension is edited now: {path} was not added.",
+                                            path=printable(source)))
+                return
             self.add_file_entry(source, dialog.target.text().strip(), dialog.mode.currentText().strip())
 
     def add_file_entry(self, source, target, mode):
@@ -1074,15 +1095,17 @@ class ImagesPage(QWidget):
         if module is None:
             warn(self, tr("Images"), tr("This sandbox-ai cannot extend images yet; update it (sandbox-ai update)."))
             return
-        entry = self.entry()
+        entry, host = self.entry(), self.host()
         dialog = NewVariantDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0],
                                   module.valid_name)
         if dialog.exec():
-            self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked())
+            self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked(),
+                                host=host)
 
-    def create_variant(self, name, agent, empty=False):
-        argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []), "--json")
-        host = self.host()
+    def create_variant(self, name, agent, empty=False, host=None):
+        host = self.host() if host is None else host
+        argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []), "--json",
+                             host=host)
         self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name, host),
                       tr("Creating the variant {name}…", name=name), self.new_button)
 
@@ -1100,6 +1123,10 @@ class ImagesPage(QWidget):
             pass
 
     def delete_variant(self, keep_image=False):
+        chosen = self.chosen_entries()
+        if len(chosen) > 1:
+            self.delete_variants([e for e in chosen if e["variant"]], keep_image)
+            return
         entry = self.entry()
         if not entry or not entry["variant"]:
             if keep_image:
@@ -1112,9 +1139,48 @@ class ImagesPage(QWidget):
         host = self.host()
         if not ask_first(self, "image-remove", tr("Delete variant"), on_host(host, text), tr("Delete")):
             return
-        self.task.run(self.run_argv("images", "remove", entry["target"], *(["--keep-image"] if keep_image else [])),
+        self.task.run(self.run_argv("images", "remove", entry["target"], *(["--keep-image"] if keep_image else []),
+                                    host=host),
                       lambda status, out, err: self.deleted(status, out, err, entry["target"], host),
                       tr("Deleting the variant {name}…", name=entry["target"]), self.delete_button)
+
+    def delete_variants(self, entries, keep_image=False):
+        """Delete variant… with several selected: the variants among them (an agent's own image stays), after one
+        question naming them, one after the other; what failed is said together at the end."""
+        if not entries:
+            warn(self, tr("Images"), tr("Select a variant first."))
+            return
+        names = [e["target"] for e in entries]
+        text = widgets.several(tr("Delete these {count} variants? Their images stay; projects that start one with "
+                                  "--image-variant stop working.", count=len(names)) if keep_image else
+                               tr("Delete these {count} variants and their images? Projects that start one with "
+                                  "--image-variant stop working.", count=len(names)), names)
+        host = self.host()
+        if not ask_first(self, "image-remove", tr("Delete variant"), on_host(host, text), tr("Delete")):
+            return
+        outcomes = []
+
+        def step(index):
+            if index == len(names) or host != self.host():
+                if host == self.host():
+                    widgets.report_each(self, tr("Delete variant"), outcomes)
+                    if self.target in names:
+                        self.description, self.target = None, None
+                        self.set_editing(False, tr("Select an image or a variant to edit its extension."))
+                    self.refresh()
+                return
+            name = names[index]
+
+            def done(status, out, err):
+                if status == -2:  # cancelled: the rest are not deleted
+                    step(len(names))
+                    return
+                outcomes.append((name, (status, out, err), None))
+                step(index + 1)
+            self.task.run(self.run_argv("images", "remove", name, *(["--keep-image"] if keep_image else []),
+                                        host=host), done,
+                          tr("Deleting the variant {name}…", name=name), self.delete_button)
+        step(0)
 
     def deleted(self, status, out, err, name, host=None):
         if host is not None and host != self.host():
@@ -1130,7 +1196,7 @@ class ImagesPage(QWidget):
     # -- more: recipes, history, sandbox-ai's own check, dropping an extension --
 
     def new_from_recipe(self):
-        entry = self.entry()
+        entry, host = self.entry(), self.host()
         dialog = RecipeDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0])
         if not dialog.exec():
             return
@@ -1141,7 +1207,8 @@ class ImagesPage(QWidget):
                                         "agent's name."))
             return
         recipe, agent = dialog.recipe.currentData(), dialog.agent.currentData()
-        argv = self.run_argv("images", "recipe", recipe, "--from", agent, *([f"--as={name}"] if name else []))
+        argv = self.run_argv("images", "recipe", recipe, "--from", agent, *([f"--as={name}"] if name else []),
+                             host=host)
         self.task.run(argv, lambda status, out, err: self.recipe_done(status, out, err, recipe),
                       tr("Creating the variant {name}…", name=name or recipe), self.more_button)
 
@@ -1210,6 +1277,6 @@ class ImagesPage(QWidget):
                 "Drop the extension of {name}? Its packages, files and fragment are removed; the next build is the "
                 "base image.", name=entry["target"])), tr("Drop")):
             return
-        self.task.run(self.run_argv("images", "remove", entry["target"]),
+        self.task.run(self.run_argv("images", "remove", entry["target"], host=host),
                       lambda status, out, err: self.deleted(status, out, err, entry["target"], host),
                       tr("Dropping the extension of {name}…", name=entry["target"]), self.more_button)

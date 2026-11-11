@@ -61,6 +61,33 @@ def available(web=WEB):
     return True, ""
 
 
+def prepare_window(window, wanted=True, environ=None, platform=None):
+    """The main WINDOW made an OpenGL window from the start when terminal tabs are WANTED and can run. A web view
+    (QtWebEngine draws through OpenGL) put into a window made without it makes Qt destroy the window and make it
+    again as an OpenGL one: at the first terminal tab the whole window vanished and came back (a tiling window
+    manager laid out every window anew). A hidden OpenGL widget of no size, in the window before it is first shown,
+    gives it that kind at once. None (nothing done) without terminal tabs, on Qt's offscreen platform or with
+    SANDBOX_AI_APP_NO_GL_WINDOW set."""
+    environ = os.environ if environ is None else environ
+    if not wanted or environ.get("SANDBOX_AI_APP_NO_GL_WINDOW") or not available()[0]:
+        return None
+    if platform is None:
+        from PySide6.QtGui import QGuiApplication
+        platform = QGuiApplication.platformName()
+    if platform in ("offscreen", "minimal", "vnc"):
+        return None
+    try:
+        from PySide6.QtOpenGLWidgets import QOpenGLWidget
+    except ImportError:
+        return None
+    surface = QOpenGLWidget(window)
+    surface.setObjectName("openglSurface")
+    surface.setFixedSize(0, 0)
+    surface.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    surface.hide()
+    return surface
+
+
 if not MISSING:
     class LocalOnly(QWebEngineUrlRequestInterceptor):
         """Blocks every request except the page's own files and Qt's qwebchannel.js."""
@@ -236,6 +263,38 @@ def attach_why(entry):
     return tr(ATTACH_WHY[why])
 
 
+OWNER = "\0owner"  # what grouped() adds to an entry: the name of the start it belongs to, "" for none (an MCP server)
+ORPHAN_TIP = N_("An MCP server that belongs to no start that runs: started on its own (sandbox-ai mcp start), or the "
+                "start it was started for ended.")
+
+
+def grouped(host, entries):
+    """ENTRIES (of `sandbox-ai list --json` on HOST) in the order of their groups: each start that belongs to no other
+    one, followed by those that belong to it (start_tree.owners: its MCP servers and helpers, the members of a team
+    it leads), marked with the name of that start (OWNER); then the MCP servers that belong to no start (OWNER "").
+    The entries are copies: what came back is not changed."""
+    from . import backend, start_tree
+    instances = []
+    for entry in entries:
+        instance = backend.listed_instance(host, entry)
+        if instance is not None:
+            instances.append((instance, entry))
+    starts = [i for i, _ in instances]
+    owned = start_tree.owners(starts)
+    alone = set(start_tree.orphans(starts, owned))
+    names = {i.key: i.name for i in starts}
+    below = {}
+    for instance, entry in instances:
+        if instance.key in owned:
+            below.setdefault(owned[instance.key][0], []).append({**entry, OWNER: names[owned[instance.key][0]]})
+    found = []
+    for instance, entry in instances:
+        if instance.key not in owned and instance.key not in alone:
+            found.append(dict(entry))
+            found += below.get(instance.key, [])
+    return found + [{**entry, OWNER: ""} for instance, entry in instances if instance.key in alone]
+
+
 def attach_key(argv):
     """What a terminal's command line stands for when it attaches to a start (one tab per start):
     `sandbox-ai [session] attach NAME` on this machine, or the same over SSH; None for every other command."""
@@ -381,7 +440,7 @@ class TerminalsPage(QWidget):
                                          "it was started; one in tmux opens in a tab with one click"))
         self.sessions_fold.toggled.connect(self.fold_sessions)
         top.addWidget(self.sessions_fold)
-        self.host = QComboBox()
+        self.host = QComboBox(self)  # (a parent at once: load_hosts() shows or hides it - no window of its own)
         self.host.setToolTip(tr("This machine, or a host of sandbox-ai hosts (over SSH)"))
         self.host.setAccessibleName(tr("Host"))
         self.load_hosts()
@@ -496,8 +555,8 @@ class TerminalsPage(QWidget):
         if error is not None or not isinstance(result, list):
             self.problem = printable(str(error) if error is not None else tr("not a list"))[:300]
         else:
-            self.entries = [e for e in result if isinstance(e, dict) and isinstance(e.get("name"), str)
-                            and e.get("state") in ("running", "paused")]
+            self.entries = grouped(host, [e for e in result if isinstance(e, dict) and isinstance(e.get("name"), str)
+                                          and e.get("state") in ("running", "paused")])
             self.problem = ""
         self.show_starts()
 
@@ -525,13 +584,19 @@ class TerminalsPage(QWidget):
         if self.starts is None:
             return
         host = self.chosen_host()
-        rows, colors, open_ = [], [], []
+        rows, colors, open_, tips = [], [], [], []
         for entry in self.entries:
             view = self.open_view(self.start_key(host, entry["name"])) if entry.get("attachable") else None
-            rows.append([printable(entry["name"]), printable(entry.get("agent") or entry.get("kind") or ""),
+            owner = entry.get(OWNER)
+            # What belongs to a start stands below it, indented; an MCP server of no start says so.
+            name = printable(entry["name"])
+            rows.append([f"    ↳ {name}" if owner else name,
+                         printable(entry.get("agent") or entry.get("kind") or ""),
                          tr(STATES.get(entry.get("state"), "running")), printable(entry.get("workspace") or ""),
-                         attach_why(entry)])
+                         attach_why(entry) + (" · " + tr("belongs to no start") if owner == "" else "")])
             colors.append({"running": "ok", "paused": "warn"}.get(entry.get("state")))
+            tips.append(tr("Belongs to {name}", name=printable(owner)) if owner else
+                        tr(ORPHAN_TIP) if owner == "" else None)
             open_.append(view is not None)
         text = tr("{count} running on {host}", count=len(rows), host=host)
         if self.problem:
@@ -543,7 +608,7 @@ class TerminalsPage(QWidget):
         self.shown_rows = signature
         for row in range(self.list.rowCount()):
             self.list.removeCellWidget(row, 4)
-        fill(self.list, rows, colors, keys=[e["name"] for e in self.entries])
+        fill(self.list, rows, colors, tooltips=tips, keys=[e["name"] for e in self.entries])
         for row, entry in enumerate(self.entries):
             if not entry.get("attachable"):
                 continue
