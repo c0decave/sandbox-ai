@@ -32,17 +32,22 @@ PODMAN = shutil.which("podman")
 
 
 def image_ready():
+    """None when Podman and the Tor image are there (SANDBOX_AI_BUILD_TOR=1 builds it), else why not."""
     if not PODMAN:
-        return False
+        return "needs Podman"
     if subprocess.run([PODMAN, "image", "exists", v.TOR_IMAGE], capture_output=True).returncode == 0:
-        return True
-    if os.environ.get("SANDBOX_AI_BUILD_TOR") == "1":
-        built = subprocess.run([sys.executable, str(ROOT / "sandbox-ai"), "build", "tor"], timeout=1800)
-        return built.returncode == 0
-    return False
+        return None
+    if os.environ.get("SANDBOX_AI_BUILD_TOR") != "1":
+        return "needs the Tor image (sandbox-ai build tor, or SANDBOX_AI_BUILD_TOR=1)"
+    built = subprocess.run([str(ROOT / "sandbox-ai"), "build", "tor"], capture_output=True, text=True, timeout=1800)
+    if built.returncode != 0:
+        tail = " | ".join((built.stdout + built.stderr).strip().splitlines()[-12:])
+        return f"sandbox-ai build tor failed ({built.returncode}): {tail}"[:1500]
+    return None
 
 
-pytestmark = pytest.mark.skipif(not image_ready(), reason="needs Podman and the Tor image (sandbox-ai build tor)")
+MISSING = image_ready()
+pytestmark = pytest.mark.skipif(MISSING is not None, reason=MISSING or "")
 
 # Runs in the container in place of `vpn_runtime.py serve`: the runtime's own steps up to tor, with the network off.
 PROBE = r"""

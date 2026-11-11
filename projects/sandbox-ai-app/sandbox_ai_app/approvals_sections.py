@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBox
 from .files import printable
 from .i18n import tr
 from .widgets import (
-    background, compact_combo, confirm, fill, flow, plain_label, row_key, selected_rows, set_enabled, table, warn,
+    ask_first, background, compact_combo, confirm, fill, flow, plain_label, row_key, selected_rows, set_enabled, table, warn,
 )
 
 FOLLOW, ALL = "follow", "all"
@@ -396,15 +396,46 @@ class BlockedSection(QWidget):
             return
         what = "\n".join(f"- {printable(entry.get('what') or '')}" for entry in chosen[:12])
         if action == "allow-run":
-            if not confirm(self, tr("Allow for this run?"), tr("The sandbox may do this until it ends:") + "\n" + what,
-                           tr("Allow for this run")):
+            if not ask_first(self, "net-allow", tr("Allow for this run?"),
+                             tr("The sandbox may do this until it ends:") + "\n" + what, tr("Allow for this run")):
                 return
         elif action == "allow-always":
             text = self.always_text(chosen)
-            if text is None or not confirm(self, tr("Allow always for this project?"), text, tr("Allow always")):
+            if text is None or not ask_first(self, "net-allow", tr("Allow always for this project?"), text,
+                                             tr("Allow always")):
                 return
+        # In the thread, after the question above (ask_first): what each entry needs.
+        def run_actions(action, chosen, records):
+            """Each entry's commands (in the thread): [(entry, (status, out, err))]."""
+            done = []
+            for entry in chosen:
+                run, question = str(entry.get("run") or ""), entry.get("question")
+                option = target_option(entry.get("target"))
+                try:
+                    if action == "ask-again":
+                        result = self.sai.call("approvals", "ask-again", question, timeout=60)
+                    elif action == "deny-run":
+                        result = self.sai.call("approvals", "deny", question, "--scope", "run", timeout=60)
+                    elif action == "allow-run" and question and entry.get("question_kind") != "dns" and not (
+                            entry.get("kind") == "network" and option):
+                        result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
+                    elif option:  # a destination: as sandbox-ai net allow (resolved through the run's VPN or Tor)
+                        keep = ["--keep"] if action == "allow-always" else []
+                        result = self.sai.call("net", "allow", run, *option, *keep, timeout=90)
+                        if question and result[0] == 0:
+                            self.sai.call("approvals", "ask-again", question, timeout=60)  # no remembered deny left
+                    else:  # allow-always for a request or tool call: an exception rule, then allowed for this run
+                        plan = self.sai.module("approvals").rule_exception(records.get(run) or {}, entry, write=True)
+                        result = (0, json.dumps(plan), "")
+                        if question:
+                            result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
+                except (ValueError, OSError) as exc:
+                    result = (1, "", str(exc))
+                done.append((entry, result))
+            return done
+
         records = dict(self.header.runs)
-        self.acting = background(self.run_actions, action, chosen, records, timeout=ACTION_WAIT, work=True,
+        self.acting = background(run_actions, action, chosen, records, timeout=ACTION_WAIT, work=True,
                                  done=lambda result, error: self.acted(action, result, error))
         self.message.setText(tr("Working…"))
         self.update_buttons()
@@ -443,35 +474,6 @@ class BlockedSection(QWidget):
                                 what=printable(entry.get("what")), original=printable(plan.get("original")),
                                 rule=printable(rule), path=printable(plan["path"])))
         return "\n\n".join(lines)
-
-    def run_actions(self, action, chosen, records):
-        """Each entry's commands (in the thread): [(entry, (status, out, err))]."""
-        done = []
-        for entry in chosen:
-            run, question = str(entry.get("run") or ""), entry.get("question")
-            option = target_option(entry.get("target"))
-            try:
-                if action == "ask-again":
-                    result = self.sai.call("approvals", "ask-again", question, timeout=60)
-                elif action == "deny-run":
-                    result = self.sai.call("approvals", "deny", question, "--scope", "run", timeout=60)
-                elif action == "allow-run" and question and entry.get("question_kind") != "dns" and not (
-                        entry.get("kind") == "network" and option):
-                    result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
-                elif option:  # a destination: as sandbox-ai net allow (resolved through the run's VPN or Tor)
-                    keep = ["--keep"] if action == "allow-always" else []
-                    result = self.sai.call("net", "allow", run, *option, *keep, timeout=90)
-                    if question and result[0] == 0:
-                        self.sai.call("approvals", "ask-again", question, timeout=60)  # no remembered deny left
-                else:  # allow-always for a request or tool call: an exception rule, then allowed for this run
-                    plan = self.sai.module("approvals").rule_exception(records.get(run) or {}, entry, write=True)
-                    result = (0, json.dumps(plan), "")
-                    if question:
-                        result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
-            except (ValueError, OSError) as exc:
-                result = (1, "", str(exc))
-            done.append((entry, result))
-        return done
 
     def acted(self, action, result, error):
         self.acting = None
@@ -583,8 +585,8 @@ class AllowedSection(QWidget):
         run = self.header.run()
         if not chosen or run in (None, ALL):
             return
-        if not confirm(self, tr("Revoke?"), tr("The sandbox may no longer reach:") + "\n" +
-                       "\n".join(f"- {printable(r['destination'])}" for r in chosen), tr("Revoke"), destructive=True):
+        if not ask_first(self, "net-revoke", tr("Revoke?"), tr("The sandbox may no longer reach:") + "\n" +
+                         "\n".join(f"- {printable(r['destination'])}" for r in chosen), tr("Revoke")):
             return
         options = [token for r in chosen for token in r["revoke"]]
         self.message.setText(tr("Working…"))

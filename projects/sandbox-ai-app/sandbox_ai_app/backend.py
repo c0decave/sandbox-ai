@@ -3825,6 +3825,8 @@ NEEDS_CONFIRM = {
                     "unless kept)",
 }
 APP_NEEDS_CONFIRM = {
+    # the Approvals page's Allowed now: Revoke takes back what was allowed during the run, at once
+    "net-revoke": "revoking takes back what the running sandbox may reach, at once (open connections to it end)",
     # sandbox-ai session move: no route of the web interface does it
     "session-move": "moving a session stops it here once it runs on the other host (its HOME stays here until it is "
                     "deleted; logins and HOME are not copied)",
