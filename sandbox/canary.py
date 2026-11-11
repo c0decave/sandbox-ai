@@ -1136,6 +1136,9 @@ class Plan:
         self.paused = False
         if marker is not None:
             marker.unlink(missing_ok=True)
+        if getattr(self, "control_dir", None):  # the kill switch asked for while it was paused (sandbox-ai net cut)
+            with contextlib.suppress(Exception):
+                self.launcher.load_starts_module().module("net").apply_pending_cut(self.control_dir)
         self.record({"event": "resumed", "canary": None, "action": "resume", "summary": "resumed"})
         return True
 

@@ -306,7 +306,7 @@ class EditorWindow(QDialog):
         self.where = plain_label(printable(shown), role="secondary")
         self.where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.where)
-        self.notice = plain_label()
+        self.notice = plain_label(selectable=True)
         self.notice.hide()
         layout.addWidget(self.notice)
         self.stack = QStackedWidget()

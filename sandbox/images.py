@@ -9,9 +9,11 @@
                      [--fragment FILE|-] [--clear-fragment] [--show] [--json]
   sandbox-ai images check AGENT|VARIANT [--fragment FILE|-] [--json]
                                                          validate the extension, show the final Containerfile
-  sandbox-ai images recipe media|tor --from AGENT [--as V]  a variant with a ready extension (media: ffmpeg,
+  sandbox-ai images recipe media|tor|dev --from AGENT [--as V]  a variant with a ready extension (media: ffmpeg,
                                                          PulseAudio, espeak-ng, Piper ... for --audio virtual and
-                                                         videos; tor: torsocks, torbrowser-launcher)
+                                                         videos; tor: torsocks, torbrowser-launcher; dev: Podman
+                                                         and tools for developing sandbox-ai, with
+                                                         --nested-containers)
   sandbox-ai images new NAME --from AGENT [--empty]      a variant: localhost/AGENT-sandbox-NAME, started with
                                                          --image-variant NAME
   sandbox-ai images remove AGENT|VARIANT [--keep-image]  drop an extension (and a variant's image)
@@ -858,6 +860,18 @@ RECIPES = {
               "apt": ["ffmpeg", "pulseaudio", "pulseaudio-utils", "sox", "espeak-ng", "imagemagick", "scrot",
                       "x11-apps"],
               "pip": ["piper-tts"]},
+    # Debian's own packages of the image's release (bookworm: Podman 4.3); start the variant with
+    # --nested-containers, which configures Podman for the sandbox (storage in /var/tmp, the agent's network).
+    # uidmap's setuid helpers stay without effect (no new privileges); the agent maps no IDs itself.
+    "dev": {"description": "for developing sandbox-ai itself with --nested-containers: Podman (crun, conmon, "
+                           "fuse-overlayfs, slirp4netns, passt, uidmap), nftables and iproute2 for the kill switch "
+                           "tests, tor for the Tor tests, busybox-static for small local test images, Python's venv "
+                           "and the libraries the app's tests need offscreen (EGL, GL, xkbcommon, fontconfig, D-Bus, "
+                           "Xvfb), spectrwm, xdotool and xwd for the window-manager checks (tests/devtools)",
+            "apt": ["podman", "crun", "conmon", "fuse-overlayfs", "slirp4netns", "passt", "uidmap", "nftables",
+                    "iproute2", "tor", "git", "python3-venv", "busybox-static", "libegl1", "libgl1",
+                    "libxkbcommon0", "libfontconfig1", "libdbus-1-3", "xvfb", "spectrwm", "xdotool", "x11-utils",
+                    "x11-apps"]},
     # tor itself runs in the VPN container (sandbox-ai vpn add NAME --tor); the agent needs only its clients.
     # Tor Browser's libraries (GTK, X11, ALSA, dbus-glib) are in the base image's GUI layer (Playwright's Firefox).
     "tor": {"description": "for a sandbox behind a Tor VPN profile: torsocks (socks5h://127.0.0.1:9050 with vpn add "

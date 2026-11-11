@@ -83,7 +83,7 @@ GROUPS = {
     "Network": ["--ask", "--profile", "--allow-host", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",
-                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--llm"],
+                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm"],
     "Proxy & privacy": ["--mode", "--mode-at-least", "--no-proxy", "--no-inspect", "--rules", "--privacy-check", "--privacy-rules",
                         "--canaries", "--no-canaries", "--telemetry", "--log-dir", "--log-debug"],
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
@@ -93,8 +93,8 @@ GROUPS = {
     "Login": ["--copy-auth", "--no-auth", "--auth-file", "--import-codex-auth"],
     "Display & terminal": ["--gui", "--gui-vnc", "--gui-screen", "--gui-wayland", "--audio", "--tmux", "--no-tmux"],
     "Hardware": ["--device", "--gpu"],
-    "Limits": ["--memory", "--cpus", "--pids"],
-    "Engine": ["--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
+    "Limits": ["--memory", "--cpus", "--pids", "--tmp-size"],
+    "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
 }
 PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--log-dir", "--git-credentials", "--local-config",
                 "--auth-file", "--import-codex-auth", "--gui-vnc", "--kit-dir", "--config", "--runtime", "--device"}
@@ -1318,6 +1318,53 @@ class SandboxAI:
             return 2, "", "invalid name"
         return self.call("mcp", "stop", name, timeout=300)
 
+    # -- the kill switch (sandbox-ai net cut) --
+
+    def cut_supported(self):
+        """Whether this sandbox-ai has the kill switch (sandbox-ai net cut, 0.1.94)."""
+        return "cut" in self.net_commands()
+
+    def cut_run(self, run, mode, host="local"):
+        """`sandbox-ai net cut RUN MODE --json` on HOST (the run with its MCP servers, helpers and team): (status,
+        out, err); the JSON report on stdout says each run's result (cut_report)."""
+        if not valid_run(run) or mode not in CUT_MODES:
+            return 2, "", "invalid run or mode"
+        return self.host_run(host, "net", "cut", run, mode, "--json", timeout=CUT_WAIT)
+
+    def cut_every_host(self, mode):
+        """The emergency stop (MODE "all") or Lift every cut ("off") on this machine and on every host of `sandbox-ai
+        hosts`, the hosts read afresh (not what a page saw last: right after the start it has seen none). A list of
+        hosts that cannot be read is said as the result of "hosts" (this machine is cut all the same)."""
+        try:
+            hosts, problem = list(self.remote_hosts()), None
+        except Exception as exc:  # noqa: BLE001 - this machine is cut regardless; the list's failure is said
+            hosts, problem = [], str(exc) or type(exc).__name__
+        found = self.cut_everywhere(mode, ["local", *hosts])
+        if problem is not None:
+            found["sandbox-ai hosts"] = (1, "", f"the list of hosts could not be read: {problem}")
+        return found
+
+    def cut_everywhere(self, mode, hosts=("local",)):
+        """`sandbox-ai net cut --all-runs MODE --json` on each of HOSTS at once (the emergency stop must not wait for
+        one host after another): {host: (status, out, err)}; a host that fails or does not answer says so."""
+        if mode not in CUT_MODES:
+            raise ValueError("invalid mode")
+        found, threads = {}, []
+
+        def one(host):
+            try:
+                found[host] = self.host_run(host, "net", "cut", "--all-runs", mode, "--json", timeout=CUT_WAIT)
+            except Exception as exc:  # noqa: BLE001 - one host's failure is its own result
+                found[host] = (1, "", str(exc))
+        for host in dict.fromkeys(hosts):
+            thread = threading.Thread(target=one, args=(host,), daemon=True)
+            thread.start()
+            threads.append((host, thread))
+        for host, thread in threads:
+            thread.join(CUT_WAIT + 30)
+            found.setdefault(host, (124, "", "no answer in time"))
+        return found
+
     # -- projects --
 
     def recent_projects(self):
@@ -1508,6 +1555,43 @@ class SandboxAI:
         if not isinstance(document, list):
             raise ValueError("sandbox-ai canaries log --json: not a log")
         return document
+
+    # -- reports (sandbox-ai report): runs, statistics, network and the security report as Markdown, HTML or PDF --
+
+    REPORT_FORMATS = ("pdf", "html", "md")
+
+    def has_report(self):
+        """This sandbox-ai writes reports (report.py, `sandbox-ai report`)."""
+        return (self.directory / "report.py").is_file()
+
+    def report(self, path, kind="pdf", names=(), log_dir=None, parts=True, since=None):
+        """`sandbox-ai report NAME... -f KIND -o PATH` (or --log-dir DIR for every run of a log folder): one report of
+        the starts NAMES (each with its runs and, with PARTS, its MCP servers, helpers and team) written to PATH, from
+        SINCE on (10m, 2h, an ISO time) when given. Returns PATH; ValueError: not written."""
+        if kind not in self.REPORT_FORMATS:
+            raise ValueError(f"no report format {kind!r}")
+        if not valid_directory(path):
+            raise ValueError("not an absolute path for the report")
+        names = list(names or [])
+        if not names and not log_dir:
+            raise ValueError("no start and no log folder for the report")
+        if any(not valid_run(name) for name in names):
+            raise ValueError("invalid start")
+        if log_dir is not None and not valid_directory(log_dir):
+            raise ValueError("not an absolute path for the log folder")
+        args = ["report", "--format", kind, "--output", str(path)]
+        if not parts:
+            args.append("--no-parts")
+        if since:
+            if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z:.+ -]{0,39}", str(since)):
+                raise ValueError("not a time")
+            args += ["--since", str(since)]
+        if log_dir is not None:
+            args += ["--log-dir", str(log_dir)]
+        status, out, err = self.call(*args, "--", *names, timeout=600)
+        if status != 0:
+            raise ValueError((err or out).strip() or f"sandbox-ai report: exit status {status}")
+        return str(path)
 
     # -- safeguards (sandbox-ai safeguards): what refused or ended something in a run, why, and the fix --
 
@@ -3617,6 +3701,33 @@ def valid_run(run):
     return isinstance(run, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run))
 
 
+# The kill switch (sandbox-ai net cut): its modes, and how long one host's answer may take (every run at once there).
+CUT_MODES = ("remote", "local", "api", "all", "off")
+CUT_WAIT = 90
+
+
+def cut_name(value):
+    """VALUE if it names a cut ("api", or modes that hold together: "remote+api"), else None."""
+    parts = value.split("+") if isinstance(value, str) else []
+    return value if parts and all(part in CUT_MODES[:-1] for part in parts) else None
+
+
+def cut_report(result):
+    """The runs of a `sandbox-ai net cut ... --json` RESULT ((status, out, err)): [{"run", "name", "for", "ok", "cut",
+    "error"}], or None when it said no report (an older sandbox-ai, no answer); then its error text explains."""
+    try:
+        report = json.loads(result[1])
+    except (ValueError, TypeError, IndexError):
+        return None
+    runs = report.get("runs") if isinstance(report, dict) else None
+    if not isinstance(runs, list):
+        return None
+    return [{"run": str(entry.get("run") or ""), "name": str(entry.get("name") or entry.get("run") or ""),
+             "for": entry.get("for") if isinstance(entry.get("for"), str) else None, "ok": entry.get("ok") is True,
+             "cut": cut_name(entry.get("cut")),
+             "error": str(entry.get("error") or "")} for entry in runs if isinstance(entry, dict)]
+
+
 def valid_directory(path):
     """An absolute path of one line (never read as an option)."""
     path = str(path or "")
@@ -3714,6 +3825,8 @@ NEEDS_CONFIRM = {
                     "unless kept)",
 }
 APP_NEEDS_CONFIRM = {
+    # the Approvals page's Allowed now: Revoke takes back what was allowed during the run, at once
+    "net-revoke": "revoking takes back what the running sandbox may reach, at once (open connections to it end)",
     # sandbox-ai session move: no route of the web interface does it
     "session-move": "moving a session stops it here once it runs on the other host (its HOME stays here until it is "
                     "deleted; logins and HOME are not copied)",

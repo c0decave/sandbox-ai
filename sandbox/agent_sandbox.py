@@ -349,16 +349,16 @@ SHORT_OPTIONS = {
     "--network": "-nw", "--ip": "-ip",
     "--ip6": "-i6", "--image": "-i", "--podman-url": "-pu", "--binary": "-B", "--runtime": "-rt",
     "--copy-auth": "-ca", "--no-auth": "-na", "--auth-file": "-af", "--import-codex-auth": "-ic",
-    "--image-variant": "-iv",
+    "--image-variant": "-iv", "--nested-containers": "-ct",
     "--copy": "-cp", "--state-dir": "-S", "--kit": "-k", "--kit-dir": "-K", "--no-default-kit": "-nk",
     "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
     "--gui-screen": "-gs", "--audio": "-au", "--gui-vnc": "-gv", "--gui-wayland": "-gw", "--tmux": "-T", "--no-tmux": "-nt",
     "--mcp": "-M", "--helper": "-hl", "--with": "-wa", "--session": "-s", "--name": "-N", "--name-style": "-nv", "--project-name": "-pn", "--keep": "-kp",
     "--no-keep": "-nkp", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
-    "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--ask": "-Q",
+    "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--tmp-size": "-ts", "--ask": "-Q",
     "--secret-env": "-se", "--api-key": "-ky", "--model": "-mm", "--effort": "-ef", "--publish": "-pl", "--git-token-secret": "-gk", "--token-proxy": "-tp", "--git-logins": "-gn", "--rules": "-ru",
     "--log-debug": "-ld", "--llm": "-lm", "--vpn": "-vp", "--vpn-check": "-vc",
-    "--vpn-bypass-host-ports": "-vb", "--mode": "-mo",
+    "--vpn-bypass-host-ports": "-vb", "--vpn-bypass-tcp": "-vt", "--mode": "-mo",
     "--canaries": "-cn", "--no-canaries": "-nn", "--telemetry": "-tm",
 }
 HELP_EPILOG = """\
@@ -399,7 +399,7 @@ HELP_GROUPS = [  # --help: options by topic, in this order
                  "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier", "--allow", "--allow-tcp",
                  "--allow-host-port", "--no-provider-defaults", "--dns", "--nameserver", "--offline",
                  "--egress-all-allow", "--subnet", "--subnet6", "--network", "--ip", "--ip6", "--vpn",
-                 "--vpn-check", "--vpn-bypass-host-ports"]),
+                 "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp"]),
     ("Connection proxy, approvals and privacy", ["--ask", "--rules", "--allow-http", "--privacy-check",
                                                  "--privacy-rules", "--no-inspect", "--no-proxy", "--canaries",
                                                  "--no-canaries", "--telemetry"]),
@@ -411,8 +411,9 @@ HELP_GROUPS = [  # --help: options by topic, in this order
     ("Kits, memory and plugins", ["--kit", "--kit-dir", "--no-default-kit", "--no-memory", "--no-plugins"]),
     ("Sessions, terminal and display", ["--audio", "--name", "--name-style", "--project-name", "--keep", "--no-keep", "--session", "--tmux",
                                         "--no-tmux", "--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"]),
-    ("Hardware and limits", ["--device", "--gpu", "--memory", "--cpus", "--pids"]),
-    ("Engine", ["--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime"]),
+    ("Hardware and limits", ["--device", "--gpu", "--memory", "--cpus", "--pids", "--tmp-size"]),
+    ("Engine", ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary",
+                "--runtime"]),
     ("Logs and checks", ["--log-dir", "--log-debug", "--dry-run", "--probe", "--version", "--help"]),
 ]
 
@@ -519,6 +520,9 @@ def build_parser():
                    help="CPU limit, e.g. 2 or 1.5 (default: half of this host's CPUs; none: no limit)")
     p.add_argument("--pids", default="4096", metavar="N",
                    help="Limit on processes and threads (default: 4096; none: no limit)")
+    p.add_argument("--tmp-size", metavar="SIZE",
+                   help="Podman: the size of /tmp and of /var/tmp each, e.g. 6g (default: half the memory limit; files "
+                        "there are memory, so each at most half of it)")
     p.add_argument("--preset", metavar="NAME",
                    help="Start from the preset NAME (sandbox-ai presets list): its options, MCP servers, ruleset and "
                         "first task; the command line wins over it")
@@ -661,10 +665,22 @@ def build_parser():
                    help="With a Tor profile: let the sandbox reach the host's loopback ports it names (--allow-host-port, "
                         "an --llm server or a Git server on this host) past Tor; whatever listens there reaches the "
                         "internet from your own address. Without it a Tor start refuses them")
+    p.add_argument("--vpn-bypass-tcp", action="append", default=[], metavar="ADDRESS:PORT",
+                   help="With a Tor profile: reach exactly this IPv4 address and TCP port of your local network past "
+                        "Tor (a model server on another machine, --llm); the rest of your network stays closed and "
+                        "everything else goes through Tor. The connection proxy still checks it; whatever listens there "
+                        "could reach the internet from your own address. Repeatable")
     p.add_argument("--image", help="Prebuilt Podman image (default: localhost/<agent>-sandbox:latest); never pulled implicitly")
     p.add_argument("--image-variant", metavar="NAME",
                    help="Your image variant NAME of this agent (sandbox-ai images new NAME --from AGENT): "
                         "localhost/<agent>-sandbox-NAME:latest")
+    p.add_argument("--nested-containers", action="store_true",
+                   help="Podman: the agent may run containers itself (podman, buildah, unshare -rn): it becomes root "
+                        "of a user namespace of its own, with the subordinate IDs of the sandbox but the proxy's and "
+                        "Tor's, /dev/fuse and /dev/net/tun, and fewer system calls blocked. What its containers send "
+                        "leaves through the sandbox's firewall and connection proxy like its own connections. Weakens "
+                        "the isolation: more of your host's kernel is reachable (not in the modes high and paranoid, "
+                        "not behind Tor). Experimental: refused unless SANDBOX_AI_EXPERIMENTAL=nested-containers")
     p.add_argument("--podman-url", metavar="URL", help="Podman service URL, e.g. unix:///example/podman.sock")
     p.add_argument("--binary", metavar="PATH", help="Agent executable (host path with bwrap; image path with podman)")
     p.add_argument("--runtime", action="append", default=[], metavar="DIR", help="bwrap: expose runtime directory read-only at same path")
@@ -3638,6 +3654,8 @@ def validate(a):
     check_rulesets(a)
     check_device_rules(a)
     load_vpn_module().validate(a)  # --vpn, and no VPN key within the sandbox's reach
+    check_nested(a)  # after the VPN's: never behind Tor
+    check_tmp_size(a)
     a.canary_categories = load_canary_module().categories(a)
     a.log_explicit = bool(a.log_dir)
     if a.log_dir is None and proxy_enabled(a):
@@ -4119,7 +4137,10 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
     podman machine, reached only by the supervisor's relays of host ports (runtime.HOST_RELAY_MARK). CHECK_MARK (with
     a VPN: vpn_runtime.CHECK_MARK): the VPN container's own checks and lookups during the run pass this table, neither
     redirected to the proxy nor held by the allow-list, so that they measure the tunnel; the VPN's kill switch still
-    holds them (only a process with CAP_NET_ADMIN can mark a packet, and the agent has none)."""
+    holds them (only a process with CAP_NET_ADMIN can mark a packet, and the agent has none). The chain "cut" is the
+    run's own kill switch (sandbox-ai net cut, runtime.cut_rules): empty until the human cuts the run's network, then
+    it drops what the cut forbids before any other rule of the output chain (only the VPN container's checks come
+    first)."""
     for rule in vpn_rules:
         if not re.fullmatch(r"[a-z0-9 .:/,=-]{1,200}", rule):
             raise ValueError(f"not a firewall rule of a VPN: {rule!r}")
@@ -4135,8 +4156,11 @@ def firewall_rules(networks, addresses, log=False, dns=(), allow_all=False, tcp=
              "  ip6 hoplimit 255 icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept", " }",
              " chain forward { type filter hook forward priority 0; policy drop; }",
              " chain runtime {", " }",
+             # The kill switch (sandbox-ai net cut; runtime.cut_rules fills it during the run): before everything else.
+             " chain cut {", " }",
              " chain output { type filter hook output priority 0; policy drop;",
              *([f"  meta mark {int(check_mark):#x} accept"] if check_mark else []),
+             "  jump cut",
              *[f"  {rule}" for rule in vpn_rules],
              '  oifname "lo" accept', "  ct state established,related accept",
              "  ip6 hoplimit 255 icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept"]
@@ -6546,6 +6570,40 @@ def provider_hosts(a):
     return list(dict.fromkeys(hosts))
 
 
+def killswitch_config(a, hosts):
+    """config.json's "killswitch" (runtime.cut_settings): what the supervisor needs to know of this run to cut its
+    network during the run (sandbox-ai net cut). The model API as the start opened it: the addresses pinned for the
+    provider's hosts (HOSTS and --llm's own pins) on 443 with their names, an --llm server by its addresses and port,
+    or the host's port it listens on. An MCP server's or a probe's sandbox has no model API of its own. Behind Tor only
+    the --vpn-bypass-tcp targets are the local network (everything else lies past Tor). None (said why): more host ports
+    or API addresses than the kill switch tells apart (runtime.CUT_PORTS, CUT_API_LIMIT); the run starts without one."""
+    pinned = {**hosts, **getattr(a, "llm_pins", {})}
+    names = [] if a.mcp_socket_dir or a.probe else [name for name in provider_hosts(a) if name in pinned]
+    https = sorted({str(ipaddress.ip_address(addr)) for name in names for addr in pinned[name]
+                    if "/" not in str(addr)})
+    tcp, loopback = [], []
+    if getattr(a, "llm", None) and not (a.mcp_socket_dir or a.probe):
+        parsed = load_llm_module().selection(a)[0]["parsed"]
+        if parsed["loopback"]:
+            loopback = [int(parsed["port"])]
+        else:
+            tcp = [[str(ipaddress.ip_address(addr)), int(parsed["port"])]
+                   for addr in getattr(a, "llm_addresses", None) or []]
+    tor = bool(getattr(a, "vpn_profile", None)) and a.vpn_profile.get("type") == "tor"
+    bypass = tcp_targets(argparse.Namespace(allow_tcp=[str(v) for v in getattr(a, "vpn_bypass_tcp", None) or []])) \
+        if tor else []
+    config = {"host_ports": host_ports(a), "api": {"https": https, "tcp": tcp, "loopback": loopback, "names": names},
+              "tor": tor, "bypass": [[addr, port] for addr, port in bypass],
+              "machine_host": machine_host() if on_machine(a) else None, "vpn_mark": getattr(a, "vpn_mark", None)}
+    try:
+        RUNTIME.cut_settings(config)  # as the supervisor takes it: what it cannot tell apart, it is never handed
+    except ValueError as exc:
+        print(f"agent-sandbox: note: this run has no kill switch (sandbox-ai net cut): {printable(exc)}",
+              file=sys.stderr)
+        return None
+    return config
+
+
 def hooks_active(a):
     """The agent's own tools have rules in this run (a "tool" rule or default, or a tool whose results are
     untrusted): its hooks are installed. Not in probes and MCP server sandboxes, where no agent runs."""
@@ -6880,6 +6938,7 @@ def register_run(a, run, session):
         # URL of it is opened in your browser (approvals.py), which would reach it from your own address.
         "vpn_type": a.vpn_profile.get("type") if getattr(a, "vpn_profile", None) else None,
         "vpn_bypass_host_ports": bool(getattr(a, "vpn_bypass_host_ports", False)),
+        "vpn_bypass_tcp": list(getattr(a, "vpn_bypass_tcp", None) or []),
         # macOS: the container `sandbox-ai net` reaches the supervisor in (podman exec; runtime.VM_CONTROL_DIR).
         **({"container": f"{pod_name(a, run)}-agent"} if on_machine(a) else {}),
         # sandbox-ai list (and the app and the web, which group by them): the agents --with in this sandbox, and
@@ -6903,6 +6962,10 @@ def register_run(a, run, session):
         "host_relay": True,
         # The MCP servers this run reaches (--mcp, helpers included): sandbox-ai mcp list names whom each serves.
         "mcp_servers": [] if a.mcp_socket_dir else list(dict.fromkeys(a.mcp)),
+        # An MCP server's sandbox: the server it is (sandbox-ai net cut cuts it with the runs it serves).
+        **({"mcp_name": a.mcp_socket_dir.expanduser().parent.name} if a.mcp_socket_dir else {}),
+        # `sandbox-ai net cut` (the kill switch): its supervisor takes the control op "cut" (runs from 0.1.94).
+        **({"net_cut": 1} if getattr(a, "killswitch", True) is not None else {}),
         # --llm NAME[:MODEL]: sandbox-ai list, the app and the web show that server's status beside the start.
         "llm": getattr(a, "llm", None) or None,
         # `sandbox-ai mcp attach NAME START --live`: its supervisor opens relays during the run (control op mcp-open),
@@ -7278,6 +7341,8 @@ def agent_environment(a):
         env["SANDBOX_AI_COMPANIONS"] = " ".join(companions(a))
     if a.tmux_socket_dir:
         env["TMUX_TMPDIR"] = TMUX_DIR
+    if nested(a):
+        env.update(NESTED_ENV)
     if getattr(a, "helper_of", None) and a.agent == "opencode":
         env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"  # the lead shares /work: no plugins or settings from there
     content = {}
@@ -7377,11 +7442,13 @@ def agent_command(a, binary):
     return [binary, *args]
 
 
-def mount_option(src, dest, mode):
+def mount_option(src, dest, mode, nosuid=False):
     if any(c in str(src) + dest for c in (",", "\n", "\r")):
         raise ValueError("Podman bind paths cannot contain commas or newlines")
-    # nodev: device files inside a mounted tree stay unusable (devices only through --device).
-    return ["--mount", f"type=bind,src={src},dst={dest},{'ro' if mode == 'ro' else 'rw'},nodev"]
+    # nodev: device files inside a mounted tree stay unusable (devices only through --device). NOSUID
+    # (--nested-containers): a setuid file made there by one of the agent's IDs gives nothing inside the sandbox.
+    return ["--mount", f"type=bind,src={src},dst={dest},{'ro' if mode == 'ro' else 'rw'},nodev"
+                       + (",nosuid" if nosuid else "")]
 
 
 def pod_commands(a, name, session, home):
@@ -7410,8 +7477,8 @@ def pod_commands(a, name, session, home):
     run = podman_command(a, "run", "--rm", "--pull=never", "--pod", name, "--user=0:0",
            "--read-only", "--cap-drop=ALL", "--security-opt=seccomp=unconfined",
            "--security-opt=apparmor=unconfined", "--security-opt=label=disable",
-           "--tmpfs=/run:rw,nosuid,nodev", f"--tmpfs=/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}",
-           f"--tmpfs=/var/tmp:rw,nosuid,nodev{tmpfs_size(enforced_limits(a)[0])}",
+           "--tmpfs=/run:rw,nosuid,nodev", f"--tmpfs=/tmp:rw,nosuid,nodev{tmp_mount_size(a)}",
+           f"--tmpfs=/var/tmp:rw,nosuid,nodev{tmp_mount_size(a)}",
            f"--tmpfs={WORKSPACES_DIR}:{WORKSPACES_TMPFS}", "--workdir=/work", "--interactive")
     limits = enforced_limits(a)[0]
     if "memory" in limits:
@@ -7426,6 +7493,12 @@ def pod_commands(a, name, session, home):
         run += ["--name", f"{name}-agent"]
     for cap in CAPS + (["NET_BIND_SERVICE"] if a.log_dir else []):
         run += ["--cap-add", cap]
+    if nested(a):
+        # The supervisor maps the sandbox's root into the agent's own user namespace (runtime.nested_setup): the
+        # kernel asks CAP_SETFCAP for that. Firejail drops it with all the others before the agent runs.
+        run += ["--cap-add", "SETFCAP"]
+        for path in nested_devices(a):
+            run += ["--device", path]
     if sys.stdin.isatty() and sys.stdout.isatty():
         run += ["--tty"]
     bindings = [(HERE / "runtime.py", "/sandbox/runtime.py", "ro"),
@@ -7472,6 +7545,8 @@ def pod_commands(a, name, session, home):
         bindings.append((wayland_socket(), WAYLAND_TARGET, "rw"))
     if getattr(a, "proxy_dir", None):
         bindings.append((a.proxy_dir, str(PROXY_DIR), "ro"))
+    if nested(a):
+        bindings.append((session / "containers" / "containers.conf", NESTED_CONF_DROPIN, "ro"))
     if getattr(a, "control_dir", None):
         bindings.append((a.control_dir, str(CONTROL_DIR), "rw"))
     if getattr(a, "browser_dir", None) and on_machine(a):
@@ -7481,14 +7556,226 @@ def pod_commands(a, name, session, home):
     elif getattr(a, "browser_dir", None):
         bindings.append((a.browser_dir, str(BROWSER_DIR), "ro"))
     for src, dest, mode in bindings:
-        run += mount_option(src, dest, mode)
+        run += mount_option(src, dest, mode, nosuid=nested(a))
     for path, kind in devices(a):
         # A directory as a bind mount, not --device: Podman would copy only the devices present now.
-        run += ["--mount", f"type=bind,src={path},dst={path},rw,dev"] if kind == "dir" else ["--device", path]
+        run += ["--mount", f"type=bind,src={path},dst={path},rw,dev" + (",nosuid" if nested(a) else "")] \
+            if kind == "dir" else ["--device", path]
     for key, value in base_env().items():
         run += ["--env", f"{key}={value}"]
     run += ["--entrypoint=/usr/bin/python3", a.image, "-I", "/sandbox/runtime.py", "--internal-bootstrap"]
     return create, run
+
+
+# --nested-containers: the agent runs containers itself as root of a user namespace of its own, which the supervisor
+# makes before Firejail starts (runtime.nested_setup). The devices the engines inside need, where this host has them
+# (without /dev/fuse the images are stored by copying, "vfs"):
+NESTED_DEVICES = ("/dev/fuse", "/dev/net/tun")
+NESTED_ENV = {"CONTAINERS_STORAGE_CONF": "/sandbox/session/containers/storage.conf",
+              # A build's RUN steps in a chroot of their own (no further namespaces of their own to set up).
+              "BUILDAH_ISOLATION": "chroot"}
+# The engines' configuration for the sandbox: a drop-in on top of the image's own containers.conf (CONTAINERS_CONF
+# would replace it, and with it the distribution's choice of network backend and helper paths: Podman then looked
+# for programs the image does not have and failed with "no such file or directory").
+NESTED_CONF_DROPIN = "/etc/containers/containers.conf.d/90-sandbox-ai-nested.conf"
+# Where the images and containers inside are kept: the sandbox's /tmp, a tmpfs (--tmp-size) that goes with the run,
+# so that nothing owned by your subordinate IDs is left in a HOME or a workspace. (Not /var/tmp: inside Firejail that
+# is a tmpfs of Firejail's own, noexec.)
+NESTED_GRAPHROOT = "/tmp/containers/storage"
+
+
+def nested(a):
+    return bool(getattr(a, "nested_containers", False))
+
+
+def nested_reserved_ids():
+    """IDs that nothing in the agent's own user namespace maps to: the connection proxy's (the redirect to the proxy
+    skips its connections), PulseAudio's and tor's (the Tor kill switch lets tor's connections out)."""
+    return sorted({int(RUNTIME.PROXY_UID), int(RUNTIME.AUDIO_UID), int(load_vpn_module().runtime().TOR_UID)})
+
+
+def nested_devices(a):
+    """NESTED_DEVICES this host has (on macOS and with --podman-url the engine's machine is asked, by Podman)."""
+    return [path for path in NESTED_DEVICES if not local_engine(a) or os.path.exists(path)]
+
+
+def nested_storage(a):
+    return "overlay" if "/dev/fuse" in nested_devices(a) else "vfs"
+
+
+EXPERIMENTAL_ENV = "SANDBOX_AI_EXPERIMENTAL"  # comma-separated: what this host opts into before it is done
+
+
+def experimental(name, environ=None):
+    """True if SANDBOX_AI_EXPERIMENTAL names NAME (an option not yet through its live tests)."""
+    value = (os.environ if environ is None else environ).get(EXPERIMENTAL_ENV, "")
+    return name in {part.strip() for part in value.split(",")}
+
+
+def check_nested(a):
+    """--nested-containers: experimental (SANDBOX_AI_EXPERIMENTAL), Podman only, never behind Tor, and /dev/net/tun
+    for the containers' networks."""
+    if not nested(a):
+        return
+    if not experimental("nested-containers"):
+        raise ValueError("--nested-containers is experimental in this release: its live test (Podman inside a "
+                         "sandbox, tests/test_nested_containers_live.py) has not passed yet; to try it anyway: "
+                         f"{EXPERIMENTAL_ENV}=nested-containers sandbox-ai ...")
+    if a.backend != "podman":
+        raise ValueError("--nested-containers needs the Podman backend (the agent's user namespace is made in the "
+                         "pod's container)")
+    if a.podman_url:
+        raise ValueError("--nested-containers with --podman-url: the devices it needs are checked on this host; "
+                         "start it on the machine of that Podman service")
+    if tor_run(a):
+        raise ValueError(f"--nested-containers is refused behind Tor (--vpn {a.vpn}): the kill switch would still "
+                         "hold (tor's user is never mapped for the agent), but the namespaces and system calls it "
+                         "opens reach far more of the kernel, and one kernel bug would show your address; start "
+                         "without one of them")
+    if local_engine(a) and "/dev/net/tun" not in nested_devices(a):
+        raise ValueError("--nested-containers needs /dev/net/tun on this host (the containers' networks: slirp4netns, "
+                         "pasta): sudo modprobe tun")
+
+
+def nested_files(a):
+    """{name: text} in the session directory (NESTED_ENV): the engines' configuration inside the sandbox."""
+    driver = nested_storage(a)
+    containers = "\n".join([
+        "# sandbox-ai --nested-containers: Podman runs as root of the agent's own user namespace. The containers",
+        "# share the agent's network namespace (their connections meet the sandbox's firewall and connection proxy",
+        "# like the agent's own); --network slirp4netns or pasta run there too. No cgroups of their own: the",
+        "# sandbox's limits hold for all of them.",
+        "[containers]", 'netns = "host"', 'utsns = "host"', 'ipcns = "host"', 'cgroupns = "host"',
+        'cgroups = "disabled"', 'log_driver = "k8s-file"', "pids_limit = 0", "default_sysctls = []",
+        'apparmor_profile = "unconfined"', "label = false", "keyring = false",
+        "[engine]", 'cgroup_manager = "cgroupfs"', 'events_logger = "file"', ""])
+    storage = ["[storage]", f'driver = "{driver}"', 'runroot = "/run/containers/storage"',
+               f'graphroot = "{NESTED_GRAPHROOT}"']
+    if driver == "overlay":
+        storage += ["[storage.options.overlay]", 'mount_program = "/usr/bin/fuse-overlayfs"', 'mountopt = "nodev"']
+    return {"containers/containers.conf": containers, "containers/storage.conf": "\n".join(storage) + "\n"}
+
+
+def nested_writable(a):
+    """The sandbox paths of the host folders the agent may write (the writable workspaces, rw --mount, its HOME and,
+    for a session, the tmux socket's folder): where the supervisor gives back, at the end of a nested run, what one
+    of the agent's other IDs left there (runtime.give_back)."""
+    paths = [dest for index, (_, dest) in enumerate(workspace_targets(a)) if workspace_mode(a, index) == "rw"]
+    paths += [parse_mount(value)[1] for value in a.mount if parse_mount(value)[2] == "rw"]
+    paths.append("/root")
+    if a.tmux_socket_dir and not on_machine(a):
+        paths.append(TMUX_DIR)
+    return list(dict.fromkeys(paths))
+
+
+def nested_plan(a):
+    """The dry run's account of --nested-containers, or None."""
+    if not nested(a):
+        return None
+    return {"experimental": True,
+            "user_namespace": "the agent is root of a user namespace of its own (its capabilities count only there)",
+            "reserved_ids": nested_reserved_ids(), "capabilities_added": ["SETFCAP"], "devices": nested_devices(a),
+            "seccomp": "Firejail's default filter but " + ", ".join(
+                name.lstrip("!") for name in RUNTIME.NESTED_SECCOMP.partition("=")[2].split(",")),
+            "storage": {"driver": nested_storage(a), "graphroot": NESTED_GRAPHROOT},
+            "network": "the agent's own: its firewall and connection proxy", "environment": dict(NESTED_ENV),
+            "containers_conf": NESTED_CONF_DROPIN,
+            "host_folders": "every bind mount nosuid and nodev (a setuid file made there gives nothing inside)",
+            "given_back": {"paths": nested_writable(a),
+                           "what": "files and folders the run left owned by another of the sandbox's IDs: given "
+                                   "back to you (your user and group, setuid and setgid bits cleared) when it ends; "
+                                   "after a run that was killed: podman unshare chown -R 0:0 PATH"}}
+
+
+USERNS_RESTRICTION = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")  # Ubuntu 23.10 and later
+
+
+def nested_notes(a):
+    if not nested(a):
+        return []
+    notes = ["--nested-containers is experimental (SANDBOX_AI_EXPERIMENTAL=nested-containers): it has not passed its "
+             "live test yet",
+             "--nested-containers: the agent may run containers (podman, buildah, unshare -rn); it is root of a user "
+             "namespace of its own, which reaches more of your host's kernel; its containers' connections pass the "
+             "sandbox's firewall and connection proxy; their images live in /tmp (--tmp-size) and go with the run",
+             "--nested-containers: it can leave files owned by your subordinate IDs (setuid ones included) in the "
+             "workspaces and the folders it may write; they are mounted nosuid here, and at the end of the run "
+             "everything left so is given back to you (after a run that was killed: podman unshare chown -R 0:0 "
+             "PATH)"]
+    try:
+        restricted = local_engine(a) and USERNS_RESTRICTION.read_text().strip() == "1"
+    except OSError:
+        restricted = False
+    if restricted:
+        notes.append("--nested-containers: this host's AppArmor takes the capabilities of user namespaces that "
+                     "unconfined programs make (kernel.apparmor_restrict_unprivileged_userns=1): unshare -r and "
+                     "rootless engines inside fail; sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 "
+                     "lifts it")
+    return notes
+
+
+SIZE_UNITS = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
+
+
+def size_bytes(value):
+    """Bytes of a size such as 4g, 512m or 1048576."""
+    value = str(value).strip().lower()
+    return int(value[:-1]) * SIZE_UNITS[value[-1]] if value[-1:] in SIZE_UNITS else int(value)
+
+
+MEMINFO = Path("/proc/meminfo")
+
+
+def host_memory(path=None):
+    """Bytes of this host's memory (MemTotal), or None where it cannot be read."""
+    try:
+        for line in Path(path or MEMINFO).read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def tmp_ceiling(a):
+    """(the most --tmp-size may be, what it is): /tmp and /var/tmp each get it, and both are memory, so together they
+    stay within the memory limit (half of it each); with --memory none within half of this host's memory (a quarter
+    each). (None, None) where nothing bounds it (another engine's machine)."""
+    memory = resource_limits(a).get("memory")
+    if memory:
+        return size_bytes(memory) // 2, f"half the memory limit {memory}"
+    total = host_memory() if local_engine(a) else None
+    if total:
+        return total // 4, f"a quarter of this host's memory ({total >> 20} MiB; --memory none)"
+    return None, None
+
+
+def check_tmp_size(a):
+    """--tmp-size SIZE: Podman only, a size with k, m or g or a number of bytes, at least 16m, at most tmp_ceiling."""
+    value = getattr(a, "tmp_size", None)
+    if value is None:
+        return
+    if not re.fullmatch(r"[1-9][0-9]{0,12}[kmg]?", str(value).strip().lower()):
+        raise ValueError(f"--tmp-size expects a size such as 6g or 512m, or a number of bytes: {value!r}")
+    if a.backend != "podman":
+        raise ValueError("--tmp-size needs the Podman backend (Bubblewrap's /tmp has no size of its own)")
+    if size_bytes(value) < 16 << 20:
+        raise ValueError(f"--tmp-size is at least 16m: {value!r}")
+    ceiling, what = tmp_ceiling(a)
+    if ceiling is not None and size_bytes(value) > ceiling:
+        raise ValueError(f"--tmp-size {value} is more than {what}: /tmp and /var/tmp each get it, and files there "
+                         "are memory that counts against the limit; raise --memory as well (twice the size)")
+
+
+def tmp_mount_size(a):
+    """",size=N" for /tmp and /var/tmp: --tmp-size, else half the memory limit (tmpfs_size); with --memory none a
+    quarter of this host's memory each (the kernel's default, half of it each, would let both take all of it)."""
+    if getattr(a, "tmp_size", None):
+        return f",size={size_bytes(a.tmp_size)}"
+    if "memory" not in resource_limits(a):
+        ceiling = tmp_ceiling(a)[0]
+        return f",size={ceiling}" if ceiling else ""
+    return tmpfs_size(enforced_limits(a)[0])
 
 
 _procinfo = None
@@ -8892,7 +9179,7 @@ def launch(argv, floor_by=None):
     for note in git_credentials_file(a)[1] + ([a.llm_vpn_note] if getattr(a, "llm_vpn_note", None) else []) + \
             registry_git_tokens(a)[1]:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
-    for note in device_notes(a):
+    for note in device_notes(a) + nested_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     for note in enforced_limits(a)[1]:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
@@ -8918,6 +9205,9 @@ def launch(argv, floor_by=None):
                                              "nodes": list(grant["nodes"] or grant.get("pending") or [])}
                                             for grant in device_grants(a)],
                           "limits": enforced_limits(a)[0],
+                          "tmp_size": int(tmp_mount_size(a).partition("=")[2] or 0) or None
+                          if a.backend == "podman" else None,
+                          "nested_containers": nested_plan(a),
                           "allow": a.allow, "https_hosts": allowed_hosts(a), "host_wildcards": host_wildcards(a),
                           "https_networks": host_networks(allowed_hosts(a)), "offline": a.offline,
                           "dangerously_skip_permissions": a.dangerously_skip_permissions,
@@ -9075,7 +9365,12 @@ def launch(argv, floor_by=None):
             cleanup.callback(shutil.rmtree, a.proxy_dir, True)
             write_proxy_files(a, a.proxy_dir, hosts, log_name)
         a.sandbox_home = home  # run.json: a workspace added later must not overlap it
+        # The kill switch (sandbox-ai net cut): what it needs to know of this run; None: it has none (said why).
+        a.killswitch = killswitch_config(a, hosts)
         a.control_dir = register_run(a, a.run_id, session)
+        if a.killswitch is not None:
+            # The cuts of the runs this one acts for, when they are cut now: they hold before its agent runs.
+            a.killswitch["cuts"] = load_starts_module().module("net").joined_cuts(a.run_id, a.control_dir)
         cleanup.callback(shutil.rmtree, a.control_dir, True)
         # Before the run's directory goes (callbacks run last first): what `mcp attach --live` wrote into the agent's
         # configuration is taken out again (a later start names the servers it keeps on its command line).
@@ -9113,10 +9408,15 @@ def launch(argv, floor_by=None):
                **({"mode": mode} if mode["refuses"] or mode["approval_scope"] != "always" else {}),
                "ask_blocked": getattr(a, "blocked_approvals", {"hosts": [], "tcp": []}),
                "policy": getattr(a, "policy", {}),  # the supervisor holds run-time changes to it too
+               # The kill switch (sandbox-ai net cut): the model API, the host's ports, Tor; the firewall's cut chain.
+               **({"killswitch": a.killswitch} if a.killswitch is not None else {}),
                "pinned": [*hosts, *a.llm_pins], "wildcards": host_wildcards(a), "watch": [*(dest for _, dest in workspace_targets(a)), "/root", "/tmp",
                          *(parse_mount(m)[1] for m in a.mount)] if a.log_explicit else [],
                # macOS: the sandbox runs in podman machine's VM (runtime.VM_CONTROL_DIR, PortRelay's upstream).
-               **({"machine": {"host": machine_host(), "browser": host_browser(a)}} if on_machine(a) else {})}
+               **({"machine": {"host": machine_host(), "browser": host_browser(a)}} if on_machine(a) else {}),
+               # --nested-containers: the agent's own user namespace, without these IDs (runtime.nested_setup).
+               **({"nested": {"reserved": nested_reserved_ids(), "writable": nested_writable(a)}}
+                  if nested(a) else {})}
         resolv, nsswitch = resolver_files(a)
         files = {"config.json": json.dumps(cfg), "hosts": hosts_file({**hosts, **a.llm_pins}, own_host_names(a)),
                  "resolv.conf": resolv, "nsswitch.conf": nsswitch,
@@ -9134,6 +9434,8 @@ def launch(argv, floor_by=None):
             files["gui.json"] = json.dumps(gui_config(a))
         if getattr(a, "audio", None) == "virtual":
             files["audio.json"] = json.dumps({"kind": "virtual"})
+        if nested(a):
+            files.update(nested_files(a))
         npmrc = load_publish_logins_module().npmrc(publish_kinds(a), publish_logins_of(a)) \
             if getattr(a, "publish", None) else None
         if npmrc:

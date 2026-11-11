@@ -85,15 +85,40 @@ def local_time(text, seconds=False):
     return time.strftime(pattern + (":%S" if seconds else ""), time.localtime(moment))
 
 
-def plain_label(text="", word_wrap=True, role=None):
-    """A label that never interprets its text as HTML (texts from logs and questions come from the agent)."""
+def plain_label(text="", word_wrap=True, role=None, selectable=False):
+    """A label that never interprets its text as HTML (texts from logs and questions come from the agent).
+    SELECTABLE: a message, a status or a refusal - its text can be marked and copied (Ctrl+C, its context menu)."""
     label = QLabel()
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(word_wrap)
     label.setText(str(text))
     if role:
         label.setProperty("role", role)
+    if selectable:
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                      | Qt.TextInteractionFlag.TextSelectableByKeyboard)
     return label
+
+
+def show_text_window(parent, title_text, text):
+    """TEXT whole in a window of its own, to mark and copy (a refusal cut short in a status line)."""
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit, QVBoxLayout
+    dialog = QDialog(parent)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    dialog.setWindowTitle(title_text)
+    layout = QVBoxLayout(dialog)
+    view = QPlainTextEdit(str(text))
+    view.setReadOnly(True)
+    view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+    layout.addWidget(view)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    copy = buttons.addButton(tr("Copy all"), QDialogButtonBox.ButtonRole.ActionRole)
+    copy.clicked.connect(lambda: QApplication.clipboard().setText(str(text)))
+    buttons.rejected.connect(dialog.close)
+    layout.addWidget(buttons)
+    dialog.resize(640, 260)
+    dialog.show()
+    return dialog
 
 
 class ElidedLabel(QLabel):
@@ -105,6 +130,7 @@ class ElidedLabel(QLabel):
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.about = about
         self.elides = True  # cut on purpose (tests/test_layout.py: not a clipped text)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Ctrl+C after a click copies the whole text
         if role:
             self.setProperty("role", role)
 
@@ -118,6 +144,33 @@ class ElidedLabel(QLabel):
     def setText(self, text):  # noqa: N802
         super().setText(str(text))
         self.setToolTip(safe_tooltip(text) if text else "")
+
+    def copy_text(self):
+        QApplication.clipboard().setText(self.text())
+
+    def show_whole(self):
+        if self.text():
+            show_text_window(self, tr("Whole text"), self.text())
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        """Copy the whole text (also Ctrl+C after a click), or show it whole in a window to mark a part."""
+        if not self.text():
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.addAction(tr("Copy"), self.copy_text)
+        menu.addAction(tr("Show the whole text…"), self.show_whole)
+        menu.exec(event.globalPos())
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        self.show_whole()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        from PySide6.QtGui import QKeySequence
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_text()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event):  # noqa: N802
         from PySide6.QtGui import QPainter

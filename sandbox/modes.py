@@ -57,8 +57,8 @@ MODES = {
         "summary": "the launcher's defaults: the agent's provider only, approvals on (the default mode)"},
     "high": {
         "summary": "the provider only, nothing can be opened by options; approvals at most for the run; writes "
-                   "to other hosts are asked; workspaces after the first read-only; no devices or Wayland; "
-                   "privacy check of every push; 4g memory, 2048 processes",
+                   "to other hosts are asked; workspaces after the first read-only; no devices, nested containers "
+                   "or Wayland; privacy check of every push; 4g memory, 2048 processes",
         "privacy_check": "always", "limits": {"memory": "4g", "pids": "2048"}, "approval_scope": "run",
         "other_workspaces_ro": True, "rules": "ask-writes", "taint": "ask-mcp",
         "canaries": {"categories": ["credentials", "home"], "on_read": "ask", "on_send": "stop"}},
@@ -248,6 +248,8 @@ RULES = [
      "it opens hosts beyond the agent's provider (so does a Git token for another server)"),
     (STRICT, lambda a, l: _given(a.allow, "--allow"), "it opens addresses"),
     (STRICT, lambda a, l: _given(a.allow_tcp, "--allow-tcp"), "it opens TCP ports"),
+    (STRICT, lambda a, l: _given(getattr(a, "vpn_bypass_tcp", None) or [], "--vpn-bypass-tcp"),
+     "it reaches an address of your network past Tor, from your own address"),
     (STRICT, lambda a, l: _given(a.allow_host_port, "--allow-host-port"),
      "it opens ports on the host (so does a Git token for a server on this host)"),
     (STRICT, lambda a, l: ("--nameserver " + " ".join(a.nameserver)) if a.nameserver else "--dns" if a.dns
@@ -267,6 +269,8 @@ RULES = [
      "the agents would make calls beyond the model's (plugin downloads, model lists, language servers)"),
     (STRICT, lambda a, l: _given(a.device, "--device"), "the device's driver runs in your host's kernel"),
     (STRICT, lambda a, l: f"--gpu {a.gpu}" if a.gpu else None, "the GPU's driver runs in your host's kernel"),
+    (STRICT, lambda a, l: "--nested-containers" if getattr(a, "nested_containers", False) else None,
+     "the agent gets user namespaces of its own and more system calls, which reach more of your host's kernel"),
     (STRICT, lambda a, l: "--gui-wayland" if a.gui_wayland else None, "it reaches your desktop's compositor"),
     (STRICT, lambda a, l: _given([m for m in a.mount if m.rsplit(":", 1)[-1] == "rw"], "--mount"),
      "the agent could write a host folder"),
@@ -431,7 +435,7 @@ WEAKENING_OPTIONS = frozenset({
     "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",
     "--profile", "--dns", "--nameserver", "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask",
     "--local-config", "--llm", "--preset", "--preset-value", "--vpn-check",  # --vpn-check: a failing VPN used anyway
-    "--vpn-bypass-host-ports",  # the host's ports past Tor
+    "--vpn-bypass-host-ports", "--vpn-bypass-tcp",  # the host's ports, an address of your network past Tor
     # files, devices, displays and sound
     "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
     "--state-dir", "--kit", "--kit-dir", "--mcp",
@@ -444,6 +448,7 @@ WEAKENING_OPTIONS = frozenset({
     "--telemetry",
     # what runs the sandbox, and its limits
     "--runtime", "--binary", "--image", "--image-variant", "--podman-url", "--backend", "--memory", "--cpus", "--pids",
+    "--tmp-size", "--nested-containers",
 })
 
 

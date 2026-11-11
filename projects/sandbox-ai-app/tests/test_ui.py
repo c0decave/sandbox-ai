@@ -1746,7 +1746,7 @@ def test_the_window_in_german(qapp, env, monkeypatch):
     try:
         assert [w.nav.item(i).text() for i in range(w.nav.count())][:7] == [
             "PROJEKT", "Start", "Tafel", "LAUFEND", "Sandboxen & Sitzungen", "Freigaben", "Terminals"]
-        assert w.approvals.allow_button.text() == "Erlauben"
+        assert w.approvals.allow_button.text() == "Einmal erlauben"
         assert w.launch.form.tabText(1) == "Netzwerk"
     finally:
         w.shutdown()

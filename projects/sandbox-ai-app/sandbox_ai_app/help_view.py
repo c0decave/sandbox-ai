@@ -844,7 +844,7 @@ class TourSearchDialog(QDialog):
         self.results = QListWidget()
         self.results.itemActivated.connect(lambda item: self.start(item))
         layout.addWidget(self.results, 1)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         layout.addWidget(self.status)
         buttons = QHBoxLayout()
         buttons.addStretch()

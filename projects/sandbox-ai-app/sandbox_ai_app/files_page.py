@@ -755,7 +755,7 @@ class FilesPage(QWidget):
         self.sai, self.projects = sai, projects
         self.others, self.last_report = [], []
         self.ranges = files.subordinate_ranges()
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         # Copied or cut items (Ctrl+C, Ctrl+X), what is dragged now, the editors and dialogs open.
         self.clipboard, self.drag, self.editors, self.dialogs = None, None, [], []
         self.left = Pane(self, "sandbox")
@@ -935,7 +935,9 @@ class FilesPage(QWidget):
         Key, plain = Qt.Key, modifiers & ~Qt.KeyboardModifier.KeypadModifier
         control = bool(plain & Qt.KeyboardModifier.ControlModifier)
         if control:
-            return key in (Key.Key_A, Key.Key_C, Key.Key_R, Key.Key_V, Key.Key_X)
+            # Ctrl alone: with Shift or Alt it is the window's (Ctrl+Shift+X: the emergency stop of every sandbox).
+            return not plain & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier) and \
+                key in (Key.Key_A, Key.Key_C, Key.Key_R, Key.Key_V, Key.Key_X)
         if key == Key.Key_F10:
             return bool(plain & Qt.KeyboardModifier.ShiftModifier)  # (F10 alone: the window's)
         return key in (Key.Key_F2, Key.Key_F3, Key.Key_F4, Key.Key_F5, Key.Key_F6, Key.Key_F7, Key.Key_F8,
@@ -947,6 +949,8 @@ class FilesPage(QWidget):
         control = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
         shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if control and (shift or alt) and key in (Key.Key_A, Key.Key_C, Key.Key_R, Key.Key_V, Key.Key_X):
+            return False  # the window's keys (Ctrl+Shift+X: the emergency stop), never the list's
         self.activate(pane)
         changing = (Key.Key_F2, Key.Key_F5, Key.Key_F6, Key.Key_F7, Key.Key_F8, Key.Key_Delete)
         if self.task.running and (key in changing or (control and key == Key.Key_V)):

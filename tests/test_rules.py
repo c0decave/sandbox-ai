@@ -815,7 +815,7 @@ def test_an_ask_rule_waits_for_the_answer_in_the_approvals_directory(tmp_path):
         assert approvals.describe(question).startswith('call the MCP tool delete_file of files with {"path": "/work/a"}')
         calls = relay.records("call")
         assert calls[0]["question"] == question["id"] and calls[0]["approval"] == {
-            "decision": "allow", "scope": "run", "reason": "answered"}
+            "decision": "allow", "scope": "run", "reason": "answered", "question": question["id"]}
         assert "question" not in calls[1] and calls[1]["approval"]["scope"] == "run"  # asked once for the run
         assert relay.ran() == ["delete_file", "delete_file"]
         # Another rule's question is asked anew; a deny for once refuses this call only.
@@ -1147,3 +1147,36 @@ def test_the_relay_entry_point_takes_the_gateway(tmp_path):
     bad = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/runtime.py"), "--internal-mcp-serve", "/x.sock",
                           "--gateway", "not-base64!", "--", "true"], capture_output=True, text=True, timeout=30)
     assert bad.returncode == 1
+
+
+def test_the_agents_model_api_is_not_held_by_rules_for_every_host():
+    """0.1.94: a ruleset's rules for every host ("*") and its default are not meant for the agent's own model API -
+    a Tor start's "writes" rule asked about every chat completion to the --llm server, and an unanswered one
+    stopped the agent for the run. A rule naming the host still holds; so does the administrator's policy."""
+    writes = {"id": "writes", "host": "*", "methods": ["POST"], "decision": "ask", "reason": "sends data"}
+    preset = {"name": "tor-researcher", "version": 1, "http": [writes]}
+    rules = rt.Ruleset([preset], {}, ["api.anthropic.com"])
+    llm = rt.Ruleset.request("192.0.2.20:1234", "POST", "/v1/chat/completions", [], "192.0.2.20")
+    assert rules.http(llm)["decision"] == "ask"  # not known as the model API: asked
+    assert rules.http({**llm, "model_api": True})["decision"] == "allow"
+    provider = rt.Ruleset.request("api.anthropic.com", "POST", "/v1/messages", [["Host", "api.anthropic.com"]])
+    assert rules.http(provider)["decision"] == "allow"
+    other = rt.Ruleset.request("example.org", "POST", "/form", [])
+    assert rules.http(other)["decision"] == "ask"
+    named = {"name": "mine", "version": 1, "http": [{"id": "no-llm", "host": "192.0.2.20", "methods": ["POST"],
+                                                      "decision": "deny"}]}
+    assert rt.Ruleset([preset, named]).http({**llm, "model_api": True})["decision"] == "deny"
+    default_ask = {"name": "strict", "version": 1, "defaults": {"http": "ask"}, "http": []}
+    assert rt.Ruleset([default_ask]).http({**llm, "model_api": True})["decision"] == "allow"
+    policy = {"name": "policy", "version": 1, "http": [writes]}
+    assert rt.Ruleset([policy]).http({**llm, "model_api": True})["decision"] == "ask"
+
+
+def test_the_proxy_knows_the_llm_endpoint_of_a_request():
+    entry = {"name": "macbook", "scheme": "http", "host": "192.0.2.20", "port": 1234, "addresses": ["192.0.2.20"],
+             "prefix": "/v1"}
+    assert rt.llm_endpoint([entry], "http", "192.0.2.20:1234", 1234, "/v1/chat/completions") is entry
+    assert rt.llm_endpoint([entry], "http", "192.0.2.20:1234", 1234, "/admin") is None
+    assert rt.llm_endpoint([entry], "http", "192.0.2.21:1234", 1234, "/v1/chat/completions") is None
+    assert rt.llm_endpoint([entry], "http", "192.0.2.20:1235", 1235, "/v1/chat/completions") is None
+    assert rt.llm_endpoint([entry], "https", "192.0.2.20:1234", 1234, "/v1/chat/completions") is None

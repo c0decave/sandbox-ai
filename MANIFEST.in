@@ -8,7 +8,7 @@ graft sandbox/presets
 graft sandbox/templates
 graft sandbox/builtin
 graft sandbox/marketplace
-recursive-include tests *.py
+recursive-include tests *.py *.sh
 recursive-include docs *.py *.md
 recursive-include tests/golden *
 recursive-include scripts *.py *.sh

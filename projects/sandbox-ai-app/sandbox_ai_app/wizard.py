@@ -300,7 +300,7 @@ class ModelPage(Page):
         self.form.addRow("", self.only)
         self.hint = plain_label(role="secondary")
         self.form.addRow(self.hint)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.form.addRow(self.status)
         self.endpoints, self.notes, self.listed = {}, [], {}
         self.loaded, self.shown_agent, self.existing_choice, self.seen_existing = False, None, None, None
@@ -1376,7 +1376,7 @@ class ReviewPage(Page):
         self.diff.setReadOnly(True)
         self.diff.setFont(MONO)
         self.form.addRow(tr("The project file and what changes"), self.diff)
-        self.verdict = plain_label(role="secondary")
+        self.verdict = plain_label(role="secondary", selectable=True)
         self.form.addRow(self.verdict)
         self.token = 0
         self.verdict_ok = None

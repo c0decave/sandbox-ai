@@ -159,7 +159,7 @@ class PresetDirs(QWidget):
         row.addWidget(self.remove_button)
         row.addStretch()
         layout.addLayout(row)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         if not sai.has_preset_dirs():
@@ -303,7 +303,7 @@ class TrustedProjects(QWidget):
         row.addWidget(self.forget_button)
         row.addStretch()
         layout.addLayout(row)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.update_buttons()

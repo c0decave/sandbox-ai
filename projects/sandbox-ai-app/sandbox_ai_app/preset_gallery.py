@@ -13,7 +13,8 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGraphicsScene, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout,
+    QWidget,
 )
 
 from . import board as B
@@ -208,13 +209,20 @@ class PresetGallery(QDialog):
         search_row.addWidget(self.search, 1)
         search_row.addWidget(help_view.HelpButton("gallery.cards"))
         layout.addLayout(search_row)
+        # On the left: the categories (a click shows that section of the cards: no scrolling down to find it), then
+        # the chosen preset's description; on the right the cards.
         split = QSplitter(Qt.Orientation.Horizontal)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        split.addWidget(self.scroll)
         details = QWidget()
         side = QVBoxLayout(details)
-        side.setContentsMargins(8, 0, 0, 0)
+        side.setContentsMargins(0, 0, 8, 0)
+        side.addWidget(plain_label(tr("Categories"), role="section"))
+        self.categories = QListWidget()
+        self.categories.setAccessibleName(tr("Categories"))
+        self.categories.itemClicked.connect(self.show_category)
+        self.categories.itemActivated.connect(self.show_category)
+        side.addWidget(self.categories)
         self.title = plain_label(role="title")
         self.description = plain_label()
         self.meta = plain_label(role="secondary")
@@ -233,7 +241,7 @@ class PresetGallery(QDialog):
                                        "practises on (port 4000), on the host the board starts on"))
         self.demo_button.clicked.connect(lambda _=False: self.start_demo_device())
         self.demo_button.hide()
-        self.demo_status = plain_label(role="secondary")
+        self.demo_status = plain_label(role="secondary", selectable=True)
         self.demo_status.hide()
         side.addWidget(self.demo_button)
         side.addWidget(self.demo_status)
@@ -241,9 +249,10 @@ class PresetGallery(QDialog):
         side.addWidget(self.command)
         side.addStretch()
         split.addWidget(details)
-        split.setSizes([840, 340])
+        split.addWidget(self.scroll)
+        split.setSizes([360, 820])
         layout.addWidget(split, 1)
-        self.problem = plain_label(role="notice-warn")
+        self.problem = plain_label(role="notice-warn", selectable=True)
         self.problem.hide()
         layout.addWidget(self.problem)
         row = QHBoxLayout()
@@ -341,6 +350,12 @@ class PresetGallery(QDialog):
             self.cards += cards
         column.addStretch()
         self.scroll.setWidget(holder)
+        self.categories.clear()
+        for heading, _box, cards, key in self.sections:
+            item = QListWidgetItem(f"{heading.text()} ({len(cards)})")
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self.categories.addItem(item)
+        self.fit_categories()
         wanted = next((c for c in self.cards if select in (c.preset.key, c.preset.id)), None) or \
             (self.cards[0] if self.cards else None)
         if wanted is not None:
@@ -365,9 +380,29 @@ class PresetGallery(QDialog):
             visible = bool(shown) or (key == "mine" and not text.strip())
             heading.setVisible(visible)
             box.setVisible(visible)
+            for row in range(self.categories.count()):
+                item = self.categories.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == key:
+                    item.setHidden(not visible)
+                    item.setText(f"{heading.text()} ({shown})")
+        self.fit_categories()
         if self.selected is None or self.selected.isHidden():
             visible = self.visible_cards()
             self.choose(visible[0] if visible else None)
+
+    def fit_categories(self):
+        """The category list as tall as its rows (at most ten): the description stays right below it."""
+        rows = sum(not self.categories.item(row).isHidden() for row in range(self.categories.count()))
+        height = self.categories.sizeHintForRow(0) if self.categories.count() else 20
+        self.categories.setFixedHeight(max(1, min(rows, 10)) * max(height, 18) + 2 * self.categories.frameWidth() + 4)
+
+    def show_category(self, item):
+        """Scroll the cards to the section of the category clicked."""
+        key = item.data(Qt.ItemDataRole.UserRole)
+        for heading, _box, _cards, section in self.sections:
+            if section == key and not heading.isHidden():
+                self.scroll.verticalScrollBar().setValue(heading.y())
+                return
 
     def choose(self, card_):
         if self.selected is not None and self.selected is not card_:

@@ -107,6 +107,7 @@ def test_without_a_usable_keyring_set_keeps_the_secret_in_the_files(tmp_path, mo
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("SANDBOX_AI_SECRETS", raising=False)
     monkeypatch.setattr(ss, "keyring_usable", lambda run=None: False)
+    monkeypatch.setattr(ss, "keychain_usable", lambda *a, **k: False)  # (a macOS runner's Keychain may be locked)
     lines = []
     assert ss.main(["set", "GH_PUSH"], stdin=io.StringIO("ghp_value\n"), out=lines.append) == 0
     assert lines == ["GH_PUSH kept (file)"] and ss.get("GH_PUSH") == "ghp_value"

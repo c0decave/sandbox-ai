@@ -15,8 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        # The suite runs longer than an hour on a runner: each Python version in three parts of the test files.
-        shard: [0, 1, 2]
+        # The suite runs longer than an hour on a runner: each Python version in four parts of the test files.
+        shard: [0, 1, 2, 3]
     name: test (${{ matrix.python }}, part ${{ matrix.shard }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
@@ -30,10 +30,12 @@ jobs:
       - name: Tests (failures summarised as an annotation, readable through the API)
         run: |
           # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
+          # In a session of its own (setsid): a signal a test sends to its process group cannot end this step before
+          # it says where the run stopped (part runs ended with exit 143 and no word).
           # -v names each test as it starts, so a test that hangs (a part is killed after 60 minutes) is named in the
           # annotation; faulthandler prints the tracebacks of a test that runs longer than 5 minutes.
-          files=$(ls tests/test_*.py | awk -v part=${{ matrix.shard }} 'NR % 3 == part')
-          status=0; timeout --signal=INT --kill-after=60 3600 python -m pytest -v -rfE -o faulthandler_timeout=300 \
+          files=$(ls tests/test_*.py | awk -v part=${{ matrix.shard }} 'NR % 4 == part')
+          status=0; timeout --signal=INT --kill-after=60 3600 setsid --wait python -m pytest -v -rfE -o faulthandler_timeout=300 \
             $files > pytest.txt 2>&1 || status=$?
           tail -n 300 pytest.txt
           if [ "$status" -ne 0 ]; then
@@ -46,6 +48,91 @@ jobs:
             echo "::error title=pytest failed::$text"
           fi
           exit "$status"
+
+  # The Tor kill switch in the kernel (tests/test_tor_killswitch_live.py): nftables in a network namespace of its own,
+  # every way out tried; only --vpn-bypass-tcp's exact address and port may leave past Tor. The run's own kill switch
+  # (sandbox-ai net cut, tests/test_killswitch_live.py): the sandbox's firewall with each mode's cut chain, every way
+  # out tried; each mode keeps exactly its part, connections open before the cut stop. Skipped elsewhere when no
+  # namespace with CAP_NET_ADMIN can be made; here sudo makes it, and the job fails if it was skipped all the same.
+  killswitch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0, published 2026-10-22
+        with:
+          python-version: "3.12"
+      - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nftables iproute2
+      - name: Kill switch in the kernel
+        shell: bash
+        run: |
+          status=0
+          python -m pytest -v -rs -o faulthandler_timeout=300 tests/test_tor_killswitch_live.py tests/test_killswitch_live.py > killswitch.txt 2>&1 || status=$?
+          tail -n 200 killswitch.txt
+          if [ "$status" -ne 0 ] || grep -q SKIPPED killswitch.txt; then
+            # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.
+            text=$(grep -E '^(FAILED|ERROR|SKIPPED)|^E ' killswitch.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=kill switch in the kernel failed::$text"
+            exit 1
+          fi
+      # The Tor container as a start runs it (rootless Podman, its capabilities, its tmpfs): tor comes up, becomes
+      # debian-tor and owns its data directory; then a real Tor profile is brought up and checked through Tor.
+      - name: Tor container under Podman
+        shell: bash
+        env:
+          SANDBOX_AI_BUILD_TOR: "1"
+          SANDBOX_AI_LIVE_NETWORK: "1"
+        run: |
+          podman --version
+          status=0
+          python -m pytest -v -rs -o faulthandler_timeout=300 tests/test_tor_container_live.py > tor.txt 2>&1 || status=$?
+          tail -n 200 tor.txt
+          if [ "$status" -ne 0 ] || grep -q SKIPPED tor.txt; then
+            # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.
+            text=$(grep -E '^(FAILED|ERROR|SKIPPED)|^E ' tor.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=Tor container failed::$text"
+            exit 1
+          fi
+
+  # --nested-containers in a real sandbox (tests/test_nested_containers_live.py): Podman inside the agent's sandbox
+  # runs a container and unshare -rn works, while what the containers send meets the sandbox's own firewall and
+  # connection proxy (a refused destination stays refused, and the proxy logs it). Builds the claude image and its dev
+  # variant first; the job fails if the test was skipped all the same.
+  nested:
+    runs-on: ubuntu-24.04
+    env:
+      SANDBOX_AI_EXPERIMENTAL: nested-containers  # the option is refused without it until this job passes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0, published 2026-10-22
+        with:
+          python-version: "3.12"
+      - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends podman passt slirp4netns uidmap
+      # Ubuntu's AppArmor takes the capabilities of a user namespace an unconfined program makes (the supervisor
+      # makes the agent's); a host that runs sandboxes with --nested-containers needs the same.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: The claude image and its dev variant
+        run: |
+          podman --version
+          ./sandbox-ai images recipe dev --from claude
+          ./sandbox-ai build dev
+      - name: Podman inside a sandbox
+        shell: bash
+        run: |
+          status=0
+          python -m pytest -v -rs -o faulthandler_timeout=300 --agent-live tests/test_nested_containers_live.py > nested.txt 2>&1 || status=$?
+          tail -n 200 nested.txt
+          if [ "$status" -ne 0 ] || grep -q SKIPPED nested.txt; then
+            # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.
+            text=$(grep -E '^(FAILED|ERROR|SKIPPED)|^E ' nested.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=nested containers failed::$text"
+            exit 1
+          fi
 
   package:
     runs-on: ubuntu-24.04  # ubuntu-latest is 26.04 since 2026-10-19: no Python 3.9 there
@@ -74,7 +161,7 @@ jobs:
   # LOCAL_PEERPID; the Linux suite simulates them) and install.sh with the Mac's bash 3.2 and BSD tools. No Podman
   # here: podman machine needs nested virtualisation, which GitHub's macOS runners do not have.
   macos:
-    runs-on: macos-14  # arm64
+    runs-on: macos-15  # arm64 (macos-14 is retired: "configuration not supported")
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
@@ -107,7 +194,7 @@ jobs:
   # The desktop app (projects/sandbox-ai-app), tested against the sandbox-ai of the same commit.
   app:
     runs-on: ubuntu-24.04  # the apt names below (libasound2t64, ...) are 24.04's
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       QT_QPA_PLATFORM: offscreen
       # A test skipped for missing Qt, QtWebEngine or sandbox-ai fails instead (tests/conftest.py).
@@ -141,7 +228,7 @@ jobs:
       - name: Tests (offscreen, Qt required)
         run: |
           # Into a file, not a pipe (see above); a crash (exit 139) names the test it happened in.
-          status=0; timeout --signal=INT --kill-after=60 1500 python -X faulthandler -m pytest -v -rs -rfE tests \
+          status=0; timeout --signal=INT --kill-after=60 2700 python -X faulthandler -m pytest -v -rs -rfE tests \
             > tests.txt 2>&1 || status=$?
           tail -n 300 tests.txt
           if [ "$status" -ne 0 ]; then

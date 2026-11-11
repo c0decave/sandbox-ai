@@ -135,7 +135,7 @@ class CanariesView(QWidget):
         top = QHBoxLayout()
         self.refresh_button = QPushButton(tr("Refresh"))
         self.refresh_button.clicked.connect(lambda _=False: self.refresh())
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         top.addWidget(self.refresh_button)
         top.addWidget(self.status, 1)
         layout.addLayout(top)

@@ -656,6 +656,12 @@ def entries(include_all=False, prune=True):
     leads = {}
     for entry in found:
         entry.update(grouping(entry, records, leads))
+        # The kill switch of a running start (sandbox-ai net cut): its mode, and whether it has one (0.1.94 on).
+        record_ = records.get(entry.get("run")) if isinstance(entry.get("run"), str) else None
+        record_ = record_ if isinstance(record_, dict) else {}
+        cut = record_.get("cut") if isinstance(record_.get("cut"), str) else ""
+        entry["cut"] = cut if cut and all(part in ("remote", "local", "api", "all") for part in cut.split("+")) else None
+        entry["killswitch"] = bool(record_.get("net_cut"))
     break_helper_cycles(found)
     # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach); the
     # start it was started for (its mcp.json says so) first, if it is one of them. That one is named in "started_for"
@@ -921,6 +927,8 @@ def pause_run(entry, record_, freeze):
         marker.touch()
     else:
         marker.unlink(missing_ok=True)
+        # The kill switch asked for while it was paused: set now, before this returns (sandbox-ai net cut).
+        module("net").apply_pending_cut(record_["directory"])
     record(entry["name"], "pause" if freeze else "resume", entry["id"], entry["run"])
     print(f"sandbox-ai: {shown} {'paused' if freeze else 'resumed'}", file=sys.stderr)
     return 0

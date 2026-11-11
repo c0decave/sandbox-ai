@@ -344,7 +344,7 @@ class ActivityPage(QWidget):
         self.connections_button.clicked.connect(self.show_connections)
         self.files_button = QPushButton(tr("Show in Files"))
         self.files_button.clicked.connect(self.show_file)
-        self.status = plain_label()  # wraps: a long status never widens the window
+        self.status = plain_label(selectable=True)  # wraps: a long status never widens the window
         self.status.setAccessibleName(tr("Status"))
         bottom.addWidget(self.connections_button)
         bottom.addWidget(self.files_button)

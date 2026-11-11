@@ -346,8 +346,10 @@ class McpGateway:
         self.timeout = int(config.get("timeout", APPROVAL_SECONDS))
         self.out = out or sys.stderr
         self.lock = threading.Lock()
-        # Answers for "run" (or "always", which is capped to it): until the server stops.
+        # Answers for "run" (or "always", which is capped to it): until the server stops. Questions nobody answered:
+        # refused at once until then (time.monotonic(), UNANSWERED_PAUSE), then asked again.
         self.decided, self.asked, self.token = {}, 0, secrets.randbelow(10 ** 9)
+        self.cooling = {}
         self.who = Attribution()
 
     def client(self, connection):
@@ -394,12 +396,12 @@ class McpGateway:
         allowed, reason = verdict["decision"] == "allow", verdict["reason"]
         if verdict["decision"] == "ask":
             answer = self.ask(tool, record["arguments"], verdict, client)
-            record["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
+            record["approval"] = approval_record(answer)
             if answer.get("question"):
                 record["question"] = answer["question"]
             allowed = answer.get("decision") == "allow"
             if not allowed:
-                reason = f"not approved ({answer.get('reason', 'refused')}): {reason}"
+                reason = not_approved(answer, reason)
         if not allowed:
             record["reason"] = reason
         self.emit("sandbox-ai-mcp-call", record)
@@ -415,11 +417,15 @@ class McpGateway:
                                         **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(client or {})})
             answer = answer if isinstance(answer, dict) else {}
             return {"decision": answer.get("decision", "deny"), "scope": answer.get("scope", "once"),
-                    "reason": answer.get("reason", "no answer")}
+                    "reason": answer.get("reason", "no answer"),
+                    **{k: answer[k] for k in ("question", "why") if isinstance(answer.get(k), str)}}
         key = (verdict["ruleset"], verdict["rule"], tool)
         with self.lock:
             if key in self.decided:
                 return self.decided[key]
+            if self.cooling.get(key, (0, None))[0] > time.monotonic():
+                return {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s to question "
+                        f"{self.cooling[key][1]}; refused without asking for now, then asked again"}
             if self.approvals is None:
                 return {"decision": "deny", "scope": "once", "reason": "this server cannot ask (no approvals directory)"}
             if self.asked >= RUN_QUESTIONS:
@@ -435,6 +441,9 @@ class McpGateway:
             if answer:
                 break
             time.sleep(0.2)
+        if answer is None:  # no decision: refused at once for a while, then asked again
+            with self.lock:
+                self.cooling[key] = (time.monotonic() + UNANSWERED_PAUSE, ident)
         answer = {**(answer or {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s"}),
                   "question": ident}
         if answer["scope"] in ("run", "always"):
@@ -1023,6 +1032,257 @@ def wait_child(child):
             signal.signal(sig, handler)
 
 
+# --- nested containers (the launcher's --nested-containers) -------------------------------------------------------
+#
+# The agent becomes root of a user namespace of its own, made here before Firejail starts and entered by the guard
+# after Firejail is verified (enter_nested_userns), with a mount namespace of that user namespace. Its root is the sandbox's root (the agent's own ID, your user on
+# the host), its other IDs are the sandbox's subordinate IDs but RESERVED: the connection proxy's (the redirect to
+# the proxy skips its connections), PulseAudio's and tor's (the kill switch lets tor's connections out). No process
+# of the agent can take those on, its containers' included. Its capabilities count only in that namespace and in
+# what is made in it: the sandbox's network namespace with the firewall, Firejail's mounts and every process outside
+# belong to the sandbox's namespace, where it has none. Its containers share its network namespace (or reach the
+# network through slirp4netns or pasta running there): what they send meets the firewall and the proxy like its
+# own connections.
+#
+# The kernel mounts /proc (and /sys) for a new namespace only where one is already fully visible (mount_too_revealing),
+# and Firejail's /proc has mounts over parts of it: a fresh one is mounted below NESTED_HIDDEN, under a tmpfs that
+# hides it from the agent (in the agent's namespace that tmpfs is locked: it cannot be taken away).
+NESTED_DIR = Path("/run/sandbox-nested")
+NESTED_USERNS = NESTED_DIR / "userns"
+NESTED_HIDDEN = NESTED_DIR / "hidden"
+NESTED_TOP = 65534  # IDs above it ("nobody" is the highest images use) stand in for the reserved ones
+CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWCGROUP = 0x10000000, 0x00020000, 0x02000000
+MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC, MS_REMOUNT, MS_BIND = 1, 2, 4, 8, 32, 4096
+# Firejail's default filter, but what a container engine needs inside its own namespaces: mounting, pivot_root and
+# chroot, a container's host name. They act only on namespaces the agent made (its capabilities count nowhere else);
+# ptrace, keyctl, modules, bpf and the rest stay blocked.
+NESTED_SECCOMP = "--seccomp=" + ",".join("!" + name for name in (
+    "mount", "umount2", "pivot_root", "chroot", "sethostname", "setdomainname",
+    "fsopen", "fsconfig", "fsmount", "fspick", "move_mount", "open_tree"))
+
+
+def parse_id_map(text):
+    """[(inside, outside, count)] of a /proc/PID/uid_map or gid_map."""
+    found = []
+    for line in text.splitlines():
+        if line.strip():
+            inside, outside, count = (int(value) for value in line.split())
+            found.append((inside, outside, count))
+    return found
+
+
+def nested_id_map(own, reserved, top=NESTED_TOP):
+    """[(inside, outside, count)]: the uid_map (gid_map) of the agent's user namespace, OUTSIDE being IDs of this
+    namespace, whose own map is OWN (as /proc/self/uid_map lists it). 0 is 0 (the agent stays the owner of what it
+    writes); every other ID of this namespace up to TOP is itself, but RESERVED, which nothing inside maps to; the
+    reserved numbers inside take the IDs above TOP that are left, as many as there are (the rest stay unmapped)."""
+    reserved = sorted({int(value) for value in reserved} - {0})
+    ranges = sorted((inside, inside + count) for inside, _, count in own)
+    if not any(start <= 0 < end for start, end in ranges):
+        raise RuntimeError("the sandbox's user namespace maps no root")
+    extents = []
+    for start, end in ranges:
+        low, high = start, min(end, top + 1)
+        for skip in [r for r in reserved if low <= r < high] + [high]:
+            if skip > low:
+                extents.append([low, low, skip - low])
+            low = skip + 1
+    spare = [value for start, end in ranges for value in range(max(start, top + 1), end) if value not in reserved]
+    for inside, outside in zip([r for r in reserved if r <= top], spare):
+        extents.append([inside, outside, 1])
+    extents.sort()
+    merged = []
+    for inside, outside, count in extents:
+        if merged and merged[-1][0] + merged[-1][2] == inside and merged[-1][1] + merged[-1][2] == outside:
+            merged[-1][2] += count
+        else:
+            merged.append([inside, outside, count])
+    if len(merged) > 340:  # the kernel's limit of lines in a map
+        raise RuntimeError("the agent's user namespace would need more than 340 ID ranges")
+    return [tuple(extent) for extent in merged]
+
+
+def id_map_text(extents):
+    return "".join(f"{inside} {outside} {count}\n" for inside, outside, count in extents)
+
+
+def mapped_outside(extents, value):
+    """True if the map EXTENTS (as the namespace itself lists it) maps something to VALUE outside."""
+    return any(outside <= value < outside + count for _, outside, count in extents)
+
+
+def libc_mount(libc, source, target, fstype, flags, data=None):
+    if libc.mount(os.fsencode(str(source)), os.fsencode(str(target)), fstype and fstype.encode(),
+                  ctypes.c_ulong(flags), data and data.encode()) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, f"mount {fstype or 'bind'} on {target}: {os.strerror(error)}")
+
+
+def nested_setup(reserved, libc=None, proc=Path("/proc")):
+    """Make the agent's user namespace (NESTED_USERNS, kept by a bind mount) and the hidden /proc and /sys; before
+    Firejail starts, while no thread runs. Fails the start (it is what the option asked for)."""
+    libc = libc or ctypes.CDLL(None, use_errno=True)
+    maps = {name: id_map_text(nested_id_map(parse_id_map((proc / "self" / name).read_text()), reserved))
+            for name in ("uid_map", "gid_map")}
+    NESTED_DIR.mkdir(mode=0o755, exist_ok=True)
+    ready_r, ready_w = os.pipe()
+    hold_r, hold_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the namespace's first process: it only has to exist until the maps are written and it is kept
+        status = 1
+        try:
+            os.close(ready_r)
+            os.close(hold_w)
+            if libc.unshare(CLONE_NEWUSER) == 0:
+                os.write(ready_w, b"1")
+                os.read(hold_r, 1)
+                status = 0
+        finally:
+            os._exit(status)
+    os.close(ready_w)
+    os.close(hold_r)
+    try:
+        if os.read(ready_r, 1) != b"1":
+            raise RuntimeError("--nested-containers: the agent's user namespace could not be made (unshare)")
+        for name, text in maps.items():  # root is mapped: needs CAP_SETFCAP here (the launcher adds it)
+            with open(proc / str(pid) / name, "w") as handle:
+                handle.write(text)
+        NESTED_USERNS.touch(mode=0o444)
+        libc_mount(libc, proc / str(pid) / "ns" / "user", NESTED_USERNS, None, MS_BIND)
+    finally:
+        os.close(hold_w)
+        os.close(ready_r)
+        os.waitpid(pid, 0)
+    flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    (NESTED_HIDDEN / "proc").mkdir(mode=0o700, parents=True, exist_ok=True)
+    (NESTED_HIDDEN / "sys").mkdir(mode=0o700, exist_ok=True)
+    libc_mount(libc, "proc", NESTED_HIDDEN / "proc", "proc", flags)
+    with contextlib.suppress(OSError):  # without it the engines bind /sys instead of mounting it
+        libc_mount(libc, "sysfs", NESTED_HIDDEN / "sys", "sysfs", flags | MS_RDONLY)
+    libc_mount(libc, "tmpfs", NESTED_HIDDEN, "tmpfs", flags | MS_RDONLY, "size=4k,mode=000")
+
+
+# Podman as root keeps its run state there and only makes it when its runtime first starts: `podman import -`
+# (stdin) writes its temporary file into /run/libpod before that, and in a sandbox's fresh /run failed with "no such
+# file or directory" (CI). The guard makes them, as the agent's root.
+NESTED_RUN_DIRS = ("/run/libpod", "/run/containers/storage")
+
+
+def nested_sys(libc, root=Path("/sys")):
+    """The agent's /sys, in its own mount namespace: inside Firejail the sandbox has none, and Podman's first step,
+    statfs("/sys/fs/cgroup"), failed with a bare "no such file or directory" (CI) - before every command, `podman
+    version` included. A small tmpfs with fs/cgroup in it, and there a cgroup2 file system of a cgroup namespace of
+    the agent's own (it shows the sandbox's cgroup as its root, nothing above it), read-only. Returns "present" (it
+    had one), "cgroup2" or "empty" (the folder alone, where cgroup2 cannot be mounted)."""
+    if (root / "fs" / "cgroup").is_dir():
+        return "present"
+    flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    libc_mount(libc, "tmpfs", root, "tmpfs", flags, "mode=0755,size=64k")
+    (root / "fs" / "cgroup").mkdir(mode=0o755, parents=True, exist_ok=True)
+    how = "empty"
+    if libc.unshare(CLONE_NEWCGROUP) == 0:
+        with contextlib.suppress(OSError):
+            libc_mount(libc, "cgroup2", root / "fs" / "cgroup", "cgroup2", flags | MS_RDONLY)
+            how = "cgroup2"
+    with contextlib.suppress(OSError):  # the tmpfs read-only too: nothing is written into the agent's /sys
+        libc_mount(libc, "none", root, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+    return how
+
+
+def enter_nested_userns(reserved, path=NESTED_USERNS, libc=None, proc=Path("/proc"), run_dirs=NESTED_RUN_DIRS,
+                        sys_root=Path("/sys")):
+    """The guard, verified inside Firejail: enter the agent's user namespace (its owner, the sandbox's root, may),
+    check that none of RESERVED is mapped in it, then make a mount namespace of that user namespace - where a
+    container engine as its root may mount (its storage, its containers' roots). Every mount of Firejail's is
+    copied into it locked: none can be taken away, a read-only one cannot become writable, and nothing mounted
+    there reaches back (the copy receives, never sends)."""
+    libc = libc or ctypes.CDLL(None, use_errno=True)
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        if libc.setns(descriptor, CLONE_NEWUSER) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, f"--nested-containers: cannot enter the agent's user namespace: {os.strerror(error)}")
+    finally:
+        os.close(descriptor)
+    for name in ("uid_map", "gid_map"):
+        extents = parse_id_map((proc / "self" / name).read_text())
+        taken = [value for value in reserved if value and mapped_outside(extents, int(value))]
+        if taken:
+            raise RuntimeError(f"--nested-containers: the agent's {name} maps the reserved IDs {taken}; refusing")
+    if libc.unshare(CLONE_NEWNS) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, f"--nested-containers: no mount namespace of the agent's own: {os.strerror(error)}")
+    for directory in run_dirs:
+        with contextlib.suppress(OSError):  # Podman says it itself if it still cannot
+            Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        nested_sys(libc, sys_root)
+    except OSError as exc:  # Podman then says what it misses; the run goes on
+        print(f"agent-sandbox: --nested-containers: no /sys for the containers: {exc}", file=sys.stderr)
+
+
+GIVE_BACK_LIMIT = 2_000_000  # entries looked at in all: a give-back never holds the end of a run for long
+GIVE_BACK_NAMED = 20  # how many of them the report names
+
+
+def give_back(paths, since, lstat=os.lstat, lchown=os.lchown, chmod=os.chmod, limit=GIVE_BACK_LIMIT, owner=(0, 0)):
+    """--nested-containers, at the end of the run: in the host folders PATHS (sandbox paths, the agent's writable
+    ones) everything the run left owned by an ID other than OWNER, the sandbox's root (0:0 in the supervisor's user
+    namespace: your user and group on the host, whatever their numbers there) - changed since SINCE (its ctime: what
+    was there before stays as it was) - goes back to OWNER, and its
+    setuid and setgid bits go. Nothing is followed: symbolic links are changed themselves, other file systems
+    (mounts below) are not entered. Returns {"count", "paths" (the first GIVE_BACK_NAMED), "failed", "complete"}."""
+    found = {"count": 0, "paths": [], "failed": 0, "complete": True}
+    seen = 0
+    for root in paths:
+        try:
+            device = lstat(root).st_dev
+        except OSError:
+            continue
+        for directory, folders, files in os.walk(root, followlinks=False):
+            for name in [*folders, *files, *([""] if directory == root else [])]:
+                path = os.path.join(directory, name) if name else directory
+                seen += 1
+                if seen > limit:
+                    found["complete"] = False
+                    return found
+                try:
+                    info = lstat(path)
+                except OSError:
+                    continue
+                if name in folders and info.st_dev != device:
+                    folders.remove(name)  # another file system mounted here: not this folder's
+                    continue
+                if info.st_ctime < since or (info.st_uid, info.st_gid) == tuple(owner):
+                    continue  # there before the run, or yours (a setuid file of your user gives nothing beyond it)
+                special = stat.S_IMODE(info.st_mode) & (stat.S_ISUID | stat.S_ISGID)
+                try:
+                    lchown(path, *owner)
+                    if special and not stat.S_ISLNK(info.st_mode):
+                        chmod(path, stat.S_IMODE(info.st_mode) & ~(stat.S_ISUID | stat.S_ISGID))
+                except OSError:
+                    found["failed"] += 1
+                    continue
+                found["count"] += 1
+                if len(found["paths"]) < GIVE_BACK_NAMED:
+                    found["paths"].append(path)
+    return found
+
+
+def report_given_back(found, log_dir=None):
+    """What give_back did, on the supervisor's standard error and (with a log directory) in nested-owners.json."""
+    if not found["count"] and not found["failed"] and found["complete"]:
+        return
+    names = ", ".join(found["paths"]) + (" ..." if found["count"] > len(found["paths"]) else "")
+    print(f"agent-sandbox: --nested-containers: {found['count']} files and folders the run left owned by other IDs "
+          f"of the sandbox were given back to you (setuid and setgid bits cleared): {names}"
+          + (f"; {found['failed']} could not be (podman unshare chown -R 0:0 PATH)" if found["failed"] else "")
+          + ("" if found["complete"] else "; not every file was looked at (too many)"), file=sys.stderr)
+    if log_dir is not None and Path(log_dir).is_dir():
+        with contextlib.suppress(OSError):
+            (Path(log_dir) / "nested-owners.json").write_text(json.dumps(found) + "\n")
+
+
 def inner_bootstrap():
     # Firejail 0.9.80's check_kernel_procs() skips confinement when none of
     # /proc/{1..10}/comm begins with a kernel-worker name. In a fresh PID
@@ -1045,6 +1305,10 @@ def inner_bootstrap():
     # Installation failure aborts before Firejail or the agent starts.
     subprocess.run(["nft", "list", "table", "inet", "agent_sandbox"], check=True, stdout=subprocess.DEVNULL)
     cfg = json.loads(SESSION_CONFIG.read_text()) if SESSION_CONFIG.exists() else {}
+    nested = cfg.get("nested") if isinstance(cfg.get("nested"), dict) else None
+    began = time.time() - 2  # what the run changed has a later ctime (a little slack for coarse clocks)
+    if nested:  # first: no thread runs yet (a child is forked)
+        nested_setup(nested.get("reserved", []))
     before = namespace_state()
     proxy_config = json.loads((PROXY_DIR / "proxy.json").read_text()) if cfg.get("proxy") else {}
     base = proxy_config.get("allow", {})
@@ -1079,6 +1343,16 @@ def inner_bootstrap():
         # pasta's -T would reach the VM's loopback, not the Mac's: the ports of the start are relayed here instead.
         host_relays = [PortRelay(port, CONTROL_DIR, upstream=(network.upstream_host, int(port)))
                        for port in base.get("loopback", [])]
+    # The kill switch (sandbox-ai net cut): what it needs to know of the run; the firewall has its cut chain.
+    if isinstance(cfg.get("killswitch"), dict):
+        try:
+            network.cut_settings = cut_settings(cfg["killswitch"])
+        except ValueError as exc:  # never a failing start: this run has no kill switch then, and says so
+            print(f"agent-sandbox: this run has no kill switch (sandbox-ai net cut): {exc}", file=sys.stderr)
+        network.vpn_mark = cfg["killswitch"].get("vpn_mark") or None
+        network.start_relays = host_relays
+        for relay in host_relays:
+            relay.allowed = network.relay_allowed
     held_loopback = hold_unserved_loopback(base.get("loopback", []))  # before the agent starts; kept for the run
     # The run's taint (see Taint): the proxy reads its mirror; its events go to the connection log.
     taint = Taint(mirror=PROXY_RUN / "taint.json" if cfg.get("proxy") else None,
@@ -1106,7 +1380,8 @@ def inner_bootstrap():
             threading.Thread(target=control_server, daemon=True,
                              args=((VM_CONTROL_DIR if machine else CONTROL_DIR) / "control.sock", network, control,
                                    policy.get("forbid", []), mode, taint, relays, True, rules),
-                             kwargs={"token_file": CONTROL_DIR / EXEC_TOKEN if machine else None}).start()
+                             kwargs={"token_file": CONTROL_DIR / EXEC_TOKEN if machine else None,
+                                     "broker": broker}).start()
         if machine and machine.get("browser") and CONTROL_DIR.is_dir():
             threading.Thread(target=browser_relay, kwargs={"stop": control}, daemon=True).start()
         start_mcp_relays(cfg.get("mcp_relay") or {}, broker, taint, who, registry=relays)
@@ -1122,13 +1397,19 @@ def inner_bootstrap():
             gui = start_gui(json.loads(GUI_CONFIG.read_text()))
         if AUDIO_CONFIG.exists():
             gui += start_audio(json.loads(AUDIO_CONFIG.read_text()))  # stopped with the display at the end
+        # The cuts of the runs this one acts for (their MCP server, helper, team member started while they are cut):
+        # they hold before the agent runs (after the proxy wrote its allow-list), or the start fails.
+        start_cuts(network, (cfg.get("killswitch") or {}).get("cuts"))
         # Built only now: the blacklist names the proxy's directories, which exist from here on.
-        cmd = firejail_command(before)
+        cmd = firejail_command(before, nested=bool(nested))
         child = subprocess.Popen(cmd, env=base_env(), close_fds=True)
         oom_first(child.pid)  # an out-of-memory kill takes the agent's processes before PID 1 (the whole run)
         return wait_child(child)
     finally:
         guard.set()
+        if nested:  # the agent and its containers have ended with Firejail's PID namespace
+            with contextlib.suppress(Exception):
+                report_given_back(give_back(nested.get("writable", []), began), LOG_DIR)
         for process in gui:
             stop_process(process)
         if proxy:
@@ -2040,9 +2321,10 @@ class MemoryGuard:
         return thread
 
 
-def firejail_command(before):
+def firejail_command(before, nested=False):
     help_text = subprocess.run(["firejail", "--help"], check=True, text=True, capture_output=True).stdout
-    command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs", "--seccomp"]
+    command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs",
+               NESTED_SECCOMP if nested else "--seccomp"]
     for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR, VM_CONTROL_DIR):
         if private.is_dir():
             command.append(f"--blacklist={private}")
@@ -2095,6 +2377,8 @@ def inner_guard(before):
     env.update(cfg["env"])
     # Both tmux windows start here, after verification and inside Firejail.
     cmd = tmux_command(cfg["command"], detached=cfg["tmux"] == "detached") if cfg.get("tmux") else cfg["command"]
+    if isinstance(cfg.get("nested"), dict):  # after the check: capabilities in its own user namespace only
+        enter_nested_userns(cfg["nested"].get("reserved", []))
     os.chdir("/work")
     os.execvpe(cmd[0], cmd, env)
 
@@ -2309,7 +2593,10 @@ def hold_unserved_loopback(ports):
 
 
 def allowed_destination(allow, address, port):
-    """True if the firewall lets the proxy reach ADDRESS:PORT (ALLOW from the launcher's proxy.json)."""
+    """True if the firewall lets the proxy reach ADDRESS:PORT (ALLOW from the launcher's proxy.json), and the kill
+    switch (its "cut", see cut_allows) does too."""
+    if not cut_allows(allow.get("cut"), address, port):
+        return False
     ip = ipaddress.ip_address(address)
     if ip.is_loopback:
         return str(ip) in HOST_LOOPBACK and port in allow.get("loopback", [])
@@ -2894,6 +3181,23 @@ def host_header_problem(headers, scheme, port, names, shown=None):
 LLM_KEY_HEADERS = ("authorization", "x-api-key", "api-key")
 
 
+def llm_endpoint(entries, scheme, origin, port, path, target=None):
+    """The --llm endpoint (its entry) a request to ORIGIN:PORT PATH goes to, or None: its scheme and port, its
+    verified name (HTTPS) or one of its pinned addresses (plain http), below its path prefix - as llm_head finds it."""
+    for entry in entries or []:
+        if scheme != entry["scheme"] or port != entry["port"]:
+            continue
+        if scheme == "https" and origin.lower() != entry["host"]:
+            continue
+        if scheme == "http" and origin.rsplit(":", 1)[0].strip("[]") not in entry["addresses"]:
+            continue
+        prefix = entry.get("prefix", "")
+        if prefix and (path != prefix and not path.startswith(prefix + "/") or ambiguous_path(target or path)):
+            continue
+        return entry
+    return None
+
+
 def llm_head(entries, scheme, origin, port, path, head, target=None):
     """--llm: (HEAD, endpoint name) with the endpoint's key where the agent sent the placeholder (or as a Bearer token
     where it sent no credentials) and its header secrets in place of the agent's own; (HEAD, None) unchanged for
@@ -3128,9 +3432,13 @@ class ProxyServer:
     """Connections of one sandbox run; one thread per connection."""
 
     def __init__(self, config, log_fd, checker=None, run_dir=PROXY_RUN, destination=original_destination,
-                 upstream=None, asker=None, who=None):
+                 upstream=None, asker=None, who=None, connect=None):
         import ssl
         self.config, self.log_fd, self.checker, self.run_dir = config, log_fd, checker, run_dir
+        # CONNECT ((address, port), timeout) -> socket: how the proxy reaches a destination (tests: somewhere else).
+        # LIVE: {connection number: {"sockets", "address", "port", "name"}} of the open connections, which the kill
+        # switch closes when it forbids them (watch_cut); the sockets are duplicates, as TLS takes over the originals.
+        self.connect, self.live = connect or socket.create_connection, {}
         # ASKER puts questions to the supervisor; WHO (the same channel, also with --ask off) asks it which
         # process a connection belongs to. DEBUG (--log-debug) logs more of what a refused client sent.
         self.asker, self.who, self.debug = asker, who, bool(config.get("debug"))
@@ -3413,6 +3721,70 @@ class ProxyServer:
     def serve(self, listeners):
         for listener in listeners:
             threading.Thread(target=self.accept_loop, args=(listener,), daemon=True).start()
+        threading.Thread(target=self.watch_cut, name="proxy-cut", daemon=True).start()
+
+    # -- the kill switch --
+
+    def track(self, number, client, address, port):
+        """List the connection NUMBER (CLIENT, to ADDRESS:PORT) for the kill switch: a duplicate of its socket, which
+        stays usable when TLS takes the original over."""
+        entry = {"sockets": [], "address": address, "port": port, "name": False}  # name False: not known yet
+        with contextlib.suppress(OSError):
+            entry["sockets"].append(client.dup())
+        with self.lock:
+            self.live[number] = entry
+        return entry
+
+    def track_upstream(self, entry, upstream):
+        with contextlib.suppress(OSError):
+            duplicate = upstream.dup()
+            with self.lock:
+                entry["sockets"].append(duplicate)
+
+    def untrack(self, number):
+        with self.lock:
+            entry = self.live.pop(number, None)
+        for sock in (entry or {}).get("sockets", []):
+            with contextlib.suppress(OSError):
+                sock.close()
+
+    def close_cut(self, cut):
+        """End every open connection the kill switch CUT forbids (both sides, with a reset once the proxy lets go of
+        them); logged as "cut". The number ended."""
+        with self.lock:
+            entries = list(self.live.items())
+        ended = 0
+        for number, entry in entries:
+            named = entry["name"] is False or cut_name_allows(cut, entry["address"], entry["port"], entry["name"])
+            if cut_allows(cut, entry["address"], entry["port"]) and named:
+                continue
+            for sock in list(entry["sockets"]):
+                with contextlib.suppress(OSError):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+            ended += 1
+            address, port = entry["address"], entry["port"]
+            self.log({"connection": number, "destination": f"[{address}]:{port}" if ":" in address else
+                      f"{address}:{port}", **({"host": entry["name"]} if entry["name"] else {}), "event": "cut",
+                      "reason": cut_reason(cut)})
+        return ended
+
+    def watch_cut(self, stop=None, every=None):
+        """Look at the kill switch every EVERY seconds (CUT_POLL; the supervisor writes it into the allow-list); once it
+        changes, the open connections it forbids end (close_cut). New ones meet it in handle()."""
+        every = CUT_POLL if every is None else every
+        seen = None
+        while stop is None or not stop.is_set():
+            cut = self.allow().get("cut")
+            if cut != seen:
+                try:
+                    if cut:
+                        self.close_cut(cut)
+                    seen = cut  # only once done: a look that failed is tried again at the next one
+                except Exception:  # noqa: BLE001 - one look that fails never ends the watch
+                    pass
+            time.sleep(every)
 
     def accept_loop(self, listener):
         while True:
@@ -3444,6 +3816,13 @@ class ProxyServer:
             pending = self.attribute(client)  # looked up meanwhile; read when the first record is written
             if pending is not None:
                 record["process"] = pending
+            # Listed before the kill switch is asked: a cut made meanwhile finds it (close_cut), one made before
+            # refuses it here, without a question.
+            tracked = self.track(number, client, address, port)
+            cut = self.allow().get("cut")
+            if not cut_allows(cut, address, port):
+                self.refuse(client, {**record, "event": "denied", "reason": cut_reason(cut)}, reset=True)
+                return
             first = None
             if not allowed_destination(self.allow(), address, port):
                 answer = None
@@ -3459,11 +3838,11 @@ class ProxyServer:
                     question = {"destination": record["destination"], "address": address, "port": port,
                                 "protocol": protocol, **self.asked_by(record)}
                     answer = self.asker("connect", {**question, **({"host": name} if name else {})})
-                    record["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
+                    record["approval"] = approval_record(answer)
                 if not answer or answer.get("decision") != "allow" or not allowed_destination(self.allow(), address, port):
                     self.refuse(client, {**record, **self.origin(first), "event": "denied",
                                          "reason": "not allowed by the network options"
-                                         if not answer else f"not approved ({answer.get('reason', 'refused')})"},
+                                         if not answer else not_approved(answer)},
                                 reset=True)
                     return
             first = self.peek(client) if first is None else first
@@ -3479,7 +3858,8 @@ class ProxyServer:
             if not self.passthrough_allowed(first, address, port, record):
                 return
             try:
-                upstream = socket.create_connection((address, port), timeout=30)
+                upstream = self.connect((address, port), timeout=30)
+                self.track_upstream(tracked, upstream)
                 no_delay(upstream)
             except OSError as exc:
                 self.log({**record, "event": "error", "error": f"connect: {exc}"})
@@ -3514,6 +3894,14 @@ class ProxyServer:
                     self.log({**record, "event": "denied", "protocol": "ssh", "reason": reason})
                     return
             kind, name = client_hello_sni(first)
+            tracked["name"] = name if kind == "tls" else None
+            cut = self.allow().get("cut")
+            if not cut_name_allows(cut, address, port, tracked["name"]):  # "api": the provider's name, not its CDN's
+                with contextlib.suppress(OSError):
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.log({**record, **({"host": name} if kind == "tls" else {}), "event": "denied",
+                          "reason": cut_reason(cut) + " (it names none of the model API's hosts)"})
+                return
             if kind == "tls" and canary_sni(self, client, name, record):
                 return
             upstream.settimeout(IDLE_TIMEOUT)
@@ -3555,6 +3943,7 @@ class ProxyServer:
                 if sock is not None:
                     with contextlib.suppress(OSError):
                         sock.close()
+            self.untrack(number)  # its duplicates last: a reset the kill switch asked for goes out with them
 
     def passthrough_allowed(self, first, address, port, record):
         """False (logged) for a ClientHello naming a --no-inspect host that ADDRESS does not serve."""
@@ -3907,6 +4296,9 @@ class ProxyServer:
                 parts, facts = None, None
                 if self.rules.http_active:
                     facts = Ruleset.request(origin, method, target, headers, destination)
+                    facts["model_api"] = llm_endpoint(
+                        self.config.get("llm"), scheme, origin,
+                        int(str(record.get("destination", "")).rsplit(":", 1)[-1] or 0), path, target) is not None
                     facts["taint"] = self.taint()
                     if facts["taint"]:
                         entry["tainted"] = facts["taint"].get("since")
@@ -3924,9 +4316,9 @@ class ProxyServer:
                         answer = self.http_ask(ruled, method, redact_text(url), authority,
                                                facts["paths"][0] or "/", facts["body"],
                                                {**self.asked_by(record), **({"host_header": claim} if claim else {})})
-                        entry["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
+                        entry["approval"] = approval_record(answer)
                         if answer.get("decision") != "allow":
-                            refusal = f"not approved ({answer.get('reason', 'refused')}): {ruled['reason']}"
+                            refusal = not_approved(answer, ruled["reason"])
                     if refusal:
                         message = f"sandbox-ai: {refusal}\n".encode()
                         send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
@@ -4179,7 +4571,7 @@ class ProxyServer:
                                          "refs": [printable_text(ref, 300) for _, _, ref in commands][:50],
                                          "message": printable_text(verdict.get("message", "")),
                                          **(self.asked_by(record) if record is not None else {})})
-            verdict["approval"] = {k: answer.get(k) for k in ("decision", "scope", "reason")}
+            verdict["approval"] = approval_record(answer)
             if answer.get("decision") != "allow":
                 verdict = {**verdict, "ok": False, "message": "the push has privacy warnings and was not approved:\n"
                            + str(verdict.get("message", ""))}
@@ -5557,9 +5949,16 @@ class Ruleset:
                     "reason": f"the Host header {facts['claimed']} differs from the server name {facts['server']} "
                               f"({', '.join(applying)})"}
         best = None
+        # The agent's own model API (its provider by its verified name, its --llm endpoint): what a ruleset says of
+        # every host ("*", its default) is not meant for it - the agent sends everything to its model, a question
+        # for each answer would stop it. A rule naming the host still holds, and so does the administrator's policy.
+        model = bool(facts.get("model_api")) or self.provider(facts)
         for source in self.sources:
             verdict = None
+            exempt = model and source["name"] != "policy"
             for rule in source["http"]:
+                if exempt and "*" in rule["host"]:
+                    continue
                 outcome = self.http_match(rule, facts, methods)
                 if outcome or (outcome is None and rule["decision"] != "allow"):
                     verdict = {"decision": rule["decision"], "rule": rule["id"], "ruleset": source["name"],
@@ -5576,7 +5975,7 @@ class Ruleset:
                     verdict = {"decision": "deny", "rule": "(unlisted)", "ruleset": source["name"],
                                "reason": f"{method} {path} is not among the requests allowed for {shown_host} "
                                          f"({source['name']})"}
-                elif source["defaults"]["http"] != "allow":
+                elif source["defaults"]["http"] != "allow" and not exempt:
                     verdict = {"decision": source["defaults"]["http"], "rule": "(default)", "ruleset": source["name"],
                                "reason": f"{method} {path} on {shown_host}: no rule of {source['name']} allows it "
                                          f"(its default is {source['defaults']['http']})"}
@@ -6013,9 +6412,9 @@ class HookServer:
                                                    "rule": verdict["rule"], "ruleset": verdict["ruleset"],
                                                    "reason": printable_text(verdict["reason"], 1000),
                                                    **({"taint": verdict["taint"]} if verdict.get("taint") else {})})
-                record["approval"] = {key: approval.get(key) for key in ("decision", "scope", "reason")}
+                record["approval"] = approval_record(approval)
                 answer = {"decision": "allow" if approval.get("decision") == "allow" else "deny",
-                          "reason": f"not approved ({approval.get('reason', 'refused')}): {verdict['reason']}"}
+                          "reason": not_approved(approval, verdict["reason"])}
         if answer["decision"] == "allow":
             # Marked before the tool runs: its result reaches the agent only once the run is tainted.
             source = self.rules.untrusted_agent_tool(agent, tool)
@@ -6184,6 +6583,9 @@ class PortRelay:
         self.upstream = upstream
         self.listen_port = int(listen_port or port)
         self.slots = threading.BoundedSemaphore(limit)
+        # ALLOWED (port -> bool, RuntimeNetwork.relay_allowed): whether the kill switch lets a connection through now;
+        # ACTIVE: the open connections' sockets, which cut() closes.
+        self.allowed, self.active, self.active_lock = None, set(), threading.Lock()
         self.listeners = []
         for family, address in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
             listener = socket.socket(family, socket.SOCK_STREAM)
@@ -6221,8 +6623,19 @@ class PortRelay:
                 time.sleep(0.1)
 
     def handle(self, connection):
+        upstream = None
         try:
+            with self.active_lock:
+                self.active.add(connection)
+            # Asked once the connection is listed: a cut made meanwhile closes it (cut), one made before refuses it here.
+            if self.allowed is not None and not self.allowed(self.port):
+                with contextlib.suppress(OSError):
+                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                connection.close()  # the kill switch holds: refused at once
+                return
             upstream = socket.socket(socket.AF_UNIX if self.upstream is None else socket.AF_INET, socket.SOCK_STREAM)
+            with self.active_lock:
+                self.active.add(upstream)
             try:
                 upstream.settimeout(10)
                 if self.upstream is None:
@@ -6237,7 +6650,20 @@ class PortRelay:
                 return
             join_streams(connection, upstream)
         finally:
+            with self.active_lock:
+                self.active.discard(connection)
+                self.active.discard(upstream)
             self.slots.release()
+
+    def cut(self):
+        """The kill switch forbids this port now: every open connection ends (reset, both sides), at once."""
+        with self.active_lock:
+            sockets = list(self.active)
+        for sock in sockets:
+            with contextlib.suppress(OSError):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
 
     def close(self):
         for listener in self.listeners:
@@ -6338,15 +6764,96 @@ class RuntimeNetwork:
         self.relays, self.relay_dir, self.proxied, self.relay_factory = {}, None, False, PortRelay
         # macOS (podman machine): the Mac's address the relays connect to instead of the host relay's socket.
         self.upstream_host = None
+        # The kill switch (sandbox-ai net cut): CUT_SETTINGS (cut_settings of config.json "killswitch"; None: this run's
+        # firewall has no cut chain), the cuts that hold ({by: mode}: who asked for which; a run shared by several, as
+        # an MCP server, holds each one's, the strictest together), the VPN's own packets (they pass the cut) and the
+        # relays of the host's ports made at the start (macOS), whose connections a cut closes too.
+        self.cut_settings, self.cuts, self.vpn_mark, self.start_relays = None, {}, None, []
 
-    def _commit(self, state, once):
+    @property
+    def cut_mode(self):
+        """What the kill switch holds now, as cut_label calls it (None: no cut)."""
+        return cut_label(set(self.cuts.values()))
+
+    def cut_view(self, cuts=None, current=True):
+        """The kill switch as it holds (CURRENT), or as CUTS ({by: mode}) would hold, for cut_allows and cut_rules: the
+        run's settings, the modes and every host port the run reaches now (forwarded at the start, relayed during the
+        run). None: no cut."""
+        modes = cut_modes({"modes": sorted(set((self.cuts if current else cuts or {}).values()))})
+        if not modes or self.cut_settings is None:
+            return None
+        ports = {*self.cut_settings["host_ports"], *self.base.get("loopback", []), *self.relays}
+        return {**self.cut_settings, "mode": cut_label(modes), "modes": modes,
+                "host_ports": sorted(int(port) for port in ports)}
+
+    def _commit(self, state, once, cuts=None, cutting=False):
+        """The firewall and the proxy's allow-list for STATE (and the targets allowed ONCE), with the kill switch as it
+        holds, or with CUTS when CUTTING (set_cut)."""
         effective = dict(state, tcp=state["tcp"] | once)
-        self.apply_rules(runtime_rules(effective) + (relay_rules(self.relays) if self.proxied else ""))
-        self.state, self.once = state, once
+        cuts = dict(cuts or {}) if cutting else dict(self.cuts)
+        script = runtime_rules(effective) + (relay_rules(self.relays) if self.proxied else "")
+        if self.cut_settings is not None:  # the cut chain anew: the host ports it tells apart may have changed
+            script += cut_rules(self.cut_view(cuts, current=False), self.vpn_mark)
+        self.apply_rules(script)
+        self.state, self.once, self.cuts = state, once, cuts
         if self.allow_file is not None:
             allow = merged_allow(self.base, effective, self.no_ssh | once)
             allow["loopback"] = sorted({*self.base.get("loopback", []), *self.relays})
+            if cuts:  # the proxy holds it too (allowed_destination), and closes what it forbids
+                allow["cut"] = self.cut_view()
             write_new(self.allow_file, json.dumps(allow), 0o644)
+
+    def set_cut(self, mode, by="self", clear=False):
+        """The kill switch MODE (CUT_MODES; "off" or None lifts it) asked for by BY (a run's name, or a list of them:
+        the run itself, the runs it acts for). Each one's cut is kept apart and all hold together (a shared MCP server
+        stays cut while one of the runs it serves is); "off" takes back only BY's, CLEAR every one. The firewall's cut
+        chain and the proxy's allow-list change at once, then the connections of the supervisor's relays the cut
+        forbids are closed. What the run may reach otherwise stays as it is. The new state (shown)."""
+        mode = None if mode in (None, "off") else mode
+        if mode is not None and mode not in CUT_MODES:
+            raise ValueError(f"the kill switch's modes: {', '.join(CUT_MODES)} or off")
+        names = [by] if isinstance(by, str) else by
+        if not isinstance(names, list) or not 1 <= len(names) <= CUT_BY_LIMIT or \
+                not all(isinstance(name, str) and CUT_BY.fullmatch(name) for name in names):
+            raise ValueError(f"the kill switch is asked for by 1 to {CUT_BY_LIMIT} run names")
+        if self.cut_settings is None:
+            raise ValueError("this sandbox has no kill switch (started by a sandbox-ai older than 0.1.94, or with "
+                             "more host ports or model API addresses than it tells apart): start it again")
+        with self.lock:
+            cuts = {} if clear else dict(self.cuts)
+            for name in names:
+                if mode is None:
+                    cuts.pop(name, None)
+                else:
+                    cuts[name] = mode
+            self._commit(self.state, set(self.once), cuts=cuts, cutting=True)
+            relays = [*self.relays.values(), *self.start_relays]
+        for relay in relays:
+            if not self.relay_allowed(relay.port):
+                relay.cut()
+        return self.shown()
+
+    def relay_allowed(self, port):
+        """The kill switch lets the agent reach the host's PORT through a relay of the supervisor's (PortRelay)."""
+        view = self.cut_view()
+        return view is None or cut_allows(view, "127.0.0.1", port)
+
+    def cut_refusal(self, kind, details):
+        """Why the kill switch refuses a question of KIND (DETAILS as ApprovalBroker.ask has them) without asking, or
+        None: a connection it forbids, a lookup while it holds anything but "local" (the host would look the name up,
+        and a lookup leaves for the internet)."""
+        view = self.cut_view()
+        if view is None:
+            return None
+        if kind == "dns" and view["modes"] != ["local"]:
+            return cut_reason(view)
+        if kind == "connect":
+            try:
+                if not cut_allows(view, str(details.get("address")), int(details.get("port"))):
+                    return cut_reason(view)
+            except (TypeError, ValueError):
+                return cut_reason(view)
+        return None
 
     def relay(self, op, ports):
         """Start (allow) or stop (revoke) relaying host PORTS; called under the lock, before the commit."""
@@ -6369,6 +6876,7 @@ class RuntimeNetwork:
                     raise ValueError(f"at most {RELAY_PORTS} host ports are relayed at a time")
                 self.relays[port] = self.relay_factory(port, self.relay_dir) if self.upstream_host is None else \
                     self.relay_factory(port, self.relay_dir, upstream=(self.upstream_host, port))
+                self.relays[port].allowed = self.relay_allowed  # the kill switch: no new connection it forbids
                 started.append(port)
         except BaseException:
             for port in started:
@@ -6441,14 +6949,16 @@ class RuntimeNetwork:
 
     def nameservers(self):
         """The nameservers DNS was allowed to during the run, for the DNS stub (in the order they were given is
-        not kept: sorted)."""
+        not kept: sorted); none the kill switch forbids."""
         with self.lock:
-            return sorted(self.state.get("dns", ()))
+            view = self.cut_view()
+            return [server for server in sorted(self.state.get("dns", ())) if cut_allows(view, server, 53, "udp")]
 
     def shown(self):
         return {"nets": sorted(self.state["nets"]), "https": sorted(self.state["https"]),
                 "tcp": [[a, p] for a, p in sorted(self.state["tcp"])], "dns": sorted(self.state.get("dns", ())),
-                "host_ports": sorted(self.relays)}
+                "host_ports": sorted(self.relays), "cut": self.cut_mode, "cuts": dict(self.cuts),
+                "killswitch": self.cut_settings is not None}
 
 
 NET_OPTIONS = (("nets", "--allow"), ("https", "--allow-host"), ("tcp", "--allow-tcp"), ("dns", "--dns"),
@@ -6467,6 +6977,323 @@ def mode_refusal(mode, request):
             return (f"{option} widens the security mode {mode.get('name')} of this run; answer its questions "
                     "instead, or start it again with a laxer mode")
     return None
+
+
+# --- the kill switch: sandbox-ai net cut -----------------------------------------------------------------------------
+#
+# A running sandbox's network cut down by the human (`sandbox-ai net cut RUN MODE`, the app's Kill switch): "remote"
+# keeps only the local network and the host's ports the run may reach, "local" only the internet it may reach, "api"
+# only its model API (its provider's hosts as the start pinned them, or its --llm server), "all" nothing; "off" lifts
+# it. A cut only takes away: it holds on top of what the run may reach (its start options, what was allowed during the
+# run, approvals), which stays as it was and is there again once the cut is lifted. It is held outside the agent's
+# reach, three times: by the firewall's cut chain, which the output chain jumps to first and which judges every packet
+# by the destination its connection was opened to (conntrack's original direction: before the proxy's redirect or
+# Tor's), so that what is open already stops too; by the connection proxy, which refuses new connections and closes
+# the open ones the cut forbids; and by the supervisor's own relays of host ports and its DNS stub. Only the human
+# reaches the control socket; changing the firewall needs CAP_NET_ADMIN, which the agent has not; the proxy's files
+# are hidden from it.
+
+CUT_MODES = ("remote", "local", "api", "all")
+CUT_TEXT = {"remote": "the internet is cut: only the local network and the host's ports it may reach stay reachable",
+            "local": "the local network and the host's ports are cut: only the internet it may reach stays reachable",
+            "api": "only its model API stays reachable",
+            "all": "everything is cut, its model API too"}
+# The local network: private, link-local and multicast addresses (a lookup is no part of it, see cut_class).
+LOCAL_NETWORKS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4",
+                  "255.255.255.255/32", "fc00::/7", "fe80::/10", "ff00::/8")
+LOCAL_NETS = tuple(ipaddress.ip_network(net) for net in LOCAL_NETWORKS)
+DNS_STUB = "127.0.0.1"  # the supervisor's DNS stub (dns_logger): the sandbox's own; what it forwards is held apart
+CUT_POLL = 0.25         # seconds between the proxy's looks at the cut (its open connections closed within that)
+CUT_PORTS = 64          # host ports the kill switch tells apart (forwarded at the start, relayed, an --llm server's)
+CUT_API_LIMIT = 512     # addresses and names of a model API
+CUT_BY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # who asked for a cut: a run's name (or "self")
+# What the cut does with a packet it forbids: rejected, never only dropped. A dropped TCP SYN leaves connect() waiting
+# (the kernel sends it again and again) - the agent would hang, and a check could not tell a cut connection from one
+# on its way out; the rejection ends it at once (EHOSTUNREACH), as Tor's kill switch does. UDP: the send fails.
+CUT_REJECT = "reject with icmpx type admin-prohibited"
+CUT_BY_LIMIT = 256      # names in one cut request (sandbox-ai net cut --all-runs: a run and every run it acts for)
+
+
+def cut_settings(config):
+    """What the kill switch knows of the run (config.json "killswitch", from the launcher), checked: the host's ports
+    forwarded at the start ("host_ports"); the model API ("api": "https" addresses reached on 443, "tcp" [address,
+    port] targets, "loopback" the host's ports of an --llm server, "names" the provider's host names, which TLS to an
+    "https" address must name); whether the run goes through Tor ("tor": then only its --vpn-bypass-tcp targets,
+    "bypass", count as the local network, everything else lies past Tor) and the Mac's address in podman machine
+    ("machine_host", macOS: where the supervisor's relays reach the host's ports). ValueError for a bad value."""
+    config = config if isinstance(config, dict) else {}
+    api = config.get("api") if isinstance(config.get("api"), dict) else {}
+
+    def listed(value, what):
+        if value is None:
+            return []
+        if not isinstance(value, list) or len(value) > CUT_API_LIMIT:
+            raise ValueError(f"killswitch: {what} is a list of at most {CUT_API_LIMIT} entries")
+        return value
+
+    def port(value):
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 65535:
+            raise ValueError(f"killswitch: bad port {value!r}")
+        return value
+
+    def address(value):
+        text = str(value)
+        if "%" in text:
+            raise ValueError("killswitch: scope IDs are not accepted")
+        return str(ipaddress.ip_address(text))
+
+    def targets(value, what):
+        found = set()
+        for entry in listed(value, what):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise ValueError(f"killswitch: {what} holds [address, port] pairs")
+            found.add((address(entry[0]), port(entry[1])))
+        return [[a, p] for a, p in sorted(found)]
+
+    def ports(value, what):
+        found = sorted({port(entry) for entry in listed(value, what)})
+        if len(found) > CUT_PORTS:
+            raise ValueError(f"killswitch: at most {CUT_PORTS} host ports")
+        return found
+    names = sorted({str(name).lower().rstrip(".") for name in listed(api.get("names"), "api names")
+                    if isinstance(name, str) and HOST_NAME.fullmatch(name.lower().rstrip("."))})
+    machine = config.get("machine_host")
+    return {"host_ports": ports(config.get("host_ports"), "host_ports"),
+            "api": {"https": sorted({address(a) for a in listed(api.get("https"), "api https")}),
+                    "tcp": targets(api.get("tcp"), "api tcp"), "loopback": ports(api.get("loopback"), "api loopback"),
+                    "names": names},
+            "tor": bool(config.get("tor")), "bypass": targets(config.get("bypass"), "bypass"),
+            "machine_host": str(ipaddress.IPv4Address(str(machine))) if machine else None}
+
+
+def cut_local(cut, ip, port=None, protocol="tcp"):
+    """IP (PORT) lies in the local network as the kill switch counts it: a private, link-local or multicast address;
+    behind Tor only a --vpn-bypass-tcp target (TCP), every other address lies past Tor."""
+    if cut.get("tor"):
+        return protocol == "tcp" and port is not None and [str(ip), int(port)] in cut.get("bypass", [])
+    return any(ip in net for net in LOCAL_NETS)
+
+
+def cut_class(cut, address, port, protocol="tcp"):
+    """Where ADDRESS:PORT (PROTOCOL tcp or udp) lies for the kill switch CUT (cut_settings plus "mode"): "own" (the
+    sandbox's own loopback: its services, the DNS stub), "host" (the host's ports: the loopback ports forwarded or
+    relayed, the Mac's address in podman machine), "dns" (a nameserver other than the stub: a lookup leaves for the
+    internet, whatever the nameserver's address), "local" or "remote" (the internet)."""
+    ip = ipaddress.ip_address(str(address))
+    port = int(port)
+    if ip.is_loopback:
+        if protocol == "tcp" and str(ip) in HOST_LOOPBACK and port in cut.get("host_ports", ()):
+            return "host"
+        return "dns" if port == 53 and str(ip) != DNS_STUB else "own"
+    if cut.get("machine_host") and str(ip) == cut["machine_host"]:
+        return "host"
+    if port == 53:
+        return "dns"
+    return "local" if cut_local(cut, ip, port, protocol) else "remote"
+
+
+def start_cuts(network, cuts):
+    """At the start, before the agent runs: the cuts CUTS ({by: mode}, config.json "killswitch" "cuts") of the runs
+    this one acts for and that are cut now (its MCP server, helper or team member joins them while they are cut).
+    A cut that cannot hold stops the start (RuntimeError): it must not run uncut. The state (shown), or None."""
+    if not cuts:
+        return None
+    if not isinstance(cuts, dict) or not all(isinstance(by, str) and mode in CUT_MODES for by, mode in cuts.items()):
+        raise RuntimeError("the cuts this run starts with are not readable; it does not start")
+    if network.cut_settings is None:
+        raise RuntimeError(f"this run starts while {', '.join(sorted(cuts))} is cut, but it has no kill switch of its "
+                           "own; it does not start (lift the cut, or start it again later)")
+    try:
+        for by, mode in sorted(cuts.items()):
+            network.set_cut(mode, by)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"the kill switch of {', '.join(sorted(cuts))} could not be set for this run ({exc}); it "
+                           "does not start") from None
+    return network.shown()
+
+
+def cut_modes(cut):
+    """The modes the kill switch CUT holds at once ([]: none). A run can be cut by several (its own cut, and those of
+    the runs it acts for: a shared MCP server): each holds, so only what every one of them keeps stays reachable.
+    "all" takes everything, the others with it. An unknown mode is kept: it refuses everything (cut_allows)."""
+    if not isinstance(cut, dict):
+        return []
+    modes = cut.get("modes")
+    if not isinstance(modes, list):
+        modes = [cut.get("mode")] if cut.get("mode") is not None else []
+    modes = list(dict.fromkeys(modes))
+    return ["all"] if "all" in modes else modes
+
+
+def cut_label(modes):
+    """What a cut of MODES is called: the mode, "all", or the modes that hold together joined with "+"
+    (api+remote); None for no cut."""
+    modes = [mode for mode in CUT_MODES if mode in modes] + sorted(str(m) for m in modes if m not in CUT_MODES)
+    if not modes:
+        return None
+    return "all" if "all" in modes else "+".join(modes)
+
+
+def cut_allows(cut, address, port, protocol="tcp"):
+    """True if the kill switch CUT (None: none) lets the sandbox reach ADDRESS:PORT: every mode it holds does
+    (cut_modes); it only ever takes away from what the run may reach otherwise. An unknown mode or a bad address:
+    refused."""
+    return all(cut_allows_one(cut, mode, address, port, protocol) for mode in cut_modes(cut))
+
+
+def cut_allows_one(cut, mode, address, port, protocol="tcp"):
+    """cut_allows for one MODE of the kill switch CUT."""
+    if mode not in CUT_MODES:
+        return False
+    try:
+        kind = cut_class(cut, address, port, protocol)
+        ip = ipaddress.ip_address(str(address))
+        port = int(port)
+    except (ValueError, TypeError):
+        return False
+    if kind == "own":
+        return True
+    if mode == "all":
+        return False
+    if mode == "remote":
+        return kind in ("host", "local")
+    if mode == "local":
+        # A lookup goes on unless its nameserver lies in the local network (Tor's DNSPort, on loopback, is Tor's).
+        return kind == "remote" or kind == "dns" and (ip.is_loopback or not cut_local(cut, ip, port, protocol))
+    api = cut.get("api") or {}
+    if kind == "host":
+        return protocol == "tcp" and port in api.get("loopback", [])
+    if kind == "dns" or protocol != "tcp":
+        return False
+    return [str(ip), port] in api.get("tcp", []) or port == 443 and str(ip) in api.get("https", [])
+
+
+def cut_name_allows(cut, address, port, name):
+    """With the kill switch at "api" (alone or with others): a connection to an address of the provider's hosts (its
+    HTTPS addresses, often shared with other names behind one CDN) must name one of them in its TLS handshake (NAME,
+    None when it names none or is no TLS). An --llm server reached by its address and port, or on the host's
+    loopback, needs no name."""
+    if "api" not in cut_modes(cut):
+        return True
+    api = cut.get("api") or {}
+    try:
+        ip = ipaddress.ip_address(str(address))
+        port = int(port)
+    except (ValueError, TypeError):
+        return False
+    if ip.is_loopback or str(ip) == cut.get("machine_host") or [str(ip), port] in api.get("tcp", []):
+        return True
+    return isinstance(name, str) and name.lower().rstrip(".") in api.get("names", [])
+
+
+def cut_reason(cut):
+    """The proxy's and the supervisor's reason for what the kill switch CUT refuses or closes."""
+    modes = cut_modes(cut)
+    what = "; ".join(CUT_TEXT.get(mode, "unknown mode") for mode in modes) or "unknown mode"
+    return f"cut by the kill switch ({cut_label(modes)}: {what}); sandbox-ai net cut RUN off lifts it"
+
+
+def nft_set(values):
+    return "{ " + ", ".join(str(value) for value in values) + " }"
+
+
+def cut_rules(cut, vpn_mark=None):
+    """nft commands that replace the firewall's cut chain with the kill switch CUT (None or no mode: empty). The
+    output chain jumps to it before anything else (after the VPN container's own checks); it jumps to the chain of
+    each mode that holds (cut_<mode>, made here), and a packet one of them forbids is rejected (CUT_REJECT), also one
+    of a connection that was open before. Each is judged by its connection's original destination (ct original), so
+    the agent's connections redirected to the proxy or to Tor count by where they were meant to go. VPN_MARK (the
+    VPN's own packets: its tunnel, which carries only what passed here), IPv6 neighbour discovery and the rejection's
+    own ICMP error pass; so does a reset, which carries nothing and lets the agent see a closed connection end at
+    once."""
+    lines = ["flush chain inet agent_sandbox cut"]
+    for mode in CUT_MODES:  # every mode's chain, emptied (a chain no longer jumped to keeps nothing)
+        lines += [f"add chain inet agent_sandbox cut_{mode}", f"flush chain inet agent_sandbox cut_{mode}"]
+    modes = cut_modes(cut)
+    if not modes:
+        return "\n".join(lines) + "\n"
+    for mode in modes:
+        if mode not in CUT_MODES:
+            raise ValueError(f"no kill switch mode {mode!r}")
+    if vpn_mark is not None and not re.fullmatch(r"[a-z0-9 .:/,=&-]{1,200}", str(vpn_mark)):
+        raise ValueError(f"not a VPN mark: {vpn_mark!r}")
+    if vpn_mark:
+        lines.append(f"add rule inet agent_sandbox cut {vpn_mark} return")
+    lines.append("add rule inet agent_sandbox cut ip6 hoplimit 255 icmpv6 type { nd-router-solicit, "
+                 "nd-neighbor-solicit, nd-neighbor-advert } return")
+    lines.append("add rule inet agent_sandbox cut tcp flags & rst == rst return")
+    # The rejection's own ICMP error goes back to the sandbox's socket as "related" to the connection it ends, so its
+    # original destination is the forbidden one: it must pass, or connect() waits after all. (Only the kernel sends
+    # such errors here: the agent has no raw sockets.)
+    lines.append("add rule inet agent_sandbox cut meta l4proto { icmp, ipv6-icmp } ct state related return")
+    for mode in modes:
+        lines.append(f"add rule inet agent_sandbox cut jump cut_{mode}")
+        lines += [f"add rule inet agent_sandbox cut_{mode} {rule}" for rule in cut_mode_rules(cut, mode)]
+    return "\n".join(lines) + "\n"
+
+
+def cut_mode_rules(cut, mode):
+    """The rules of one MODE's chain (cut_rules): CUT_REJECT for what it forbids, "return" (back to the cut chain, on
+    to the next mode's) for what it keeps."""
+    rules = []
+    add = rules.append
+    api = cut.get("api") or {}
+    ports = sorted({int(port) for port in cut.get("host_ports", [])})
+    kept = set(ports) if mode == "remote" else set(api.get("loopback", [])) if mode == "api" else set()
+    closed = [port for port in ports if port not in kept]
+    if closed:  # the host's ports (pasta's forwards, the supervisor's relays): TCP on loopback
+        add(f"ct original ip daddr 127.0.0.1 meta l4proto tcp ct original proto-dst {nft_set(closed)} drop")
+        add(f"ct original ip6 daddr ::1 meta l4proto tcp ct original proto-dst {nft_set(closed)} drop")
+    machine = cut.get("machine_host")
+    if machine:  # macOS: the supervisor's relays to the Mac's ports
+        machine = ipaddress.IPv4Address(machine)
+        if mode == "remote":
+            add(f"ct original ip daddr {machine} return")
+        else:
+            reached = sorted(api.get("loopback", [])) if mode == "api" else []
+            if reached:
+                add(f"ct original ip daddr {machine} meta l4proto tcp ct original proto-dst {nft_set(reached)} return")
+            add(f"ct original ip daddr {machine} drop")
+    if mode != "local":  # lookups: only the DNS stub, which forwards nothing while the cut holds (nameservers())
+        add(f"ct original ip daddr != {DNS_STUB} meta l4proto {{ tcp, udp }} ct original proto-dst 53 drop")
+        add("meta nfproto ipv6 meta l4proto { tcp, udp } ct original proto-dst 53 drop")
+    add("ct original ip daddr 127.0.0.0/8 return")  # the sandbox's own loopback (the host's ports were dropped above)
+    add("ct original ip6 daddr ::1 return")
+    v4 = [net for net in LOCAL_NETWORKS if ":" not in net]
+    v6 = [net for net in LOCAL_NETWORKS if ":" in net]
+    bypass = [(ipaddress.ip_address(a), int(p)) for a, p in cut.get("bypass", [])]
+
+    def target(address, port, verdict):
+        family = "ip" if address.version == 4 else "ip6"
+        add(f"ct original {family} daddr {address} meta l4proto tcp ct original proto-dst {int(port)} {verdict}")
+    if mode == "all":
+        add("drop")
+    elif mode == "api":
+        https = [ipaddress.ip_address(a) for a in api.get("https", [])]
+        for version, family in ((4, "ip"), (6, "ip6")):
+            chosen = [str(a) for a in https if a.version == version]
+            if chosen:
+                add(f"ct original {family} daddr {nft_set(chosen)} meta l4proto tcp ct original proto-dst 443 return")
+        for address, port in api.get("tcp", []):
+            target(ipaddress.ip_address(address), port, "return")
+        add("drop")
+    elif mode == "remote":
+        if cut.get("tor"):
+            for address, port in bypass:
+                target(address, port, "return")
+        else:
+            add(f"ct original ip daddr {nft_set(v4)} return")
+            add(f"ct original ip6 daddr {nft_set(v6)} return")
+        add("drop")
+    elif cut.get("tor"):  # local, behind Tor: the bypass targets are its local network
+        for address, port in bypass:
+            target(address, port, "drop")
+    else:
+        add(f"ct original ip daddr {nft_set(v4)} drop")
+        add(f"ct original ip6 daddr {nft_set(v6)} drop")
+    # Written as "drop" above for reading; what the cut forbids is rejected (CUT_REJECT).
+    return [CUT_REJECT if rule == "drop" else rule[:-len("drop")] + CUT_REJECT if rule.endswith(" drop") else rule
+            for rule in rules]
 
 
 # --- sandbox-ai rules reload: the HTTP rules of a running sandbox, read anew ---------------------------------------
@@ -6700,7 +7527,7 @@ def control_client(source=None, out=None, paths=None, timeout=60):
 
 
 def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, relays=None, sandboxed=None,
-                   rules=None, token_file=None):
+                   rules=None, token_file=None, broker=None):
     """Serve `sandbox-ai net` requests (allow, revoke, show, untaint; watch: a workspace added during the run, for
     the file log) and `sandbox-ai mcp ... --live` requests (MCP_OPS, see mcp_control; RELAYS: the run's McpRelays)
     on the Unix socket PATH until STOP is set.
@@ -6712,7 +7539,8 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
     request (a thread that cannot be started at the sandbox's pids limit, say) refuses that one; the socket keeps
     serving. RULES: the run's RunRules (op "rules": show them, or reload them with the human's rulesets read anew).
     TOKEN_FILE (macOS, see VM_CONTROL_DIR): a peer control_peer_refused refuses is heard when its request carries
-    that file's token ("exec_token") and no descriptors."""
+    that file's token ("exec_token") and no descriptors. BROKER: the run's ApprovalBroker (op "decide": its remembered
+    decisions listed, set or forgotten; see ApprovalBroker.control)."""
     listener = listen_unix(path)
     listener.settimeout(0.5)
     while stop is None or not stop.is_set():
@@ -6774,8 +7602,27 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                     with contextlib.suppress(OSError):
                         connection.sendall((json.dumps(answer) + "\n").encode())
                     continue
+                if request.get("op") == "decide":
+                    if broker is None:
+                        raise ValueError("this sandbox asks nothing (started with --ask off or without the connection "
+                                         "proxy), so it remembers no decision")
+                    answer = {"ok": True, **broker.control(request)}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
                 if request.get("op") == "watch":
                     answer = {"ok": True, "watched": watch_added_workspace(request.get("path"))}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "cut":
+                    # `sandbox-ai net cut`: the kill switch. It only takes away, so neither the policy nor the security
+                    # mode holds it back.
+                    mode = request.get("mode")
+                    if mode is not None and (not isinstance(mode, str) or mode not in (*CUT_MODES, "off")):
+                        raise ValueError(f"the kill switch's modes: {', '.join(CUT_MODES)} or off")
+                    answer = {"ok": True, **network.set_cut(mode, request.get("by", "self"),
+                                                            clear=request.get("clear") is True)}
                     with contextlib.suppress(OSError):
                         connection.sendall((json.dumps(answer) + "\n").encode())
                     continue
@@ -6830,6 +7677,31 @@ SCOPES = ("once", "run", "always")
 def narrowest_scope(*scopes):
     """The narrowest of the approval SCOPES; an unknown one counts as once."""
     return min((scope if scope in SCOPES else "once" for scope in scopes), key=SCOPES.index)
+
+
+# A question nobody answered is no decision: its request is refused, and for UNANSWERED_PAUSE seconds the same request
+# is refused at once without a new question (the agent does not wait out the timeout again and again); then it is
+# asked again. Only the human's answers are remembered for the run.
+UNANSWERED_PAUSE = 120
+QUESTION_ID = re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}")  # as ApprovalBroker.ask names its questions
+DECIDE_ACTIONS = ("list", "allow", "deny", "forget")
+DECIDED_KINDS = ("connect", "dns", "push", "http", "mcp", "tool")  # the questions the broker asks itself
+SHOWN_DETAILS = ("destination", "name", "url", "method", "host", "path", "server", "tool", "agent", "rule", "ruleset")
+
+
+def approval_record(answer):
+    """What a log keeps of an approval ANSWER: its decision, scope and reason, and the question it came from (what
+    the app's Blocked list and `sandbox-ai approvals allow ID --scope run` take back)."""
+    return {**{k: answer.get(k) for k in ("decision", "scope", "reason")},
+            **({"question": answer["question"]} if isinstance(answer.get("question"), str) else {})}
+
+
+def not_approved(answer, reason=None):
+    """The refusal of a request whose approval ANSWER did not allow it: the answer's reason, the rule's REASON and,
+    where the broker said it, why in plain words and what to do (the answer's "why")."""
+    text = f"not approved ({answer.get('reason', 'refused')})" + (f": {reason}" if reason else "")
+    why = answer.get("why")
+    return text + (f". {why}" if isinstance(why, str) and why else "")
 OPEN_QUESTIONS = 20      # at a time; more are refused without asking
 RUN_QUESTIONS = 500      # per run; after that, nothing more is asked
 # Lookups below a host wildcard (details "wildcard": its suffix) are answered on the host by themselves: they have a
@@ -6862,7 +7734,7 @@ class ApprovalBroker:
 
     def __init__(self, directory, network, timeout=APPROVAL_SECONDS, poll=0.2, clock=time.monotonic, max_scope="always",
                  blocked=None, hosts_file=Path("/etc/hosts"), no_inspect=(), public=None, verify_seconds=VERIFY_SECONDS,
-                 name_ports=(443,)):
+                 name_ports=(443,), pause=UNANSWERED_PAUSE):
         self.directory, self.network, self.timeout, self.poll, self.clock = Path(directory), network, timeout, poll, clock
         # What "Allow always" for a connection remembers (see remembers): the names sandbox-ai pinned (HOSTS_FILE,
         # the sandbox's /etc/hosts), the hosts whose TLS is not opened (NO_INSPECT), which addresses count as
@@ -6879,6 +7751,8 @@ class ApprovalBroker:
         self.blocked_hosts = {h for h in blocked.get("hosts", []) if isinstance(h, str)}
         self.blocked_tcp = {t for t in blocked.get("tcp", []) if isinstance(t, str)}
         self.lock, self.pending, self.decided, self.counter = threading.Lock(), {}, {}, 0
+        # Questions nobody answered: {key: {"until": clock time, "answer", ...}}, refused at once until then.
+        self.cooling, self.pause = {}, pause
         self.serial, self.wildcard_asked = 0, {}  # every question's number (its ID); wildcard questions per suffix
         self.run_token = secrets.randbelow(10 ** 9)  # IDs differ between sandboxes asking in the same second
         self.directory.mkdir(mode=0o700, exist_ok=True)
@@ -6910,12 +7784,20 @@ class ApprovalBroker:
 
     def ask(self, kind, details, wait=True):
         """{"decision": "allow"|"deny", "scope", "reason"} for a question; WAIT=False only files it."""
+        refusal = getattr(self.network, "cut_refusal", lambda *_: None)(kind, details)
+        if isinstance(refusal, str) and refusal:  # the kill switch holds: nothing it forbids is asked (or opened)
+            return {"decision": "deny", "scope": "once", "reason": refusal}
         if self.blocked(kind, details):
             return {"decision": "deny", "scope": "run", "reason": "blocked always for this project"}
         key = self.key(kind, details)
         with self.lock:
             if key in self.decided:
-                return self.decided[key]
+                return self.remembered(self.decided[key])
+            cooling = self.cooling.get(key)
+            if cooling is not None:
+                if self.clock() < cooling["until"]:
+                    return cooling["answer"]  # not answered a moment ago: refused at once, not asked again yet
+                del self.cooling[key]
             waiting = self.pending.get(key)
             if waiting is None:
                 below = str(details.get("wildcard")) if kind == "dns" and details.get("wildcard") else None
@@ -6996,7 +7878,11 @@ class ApprovalBroker:
             if answer:
                 break
             time.sleep(self.poll)
-        answer = answer or {"decision": "deny", "scope": "run", "reason": f"no answer within {self.timeout} s"}
+        unanswered = answer is None
+        if unanswered:  # no decision: refused now, refused at once for a while (UNANSWERED_PAUSE), then asked again
+            until = time.time() + self.pause
+            answer = {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s",
+                      "question": waiting["id"], "why": self.unanswered_why(details, waiting["id"], until)}
         if kind in ("push", "http", "mcp", "tool") and answer["scope"] == "always":
             answer = {**answer, "scope": "run"}  # pushes, requests and tool calls are never remembered beyond the run
         if answer["decision"] == "allow":
@@ -7009,8 +7895,17 @@ class ApprovalBroker:
             remember = details.get("remembers") or self.remembers(details)
         with self.lock:
             self.pending.pop(key, None)
-            if answer["scope"] in ("run", "always") or answer["reason"].startswith("no answer"):
-                self.decided[key] = answer  # asked once per run (a deny counts for the run unless "once")
+            if unanswered:
+                self.cooling[key] = {"until": self.clock() + self.pause, "kind": kind, "question": waiting["id"],
+                                     "details": self.shown_details(details), "answer": {
+                                         **answer, "reason": f"no answer within {self.timeout} s to question "
+                                                             f"{waiting['id']}; refused without asking until "
+                                                             f"{time.strftime('%H:%M:%S', time.gmtime(until))} UTC"}}
+            elif answer["scope"] in ("run", "always"):
+                # The human's answer: asked once per run (a deny counts for the run unless "once").
+                self.decided[key] = {**answer, "question": waiting["id"], "kind": kind,
+                                     "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                     "details": self.shown_details(details)}
         proof = bool(remember) and remember.get("verified") == "on connection"
         if proof:  # the proxy goes on first: the approved connection is what proves (or not) the name it sent
             waiting["answer"] = answer
@@ -7020,6 +7915,109 @@ class ApprovalBroker:
         if not proof:
             waiting["answer"] = answer
             waiting["event"].set()
+
+    @staticmethod
+    def shown_details(details):
+        """What a remembered decision shows of its question (sandbox-ai approvals decided, the app's Blocked list)."""
+        return {k: printable_text(details[k], 300) for k in SHOWN_DETAILS if details.get(k) not in (None, "")}
+
+    def unanswered_why(self, details, ident, until):
+        """Why a question nobody answered refuses its request, in plain words, and what to do."""
+        if details.get("ruleset"):
+            asks = f"the ruleset {details['ruleset']} (rule {details.get('rule')}) asks before it"
+        else:
+            asks = "the run's network options do not allow it, so it is asked"
+        return (f"{asks}, and question {ident} was not answered within {self.timeout} s. It is refused without "
+                f"asking until {time.strftime('%H:%M:%S', time.gmtime(until))} UTC, then asked again. Allow it for "
+                f"the run on the app's Approvals page (Blocked) or with: sandbox-ai approvals allow {ident} --scope run"
+                + (". Allowing its host in the network settings does not change what a ruleset decides"
+                   if details.get("ruleset") else ""))
+
+    @staticmethod
+    def remembered(entry):
+        """A decision remembered for the run, as later requests get it: a deny says whose it is and how to take it
+        back."""
+        if entry.get("decision") != "deny" or not entry.get("question"):
+            return entry
+        return {**entry, "why": f"you denied it for this run (question {entry['question']}); take that back on the "
+                                f"app's Approvals page (Blocked) or with: sandbox-ai approvals ask-again "
+                                f"{entry['question']}"}
+
+    def decided_list(self):
+        """The run's remembered decisions and the requests refused for now because nobody answered (newest first)."""
+        now = self.clock()
+        with self.lock:
+            entries = [{"question": entry.get("question"), "kind": entry.get("kind") or key[0],
+                        "decision": entry.get("decision"), "scope": entry.get("scope"), "reason": entry.get("reason"),
+                        "time": entry.get("time"), "details": entry.get("details", {}),
+                        **({"changed": entry["changed"]} if entry.get("changed") else {})}
+                       for key, entry in self.decided.items()]
+            entries += [{"question": entry["question"], "kind": entry["kind"], "decision": "deny",
+                         "scope": "pause", "reason": entry["answer"]["reason"], "details": entry["details"],
+                         "seconds_left": max(0, int(entry["until"] - now))}
+                        for entry in self.cooling.values() if entry["until"] > now]
+        return sorted(entries, key=lambda e: str(e.get("question") or ""), reverse=True)
+
+    def question_of(self, ident):
+        """(kind, details) of question IDENT of this run (the file the broker wrote), for the control op decide."""
+        if not isinstance(ident, str) or not QUESTION_ID.fullmatch(ident):
+            raise ValueError("a question's ID, as sandbox-ai approvals history shows it")
+        try:
+            question = json.loads((self.directory / f"{ident}.json").read_text()[:1 << 16])
+        except (OSError, ValueError):
+            raise ValueError(f"this run asked no question {ident}") from None
+        if not isinstance(question, dict) or question.get("id") != ident or question.get("kind") not in DECIDED_KINDS:
+            raise ValueError(f"question {ident} is no question this run decides on itself")
+        return question["kind"], {k: v for k, v in question.items() if k not in ("id", "kind", "time", "timeout")}
+
+    def control(self, request):
+        """The control op "decide" (`sandbox-ai approvals allow|deny|ask-again|decided`, the app's Blocked list): list
+        the run's remembered decisions, or set one for the run (allow, deny) or forget it (forget: the next request
+        is asked again), named by the question it came from. Only the human reaches the control socket. An allow is
+        held to what the security mode and the administrator's policy approve (max_scope: refused where they approve
+        only once), a connection it opens to the policy's networks, and the kill switch still holds what it cuts."""
+        action = request.get("action", "list")
+        if action not in DECIDE_ACTIONS:
+            raise ValueError(f"decide: one of {', '.join(DECIDE_ACTIONS)}")
+        if action == "list":
+            return {"decided": self.decided_list(), "max_scope": self.max_scope, "pause": self.pause}
+        ident = request.get("question")
+        kind, details = self.question_of(ident)
+        key = self.key(kind, details)
+        with self.lock:
+            if key in self.pending:
+                raise ValueError(f"question {ident} is open: answer it (sandbox-ai approvals allow|deny {ident})")
+            was = self.decided.get(key) or (self.cooling.get(key) or {}).get("answer")
+        was = {k: was.get(k) for k in ("decision", "scope", "reason")} if was else None
+        if action == "forget":
+            with self.lock:
+                self.decided.pop(key, None)
+                self.cooling.pop(key, None)
+            return {"forgot": was is not None, "was": was, "question": ident}
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        entry = {"decision": action, "scope": "run", "reason": "answered", "question": ident, "kind": kind,
+                 "time": stamp, "changed": stamp, "details": self.shown_details(details)}
+        notes = []
+        if action == "allow":
+            if kind == "dns":
+                raise ValueError("a name is allowed with sandbox-ai net allow RUN --allow-host NAME (the host looks it "
+                                 "up and pins it)")
+            if SCOPES.index("run") > SCOPES.index(self.max_scope):
+                by, mode = getattr(self, "capped_by", ("policy", None))
+                capper = f"the security mode {mode}" if by == "mode" else "the administrator's policy"
+                safeguard_event(by, f"allow for the run (question {ident})", f"{capper} approves at most once",
+                                directory=self.directory.parent, mode=mode)
+                raise ValueError(f"{capper} approves at most once: ask again (sandbox-ai approvals ask-again {ident}) "
+                                 "and answer the next question")
+            cut = getattr(self.network, "cut_refusal", lambda *_: None)(kind, details)
+            self._apply(kind, details, entry)  # a connection: the firewall (the policy's networks hold, a cut too)
+            if isinstance(cut, str) and cut:
+                notes.append(f"recorded, but the kill switch holds: {cut}")
+        with self.lock:
+            self.decided[key] = entry
+            self.cooling.pop(key, None)
+        return {"decided": {k: entry[k] for k in ("question", "kind", "decision", "scope", "details")}, "was": was,
+                **({"notes": notes} if notes else {})}
 
     def pinned(self):
         """{name: {addresses}} sandbox-ai pinned for this run (the sandbox's /etc/hosts, written by the launcher

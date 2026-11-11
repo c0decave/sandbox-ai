@@ -91,20 +91,21 @@ KINDS = {kind.key: kind for kind in (
                                     "--nameserver", "--offline", "--egress-all-allow", "--network", "--ip", "--ip6",
                                     "--subnet", "--subnet6"),
          required=True, column=3, help=N_("Where connections may go: hosts, presets, addresses, ports, DNS")),
-    Kind("vpn", N_("VPN"), ("--vpn", "--vpn-check", "--vpn-bypass-host-ports"), column=2,
+    Kind("vpn", N_("VPN"), ("--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp"), column=2,
          help=N_("A VPN profile in front (sandbox-ai vpn): everything leaves through the tunnel, a kill switch "
                  "blocks the rest, addresses and DNS are checked before the start")),
     Kind("devices", N_("Devices and GPU"), ("--device", "--gpu"), column=0,
          help=N_("Host devices handed to the agent (weakens the isolation)")),
-    Kind("limits", N_("Limits"), ("--memory", "--cpus", "--pids"), column=0,
-         help=N_("Memory, CPUs and processes")),
+    Kind("limits", N_("Limits"), ("--memory", "--cpus", "--pids", "--tmp-size"), column=0,
+         help=N_("Memory, CPUs, processes and the size of /tmp")),
     Kind("display", N_("Display"), ("--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"), column=0,
          help=N_("A virtual display for GUI programs and browsers")),
     Kind("session", N_("Session and tmux"), ("--tmux", "--no-tmux"), column=0,
          help=N_("tmux inside the sandbox (sessions are started from the Start page)")),
     Kind("logs", N_("Logs"), ("--log-dir", "--log-debug"), column=1,
          help=N_("Where the logs go (hidden from the agent), and how much of what is refused they keep")),
-    Kind("engine", N_("Engine"), ("--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime"),
+    Kind("engine", N_("Engine"), ("--backend", "--image", "--image-variant", "--nested-containers", "--podman-url",
+                                  "--binary", "--runtime"),
          column=0,
          help=N_("Podman or Bubblewrap, the image and the agent's executable")),
 )}
@@ -1205,6 +1206,11 @@ def capabilities(board, launcher=None, definitions=None):
                               why=f" - {verdict[1]}" if verdict else ""), engine, 15)
     for value in values_.get("--runtime", []):
         add("code", "warn", tr("Runtime folder {path} (read-only, runs inside)", path=printable(value)), engine, 8)
+    if values_.get("--nested-containers"):
+        # Its network stays the sandbox's (the containers' connections pass the firewall and the proxy); what weakens
+        # is the kernel within reach: user namespaces of its own, mounts and more system calls.
+        add("code", "warn", tr("Nested containers: the agent is root of a user namespace of its own and runs "
+                               "containers (more of your host's kernel within reach)"), engine, 10)
     if values_.get("--podman-url"):
         add("code", "warn", tr("Another Podman service: {url}", url=printable(values_["--podman-url"])), engine, 10)
     display = board.first("display")

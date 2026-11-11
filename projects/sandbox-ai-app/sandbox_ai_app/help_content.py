@@ -221,9 +221,19 @@ SECTIONS = (
          "keep_days, on this machine or the host chosen; it shows what it would remove first and asks, and removes "
          "only that: when the list changed meanwhile, nothing is removed. While a command runs, these buttons "
          "wait.\n"
-         "- Stop… asks first. A session keeps its HOME; a one-off run's launcher cleans up.\n\n"
+         "- Report… writes one report of the selected starts of this machine, running or stopped, each with all "
+         "its runs and (unless you say no) its MCP servers, helpers and team: a summary, the statistics, every "
+         "destination and why it was allowed or refused, and a security report of everything tried or done that "
+         "was not allowed, the most severe first, with links (`sandbox-ai report`). Choose PDF, HTML or Markdown, "
+         "the file and, if you like, from when; it is written in the background and opened. It holds no secret, "
+         "but names hosts, paths and commands: share it with care.\n"
+         "- Stop… asks first. A session keeps its HOME; a one-off run's launcher cleans up.\n"
+         "- Kill switch cuts the network of the selected sandboxes at once, also of several, with their MCP "
+         "servers, helpers and team, without a question: the internet, the local network and host ports, all but "
+         "the model API, or everything; Lift the cut gives it back (`sandbox-ai net cut`). The State column says "
+         "what is cut. File › Emergency stop (Ctrl+Shift+X) cuts every sandbox's network, here and on every host.\n\n"
          "A launcher that has not registered can only be ended in its own terminal. Connections already open "
-         "stay open after a revoke.",
+         "stay open after a revoke (a cut closes them).",
          "Diese Seite listet jede Instanz von sandbox-ai Ihres Kontos als Baum, alle paar Sekunden neu gelesen: "
          "jeden Host (wie viele Starts, wie viele laufen, ob er antwortet), darunter seine Starts - einmalige Läufe "
          "(hier, in einem Terminal, von einem Skript oder einer anderen App gestartet), Sitzungen (laufend, "
@@ -285,95 +295,128 @@ SECTIONS = (
          "aufbewahrte Starts, die länger als keep_days ungenutzt sind, auf diesem Rechner oder dem gewählten Host; "
          "es zeigt zuerst, was es entfernen würde, fragt und entfernt nur das: Hat sich die Liste inzwischen "
          "geändert, wird nichts entfernt. Solange ein Befehl läuft, warten diese Knöpfe.\n"
-         "- Stoppen… fragt zuerst. Eine Sitzung behält ihr HOME; der Launcher eines einmaligen Laufs räumt auf.\n\n"
+         "- Bericht… schreibt einen Bericht über die gewählten Starts dieses Rechners, laufend oder gestoppt, "
+         "jeweils mit allen Läufen und (wenn Sie nicht nein sagen) ihren MCP-Servern, Helfern und ihrem Team: eine "
+         "Zusammenfassung, die Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und einen "
+         "Sicherheitsbericht über alles, was versucht oder getan wurde und nicht erlaubt war, das Schwerste zuerst, "
+         "mit Links (`sandbox-ai report`). Wählen Sie PDF, HTML oder Markdown, die Datei und, wenn Sie möchten, ab "
+         "wann; er wird im Hintergrund geschrieben und geöffnet. Er enthält keine Geheimnisse, nennt aber Hosts, "
+         "Pfade und Befehle: geben Sie ihn mit Bedacht weiter.\n"
+         "- Stoppen… fragt zuerst. Eine Sitzung behält ihr HOME; der Launcher eines einmaligen Laufs räumt auf.\n"
+         "- Kill-Switch kappt das Netz der gewählten Sandboxen sofort, auch mehrerer, mit ihren MCP-Servern, Helfern "
+         "und ihrem Team, ohne Rückfrage: das Internet, das lokale Netz und die Host-Ports, alles außer der "
+         "Modell-API, oder alles; Kappung aufheben gibt es zurück (`sandbox-ai net cut`). Die Spalte Zustand sagt, "
+         "was gekappt ist. Datei › Notaus (Ctrl+Shift+X) kappt das Netz jeder Sandbox, hier und auf jedem Host.\n\n"
          "Ein nicht angemeldeter Launcher lässt sich nur in seinem eigenen Terminal beenden. Schon offene "
-         "Verbindungen bleiben nach dem Zurücknehmen offen."),
+         "Verbindungen bleiben nach dem Zurücknehmen offen (eine Kappung schließt sie)."),
         cli=("sandbox-ai list", "sandbox-ai list --all", "sandbox-ai list --history NAME", "sandbox-ai rename OLD NEW",
              "sandbox-ai rules reload NAME", "sandbox-ai resume NAME --restore-home",
-             "sandbox-ai gc --dry-run", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
-             "sandbox-ai net untaint RUN", "sandbox-ai net stop RUN", "sandbox-ai session stop NAME",
+             "sandbox-ai report NAME -o FILE.pdf", "sandbox-ai gc --dry-run", "sandbox-ai net list", "sandbox-ai net allow", "sandbox-ai net revoke",
+             "sandbox-ai net untaint RUN", "sandbox-ai net cut RUN MODE", "sandbox-ai net stop RUN",
+             "sandbox-ai session stop NAME",
              "sandbox-ai mcp stop NAME", "sandbox-ai devices", "sandbox-ai limits", "sandbox-ai workspace add",
              "sandbox-ai mcp attach NAME START --live", "sandbox-ai mcp detach NAME START --live",
              "sandbox-ai resume NAME"),
-        see=("sessions", "network", "taint", "devices", "limits", "page-hosts", "page-terminals", "mcp",
+        see=("sessions", "network", "killswitch", "taint", "devices", "limits", "page-hosts", "page-terminals", "mcp",
              "workspaces-mounts"),
         tours=("area:sandboxes",)),
     section(
         "page-approvals", "app", ("Approvals", "Freigaben"),
-        ("A running sandbox waits here when its agent wants something the options do not allow: a connection, a "
-         "name lookup, a push despite privacy warnings, an MCP tool call or request an ask rule holds, a URL to "
-         "open. The questions of this machine and of every host of `sandbox-ai hosts` are listed together; "
-         "Questions of shows only this machine's or one host's (Show questions on the Hosts page sets it). Each "
-         "question shows the run, what is asked, its age, the countdown and the host: without an answer it is "
-         "refused after 60 seconds - a page to open is not: it waits until it is answered. A host that stops "
-         "answering keeps its questions listed for a minute after its last answer, and an answer sent to a host "
-         "stays marked answered (no second answer) until that host no longer lists the question.\n\n"
-         "- Choose the scope of an allow: once, for this run, or always (this project). The security mode and the "
-         "administrator's max_approval_scope may offer less.\n"
-         "- Allow (Ctrl+Return) asks for a confirmation that names the sandbox, the question and the scope (Cancel is "
-         "the default for always). For another host's page to open it reads Open here and allow: the page opens "
-         "in this computer's browser, and the host is told not to open it (`--no-open`).\n"
-         "- Deny for this run (Ctrl+Shift+D) is the default deny: refused, and not asked again until the run "
-         "ends. Deny once refuses only this time, so the sandbox may ask again. Block always… (Ctrl+Shift+K) "
-         "refuses it at every later start of the project too, after asking you. The keys work while the focus is "
-         "in the open questions, and in the window of questions that opens above another dialog.\n"
-         "- Each question is answered on its own: several answers can be on their way at once, and a slow host "
-         "never holds up the others.\n"
-         "- The selected question explains itself from what is already known, never by looking anything up: a "
-         "name the agent gave is marked unverified.\n\n"
-         "History lists questions with answers, of this machine or of the host chosen in History of (as its "
-         "`sandbox-ai approvals history` says them). Allowed or blocked always (per project) lists your standing "
-         "answers, of this machine or of a host chosen beside Refresh; Forget… removes one there, so it is asked "
-         "again. Sandboxes running now keep what they were allowed until they end: use Revoke… on Sandboxes & "
-         "sessions there.\n\n"
-         "The page is polled every second, also while the window is closed to the tray; new questions raise a "
-         "desktop notification each and a count in the navigation. Allow and Block on a question's notification are "
-         "the answer (once, for this run): nothing asks again. Allow always… and Block always… outlive the run, so "
-         "they ask once, and that confirmation is the answer. One answer anywhere settles the question everywhere: "
-         "its notification closes and the Questions window leaves it out. The open questions are a panel you can "
-         "float over other pages. Choose once while you are unsure.",
-         "Eine laufende Sandbox wartet hier, wenn ihr Agent etwas will, das die Optionen nicht erlauben: eine "
-         "Verbindung, eine Namensauflösung, einen Push trotz Datenschutz-Warnungen, einen MCP-Aufruf oder eine "
-         "Anfrage, die eine ask-Regel anhält, eine zu öffnende URL. Die Fragen dieses Rechners und jedes Hosts von "
-         "`sandbox-ai hosts` stehen zusammen; Fragen von zeigt nur die dieses Rechners oder eines Hosts (Fragen "
-         "zeigen auf der Seite Hosts stellt es ein). Jede Frage zeigt Lauf, Gegenstand, Alter, Countdown und Host: "
-         "Ohne Antwort wird sie nach 60 Sekunden abgelehnt - eine zu öffnende Seite nicht: sie wartet, bis sie "
-         "beantwortet ist. Ein Host, der nicht mehr antwortet, behält seine Fragen noch eine Minute nach seiner "
-         "letzten Antwort in der Liste, und eine an einen Host geschickte Antwort bleibt als beantwortet markiert "
-         "(keine zweite Antwort), bis dieser Host die Frage nicht mehr listet.\n\n"
-         "- Wählen Sie die Geltung eines Erlaubens: einmal, für diesen Lauf oder immer (dieses Projekt). "
-         "Sicherheitsmodus und max_approval_scope des Administrators können weniger anbieten.\n"
-         "- Erlauben (Strg+Eingabe) verlangt eine Bestätigung, die Sandbox, Frage und Geltung nennt (bei immer ist "
-         "Abbrechen vorgewählt). Für eine zu öffnende Seite eines anderen Hosts heißt es Hier öffnen und erlauben: "
-         "Die Seite öffnet sich im Browser dieses Rechners, und der Host erfährt, dass er sie nicht öffnen soll "
-         "(`--no-open`).\n"
-         "- Für diesen Lauf ablehnen (Strg+Umschalt+D) ist das übliche Ablehnen: abgewiesen und bis zum Ende des "
-         "Laufs nicht wieder gefragt. Einmal ablehnen weist nur dieses Mal ab, die Sandbox darf wieder fragen. "
-         "Immer sperren… (Strg+Umschalt+K) weist es nach einer Rückfrage auch bei jedem späteren Start des "
-         "Projekts ab. Die Tasten wirken, solange der Fokus in den offenen Fragen liegt, und im Fenster der "
-         "Fragen, das sich über einem anderen Dialog öffnet.\n"
-         "- Jede Frage wird für sich beantwortet: Mehrere Antworten können zugleich unterwegs sein, und ein "
-         "langsamer Host hält die anderen nie auf.\n"
-         "- Die gewählte Frage erklärt sich aus dem, was schon bekannt ist, ohne etwas nachzuschlagen: Ein Name, "
-         "den der Agent angab, ist als ungeprüft markiert.\n\n"
-         "Verlauf listet Fragen mit Antworten, die dieses Rechners oder die des unter Verlauf von gewählten Hosts "
-         "(wie sein `sandbox-ai approvals history` sie nennt). Immer erlaubt oder blockiert (je Projekt) listet Ihre dauerhaften "
-         "Antworten, die dieses Rechners oder eines Hosts, den Sie neben Neu laden wählen; Vergessen… entfernt "
-         "dort eine, dann wird wieder gefragt. Jetzt laufende Sandboxen behalten bis zu ihrem Ende, was sie "
-         "erlaubt bekamen: Nutzen Sie dort Zurücknehmen… auf Sandboxen & Sitzungen.\n\n"
-         "Die Seite fragt jede Sekunde ab, auch wenn das Fenster in den Infobereich geschlossen ist; neue Fragen "
-         "bringen je eine Desktop-Benachrichtigung und einen Zähler in der Navigation. Erlauben und Blockieren auf "
-         "der Benachrichtigung einer Frage sind die Antwort (einmal, für diesen Lauf): Nichts fragt noch einmal. "
-         "Immer erlauben… und Immer blockieren… gelten über den Lauf hinaus, sie fragen daher einmal, und diese "
-         "Bestätigung ist die Antwort. Eine Antwort irgendwo erledigt die Frage überall: Ihre Benachrichtigung "
-         "schließt sich, und das Fenster der Fragen lässt sie weg. Die offenen Fragen sind ein "
-         "Bereich, den Sie über anderen Seiten schweben lassen können. Wählen Sie einmal, solange Sie unsicher "
-         "sind."),
+        ("What your sandboxes ask, what they were refused and why, and what they may reach. What you change here "
+         "holds for the running sandbox at once.\n\n"
+         "Questions (a panel above the page, which you can float over other pages): a running sandbox waits here when "
+         "its agent wants something its options do not allow - a connection, a name lookup, a push despite privacy "
+         "warnings, a request or MCP tool call a ruleset asks about, a URL to open. The questions of this machine and "
+         "of every host of `sandbox-ai hosts` are listed together (Questions of: only this machine's or one host's). "
+         "The selected question says why it is asked. Without an answer within 60 seconds a question is refused, "
+         "and the same request is refused at once for 2 minutes, then asked again: no answer is no decision. A page "
+         "to open waits until it is answered.\n\n"
+         "- Allow for: once, for this run or always (this project); the button says which. The security mode and the "
+         "administrator's max_approval_scope may offer less. Allow asks for a confirmation that names the sandbox, "
+         "the question and the scope.\n"
+         "- Keys in the list of questions: Enter allows for this run, Delete denies for this run, Ctrl+Return allows "
+         "as chosen, Ctrl+Shift+D denies, Ctrl+Shift+K blocks always (asked first). They work in the window of "
+         "questions that opens above another dialog too.\n"
+         "- Deny for this run refuses it until the run ends; Deny once only this time; Block always… at every later "
+         "start of the project too.\n\n"
+         "Below the questions, the page is about one sandbox: the active tab's (the terminal tab or session shown, or "
+         "the newest run of the tab's project), another one chosen in Sandbox, or all of them. Its line says how it "
+         "runs: its security mode, VPN or Tor, a cut of the kill switch, how long questions wait.\n\n"
+         "- Blocked: everything it (and its MCP servers and helpers) was refused, newest first, with the reason - not "
+         "allowed by the network settings, denied by a ruleset's rule, not answered in time, denied by you, the "
+         "security mode, the administrator's policy, the kill switch - and the process that tried. Show filters by "
+         "reason; several can be chosen. Allow for this run opens a destination (as `sandbox-ai net allow`) or takes "
+         "back the run's decision about a request and allows it; Ask again forgets the decision, so the next try is "
+         "asked; Deny for this run refuses it without a question; Allow always… keeps a destination in the "
+         "project's .sandbox-ai.json, and a request as an exception rule in a ruleset of yours - your own rules in "
+         "place, the project's own ruleset in its file, and for a preset's or someone else's ruleset a copy of your "
+         "own (the original is never changed). What changes is shown before it is written. The security mode and "
+         "the policy hold: where they approve only once, nothing is allowed for the run. The kill switch holds too: "
+         "what you allow during a cut stays cut until it is lifted. Nothing here opens your browser or anything past "
+         "Tor.\n"
+         "- The network and VPN settings open destinations; they do not change what a ruleset decides. A request a "
+         "ruleset asks about (a POST, say) is asked even when its host is allowed: allow it here.\n"
+         "- Allowed now: what the sandbox may reach beyond its start options - allowed during the run here, with "
+         "`sandbox-ai net allow` or by an answer. Revoke… takes it back.\n"
+         "- Remembered: your answers that hold for later starts, per project (of this machine or a host); Forget… "
+         "removes one, so it is asked again.\n"
+         "- History: the questions with their answers, of this machine or a host.\n\n"
+         "The page is read every second, also while the window is closed to the tray; new questions raise a desktop "
+         "notification each and a count in the navigation. One answer anywhere settles the question everywhere. "
+         "Choose once while you are unsure.",
+         "Was Ihre Sandboxen fragen, was ihnen abgelehnt wurde und warum, und was sie erreichen dürfen. Was Sie hier "
+         "ändern, gilt sofort für die laufende Sandbox.\n\n"
+         "Fragen (ein Bereich über der Seite, den Sie über anderen Seiten schweben lassen können): Eine laufende "
+         "Sandbox wartet hier, wenn ihr Agent etwas will, das ihre Optionen nicht erlauben - eine Verbindung, eine "
+         "Namensauflösung, einen Push trotz Datenschutz-Warnungen, eine Anfrage oder einen MCP-Aufruf, nach dem ein "
+         "Regelwerk fragt, eine zu öffnende URL. Die Fragen dieses Rechners und jedes Hosts von `sandbox-ai hosts` "
+         "stehen zusammen (Fragen von: nur die dieses Rechners oder eines Hosts). Die gewählte Frage sagt, warum sie "
+         "gestellt wird. Ohne Antwort innerhalb von 60 Sekunden wird eine Frage abgelehnt, und dieselbe Anfrage wird "
+         "2 Minuten lang sofort abgelehnt, dann wieder gefragt: Keine Antwort ist keine Entscheidung. Eine zu "
+         "öffnende Seite wartet, bis sie beantwortet ist.\n\n"
+         "- Erlauben für: einmal, für diesen Lauf oder immer (dieses Projekt); der Knopf sagt, was. Sicherheitsmodus "
+         "und max_approval_scope des Administrators können weniger anbieten. Erlauben verlangt eine Bestätigung, die "
+         "Sandbox, Frage und Geltung nennt.\n"
+         "- Tasten in der Liste der Fragen: Eingabe erlaubt für diesen Lauf, Entf lehnt für diesen Lauf ab, "
+         "Strg+Eingabe erlaubt wie gewählt, Strg+Umschalt+D lehnt ab, Strg+Umschalt+K sperrt immer (nach Rückfrage). "
+         "Sie wirken auch im Fenster der Fragen, das sich über einem anderen Dialog öffnet.\n"
+         "- Für diesen Lauf ablehnen weist es bis zum Ende des Laufs ab; Einmal ablehnen nur dieses Mal; Immer "
+         "sperren… auch bei jedem späteren Start des Projekts.\n\n"
+         "Unter den Fragen geht es um eine Sandbox: die des aktiven Tabs (der gezeigte Terminal-Tab oder die Sitzung, "
+         "oder der neueste Lauf des Projekts des Tabs), eine andere unter Sandbox gewählte oder alle. Ihre Zeile sagt, "
+         "wie sie läuft: Sicherheitsmodus, VPN oder Tor, eine Kappung durch den Kill-Switch, wie lange Fragen "
+         "warten.\n\n"
+         "- Blockiert: alles, was ihr (und ihren MCP-Servern und Helfern) abgelehnt wurde, neueste zuerst, mit dem "
+         "Grund - von den Netzwerk-Einstellungen nicht erlaubt, von einer Regel eines Regelwerks verweigert, nicht "
+         "rechtzeitig beantwortet, von Ihnen verweigert, der Sicherheitsmodus, die Richtlinie des Administrators, "
+         "der Kill-Switch - und dem Prozess, der es versuchte. Zeigen filtert nach Grund; mehrere lassen sich "
+         "auswählen. Für diesen Lauf erlauben öffnet ein Ziel (wie `sandbox-ai net allow`) oder nimmt die "
+         "Entscheidung des Laufs über eine Anfrage zurück und erlaubt sie; Wieder fragen vergisst die Entscheidung, "
+         "der nächste Versuch wird gefragt; Für diesen Lauf ablehnen weist es ohne Frage ab; Immer erlauben… behält "
+         "ein Ziel in der .sandbox-ai.json des Projekts und eine Anfrage als Ausnahmeregel in einem Ihrer "
+         "Regelwerke - Ihre eigenen Regeln an Ort und Stelle, das eigene Regelwerk des Projekts in seiner Datei, und "
+         "für das Regelwerk einer Vorlage oder von jemand anderem eine Kopie für Sie (das Original wird nie "
+         "geändert). Was sich ändert, wird gezeigt, bevor es geschrieben wird. Sicherheitsmodus und Richtlinie "
+         "gelten: Wo sie nur einmal erlauben, wird nichts für den Lauf erlaubt. Der Kill-Switch gilt auch: Was Sie "
+         "während einer Kappung erlauben, bleibt gekappt, bis sie aufgehoben ist. Nichts hier öffnet Ihren Browser "
+         "oder etwas an Tor vorbei.\n"
+         "- Die Netzwerk- und VPN-Einstellungen öffnen Ziele; sie ändern nicht, was ein Regelwerk entscheidet. Eine "
+         "Anfrage, nach der ein Regelwerk fragt (etwa ein POST), wird auch gefragt, wenn ihr Host erlaubt ist: "
+         "Erlauben Sie sie hier.\n"
+         "- Jetzt erlaubt: was die Sandbox über ihre Startoptionen hinaus erreichen darf - während des Laufs hier, mit "
+         "`sandbox-ai net allow` oder durch eine Antwort erlaubt. Zurücknehmen… nimmt es zurück.\n"
+         "- Gemerkt: Ihre Antworten, die für spätere Starts gelten, je Projekt (dieses Rechners oder eines Hosts); "
+         "Vergessen… entfernt eine, dann wird wieder gefragt.\n"
+         "- Verlauf: die Fragen mit ihren Antworten, dieses Rechners oder eines Hosts.\n\n"
+         "Die Seite wird jede Sekunde gelesen, auch wenn das Fenster in den Infobereich geschlossen ist; neue Fragen "
+         "bringen je eine Desktop-Benachrichtigung und einen Zähler in der Navigation. Eine Antwort irgendwo erledigt "
+         "die Frage überall. Wählen Sie einmal, solange Sie unsicher sind."),
         cli=("sandbox-ai approvals list", "sandbox-ai approvals allow ID --scope once|run|always [--no-open]",
-             "sandbox-ai approvals deny ID --scope run|once|always", "sandbox-ai approvals history",
+             "sandbox-ai approvals deny ID --scope run|once|always", "sandbox-ai approvals ask-again ID",
+             "sandbox-ai approvals blocked [RUN]", "sandbox-ai approvals decided [RUN]", "sandbox-ai approvals history",
              "sandbox-ai approvals remembered", "sandbox-ai approvals forget PROJECT ENTRY",
-             "sandbox-ai hosts run HOST -- approvals list", "--ask"),
-        see=("approvals", "network", "rulesets", "policy", "page-hosts"),
+             "sandbox-ai net allow|revoke RUN …", "sandbox-ai hosts run HOST -- approvals list", "--ask"),
+        see=("approvals", "network", "rulesets", "policy", "killswitch", "page-hosts"),
         tours=("approvals-network", "area:approvals")),
     section(
         "page-terminals", "app", ("Terminals", "Terminals"),
@@ -503,7 +546,10 @@ SECTIONS = (
          "tables with simple bars.\n\n"
          "Pick a project's log directory, then compare two runs, for example before and after a change of "
          "options. A host you do not expect, or a credential header sent to it, is a reason to look at "
-         "Connections. The tokens come from what the model APIs reported in their answers.",
+         "Connections. The tokens come from what the model APIs reported in their answers.\n\n"
+         "Report… writes one report of every run of the log folder shown, as PDF, HTML or Markdown: the runs, the "
+         "statistics, every destination and why it was allowed or refused, and the security report of what was "
+         "not allowed (`sandbox-ai report --log-dir`). For a host's logs, run `sandbox-ai report` there.",
          "Statistik fasst das Protokollverzeichnis eines Projekts zusammen: Modellaufrufe und Tokens pro Lauf und pro "
          "Agent, HTTP-Anfragen pro Host, gesendete Anmelde-Header pro Host (nur Namen, nie Werte), geprüfte und "
          "abgewiesene Pushes, abgewiesene Verbindungen, gestartete Programme und die Werkzeugaufrufe der "
@@ -511,8 +557,12 @@ SECTIONS = (
          "Wählen Sie das Protokollverzeichnis eines Projekts und vergleichen Sie zwei Läufe, etwa vor und nach einer "
          "Änderung der Optionen. Ein unerwarteter Host oder ein an ihn gesendeter Anmelde-Header ist ein Grund, "
          "auf Verbindungen nachzusehen. Die Tokens stammen aus dem, was die Modell-APIs in ihren Antworten "
-         "meldeten."),
-        cli=("sandbox-ai logs", "sandbox-ai logs --project PATH"),
+         "meldeten.\n\n"
+         "Bericht… schreibt einen Bericht über jeden Lauf des gezeigten Protokollverzeichnisses, als PDF, HTML oder "
+         "Markdown: die Läufe, die Statistik, jedes Ziel und warum es erlaubt oder abgelehnt wurde, und den "
+         "Sicherheitsbericht über das, was nicht erlaubt war (`sandbox-ai report --log-dir`). Für die Protokolle "
+         "eines Hosts führen Sie `sandbox-ai report` dort aus."),
+        cli=("sandbox-ai logs", "sandbox-ai logs --project PATH", "sandbox-ai report --log-dir DIR -o FILE.pdf"),
         see=("logs", "page-connections"),
         tours=("area:statistics",)),
     section(
@@ -1408,7 +1458,11 @@ SECTIONS = (
          "A running sandbox can get more or less without a restart: `sandbox-ai net allow` and `net revoke`, "
          "with `--keep` also for the next starts. Every widening is a decision: `--dns` can carry data out in "
          "names, and IP filtering cannot tell apart domains that share CDN addresses. A destination not allowed "
-         "becomes a question on the Approvals page.",
+         "becomes a question on the Approvals page.\n\n"
+         "The network settings decide where connections may go, not what a ruleset decides about the requests on "
+         "them: a host allowed here still has its requests asked about or denied by a ruleset (a POST to any host, "
+         "say). Such a request is allowed on the Approvals page (Blocked), or with `sandbox-ai approvals allow ID "
+         "--scope run`.",
          "Jede Sandbox hat ihr eigenes Netzwerk mit einer standardmäßig sperrenden Firewall. Nur die Hosts des "
          "Anbieters werden beim Start aufgelöst, gepinnt und für HTTPS erlaubt; innen gibt es standardmäßig kein "
          "DNS.\n\n"
@@ -1424,12 +1478,66 @@ SECTIONS = (
          "Eine laufende Sandbox bekommt mehr oder weniger ohne Neustart: `sandbox-ai net allow` und `net revoke`, "
          "mit `--keep` auch für die nächsten Starts. Jede Erweiterung ist eine Entscheidung: `--dns` kann Daten in "
          "Namen hinaustragen, und IP-Filter unterscheiden keine Domains, die sich CDN-Adressen teilen. Ein nicht "
-         "erlaubtes Ziel wird zu einer Frage auf der Seite Freigaben."),
+         "erlaubtes Ziel wird zu einer Frage auf der Seite Freigaben.\n\n"
+         "Die Netzwerk-Einstellungen bestimmen, wohin Verbindungen gehen dürfen, nicht, was ein Regelwerk über die "
+         "Anfragen darauf entscheidet: Bei einem hier erlaubten Host fragt ein Regelwerk trotzdem nach seinen "
+         "Anfragen oder lehnt sie ab (etwa ein POST an jeden Host). Eine solche Anfrage erlauben Sie auf der Seite "
+         "Freigaben (Blockiert) oder mit `sandbox-ai approvals allow ID --scope run`."),
         cli=("--profile", "--allow-host", "--allow-tcp", "--allow", "--allow-host-port", "--dns", "--offline",
              "--egress-all-allow", "--no-provider-defaults", "--subnet", "sandbox-ai net allow",
              "sandbox-ai net revoke", "sandbox-ai net show", "sandbox-ai logs"),
-        see=("proxy", "approvals", "vpn-tor", "page-connections", "page-sandboxes"),
+        see=("proxy", "approvals", "vpn-tor", "page-connections", "page-sandboxes", "killswitch"),
         tours=("approvals-network",)),
+    section(
+        "killswitch", "concepts", ("Kill switch and emergency stop", "Kill-Switch und Notaus"),
+        ("The kill switch cuts a running sandbox's network down at once, for every preset and agent, without a "
+         "restart (`sandbox-ai net cut RUN MODE`; on the Sandboxes page: Kill switch, also for several selected):\n\n"
+         "- Cut the internet (`remote`): only the local network and the host's ports the run may reach stay.\n"
+         "- Cut the local network and host ports (`local`): only the internet the run may reach stays.\n"
+         "- Only the model API (`api`): its provider's hosts with the addresses the start pinned (TLS must name "
+         "one of them: another name behind the same CDN is refused), or its `--llm` server.\n"
+         "- Cut everything (`all`): the model API too.\n"
+         "- Lift the cut (`off`): it reaches again exactly what it may reach.\n\n"
+         "A cut only takes away: it never opens anything the run may not reach otherwise, and lookups count as the "
+         "internet. It holds out of the agent's reach - in the sandbox's firewall (connections already open stop "
+         "too), in the connection proxy (which closes them) and in the supervisor's relays and DNS stub - and for "
+         "the run's MCP servers, helpers and team members as well, also those that join it later. An MCP server two "
+         "runs share holds both cuts and stays cut while one of them is; a paused sandbox is cut as it resumes. "
+         "Behind Tor `api` is the provider through Tor; "
+         "nothing is opened past Tor or a VPN. The State column says what is cut.\n\n"
+         "The emergency stop (File › Emergency stop, Ctrl+Shift+X from every window, the button in the header) cuts "
+         "every running sandbox's network at once, here and on every host of `sandbox-ai hosts`, without a question; "
+         "a notification says what was cut and names every host it did not reach. File › Lift every cut (asked "
+         "first), or Kill switch › Lift the cut, gives it back. Runs started by a "
+         "sandbox-ai older than 0.1.94 have no kill switch: stop them.",
+         "Der Kill-Switch kappt das Netz einer laufenden Sandbox sofort, für jedes Preset und jeden Agenten, ohne "
+         "Neustart (`sandbox-ai net cut LAUF MODUS`; auf der Seite Sandboxen: Kill-Switch, auch für mehrere "
+         "gewählte):\n\n"
+         "- Internet kappen (`remote`): Nur das lokale Netz und die Ports des Hosts, die der Lauf erreichen darf, "
+         "bleiben.\n"
+         "- Lokales Netz und Host-Ports kappen (`local`): Nur das Internet, das der Lauf erreichen darf, bleibt.\n"
+         "- Nur die Modell-API (`api`): die Hosts ihres Anbieters mit den Adressen, die der Start festgelegt hat "
+         "(TLS muss einen davon nennen: ein anderer Name hinter demselben CDN wird abgelehnt), oder ihr "
+         "`--llm`-Server.\n"
+         "- Alles kappen (`all`): auch die Modell-API.\n"
+         "- Kappung aufheben (`off`): Sie erreicht wieder genau, was sie erreichen darf.\n\n"
+         "Eine Kappung nimmt nur weg: Sie öffnet nie etwas, das der Lauf sonst nicht erreichen darf, und "
+         "Namensauflösungen zählen als Internet. Sie gilt außerhalb der Reichweite des Agenten - in der Firewall der "
+         "Sandbox (auch schon offene Verbindungen stehen still), im Verbindungs-Proxy (der sie schließt) und in den "
+         "Relays und dem DNS-Stub des Supervisors - und auch für die MCP-Server, Helfer und Team-Mitglieder des "
+         "Laufs, auch für die, die später dazukommen. Ein MCP-Server, den zwei Läufe teilen, hält beide Kappungen und "
+         "bleibt gekappt, solange einer von ihnen es ist; eine pausierte Sandbox wird beim Fortsetzen gekappt. "
+         "Hinter Tor ist `api` der Anbieter durch Tor; nichts wird an Tor oder einem VPN vorbei geöffnet. Die "
+         "Spalte Zustand sagt, was gekappt ist.\n\n"
+         "Der Notaus (Datei › Notaus, Ctrl+Shift+X aus jedem Fenster, der Knopf in der Kopfleiste) kappt das Netz "
+         "jeder laufenden Sandbox sofort, hier und auf jedem Host von `sandbox-ai hosts`, ohne Rückfrage; eine "
+         "Benachrichtigung sagt, was gekappt wurde, und nennt jeden Host, den er nicht erreichte. Datei › Jede "
+         "Kappung aufheben (mit Rückfrage) oder Kill-Switch › Kappung aufheben gibt es zurück. Läufe, "
+         "die ein sandbox-ai vor 0.1.94 gestartet hat, haben keinen Kill-Switch: Stoppen Sie sie."),
+        cli=("sandbox-ai net cut RUN remote", "sandbox-ai net cut RUN local", "sandbox-ai net cut RUN api",
+             "sandbox-ai net cut RUN all", "sandbox-ai net cut RUN off", "sandbox-ai net cut --all-runs all",
+             "sandbox-ai net list --json"),
+        see=("network", "page-sandboxes", "proxy", "vpn-tor", "mcp")),
     section(
         "proxy", "concepts", ("Connection proxy", "Verbindungs-Proxy"),
         ("Every TCP connection of the agent passes a proxy that starts with the sandbox. It is on by default; "
@@ -1474,7 +1582,10 @@ SECTIONS = (
          "- once allows this one connection, run until the sandbox ends, always also every later start of the "
          "same project.\n"
          "- deny refuses it for this run; always blocked refuses it at every later start.\n"
-         "- A question nobody answers is refused after 60 seconds.\n\n"
+         "- A question nobody answers is refused after 60 seconds; the same request is then refused at once for 2 "
+         "minutes and asked again after that (no answer is no decision). Its decision can be changed while the "
+         "sandbox runs: Approvals page, Blocked, or `sandbox-ai approvals allow ID --scope run`, `deny ID`, "
+         "`ask-again ID`.\n\n"
          "Questions appear as desktop notifications, in the app and in `sandbox-ai approvals`. The name in a "
          "connection question is the agent's claim: what you allow is the address, unless sandbox-ai can prove "
          "the name. `--ask off` refuses everything the options do not allow. The security mode `high` caps "
@@ -1491,7 +1602,10 @@ SECTIONS = (
          "- einmal erlaubt diese eine Verbindung, für diesen Lauf bis zum Ende der Sandbox, immer auch jeden "
          "späteren Start desselben Projekts.\n"
          "- Ablehnen weist sie für diesen Lauf ab; Immer blockieren weist sie bei jedem späteren Start ab.\n"
-         "- Eine Frage ohne Antwort wird nach 60 Sekunden abgelehnt.\n\n"
+         "- Eine Frage ohne Antwort wird nach 60 Sekunden abgelehnt; dieselbe Anfrage wird danach 2 Minuten lang "
+         "sofort abgelehnt und dann wieder gefragt (keine Antwort ist keine Entscheidung). Ihre Entscheidung lässt "
+         "sich ändern, solange die Sandbox läuft: Seite Freigaben, Blockiert, oder `sandbox-ai approvals allow ID "
+         "--scope run`, `deny ID`, `ask-again ID`.\n\n"
          "Fragen erscheinen als Desktop-Benachrichtigung, in der App und in `sandbox-ai approvals`. Der Name in "
          "einer Verbindungsfrage ist eine Angabe des Agenten: Erlaubt wird die Adresse, außer sandbox-ai kann den "
          "Namen belegen. `--ask off` weist alles ab, was die Optionen nicht erlauben. Der Sicherheitsmodus `high` "
@@ -1847,9 +1961,14 @@ SECTIONS = (
          "network (each behind the same VPN in a container of its own; with Tor a server with a VPN of another type is "
          "refused). Names allowed during the run are looked up through it. With Tor nothing of the start reaches your "
          "own address: no URL of the agent opens in your browser, the host's ports (`--allow-host-port`, an LLM server "
-         "on this machine, a Git server on localhost) are refused unless `--vpn-bypass-host-ports` lets them in, and "
+         "on this machine, a Git server on localhost) are refused unless `--vpn-bypass-host-ports` lets them in, a "
+         "model server in your own network only with `--vpn-bypass-tcp ADDRESS:PORT` (exactly that address and port "
+         "past Tor, the rest of your network stays closed), and "
          "an exit that is no Tor exit ends the run (checked a minute after the start, then every 10 minutes). With "
-         "another VPN the host's ports are reached past the tunnel, as asked.",
+         "another VPN the host's ports are reached past the tunnel, as asked.\n\n"
+         "A VPN or Tor decides the way out, not what is allowed: hosts are opened in the network settings, and a "
+         "ruleset still asks about or denies requests to them (allow such a request on the Approvals page, "
+         "Blocked).",
          "Ein VPN kann vor einer Sandbox sitzen (Podman-Backend). Der Tunnel läuft in einem eigenen Container im "
          "Netzwerk der Sandbox, ein Kill-Switch lässt nichts anderes hinaus (IPv4 und IPv6), und bevor der Agent "
          "startet, werden die von außen gesehenen Adressen und das DNS geprüft, und während des Laufs erneut (ein Leck "
@@ -1869,11 +1988,16 @@ SECTIONS = (
          "abgelehnt). Während des Laufs erlaubte Namen werden durch es aufgelöst. Mit Tor erreicht nichts des Starts "
          "Ihre eigene Adresse: keine URL des Agenten öffnet sich in Ihrem Browser, die Ports des Hosts "
          "(`--allow-host-port`, ein LLM-Server auf diesem Rechner, ein Git-Server auf localhost) werden abgelehnt, "
-         "außer `--vpn-bypass-host-ports` lässt sie zu, und ein Ausgang, der kein Tor-Ausgang ist, beendet den Lauf "
+         "außer `--vpn-bypass-host-ports` lässt sie zu, ein Modellserver im eigenen Netz nur mit "
+         "`--vpn-bypass-tcp ADRESSE:PORT` (genau diese Adresse und dieser Port am Tor vorbei, der Rest Ihres Netzes "
+         "bleibt zu), und ein Ausgang, der kein Tor-Ausgang ist, beendet den Lauf "
          "(geprüft eine Minute nach dem Start, dann alle 10 Minuten). Mit einem anderen VPN werden die Ports des Hosts "
-         "am Tunnel vorbei erreicht, wie verlangt."),
+         "am Tunnel vorbei erreicht, wie verlangt.\n\n"
+         "Ein VPN oder Tor bestimmt den Weg hinaus, nicht was erlaubt ist: Hosts werden in den Netzwerk-Einstellungen "
+         "geöffnet, und ein Regelwerk fragt trotzdem nach Anfragen an sie oder lehnt sie ab (eine solche Anfrage "
+         "erlauben Sie auf der Seite Freigaben, Blockiert)."),
         cli=("sandbox-ai build vpn", "sandbox-ai build tor", "sandbox-ai vpn add", "sandbox-ai vpn list", "sandbox-ai vpn check NAME", "sandbox-ai vpn rotate NAME",
-             "sandbox-ai vpn remove NAME", "--vpn", "--vpn-check", "--vpn-bypass-host-ports"),
+             "sandbox-ai vpn remove NAME", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp"),
         see=("network", "page-credentials", "secrets", "mcp", "llm"),
         tours=()),
     section(

@@ -481,13 +481,20 @@ def read_rootfs(source, signature, fetch=None):
     return {name: entry for name, entry in document["rootfs"].items() if isinstance(entry, dict)}, None
 
 
-def default_catalogs(root=None):
-    """CATALOGS, each replaced by the copy in sandbox-ai's own tree when there is one."""
+LOCAL_CATALOGS_VARIABLE = "SANDBOX_AI_LOCAL_CATALOGS"  # =1: the copies in sandbox-ai's own tree (development)
+
+
+def default_catalogs(root=None, environ=None):
+    """CATALOGS: the published, signed catalogs. The copy in sandbox-ai's own tree (projects/NAME/catalog.json, a
+    development checkout's) only with SANDBOX_AI_LOCAL_CATALOGS=1: an installation carried such a copy, old and
+    unsigned, and took it before the published one - every entry was "not signed by a trusted key"."""
+    environ = os.environ if environ is None else environ
     root = Path(root) if root else Path(__file__).resolve().parent.parent
+    local_wanted = environ.get(LOCAL_CATALOGS_VARIABLE) == "1"
     chosen = []
     for prefix, url in CATALOGS:
         local = root / "projects" / LOCAL_CATALOGS.get(prefix, "") / "catalog.json"
-        chosen.append((prefix, str(local) if prefix in LOCAL_CATALOGS and local.is_file() else url))
+        chosen.append((prefix, str(local) if local_wanted and prefix in LOCAL_CATALOGS and local.is_file() else url))
     return chosen
 
 
@@ -870,12 +877,22 @@ def vpn_conflicts(name, definition, vpn, tor):
 
 
 def server_options(definition, vpn):
-    """The options a command server's own start gets: --vpn-bypass-host-ports only with a VPN in front (given to
-    this start, or its own --vpn); without one its start refused the option and never came up."""
+    """The options a command server's own start gets: --vpn-bypass-host-ports and --vpn-bypass-tcp only with a VPN
+    in front (given to this start, or its own --vpn); without one its start refused them and never came up."""
     options = list(definition.get("options", []))
     if vpn or option_value(launcher().canonical_options(options), "--vpn"):
         return options
-    return [token for token in options if token.split("=", 1)[0] != "--vpn-bypass-host-ports"]
+    kept, skip = [], False
+    for token in options:
+        if skip:
+            skip = False
+            continue
+        name = token.split("=", 1)[0]
+        if name == "--vpn-bypass-tcp" and "=" not in token:
+            skip = True  # its value follows
+        if name not in ("--vpn-bypass-host-ports", "--vpn-bypass-tcp"):
+            kept.append(token)
+    return kept
 
 
 def vpn_for_servers(a, names, profile_type=None):
@@ -1749,6 +1766,11 @@ def attach_live(name, start, helper=None, out=print):
                 result["agent_config"] = agent_config(record, name)
         except (OSError, ValueError) as exc:
             out(f"  the agent's configuration was not changed: {printable(str(exc))}")
+    # The run's kill switch (sandbox-ai net cut) holds for the server it reaches now as well.
+    runs = net.running()
+    for run, error in net.propagate_cut(runs.get(record.get("run"), record), runs):
+        out(f"  {printable(run)}: " + (f"the kill switch of {shown} could not be set there: {printable(error)}"
+                                       if error else f"cut as {shown} is (sandbox-ai net cut)"))
     try:
         keep_server(entry["id"], name, helper)  # False: named there already
         result["kept"] = True

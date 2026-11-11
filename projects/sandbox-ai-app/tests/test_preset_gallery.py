@@ -178,3 +178,28 @@ def test_the_wizard_offers_the_same_library(env):
     page.select_preset("mixed-llm")
     assert page.validatePage() and B.values(wizard.board)[0] == "opencode", "the preset's own agent"
     wizard.deleteLater()
+
+
+def test_the_categories_and_the_description_are_on_the_left(gallery, qapp):
+    """Feedback 2026-11-11: the categories above the description, both on the left; a click on a category shows its
+    section of the cards without scrolling down to it."""
+    split = gallery.categories.parentWidget().parentWidget()
+    assert isinstance(split, QtWidgets.QSplitter)
+    assert split.widget(0).isAncestorOf(gallery.categories) and split.widget(0).isAncestorOf(gallery.description)
+    assert split.widget(1) is gallery.scroll
+    side = split.widget(0).layout()
+    order = [side.itemAt(i).widget() for i in range(side.count()) if side.itemAt(i).widget() is not None]
+    assert order.index(gallery.categories) < order.index(gallery.description)
+    assert gallery.categories.count() == len(gallery.sections) >= 2
+    gallery.resize(1180, 500)
+    gallery.show()
+    qapp.processEvents()
+    last = gallery.categories.item(gallery.categories.count() - 1)
+    heading = next(h for h, _b, _c, key in gallery.sections if key == last.data(Qt.ItemDataRole.UserRole))
+    gallery.show_category(last)
+    bar = gallery.scroll.verticalScrollBar()
+    assert bar.value() == min(heading.y(), bar.maximum()) and (bar.maximum() == 0 or bar.value() > 0)
+    gallery.search.setText("tor")
+    hidden = [gallery.categories.item(row).isHidden() for row in range(gallery.categories.count())]
+    assert any(hidden) and not all(hidden)  # categories without a match go from the list
+    gallery.close()

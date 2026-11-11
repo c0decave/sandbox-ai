@@ -530,7 +530,7 @@ def test_inner_bootstrap(scenario, monkeypatch, tmp_path):
     monkeypatch.setattr(s.subprocess, "run", run)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
     monkeypatch.setattr(sr, "namespace_state", lambda: states()[0])
-    monkeypatch.setattr(sr, "firejail_command", lambda state: ["firejail-fixture"])
+    monkeypatch.setattr(sr, "firejail_command", lambda state, nested=False: ["firejail-fixture"])
     monkeypatch.setattr(sr, "wait_child", lambda child: 0)
     oom = []
     monkeypatch.setattr(s.RUNTIME, "oom_first", oom.append)  # never the real /proc of the machine running the tests
@@ -6277,7 +6277,8 @@ def test_control_server(scenario, tmp_path):
     try:
         if scenario == "happy":
             answer = ask({"op": "allow", "https": ["192.0.2.7"]})
-            assert answer == {"ok": True, "nets": [], "https": ["192.0.2.7/32"], "tcp": [], "dns": [], "host_ports": []}
+            assert answer == {"ok": True, "nets": [], "https": ["192.0.2.7/32"], "tcp": [], "dns": [], "host_ports": [],
+                              "cut": None, "cuts": {}, "killswitch": False}
             assert "tcp dport 443 accept" in applied[-1]
             assert json.loads(allow.read_text())["https"] == ["192.0.2.7/32"]
             assert ask({"op": "show"})["https"] == ["192.0.2.7/32"]
@@ -8515,6 +8516,20 @@ def test_identity_head(scenario):
         assert rt.identity_head(head).count(b"ncoding") == 1 and b"gzip" not in rt.identity_head(head)
     else:
         assert rt.identity_head(b"GET / HTTP/1.1\r\n\r\n") == b"GET / HTTP/1.1\r\nAccept-Encoding: identity\r\n\r\n"
+
+
+def test_llm_endpoint(scenario):
+    if scenario == "happy":
+        assert rt.llm_endpoint([LLM_ENTRY], "https", "llm.example.org", 8443, "/ollama/v1/chat/completions") \
+            is LLM_ENTRY
+    elif scenario == "sad":
+        for args in (("https", "evil.example", 8443, "/ollama/v1/x"), ("http", "192.0.2.9:8443", 8443, "/ollama/x"),
+                     ("https", "llm.example.org", 443, "/ollama/x"), ("https", "llm.example.org", 8443, "/ollamax/v1")):
+            assert rt.llm_endpoint([LLM_ENTRY], *args) is None
+    else:
+        assert rt.llm_endpoint(None, "https", "llm.example.org", 8443, "/ollama") is None
+        assert rt.llm_endpoint([LLM_ENTRY], "https", "llm.example.org", 8443, "/ollama/../admin",
+                               "/ollama/%2e%2e/admin") is None  # a path servers read differently
 
 
 def test_llm_head(scenario):
@@ -11788,3 +11803,567 @@ def test_own_host_names(scenario):
     else:  # a VPN's pod names the sandbox
         assert s.own_host_names(types.SimpleNamespace(run_id=None, vpn_pod="vpn-work", pod_name=None,
                                                       agent="claude")) == ["agent-sandbox", "vpn-work"]
+
+
+# --- --nested-containers and --tmp-size (tests/test_nested_containers.py has the whole story) -------------------
+
+NESTED_SUBUIDS = [(0, 1000, 1), (1, 100000, 65536)]
+
+
+@pytest.fixture
+def nested_devices_present(monkeypatch):
+    present = set(s.NESTED_DEVICES)
+    real = os.path.exists
+    monkeypatch.setattr(s.os.path, "exists", lambda p: str(p) in present if str(p) in s.NESTED_DEVICES else real(p))
+    return present
+
+
+def test_nested(scenario):
+    if scenario == "happy":
+        assert s.nested(s.parse_args(["claude", "--nested-containers"])) is True
+    elif scenario == "sad":
+        assert s.nested(s.parse_args(["claude"])) is False
+    else:  # a namespace of another command (an MCP server's) has no such attribute
+        assert s.nested(SimpleNamespace()) is False
+
+
+def test_nested_reserved_ids(scenario):
+    ids = s.nested_reserved_ids()
+    if scenario == "happy":
+        assert ids == [1, 2, 950]
+    elif scenario == "sad":
+        assert 0 not in ids  # the agent's own ID is never reserved: it stays the owner of what it writes
+    else:
+        assert ids == sorted(set(ids)) and s.RUNTIME.PROXY_UID in ids
+
+
+def test_nested_devices(scenario, nested_devices_present, monkeypatch):
+    a = s.parse_args(["claude", "--nested-containers"])
+    if scenario == "happy":
+        assert s.nested_devices(a) == ["/dev/fuse", "/dev/net/tun"]
+    elif scenario == "sad":
+        nested_devices_present.clear()
+        assert s.nested_devices(a) == []
+    else:  # an engine elsewhere (macOS' VM): its own devices, not this host's
+        nested_devices_present.clear()
+        monkeypatch.setattr(s, "local_engine", lambda a: False)
+        assert s.nested_devices(a) == ["/dev/fuse", "/dev/net/tun"]
+
+
+def test_nested_storage(scenario, nested_devices_present):
+    a = s.parse_args(["claude", "--nested-containers"])
+    if scenario == "happy":
+        assert s.nested_storage(a) == "overlay"
+    elif scenario == "sad":
+        nested_devices_present.discard("/dev/fuse")
+        assert s.nested_storage(a) == "vfs"
+    else:
+        nested_devices_present.discard("/dev/net/tun")
+        assert s.nested_storage(a) == "overlay"
+
+
+def test_check_nested(scenario, nested_devices_present, monkeypatch):
+    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested-containers")
+    if scenario == "happy":
+        s.check_nested(s.parse_args(["claude", "--nested-containers"]))
+        s.check_nested(s.parse_args(["claude", "--backend", "bwrap"]))  # not asked for: nothing checked
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="Podman backend"):
+            s.check_nested(s.parse_args(["claude", "--nested-containers", "--backend", "bwrap"]))
+        a = s.parse_args(["claude", "--nested-containers"])
+        a.vpn, a.vpn_profile = "anon", {"type": "tor"}
+        with pytest.raises(ValueError, match="refused behind Tor"):
+            s.check_nested(a)
+    else:
+        nested_devices_present.discard("/dev/net/tun")
+        with pytest.raises(ValueError, match="/dev/net/tun"):
+            s.check_nested(s.parse_args(["claude", "--nested-containers"]))
+        with pytest.raises(ValueError, match="--podman-url"):
+            s.check_nested(s.parse_args(["claude", "--nested-containers", "--podman-url", "unix:///tmp/p.sock"]))
+
+
+def test_nested_files(scenario, nested_devices_present):
+    a = s.parse_args(["claude", "--nested-containers"])
+    if scenario == "sad":
+        nested_devices_present.discard("/dev/fuse")
+    files = s.nested_files(a)
+    assert set(files) == {"containers/containers.conf", "containers/storage.conf"}
+    storage = files["containers/storage.conf"]
+    if scenario == "happy":
+        assert 'netns = "host"' in files["containers/containers.conf"] and "fuse-overlayfs" in storage
+    elif scenario == "sad":
+        assert 'driver = "vfs"' in storage and "mount_program" not in storage
+    else:  # nothing of the host in it: the same text on every host
+        assert str(Path.home()) not in "".join(files.values())
+
+
+def test_nested_plan(scenario, nested_devices_present):
+    if scenario == "happy":
+        plan = s.nested_plan(s.parse_args(["claude", "--nested-containers"]))
+        assert plan["reserved_ids"] == [1, 2, 950] and plan["capabilities_added"] == ["SETFCAP"]
+    elif scenario == "sad":
+        assert s.nested_plan(s.parse_args(["claude"])) is None
+    else:
+        nested_devices_present.discard("/dev/fuse")
+        assert s.nested_plan(s.parse_args(["claude", "--nested-containers"]))["storage"]["driver"] == "vfs"
+
+
+def test_nested_notes(scenario, tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "USERNS_RESTRICTION", tmp_path / "restrict")
+    if scenario == "happy":
+        assert len(s.nested_notes(s.parse_args(["claude", "--nested-containers"]))) == 3
+    elif scenario == "sad":
+        assert s.nested_notes(s.parse_args(["claude"])) == []
+    else:
+        (tmp_path / "restrict").write_text("1\n")
+        monkeypatch.setattr(s, "local_engine", lambda a: True)
+        assert "apparmor_restrict_unprivileged_userns=0" in s.nested_notes(
+            s.parse_args(["claude", "--nested-containers"]))[-1]
+
+
+def test_size_bytes(scenario):
+    if scenario == "happy":
+        assert s.size_bytes("4g") == 4 << 30 and s.size_bytes("512m") == 512 << 20 and s.size_bytes("8K") == 8 << 10
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            s.size_bytes("lots")
+    else:
+        assert s.size_bytes("1048576") == 1 << 20
+
+
+def test_check_tmp_size(scenario):
+    if scenario == "happy":
+        s.check_tmp_size(s.parse_args(["claude", "--tmp-size", "3g"]))
+        s.check_tmp_size(s.parse_args(["claude"]))
+    elif scenario == "sad":
+        for argv, message in ((["--tmp-size", "9g"], "memory limit"), (["--tmp-size", "x"], "expects a size"),
+                              (["--tmp-size", "1g", "--backend", "bwrap"], "Podman backend")):
+            with pytest.raises(ValueError, match=message):
+                s.check_tmp_size(s.parse_args(["claude", *argv]))
+    else:
+        s.check_tmp_size(s.parse_args(["claude", "--tmp-size", "4g"]))  # exactly half the memory limit
+        s.check_tmp_size(s.parse_args(["claude", "--tmp-size", str(4 << 30)]))  # the same in bytes
+        with pytest.raises(ValueError, match="half the memory limit"):
+            s.check_tmp_size(s.parse_args(["claude", "--tmp-size", "8g"]))
+        with pytest.raises(ValueError, match="at least 16m"):
+            s.check_tmp_size(s.parse_args(["claude", "--tmp-size", "15m"]))
+
+
+def test_tmp_mount_size(scenario, monkeypatch):
+    monkeypatch.setattr(s, "enforced_limits", lambda a: ({"memory": "8g"}, []))
+    if scenario == "happy":
+        assert s.tmp_mount_size(s.parse_args(["claude", "--tmp-size", "6g"])) == f",size={6 << 30}"
+    elif scenario == "sad":
+        assert s.tmp_mount_size(s.parse_args(["claude"])) == f",size={4 << 30}"
+    else:
+        monkeypatch.setattr(s, "enforced_limits", lambda a: ({}, []))
+        assert s.tmp_mount_size(s.parse_args(["claude"])) == ""  # a limit asked for but not enforced here
+        assert s.tmp_mount_size(s.parse_args(["claude", "--tmp-size", "1g"])) == f",size={1 << 30}"
+        monkeypatch.setattr(s, "host_memory", lambda path=None: 8 << 30)
+        monkeypatch.setattr(s, "local_engine", lambda a: True)
+        assert s.tmp_mount_size(s.parse_args(["claude", "--memory", "none"])) == f",size={2 << 30}"
+
+
+def test_parse_id_map(scenario):
+    if scenario == "happy":
+        assert rt.parse_id_map("0 1000 1\n1 100000 65536\n") == NESTED_SUBUIDS
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            rt.parse_id_map("0 1000\n")
+    else:
+        assert rt.parse_id_map("\n  \n") == []
+
+
+def test_nested_id_map(scenario):
+    if scenario == "happy":
+        assert rt.nested_id_map(NESTED_SUBUIDS, [1, 2, 950]) == [(0, 0, 1), (1, 65535, 2), (3, 3, 947),
+                                                                  (951, 951, 64584)]
+    elif scenario == "sad":
+        with pytest.raises(RuntimeError, match="maps no root"):
+            rt.nested_id_map([(1, 100000, 10)], [1])
+    else:  # only the agent's own ID: nothing else to map, nothing to stand in for the reserved ones
+        assert rt.nested_id_map([(0, 1000, 1)], [1, 2, 950]) == [(0, 0, 1)]
+
+
+def test_id_map_text(scenario):
+    if scenario == "happy":
+        assert rt.id_map_text([(0, 0, 1), (3, 3, 947)]) == "0 0 1\n3 3 947\n"
+    elif scenario == "sad":
+        assert rt.id_map_text([]) == ""
+    else:
+        assert rt.parse_id_map(rt.id_map_text(NESTED_SUBUIDS)) == NESTED_SUBUIDS
+
+
+def test_mapped_outside(scenario):
+    extents = [(0, 0, 1), (3, 3, 947)]
+    if scenario == "happy":
+        assert rt.mapped_outside(extents, 0) and rt.mapped_outside(extents, 949)
+    elif scenario == "sad":
+        assert not rt.mapped_outside(extents, 1) and not rt.mapped_outside(extents, 950)
+    else:
+        assert not rt.mapped_outside([], 0)
+
+
+def test_libc_mount(scenario, tmp_path):
+    calls = []
+
+    class Libc:
+        def mount(self, *args):
+            calls.append(args)
+            return -1 if scenario == "sad" else 0
+    if scenario == "sad":
+        with pytest.raises(OSError, match="mount proc on"):
+            rt.libc_mount(Libc(), "proc", tmp_path, "proc", rt.MS_NOSUID)
+    else:
+        rt.libc_mount(Libc(), "/a", tmp_path, None if scenario == "edge" else "tmpfs", rt.MS_BIND, "mode=0")
+        source, target, fstype, flags, data = calls[0]
+        assert source == b"/a" and target == os.fsencode(str(tmp_path)) and flags.value == rt.MS_BIND
+        assert fstype == (None if scenario == "edge" else b"tmpfs") and data == b"mode=0"
+
+
+def test_nested_setup(scenario, tmp_path, monkeypatch):
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    for name in ("uid_map", "gid_map"):
+        (proc / "self" / name).write_text("0 1000 1\n1 100000 65536\n" if scenario != "edge" else "1 100000 5\n")
+    monkeypatch.setattr(rt, "NESTED_DIR", tmp_path / "nested")
+    monkeypatch.setattr(rt, "NESTED_USERNS", tmp_path / "nested" / "userns")
+    monkeypatch.setattr(rt, "NESTED_HIDDEN", tmp_path / "nested" / "hidden")
+    mounts = []
+
+    class Libc:
+        def unshare(self, kind):
+            return -1 if scenario == "sad" else 0
+
+        def mount(self, *args):
+            mounts.append(os.fsdecode(args[1]))
+            return 0
+    real_fork = os.fork
+
+    def fork():
+        pid = real_fork()
+        if pid:
+            (proc / str(pid) / "ns").mkdir(parents=True)
+        return pid
+    monkeypatch.setattr(rt.os, "fork", fork)
+    if scenario == "happy":
+        rt.nested_setup([1, 2, 950], Libc(), proc)
+        assert mounts[0] == str(tmp_path / "nested" / "userns") and mounts[-1] == str(tmp_path / "nested" / "hidden")
+    elif scenario == "sad":
+        with pytest.raises(RuntimeError, match="could not be made"):
+            rt.nested_setup([1, 2, 950], Libc(), proc)
+    else:  # a sandbox namespace without root: refused before anything is made
+        with pytest.raises(RuntimeError, match="maps no root"):
+            rt.nested_setup([1, 2, 950], Libc(), proc)
+        assert mounts == [] and not (tmp_path / "nested").exists()
+
+
+def test_enter_nested_userns(scenario, tmp_path):
+    userns = tmp_path / "userns"
+    userns.write_text("")
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    text = "0 0 1\n3 3 947\n" if scenario != "edge" else "0 0 1\n1 1 2\n"
+    for name in ("uid_map", "gid_map"):
+        (proc / "self" / name).write_text(text)
+
+    class Libc:
+        def setns(self, fd, kind):
+            assert kind == rt.CLONE_NEWUSER
+            return -1 if scenario == "sad" else 0
+
+        def unshare(self, kind):
+            assert kind == rt.CLONE_NEWNS
+            return 0
+    if scenario == "happy":
+        (tmp_path / "sys" / "fs" / "cgroup").mkdir(parents=True)
+        rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc, run_dirs=(str(tmp_path / "run" / "libpod"),),
+                               sys_root=tmp_path / "sys")
+    elif scenario == "sad":
+        with pytest.raises(OSError, match="cannot enter"):
+            rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc)
+    else:
+        with pytest.raises(RuntimeError, match=r"reserved IDs \[1, 2\]"):
+            rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc)
+
+
+# --- the kill switch (sandbox-ai net cut; its own tests: tests/test_killswitch.py, test_killswitch_live.py) ---------
+
+CUT_SETTINGS = {"host_ports": [8080], "api": {"https": ["192.0.2.10"], "tcp": [["10.0.0.5", 11434]], "loopback": [],
+                                              "names": ["api.example.org"]}}
+
+
+def cut_view(mode, **changes):
+    return {**rt.cut_settings({**CUT_SETTINGS, **changes}), "mode": mode}
+
+
+def test_cut_settings(scenario):
+    if scenario == "happy":
+        settings = rt.cut_settings(CUT_SETTINGS)
+        assert settings["api"]["https"] == ["192.0.2.10"] and settings["api"]["tcp"] == [["10.0.0.5", 11434]]
+        assert settings["tor"] is False and settings["machine_host"] is None
+    elif scenario == "sad":  # a value the supervisor cannot trust: refused
+        with pytest.raises(ValueError):
+            rt.cut_settings({"api": {"tcp": [["10.0.0.5", 0]]}})
+    else:  # nothing known: a cut keeps no model API
+        assert rt.cut_settings(None) == rt.cut_settings({}) and rt.cut_settings(None)["api"]["https"] == []
+
+
+def test_cut_local(scenario):
+    ip = ipaddress.ip_address
+    if scenario == "happy":
+        assert rt.cut_local({}, ip("192.168.1.20")) and rt.cut_local({}, ip("fd00::1"))
+    elif scenario == "sad":
+        assert not rt.cut_local({}, ip("198.51.100.7"))
+    else:  # behind Tor only the bypass target, TCP
+        tor = {"tor": True, "bypass": [["192.168.1.20", 1234]]}
+        assert rt.cut_local(tor, ip("192.168.1.20"), 1234) and not rt.cut_local(tor, ip("192.168.1.20"), 22)
+        assert not rt.cut_local(tor, ip("192.168.1.20"), 1234, "udp")
+
+
+def test_cut_class(scenario):
+    cut = cut_view("all")
+    if scenario == "happy":
+        assert [rt.cut_class(cut, *where) for where in (("127.0.0.1", 8080), ("192.168.1.2", 22), ("1.1.1.1", 443))] \
+            == ["host", "local", "remote"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            rt.cut_class(cut, "not an address", 1)
+    else:  # lookups: the stub is the sandbox's own, any other nameserver a way to the internet
+        assert rt.cut_class(cut, "127.0.0.1", 53, "udp") == "own" and rt.cut_class(cut, "127.0.53.1", 53, "udp") == "dns"
+        assert rt.cut_class(cut, "192.168.1.1", 53, "udp") == "dns"
+        assert rt.cut_class(cut, "127.0.0.1", 8080, "udp") == "own"
+
+
+def test_cut_allows(scenario):
+    if scenario == "happy":
+        assert rt.cut_allows(cut_view("api"), "192.0.2.10", 443) and rt.cut_allows(cut_view("remote"), "10.0.0.5", 22)
+    elif scenario == "sad":
+        assert not rt.cut_allows(cut_view("api"), "198.51.100.7", 443)
+        assert not rt.cut_allows(cut_view("local"), "127.0.0.1", 8080)
+        assert not rt.cut_allows(cut_view("all"), "1.1.1.1", 53, "udp")
+    else:  # no cut takes nothing; an unknown mode refuses everything, even the sandbox's own
+        assert rt.cut_allows(None, "198.51.100.7", 443) and not rt.cut_allows({"mode": "x"}, "127.0.0.1", 3000)
+
+
+def test_cut_name_allows(scenario):
+    if scenario == "happy":
+        assert rt.cut_name_allows(cut_view("api"), "192.0.2.10", 443, "api.example.org")
+    elif scenario == "sad":  # another name behind the provider's CDN address
+        assert not rt.cut_name_allows(cut_view("api"), "192.0.2.10", 443, "other.example")
+    else:  # the --llm server by address and port, and every other mode, ask for no name
+        assert rt.cut_name_allows(cut_view("api"), "10.0.0.5", 11434, None)
+        assert rt.cut_name_allows(cut_view("remote"), "192.0.2.10", 443, None)
+
+
+def test_cut_reason(scenario):
+    if scenario == "happy":
+        assert rt.cut_reason({"mode": "api"}).startswith("cut by the kill switch (api: only its model API")
+    elif scenario == "sad":
+        assert "unknown mode" in rt.cut_reason({"mode": "x"})
+    else:
+        assert "sandbox-ai net cut RUN off" in rt.cut_reason(None)
+
+
+def test_nft_set(scenario):
+    if scenario == "happy":
+        assert rt.nft_set([80, 443]) == "{ 80, 443 }"
+    elif scenario == "sad":
+        assert rt.nft_set([]) == "{  }"  # never used empty: cut_rules leaves such a rule out
+    else:
+        assert rt.nft_set(["10.0.0.0/8"]) == "{ 10.0.0.0/8 }"
+
+
+def test_cut_rules(scenario):
+    if scenario == "happy":
+        rules = rt.cut_rules(cut_view("api"))
+        assert rules.startswith("flush chain inet agent_sandbox cut\n")
+        assert rules.rstrip().endswith(f"cut_api {rt.CUT_REJECT}")
+        assert "add rule inet agent_sandbox cut jump cut_api" in rules
+        assert "ct original ip daddr { 192.0.2.10 } meta l4proto tcp ct original proto-dst 443 return" in rules
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            rt.cut_rules({"mode": "everything"})
+    else:  # lifted: the cut chain and every mode's chain empty
+        assert rt.cut_rules(None).splitlines() == ["flush chain inet agent_sandbox cut"] + [
+            line for mode in rt.CUT_MODES for line in (f"add chain inet agent_sandbox cut_{mode}",
+                                                       f"flush chain inet agent_sandbox cut_{mode}")]
+
+
+def test_killswitch_config(scenario, tmp_path):
+    a = s.parse_args(["claude", "--workspace", str(tmp_path)])
+    hosts = {"api.anthropic.com": ["192.0.2.10"], "pypi.org": ["192.0.2.20"]}
+    if scenario == "happy":
+        config = s.killswitch_config(a, hosts)
+        assert config["api"] == {"https": ["192.0.2.10"], "tcp": [], "loopback": [], "names": ["api.anthropic.com"]}
+        assert config["tor"] is False and config["host_ports"] == [] and rt.cut_settings(config)
+    elif scenario == "sad":  # an MCP server's sandbox has no model API of its own
+        a.mcp_socket_dir = tmp_path / "mcp" / "files" / "sockets"
+        assert s.killswitch_config(a, hosts)["api"]["https"] == []
+    else:  # the host's ports forwarded at the start are told apart
+        a.allow_host_port = ["3080"]
+        assert s.killswitch_config(a, {})["host_ports"] == [3080]
+
+
+def test_cut_modes(scenario):
+    if scenario == "happy":
+        assert rt.cut_modes({"modes": ["remote", "api"]}) == ["remote", "api"] and rt.cut_modes({"mode": "api"}) == ["api"]
+    elif scenario == "sad":
+        assert rt.cut_modes(None) == [] and rt.cut_modes({"mode": None}) == []
+    else:  # "all" takes everything, the others with it
+        assert rt.cut_modes({"modes": ["api", "all", "remote"]}) == ["all"]
+
+
+def test_cut_label(scenario):
+    if scenario == "happy":
+        assert rt.cut_label(["api"]) == "api" and rt.cut_label(["api", "remote"]) == "remote+api"
+    elif scenario == "sad":
+        assert rt.cut_label([]) is None
+    else:
+        assert rt.cut_label(["local", "all"]) == "all"
+
+
+def test_cut_allows_one(scenario):
+    if scenario == "happy":
+        assert rt.cut_allows_one(cut_view("api"), "api", "192.0.2.10", 443)
+    elif scenario == "sad":
+        assert not rt.cut_allows_one(cut_view("api"), "nonsense", "127.0.0.1", 3000)
+    else:  # one mode of several: each judged alone
+        assert rt.cut_allows_one(cut_view("api"), "remote", "10.0.0.5", 22)
+        assert not rt.cut_allows_one(cut_view("api"), "api", "10.0.0.5", 22)
+
+
+def test_cut_mode_rules(scenario):
+    if scenario == "happy":
+        assert rt.cut_mode_rules(cut_view("all"), "all")[-1] == rt.CUT_REJECT  # rejected, never only dropped
+    elif scenario == "sad":  # "local" refuses the local network only: the rest goes on to the next chain
+        assert rt.cut_mode_rules(cut_view("local"), "local")[-1].endswith("} " + rt.CUT_REJECT)
+    else:
+        assert "ct original ip daddr 10.0.0.5 meta l4proto tcp ct original proto-dst 11434 return" in \
+            rt.cut_mode_rules(cut_view("api"), "api")
+
+
+def test_start_cuts(scenario):
+    network = rt.RuntimeNetwork({"loopback": []}, None, lambda script: None)
+    network.cut_settings = rt.cut_settings(CUT_SETTINGS)
+    if scenario == "happy":  # an MCP server that starts while the run it serves is cut: cut before its agent runs
+        assert rt.start_cuts(network, {"lead-1": "all"})["cut"] == "all"
+    elif scenario == "sad":  # it cannot be cut: it does not start
+        with pytest.raises(RuntimeError):
+            rt.start_cuts(rt.RuntimeNetwork({}, None, lambda script: None), {"lead-1": "all"})
+    else:
+        assert rt.start_cuts(network, None) is None and network.cut_mode is None
+
+
+def test_host_memory(scenario, tmp_path):
+    meminfo = tmp_path / "meminfo"
+    if scenario == "happy":
+        meminfo.write_text("MemTotal:       16318024 kB\nMemFree:  1 kB\n")
+        assert s.host_memory(meminfo) == 16318024 * 1024
+    elif scenario == "sad":
+        assert s.host_memory(tmp_path / "missing") is None
+    else:
+        meminfo.write_text("MemTotal: lots kB\n")
+        assert s.host_memory(meminfo) is None
+
+
+def test_tmp_ceiling(scenario, monkeypatch):
+    monkeypatch.setattr(s, "host_memory", lambda path=None: 16 << 30)
+    monkeypatch.setattr(s, "local_engine", lambda a: True)
+    if scenario == "happy":
+        assert s.tmp_ceiling(s.parse_args(["claude", "--memory", "12g"])) == (6 << 30, "half the memory limit 12g")
+    elif scenario == "sad":  # another engine's machine with no limit: nothing here to bound it by
+        monkeypatch.setattr(s, "local_engine", lambda a: False)
+        assert s.tmp_ceiling(s.parse_args(["claude", "--memory", "none"])) == (None, None)
+    else:
+        assert s.tmp_ceiling(s.parse_args(["claude", "--memory", "none"]))[0] == 4 << 30
+
+
+def test_nested_writable(scenario, tmp_path):
+    if scenario == "happy":
+        assert s.nested_writable(s.parse_args(["claude", "--nested-containers"])) == ["/work", "/root"]
+    elif scenario == "sad":
+        assert s.nested_writable(s.parse_args(["claude", "--workspace-ro"])) == ["/root"]
+    else:
+        (tmp_path / "d").mkdir()
+        a = s.parse_args(["claude", "--mount", f"{tmp_path / 'd'}:/opt/d:rw", "--mount", f"{tmp_path / 'd'}:/opt/e:ro"])
+        assert s.nested_writable(a) == ["/work", "/opt/d", "/root"]
+
+
+def test_give_back(scenario, tmp_path):
+    (tmp_path / "f").write_text("")
+    calls = []
+    if scenario == "happy":  # the real lstat: everything here is the test runner's, standing for the sandbox's root
+        found = rt.give_back([str(tmp_path)], 0, lchown=lambda *a: calls.append(a), chmod=lambda *a: None,
+                             owner=(os.getuid(), os.getgid()))
+        assert found == {"count": 0, "paths": [], "failed": 0, "complete": True} and calls == []
+    elif scenario == "sad":
+        assert rt.give_back([str(tmp_path / "missing")], 0)["count"] == 0
+    else:
+        assert rt.give_back([str(tmp_path)], 0, limit=1)["complete"] is False
+
+
+def test_report_given_back(scenario, tmp_path, capsys):
+    found = {"count": 2, "paths": ["/work/a", "/work/b"], "failed": 0, "complete": True}
+    if scenario == "happy":
+        rt.report_given_back(found, tmp_path)
+        assert "2 files and folders" in capsys.readouterr().err and (tmp_path / "nested-owners.json").exists()
+    elif scenario == "sad":
+        rt.report_given_back({"count": 0, "paths": [], "failed": 0, "complete": True}, tmp_path)
+        assert capsys.readouterr().err == "" and not (tmp_path / "nested-owners.json").exists()
+    else:  # no log directory: only said
+        rt.report_given_back(found, tmp_path / "missing")
+        assert "/work/a, /work/b" in capsys.readouterr().err
+
+
+def test_approval_record(scenario):
+    """What a log keeps of an approval: decision, scope, reason and the question it came from (the Blocked list)."""
+    if scenario == "happy":
+        assert rt.approval_record({"decision": "deny", "scope": "once", "reason": "no answer within 60 s",
+                                   "question": "1-2-3", "why": "..."}) == {
+            "decision": "deny", "scope": "once", "reason": "no answer within 60 s", "question": "1-2-3"}
+    elif scenario == "sad":
+        assert rt.approval_record({}) == {"decision": None, "scope": None, "reason": None}
+    else:  # a question that is no text is not kept
+        assert "question" not in rt.approval_record({"decision": "allow", "question": 7})
+
+
+def test_not_approved(scenario):
+    """A refusal says the answer's reason, the rule's and, where the broker said it, why and what to do."""
+    if scenario == "happy":
+        text = rt.not_approved({"reason": "no answer within 60 s", "why": "then asked again"}, "POST / is asked")
+        assert text == "not approved (no answer within 60 s): POST / is asked. then asked again"
+    elif scenario == "sad":
+        assert rt.not_approved({}) == "not approved (refused)"
+    else:
+        assert rt.not_approved({"reason": "answered", "why": ""}, None) == "not approved (answered)"
+
+
+def test_nested_sys(scenario, tmp_path):
+    calls = []
+
+    class Libc:
+        def mount(self, *args):
+            calls.append(os.fsdecode(args[1]))
+            return 0
+
+        def unshare(self, kind):
+            return 0 if scenario == "happy" else -1
+    root = tmp_path / "sys"
+    root.mkdir()
+    if scenario == "happy":
+        assert rt.nested_sys(Libc(), root) == "cgroup2" and calls == [str(root), str(root / "fs" / "cgroup"), str(root)]
+    elif scenario == "sad":  # no cgroup namespace: the folder only
+        assert rt.nested_sys(Libc(), root) == "empty" and (root / "fs" / "cgroup").is_dir()
+    else:  # one there already
+        (root / "fs" / "cgroup").mkdir(parents=True)
+        assert rt.nested_sys(Libc(), root) == "present" and calls == []
+
+
+def test_experimental(scenario):
+    if scenario == "happy":
+        assert s.experimental("nested-containers", {"SANDBOX_AI_EXPERIMENTAL": "a, nested-containers"})
+    elif scenario == "sad":
+        assert not s.experimental("nested-containers", {"SANDBOX_AI_EXPERIMENTAL": "nested"})
+    else:
+        assert not s.experimental("nested-containers", {})

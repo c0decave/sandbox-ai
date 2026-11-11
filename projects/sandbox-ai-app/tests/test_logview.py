@@ -360,3 +360,75 @@ def test_the_asking_page_waits_behind_a_veil_and_messages_are_never_dropped(wind
         assert late.exec() == QDialog.DialogCode.Rejected
     finally:
         window.shut_down = False
+
+
+def test_the_input_watch_forgets_windows_that_go(qapp):
+    """0.1.93: a dialog deleted on close left its QWindow's wrapper in InputWatch's list; a new window at the same
+    address came back as that dead wrapper and every focus change raised "Internal C++ object (QWindow) already
+    deleted"."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QDialog
+    from sandbox_ai_app.ui import InputWatch
+    watch = InputWatch(qapp)
+    try:
+        for _ in range(20):
+            dialog = QDialog()
+            dialog.show()
+            qapp.processEvents()
+            handle = dialog.windowHandle()
+            watch.watch(handle)
+            watch.focused(handle)
+            assert any(seen is handle for seen in watch.windows)
+            dialog.deleteLater()
+            QtWidgets.QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            qapp.processEvents()
+            assert not any(seen is handle for seen in watch.windows), "forgotten as it went"
+            watch.watch(handle)  # a dead one: nothing raised, nothing kept
+            watch.focused(handle)
+            watch.resume()
+        assert all(alive_window.isVisible() is not None for alive_window in watch.windows)
+    finally:
+        watch.stop()
+
+
+def test_a_panel_saved_floating_comes_back_managed_and_panels_paint_their_ground(window, qapp):  # noqa: F811
+    """spectrwm: the Board's properties, saved floating with Qt's drag flag stuck, came up at every start unmanaged
+    over every workspace and painting nothing ("Tafel: Eigenschaften" over an old terminal's text). It still comes
+    back floating (the panels keep where they were), but as a window the window manager manages."""
+    import time
+    from PySide6.QtCore import Qt
+    window.show()
+    dock = window.docks["inspector"]
+    dock.setFloating(True)
+    qapp.processEvents()
+    window.save_docks()
+    window.restore_docks()
+    dock.setWindowFlag(Qt.WindowType.X11BypassWindowManagerHint, True)  # as the stuck drag left it
+    dock.show()
+    window.restore_docks()
+    deadline = time.monotonic() + 3
+    while dock.windowFlags() & Qt.WindowType.X11BypassWindowManagerHint and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert dock.isFloating() and not dock.windowFlags() & Qt.WindowType.X11BypassWindowManagerHint
+    assert all(d.autoFillBackground() for d in window.docks.values())
+    dock.setFloating(False)
+
+
+def test_a_floating_panel_that_still_bypasses_the_window_manager_is_given_back_to_it(window, qapp):  # noqa: F811
+    """spectrwm: xprop showed "Tafel: Eigenschaften" as a window the window manager did not manage (no frame,
+    override-redirect: over every workspace, not to be moved or resized) - Qt's flag of a panel being dragged stayed."""
+    import time
+    from PySide6.QtCore import Qt
+    window.show()
+    dock = window.docks["inspector"]
+    dock.setFloating(True)
+    dock.setWindowFlag(Qt.WindowType.X11BypassWindowManagerHint, True)  # as a drag left it
+    dock.show()
+    window.settle_floating(dock)
+    deadline = time.monotonic() + 3
+    while dock.windowFlags() & Qt.WindowType.X11BypassWindowManagerHint and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.02)
+    assert not dock.windowFlags() & Qt.WindowType.X11BypassWindowManagerHint and dock.isVisible()
+    dock.setFloating(False)

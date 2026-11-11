@@ -59,7 +59,7 @@ class IdentitiesBox(QGroupBox):
             row.addWidget(widget)
         row.addStretch()
         layout.addLayout(row)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Edit… one

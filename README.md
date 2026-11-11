@@ -140,14 +140,15 @@ No clone needed: [sandbox-ai.pyz, the AppImage or the macOS app](#four-ways-to-i
 27. [Rulesets](#rulesets)
 28. [Canary files](#canary-files)
 29. [Secrets](#secrets)
-30. [Resource limits](#resource-limits)
-31. [Administrator policy](#administrator-policy)
-32. [Web interface](#web-interface)
-33. [Desktop app](#desktop-app)
-34. [Option reference](#option-reference)
-35. [Testing](#testing)
-36. [Troubleshooting](#troubleshooting)
-37. [Limits and remaining work](#limits-and-remaining-work)
+30. [Containers inside the sandbox](#containers-inside-the-sandbox)
+31. [Resource limits](#resource-limits)
+32. [Administrator policy](#administrator-policy)
+33. [Web interface](#web-interface)
+34. [Desktop app](#desktop-app)
+35. [Option reference](#option-reference)
+36. [Testing](#testing)
+37. [Troubleshooting](#troubleshooting)
+38. [Limits and remaining work](#limits-and-remaining-work)
 
 ## Requirements
 
@@ -381,13 +382,14 @@ match the installed version.
 | `sandbox-ai doctor [--backend podman\|bwrap\|both] [--plain] [--no-color] [--json]` | | a table by section (System, Engine, Agents, Project), in colour on a terminal (ok green, WARN orange, FAIL red; `--no-color` or `NO_COLOR` without; `--plain` one line per check); first sandbox-ai itself (its version, where it is installed: the user's own or a system installation and its prefix, a package, pip or a checkout, and the Python it runs with; in `--json` the first entry, `"id": "sandbox-ai-version"` with `version`, `kind`, `path`, `prefix`, `python`), then check the host: user, Python, user namespaces, Podman (rootless), pasta, subuid/subgid, images with agent versions, Bubblewrap tools, TIOCSTI, host logins (expiry only), the default kit and the kits with their skills, agents, commands and prompts, Claude plugins declared vs. installed, the memory of the project in the current directory, Git identity, project trust; each problem with the command that fixes it; exit 1 on a failure |
 | `sandbox-ai logs [DIR\|--project P] [--json]` | | summarize blocked egress and file access of a `--log-dir` and suggest the option for each blocked target (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
 | `sandbox-ai activity [RUN\|--session NAME\|--project P\|--log-dir DIR] [-f] [--since T] [-k KIND] [--json]` | | what the agents did: prompts, replies, tool calls, commands, file changes, network, approvals, tokens ([agent activity](#agent-activity)) |
-| `sandbox-ai net list\|show\|allow\|revoke\|untaint …` | | change what a running sandbox may reach ([network changes](#changing-the-network-of-a-running-sandbox)); it ends with `sandbox-ai stop NAME` |
+| `sandbox-ai net list\|show\|allow\|revoke\|untaint\|cut …` | | change what a running sandbox may reach ([network changes](#changing-the-network-of-a-running-sandbox)), cut it at once ([the kill switch](#the-kill-switch-cutting-a-running-sandboxs-network)); it ends with `sandbox-ai stop NAME` |
 | `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID`, `sandbox-ai limits [RUN] …` | | devices and limits of a running sandbox ([hardware](#hardware-devices-and-gpus), [limits](#resource-limits)) |
 | `sandbox-ai usage [RUN\|--all] [--json] [--follow]` | | what a running sandbox uses now: CPU, memory, processes, its top processes ([limits](#resource-limits)) |
 | `sandbox-ai workspace list\|add\|remove [RUN] DIR\|FILE [--ro] [--name NAME] [--force]` | | a host directory (or a single file) added to a running sandbox at `/workspaces/<name>` (or `/workspaces/NAME`), with the checks of a start, and taken back ([workspaces and mounts](#workspaces-and-mounts)) |
 | `sandbox-ai approvals list\|allow\|deny\|history\|remembered\|forget …` | | answer what running sandboxes ask; what was allowed always ([approvals](#approvals-and-browser-requests)) |
 | `sandbox-ai rules check\|show\|reload …` | | check ruleset files, show a start's rulesets with where each comes from, make a running start read its HTTP rules anew ([rulesets](#rulesets)) |
 | `sandbox-ai canaries list [RUN]`, `sandbox-ai canaries resume RUN` | | the decoy files of the runs and what happened to them; continue a sandbox a canary paused ([canary files](#canary-files)) |
+| `sandbox-ai report [NAME ...\|--all] [-f md\|html\|pdf] [-o FILE]` | | one report of runs, running or stopped: statistics, network and why, the security report ([reports](#reports)) |
 | `sandbox-ai secrets list\|set\|delete\|backend` | | API keys and tokens in your system keyring ([secrets](#secrets)) |
 | `sandbox-ai git-logins add\|list\|remove\|check …` | | your Git servers' logins, added by the connection proxy, never inside a sandbox ([Git logins](#git-logins-in-the-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add\|list\|remove\|check\|kinds …` | | your logins for npm, PyPI, crates.io, GitLab and GitHub, for `--publish` ([publishing](#publishing-to-registries-and-forges-sandbox-ai-publish-logins---publish)) |
@@ -695,8 +697,9 @@ What narrowing means, option by option (in `high` and `paranoid`):
   mount widens.
 - **Canary files**: `--no-canaries` widens both strict modes; their
   categories (`credentials`, `home`) are planted whatever `--canaries` adds.
-- **Devices and display**: `--device`, `--gpu` and `--gui-wayland` widen in
-  both strict modes, `--gui` and `--gui-vnc` in `paranoid`.
+- **Devices and display**: `--device`, `--gpu`, `--gui-wayland` and
+  `--nested-containers` widen in both strict modes, `--gui` and `--gui-vnc` in
+  `paranoid`.
 - **Limits**: a smaller `--memory`, `--cpus` or `--pids` narrows; a larger one
   or `none` widens.
 - **Agent**: `-D` (`--dangerously-skip-permissions`) widens `paranoid`;
@@ -1813,6 +1816,60 @@ time, running `agent_sandbox.py`), and waits up to `--wait SECONDS` (default
 `XDG_RUNTIME_DIR` (or none, e.g. from cron or `su`): it reads
 `/run/user/UID/sandbox-ai/runs` and `~/.local/state/sandbox-ai/runs` too.
 
+### The kill switch: cutting a running sandbox's network
+
+`sandbox-ai net cut` cuts the network of a running sandbox down at once, for
+every preset and agent, without a restart:
+
+```bash
+sandbox-ai net cut claude-1a2b3c4d remote   # cut the internet: only the local network and the host's ports stay
+sandbox-ai net cut claude-1a2b3c4d local    # cut the local network and the host's ports: only the internet stays
+sandbox-ai net cut claude-1a2b3c4d api      # only the model API stays (its provider, or its --llm server)
+sandbox-ai net cut claude-1a2b3c4d all      # everything, the model API too
+sandbox-ai net cut claude-1a2b3c4d off      # lifted: it reaches again what it may reach
+sandbox-ai net cut --all-runs all           # the emergency stop: every running sandbox of yours at once
+sandbox-ai net cut --all-runs off
+```
+
+A cut only takes away: each mode keeps a part of what the run may reach (its
+start options, what was allowed during the run, what approvals opened), never
+more, and `off` gives back exactly that. `api` keeps the provider's hosts with
+the addresses the start pinned for them (a TLS connection to such an address
+must name one of those hosts: another name behind the same CDN is refused), or
+the `--llm` server by its address and port, or on the host's port it listens
+on. Lookups count as the internet: `remote`, `api` and `all` stop them, except
+for the names the start pinned. Behind Tor only the `--vpn-bypass-tcp` target
+is the local network, everything else lies past Tor, and `api` is the provider
+through Tor as before; nothing is ever opened past Tor or a VPN.
+
+The cut holds outside the agent's reach, three times: the supervisor puts it
+into the sandbox's firewall (a chain of its own, checked before every other
+rule, which judges each packet by the destination its connection was opened
+to, so connections that are open already stop too, UDP included), into the
+connection proxy (which refuses new connections and closes the open ones the
+cut forbids) and into its own relays of host ports and its DNS stub; questions
+about what the cut forbids are refused without asking. Only you reach the
+control socket, changing the firewall needs a capability the agent does not
+have, and the proxy's files are hidden from it. The cut holds for the run's MCP
+servers, helpers and team members too (each has a sandbox and supervisor of
+its own; `--only` leaves them out), also those that join it later (an MCP
+server or helper started for it, `mcp attach --live`): they are cut before
+their agent runs. A sandbox keeps every run's cut apart and holds all of them
+together: an MCP server two runs share stays cut as long as one of them is
+(only what every cut keeps stays reachable, e.g. `remote+api`), and lifting one
+run's cut says which other cut still holds there; `net cut --all-runs off`
+lifts every one. A paused sandbox (nothing leaves it) keeps the cut for its
+resume, which sets it before it returns. It lasts until it is lifted or the
+run ends; `net list` and `sandbox-ai list --json` show it (`cut`), `net show`
+names it. Runs started by a sandbox-ai older than 0.1.94, or with more than 64
+host ports or 512 model API addresses, have no kill switch (the start says so):
+stop them or start them again. In the app: Sandboxes › Kill switch (also for
+several selected, all at once), and File › Emergency stop (`Ctrl+Shift+X` from
+every window of the app, the button in the header), which cuts every sandbox
+here and on every host of `sandbox-ai hosts` at once, without a question, and
+names every host or sandbox it did not reach; File › Lift every cut asks
+first.
+
 ## VPN
 
 A VPN can sit in front of a sandbox (Podman backend): the tunnel runs in a
@@ -1981,7 +2038,11 @@ run, since whatever listens there (a proxy, your own Tor or VPN client, a
 server that fetches URLs) reaches the internet from your address;
 `--vpn-bypass-host-ports` lets them in when you mean it. An `--llm` server in
 your local network is refused (Tor's exits refuse private addresses, and
-nothing else leaves). What still comes from your own address is the start's
+nothing else leaves) unless `--vpn-bypass-tcp ADDRESS:PORT` names it: exactly
+that IPv4 address and TCP port of your network (10/8, 172.16/12, 192.168/16,
+169.254/16) is then reached past Tor, through the connection proxy as
+everything else; the rest of your network stays closed, and whatever listens
+there could reach the internet from your address. What still comes from your own address is the start's
 own baseline (one request to check.torproject.org, to compare with) and what
 you run yourself: `sandbox-ai llm status` (the app's status of the start's
 `--llm` server; add a server on the internet with `llm add ... --vpn PROFILE`
@@ -3750,10 +3811,41 @@ sandbox-ai approvals deny ID [--scope once|always] # default: not asked again in
 sandbox-ai approvals history [RUN]            # questions and their answers
 sandbox-ai approvals remembered [--json]      # what is allowed/blocked always, per project: name or address, how, when, from which question
 sandbox-ai approvals forget PROJECT ENTRY     # forget one (a host name or IP:PORT)
+sandbox-ai approvals blocked [RUN] [--json]   # what a running sandbox (and its MCP servers, helpers) was refused, newest first: why, by which process, what to do
+sandbox-ai approvals decided [RUN] [--json]   # the decisions a running sandbox remembers for the run, and what it refuses for now (unanswered)
+sandbox-ai approvals allow ID --scope run     # on a question answered or left unanswered already: allowed for the rest of the run
+sandbox-ai approvals deny ID                  # ... denied for the rest of the run, without a question
+sandbox-ai approvals ask-again ID             # ... the run forgets its decision: the next try is asked again
+sandbox-ai approvals allow ID --scope always  # ... a request or MCP tool call: an exception rule (see below); a connection or lookup: net allow --keep
 ```
 
-A question nobody answers is refused after 60 seconds and, like a deny, not
-asked again in that run. `once` allows this one connection (the address is
+A question nobody answers is refused after 60 seconds. That is no decision:
+the same request is refused at once (without a new question) for the next 2
+minutes, so that the agent does not wait out the timeout again and again, and
+is asked again after that. The refusal says so, with the question's ID and the
+command that allows it. Your own answers keep their scope: a deny (`run`, the
+default) is not asked again in that run. Both can be changed while the sandbox
+runs - on the app's Approvals page (Blocked) or with `sandbox-ai approvals
+allow ID --scope run`, `deny ID` and `ask-again ID` on the answered question.
+These go to the sandbox's supervisor over its control socket, which only you
+reach (a process of the sandbox is refused): an allow for the run is refused
+where the security mode or the administrator's policy approves only once, a
+connection allowed so stays inside the policy's networks, and while the kill
+switch cuts the run, what you allow is recorded but stays cut until the cut
+is lifted. `allow ID --scope always` on a request or MCP tool call writes an
+exception rule (exactly that method, host and path, or that server and tool)
+first into the ruleset that held it: your own `rules.json` in place (the
+running start reads it again at once), the project's own ruleset into its
+trusted `.sandbox-ai.json` (from the next start), and a preset's or someone
+else's ruleset is never changed - a copy of your own with the exception goes
+to `~/.config/sandbox-ai/rules/`, which a start uses only in its place: each
+ruleset decides on its own and the strictest decision wins, so a rule of
+yours beside it could not widen it. The network settings (`--allow-host`, the
+board's Network and VPN parts) open destinations; they do not change what a
+ruleset decides about the requests to them: a request a ruleset asks about is
+asked even when its host is allowed.
+
+`once` allows this one connection (the address is
 open for 30 seconds), `run` until the sandbox ends, `always` also every later
 start of the same project (for a lookup the name; for a connection the name
 when it can be proved, else the address, see below; kept in
@@ -4245,6 +4337,54 @@ as popups in its theme and in Activity > Safeguards; the web interface as toasts
 '["firewall","dns"]'`, Settings > Window in the app, Defaults on the web) silences kinds: still recorded,
 never announced.
 
+## Reports
+
+`sandbox-ai report` writes one report of a run, of a start with all its runs and its parts (its MCP servers,
+helpers and team), of several starts, of a log folder or of every run - running or stopped - as Markdown, HTML or
+PDF, each with a table of contents and links:
+
+```bash
+sandbox-ai report web -o web.pdf                  # a start (its name or a run id) with its parts
+sandbox-ai report web api -f html -o two.html     # several starts in one report
+sandbox-ai report --session web --since 1d        # a session, from a day ago
+sandbox-ai report web --no-parts                  # the start alone (Markdown on standard output)
+sandbox-ai report --all --until 2026-11-10 -o all.md
+sandbox-ai report --project ~/src/web --json      # the gathered data, for scripts
+```
+
+| Section | What it holds |
+|---|---|
+| Summary | what the report covers, when it was made, the sandbox-ai version, the period; each run with its role, agent, state, start, duration, security mode, VPN or Tor and kill switch; the key numbers; every finding of the security report, linked |
+| Runs | per run: its id and name, role (a start, an MCP server, a helper, a team member), agent, backend, start, end, duration, exit status, workspaces (and those added during the run), log folder, security mode, preset, `--ask`, VPN/Tor, LLM server, MCP servers, kill switch, taint, telemetry, limits, devices, the hosts and presets its options allow, its start options (secret values left out) |
+| Statistics | connections, requests and bytes per destination, allowed, refused and failed; the questions asked and how they were answered; MCP tool calls per server; the agent's tool calls the rules checked; pushes and what the privacy check said; model calls and tokens; the credentials the agent sent (names only) and the logins the proxy added; processes, file changes, devices, VPN checks |
+| Network | every destination tried: allowed or refused and why - the approval (and its scope), the rule, `--allow-host`, the preset, the agent's model API, `--frontier`, `--no-inspect`, what was allowed during the run, or the reason of the refusal - with the processes that tried; every name lookup refused or forwarded; for a running sandbox what was allowed during its run (`sandbox-ai net show`) |
+| Security report | everything tried or done that was not allowed, the most severe first: canaries read or sent, VPN and Tor checks that failed (a leak is critical), failed safety checks, pushes the privacy check refused, rules, the administrator's policy and the security mode refusing, questions answered with no or not answered, the taint, devices refused, the kill switch (what it refused or closed, and the cut that holds), refused connections, lookups and TLS handshakes. Each finding: when (first and last, how often), the run (linked), by which process or tool, the verdict, what to do, the log it came from |
+| Appendix | every log file read (its size, how much of it was read, how many older lines were left out), what could not be read, and what sandbox-ai does not record |
+
+The report is made from what sandbox-ai records: the run registry (and, for a running sandbox, its supervisor's
+answer to `net show` and its kill switch), the start directories and their histories, and each run's log folder
+(`activity.jsonl`, `safeguards.jsonl`, `connections-*.jsonl`, `egress-denied.jsonl`, `dns.jsonl`,
+`canaries.jsonl`, `vpn.jsonl`, `tools.jsonl`, `mcp-calls.jsonl`, `devices.jsonl`, `workspaces.jsonl`,
+`files.jsonl`, `processes.jsonl`) and the MCP servers' own call logs. Where a run has `safeguards.jsonl`, its
+records are the findings (with their fix); for an older run they are made from the logs themselves, the same way.
+Each log is read from its end and only so far (32 MiB of one, 256 MiB of all): the appendix says what was left
+out. Every text goes through the activity log's redaction (token formats, credential patterns, the run's canary
+tokens): no secret appears in any format. The file is written with mode 0600; it names hosts, paths and commands
+of the runs, so share it with care.
+
+The HTML page holds its style (light and dark, printable) and loads nothing. The PDF is written by sandbox-ai
+itself (`sandbox/pdfdoc.py`, no dependency, the PDF reader's own Helvetica and Courier): its bookmarks are the
+sections, the runs, the severities and each finding, and the table of contents (with page numbers) and the links
+from the summary to the findings are links inside the document. In the desktop app: Sandboxes › Report… for the
+selected starts (one or several of this machine), Statistics › Report… for the log folder shown; the format and
+the file are asked, the report is written in the background and opened.
+
+What is not recorded, so no report can show it: when the kill switch was set or lifted (only the cut that holds
+while a run runs and what it refused or closed are logged); why the network options let a connection through (the
+proxy logs no reason: the report names the option, preset or provider it matches); the options of a run that was
+not kept, once it ended; what was allowed during a run, once it ended; the run of a firewall drop, a name lookup,
+a file change or a process (they are counted for the run that ran at that time); reads of your files.
+
 ## Canary files
 
 A canary is a decoy: a file that looks like a credential, planted in the
@@ -4437,6 +4577,70 @@ read, and HOST is opened. The agent's processes keep their environment, so the c
 sandbox (`export NAME=sandbox-ai-api-key-placeholder-NAME`). `revoke --api-key NAME` takes it back; the desktop
 app does the same from a secret's menu (Credentials, Secrets: Give to a running sandbox).
 
+## Containers inside the sandbox
+
+**Experimental in this release**: refused unless `SANDBOX_AI_EXPERIMENTAL=nested-containers` is set, until
+its live test (Podman inside a sandbox, CI job `nested`) passes.
+
+`--nested-containers` (`-ct`, Podman only) lets the agent run containers itself: `podman run`, `podman build`,
+`buildah` and `unshare -rn` work in its sandbox (developing sandbox-ai itself, testing images, MCP servers in
+their containers). The image needs Podman: `sandbox-ai images recipe dev --from claude && sandbox-ai build dev`
+makes the variant `dev` with Podman, crun, fuse-overlayfs, slirp4netns, passt, nftables, tor, busybox-static and
+the libraries the app's tests need offscreen; start it with `--image-variant dev --nested-containers`.
+
+**How.** Before Firejail starts, the supervisor makes a user namespace for the agent, and the agent enters it once
+Firejail is verified, with a mount namespace of its own (Firejail's mounts copied into it locked). Its root is the sandbox's root (your user on the host: what the agent writes stays yours);
+its other IDs are the sandbox's subordinate IDs, all but three that nothing inside maps to: the connection proxy's
+(1), PulseAudio's (2) and tor's (950). The agent is root with all capabilities in that namespace and in what it
+makes in it, and has none anywhere else. What the container gets for it:
+
+| Podman option | Why |
+|---|---|
+| `--cap-add SETFCAP` | the supervisor maps the sandbox's root into the agent's namespace, which the kernel allows only with it; Firejail drops it with all the others before the agent runs |
+| `--device /dev/fuse` | fuse-overlayfs, the storage of images inside (without it: copies, `vfs`) |
+| `--device /dev/net/tun` | slirp4netns and pasta for containers with a network of their own (needed) |
+
+Firejail's own filter stays, but lets through what a container engine needs inside its own namespaces (`mount`,
+`umount2`, `pivot_root`, `chroot`, `sethostname`, `setdomainname` and the new mount calls); `ptrace`, `keyctl`,
+modules, `bpf` and the rest stay blocked, `no_new_privs` stays set. Podman is configured for the sandbox
+(a drop-in over the image's own `containers.conf` in `/etc/containers/containers.conf.d/`, and
+`CONTAINERS_STORAGE_CONF`): the containers share
+the agent's network namespace, have no cgroups of their own (the sandbox's limits hold for all of them), and their
+images live in `/tmp/containers` (a tmpfs, `--tmp-size`), so they go with the run and nothing owned by your
+subordinate IDs is left in a HOME. The dry run shows all of it (`nested_containers`).
+
+**What still holds.** The firewall and the connection proxy belong to the sandbox's network namespace, which
+belongs to the sandbox's user namespace, where the agent has no capabilities: it cannot change a rule, mark a
+packet (the VPN's mark) or move an interface. Every connection of the containers leaves through that namespace,
+either directly (they share it) or through slirp4netns or pasta running in it: they meet the same allow-list and
+the same proxy as the agent's own connections. The redirect to the proxy skips only the proxy's own user, and
+Tor's kill switch lets only tor's user out: neither can be taken on, since neither is mapped in the agent's
+namespace. A container cannot make a bridge or a veth pair into the sandbox's namespace either (that needs its
+capabilities). Firejail's mounts over the proxy's, the logs' and the control directories are locked in every
+namespace the agent makes: they cannot be taken away.
+
+**What is weaker.** The agent reaches more of your host's kernel: user, mount and network namespaces of its own,
+with all capabilities in them (nftables and network drivers in its own namespaces, file systems that may be
+mounted there) and the system calls that come with them. A bug in that code is a way out that a sandbox without
+the option does not offer. The board's score drops by 10.
+
+**Files of other IDs.** As root of its namespace the agent may also give files in the workspaces and the folders it
+may write to another of its IDs - on the host one of your subordinate IDs, which you cannot delete without
+`podman unshare`, and a setuid one would run as that ID. So in a nested run every host folder is mounted `nosuid`
+(and `nodev`) in the sandbox, and when the run ends the supervisor gives back to you (your user and group, setuid
+and setgid bits cleared) everything the run left owned by another ID there; it says what it gave back and writes
+`nested-owners.json` into the log directory. What was there before the run is left as it is. After a run that was
+killed, `podman unshare chown -R 0:0 PATH` does the same.
+
+**Where it is refused.** With the Bubblewrap backend and `--podman-url`; behind a Tor profile (the kill switch
+would still hold, but one kernel bug would show your address); in the security modes `high` and `paranoid`; and
+by the administrator's policy (`"forbid": ["--nested-containers"]`). It needs `/dev/net/tun` on the host. Ubuntu
+restricts user namespaces with AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`): the start says so,
+and `unshare -r` inside fails until `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+`tests/test_nested_containers_live.py` starts a sandbox with it and checks all of this with real Podman (CI job
+`nested`).
+
 ## Resource limits
 
 Every sandbox runs with limits on memory, CPU and processes (change them while
@@ -4492,7 +4696,10 @@ the launcher's last record.
 Files in `/tmp` and `/var/tmp` (and a HOME that is not kept) live in memory
 (tmpfs) and count against the limit; with a limit, `/tmp` and `/var/tmp` each
 hold at most half of it, so a full `/tmp` is an error the agent sees ("No space
-left on device"), not the end of the run. Since 0.1.36 the agent's processes
+left on device"), not the end of the run. `--tmp-size SIZE` (`-ts`, Podman; `6g`, `512m` or
+bytes) gives each another size, at most half the memory limit, since both
+count against it (`--tmp-size 8g --memory 16g` for long test runs); with
+`--memory none` each gets a quarter of the host's memory, and at most that. Since 0.1.36 the agent's processes
 are also the kernel's first choice (`oom_score_adj` 300 above the
 supervisor's). The watch needs a local engine on Linux (not `--podman-url`).
 
@@ -4712,6 +4919,7 @@ yes, `-b` backend; see their `--help`).
 | `-b`, `--backend podman\|bwrap` | Sandbox backend (default: `podman`) |
 | `-i`, `--image IMAGE` | Prebuilt Podman image (default: `localhost/<agent>-sandbox:latest`); never pulled implicitly |
 | `-iv`, `--image-variant NAME` | Your image variant NAME of this agent (`sandbox-ai images new NAME --from AGENT`): `localhost/<agent>-sandbox-NAME:latest`; Podman only, not with `--image` |
+| `-ct`, `--nested-containers` | The agent runs containers itself (Podman, Buildah, `unshare -rn`) as root of a user namespace of its own; their connections pass the sandbox's firewall and proxy; weakens isolation ([containers inside](#containers-inside-the-sandbox)) |
 | `-pu`, `--podman-url URL` | Podman service URL, e.g. `unix:///example/podman.sock` |
 | `-B`, `--binary PATH` | Agent executable (host path with bwrap, image path with Podman) |
 | `-rt`, `--runtime DIR` | bwrap: expose a runtime directory read-only at the same path; repeatable |
@@ -4844,6 +5052,7 @@ See [Every start](#every-start-names-detach-keep-resume), [tmux](#tmux-mode) and
 | `-d`, `--device PATH\|usb:VID:PID[:SERIAL]` | Hand a host device to the agent: a character device under `/dev`, `/dev/bus/usb`, `/dev/dri`, `/dev/snd` whole, or a USB device by its IDs (re-attached when replugged); repeatable (weakens isolation) |
 | `-G`, `--gpu nvidia\|dri\|rocm` | The GPU devices (NVIDIA through CDI with Podman) |
 | `-me`, `--memory SIZE`, `-cu`, `--cpus N`, `-pi`, `--pids N` | Resource limits (defaults `8g`, half the CPUs, `4096`; `none` for none; [limits](#resource-limits)) |
+| `-ts`, `--tmp-size SIZE` | Size of `/tmp` and of `/var/tmp` each (Podman; default and most: half the memory limit; with `--memory none` a quarter of the host's memory) |
 
 See [Hardware](#hardware-devices-and-gpus); a service on the host reached with
 `--allow-host-port` is safer.
@@ -4874,6 +5083,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai net list\|show\|allow\|revoke [RUN] [--allow-host H] [--allow-tcp IP:PORT] [--allow NET] [--allow-PRESET] [--dns] [--nameserver IP] [--allow-host-port PORT] [--git-token-env\|--git-token-file\|--git-token-secret URL=REF] [--api-key HOST=NAME[=SECRET]]`, `allow ... --keep` | Change what a running sandbox may reach; `--keep` also writes it into the project's `.sandbox-ai.json` (see [Network policy](#changing-the-network-of-a-running-sandbox)) |
 | `sandbox-ai net stop RUN [--wait SECONDS]` | The older form of `sandbox-ai stop NAME` for a run: SIGTERM to its checked launcher, which cleans up |
 | `sandbox-ai net untaint [RUN]` | Take back the run's taint: the rules for tainted runs no longer hold, until untrusted content enters it again (see [Rulesets](#rulesets)) |
+| `sandbox-ai net cut [RUN] remote\|local\|api\|all\|off [--only] [--json]`, `net cut --all-runs MODE` | The kill switch: cut a running sandbox's network (with its MCP servers, helpers and team) at once, only ever taking away; `off` lifts it (see [the kill switch](#the-kill-switch-cutting-a-running-sandboxs-network)) |
 | `sandbox-ai devices list\|add\|remove [RUN] PATH\|usb:VID:PID[:SERIAL]`, `sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]`, `limits [RUN] --show [--json]` | Hand devices to a running sandbox, take them away; change its limits, or show the ones it runs with now |
 | `sandbox-ai usage [RUN\|--all] [--json] [--follow] [--interval S] [--top N]` | What a running sandbox uses now: the CPUs (and how often `--cpus` held it back), memory (and its files in `/tmp` and HOME), processes and threads against `--pids`, its top processes |
 | `sandbox-ai workspace list [RUN] [--json]`, `add [RUN] DIR\|FILE [--ro] [--name NAME]`, `remove [RUN] DIR\|FILE\|NAME [--force]` | Mount a host directory (or a single file) into a running sandbox at `/workspaces/<name>` (or `/workspaces/NAME`; the checks of `--workspace`; a directory is kept for a session's next start, under its name), take it away again |
@@ -4881,6 +5091,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai rules check [FILE ...]`, `rules show [--agent A] [--project DIR] [-- OPTIONS]`, `rules show NAME`, `rules reload NAME` (each `--json`) | Check rulesets; the rulesets of a start with their source; what a running start holds; read its HTTP rules anew (the policy's and the mode's stay) |
 | `sandbox-ai canaries list [RUN] [--tokens] [--json]`, `canaries log [RUN] [--json]`, `canaries resume RUN` | The [canary files](#canary-files) of the runs and what happened to them; every event with its process, tool call and model requests; continue a sandbox a canary paused |
 | `sandbox-ai safeguards [RUN\|--all] [--follow] [--json] [--kind K]`, `safeguards kinds` | What the [safeguards](#safeguard-warnings) refused or ended, why, and the command that would allow it |
+| `sandbox-ai report [NAME ...\|--session NAME\|--all\|--project PATH\|--log-dir DIR] [-f md\|html\|pdf] [-o FILE] [--since TIME] [--until TIME] [--no-parts] [--json]` | One [report](#reports) of runs, running or stopped: statistics, every destination and why it was allowed or refused, and the security report |
 | `sandbox-ai secrets list\|set NAME [--from-env VAR]\|delete NAME\|backend` | Secrets in the system keyring, else private files |
 | `sandbox-ai git-logins add URL --secret NAME [--user USER]`, `list [--json]`, `remove URL`, `check [URL]` | Your Git servers' logins, added by the connection proxy (see [Git logins](#git-logins-in-the-proxy-sandbox-ai-git-logins)) |
 | `sandbox-ai publish-logins add KIND --secret NAME [--url URL]`, `list [--json]`, `remove KIND`, `check [KIND]`, `kinds` | Logins for `--publish` (see [Publishing](#publishing-to-registries-and-forges-sandbox-ai-publish-logins---publish)) |
@@ -4961,6 +5172,18 @@ practical model runs, Playwright and a local LLM. Options:
 `--codex-model`, `--claude-model`, `--free-model`, `--opencode-model`.
 Practical model runs write their reports to `evidence/` (not versioned, so
 reports always belong to the code that produced them).
+
+`tests/devtools/` holds helpers for these tests, each optional
+(`tests/test_devtools.py`): `wm_check.py` runs a program on Xvfb under
+spectrwm and fails when one of its windows bypasses the window manager (the
+app's floated panels: `projects/sandbox-ai-app/tests/test_wm_live.py`);
+`fake_internet.py` is an HTTP and HTTPS echo and a DNS server with fixed names
+for egress tests without the internet; `model_mock.py` an OpenAI- and
+Ollama-compatible model server with canned answers, streams and connections
+closed while idle; `distro_matrix.sh` runs the installer (or an AppImage) on
+Debian, Ubuntu, Fedora and Arch in containers; `gitea.sh` starts a throwaway
+Gitea on loopback. With `--nested-containers` the agent runs the container
+ones inside its sandbox ([containers inside](#containers-inside-the-sandbox)).
 
 `tests/test_hosts_ssh.py` drives `sandbox-ai hosts` end to end: the real
 OpenSSH client against an SSH server on 127.0.0.1 (asyncssh's, so no sshd is

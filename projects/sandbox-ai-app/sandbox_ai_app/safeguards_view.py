@@ -122,7 +122,7 @@ class SafeguardsView(QWidget):
         for kind in TITLES:
             self.kind.addItem(f"{kind_title(kind)} ({kind})", kind)
         self.kind.currentIndexChanged.connect(lambda _: self.show_records(self.records))
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         top.addWidget(self.refresh_button)
         top.addWidget(self.kind)
         top.addWidget(self.status, 1)

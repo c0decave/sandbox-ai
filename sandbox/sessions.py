@@ -899,6 +899,11 @@ def thaw(name, data):
     else:
         signal_tree(data["pid"], signal.SIGCONT, include_root=not foreground(data))
     (session_dir(name) / "paused").unlink(missing_ok=True)
+    # The kill switch asked for while it was paused (sandbox-ai net cut): set now, before the resume returns.
+    net = starts().module("net")
+    record = net.running().get(current_run(name, data))
+    if record is not None:
+        net.apply_pending_cut(record["directory"])
 
 
 def added_options(data, workspaces=(), mounts=(), mcp=()):

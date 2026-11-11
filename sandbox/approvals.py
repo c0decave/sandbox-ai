@@ -7,6 +7,9 @@
   sandbox-ai approvals history [RUN]             questions and their answers
   sandbox-ai approvals remembered [--json]        what was allowed "always", per project
   sandbox-ai approvals forget PROJECT ENTRY       forget one of them (a host name or IP:PORT)
+  sandbox-ai approvals blocked [RUN] [--json]     what a running sandbox refused, newest first: why, and what to do
+  sandbox-ai approvals decided [RUN] [--json]     the decisions a running sandbox remembers for the run
+  sandbox-ai approvals ask-again ID               forget what the run decided about question ID: asked again
 
 A sandbox asks (with --ask, the default) when its agent connects to a destination the options do not
 allow, looks up a name they do not pin, pushes commits the privacy check has warnings about, or sends a
@@ -17,7 +20,12 @@ waits until it is answered or the run ends). Scopes: once (this connection), run
 sandbox ends), always (also every later start of this project; kept in
 ~/.config/sandbox-ai/approved.json). A name allowed after a lookup is reached by the agent's next try
 (for lookups once means run: the name stays pinned); only its public addresses are opened. A deny counts
-for the rest of the run (--scope once: the agent may ask again). The name in a connection question is the
+for the rest of the run (--scope once: the agent may ask again). A question nobody answers is no decision: it is
+refused, the same request is refused at once for the next 2 minutes (the agent does not wait out the timeout again
+and again), then asked again. On a question answered (or left unanswered) already, allow ID --scope run and deny ID
+change what the run decided, for the rest of it, and ask-again ID forgets it; allow ID --scope always on a request or
+MCP tool call writes an exception rule into the ruleset that held it (yours in place; a preset's or someone else's
+as a copy of your own), on a connection or lookup it keeps the destination in the project (net allow --keep). The name in a connection question is the
 one the agent sends: what is allowed is the address, and "always" keeps the name only when the sandbox
 proved it (its own pin, or the real server's certificate on the approved connection); the question says
 which it will be.
@@ -42,6 +50,7 @@ Standard library only.
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -780,6 +789,10 @@ def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None,
                 # Your browser would reach the agent's URL from your own address, past the run's Tor.
                 notes.append("not opened: this run goes through Tor, and your browser would open the URL from your "
                              "own address; open it in Tor Browser if you mean to")
+            elif net().cut_state(record["directory"]) in ("remote", "api", "all"):
+                # The run's kill switch cuts the internet: your browser would reach it for the agent.
+                notes.append(f"not opened: the run's network is cut (sandbox-ai net cut: "
+                             f"{net().cut_state(record['directory'])}); lift the cut first if you mean to open it")
             else:
                 (opener or open_browser)(url)
         path = Path(record["directory"]) / "approvals" / f"{ident}.answer"
@@ -1284,6 +1297,615 @@ def read_line(connection, limit, deadline):
     return data.split(b"\n", 1)[0].decode("utf-8", "replace")
 
 
+# --- what a running sandbox refused: the Blocked list ------------------------------------------------------------
+#
+# `sandbox-ai approvals blocked [RUN]` and the app's Approvals page (Blocked): every connection, lookup, request and
+# tool call a running sandbox (and its MCP servers and helpers, each a sandbox of its own) had refused, newest first,
+# with why - not allowed by the network options, a ruleset's rule, a question nobody answered, your own deny, the
+# security mode, the administrator's policy, the kill switch, a block "always" - and the process that tried. Read
+# from the logs the run writes anyway, bounded: the newest BLOCKED_TAIL bytes of each log, the newest
+# BLOCKED_QUESTIONS questions; never a whole file. What may be done about one entry ("actions") is said with it:
+#   allow-run     for the run: sandbox-ai net allow (a destination) or, for a question, approvals allow ID --scope run
+#   ask-again     forget the decision the run remembered (approvals ask-again ID): its next request is asked again
+#   deny-run      approvals deny ID: refused for the rest of the run without a question
+#   allow-always  for the project: net allow ... --keep (a destination) or an exception rule (rule_exception)
+
+BLOCKED_TAIL = 4 << 20       # bytes read from the end of each log
+BLOCKED_LIMIT = 300          # entries at most (equal ones counted as one)
+BLOCKED_QUESTIONS = 400      # the newest questions of a run read
+BLOCKED_KINDS = ("network", "rule", "unanswered", "denied", "mode", "policy", "cut", "blocked", "taint", "other")
+REDECIDED = ("http", "mcp", "tool", "push", "connect")  # questions the supervisor's control op decide takes
+CUT_MARK = "cut by the kill switch"
+
+
+_jsonltail = None
+
+
+def jsonltail():
+    """sandbox/jsonltail.py (the newest lines of a log, read from its end), loaded once."""
+    global _jsonltail
+    if _jsonltail is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_jsonltail_for_approvals", HERE / "jsonltail.py")
+        with LOADING:
+            if _jsonltail is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _jsonltail = loaded
+    return _jsonltail
+
+
+def tail_records(path, keep=None, tail=BLOCKED_TAIL, stop=None, limit=BLOCKED_LIMIT * 4):
+    """The JSON objects of the log PATH that KEEP wants, newest first, from its newest TAIL bytes only (a log of the
+    project holds every run: never read whole); reading ends early once STOP(record) says the rest is older. A line
+    being written, a damaged line and a link are skipped."""
+    tails = jsonltail()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return []
+    found = []
+    try:
+        info = os.fstat(fd)
+        if not stat_regular(info):
+            return []
+        end = tails.complete_end(fd, info.st_size)
+        read = 0
+        for line in tails.lines_from_end(fd, end, chunk=min(tails.CHUNK, max(4096, tail)), line_limit=1 << 20):
+            read += len(line) + 1
+            if read > tail:
+                break
+            try:
+                record = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            if stop is not None and stop(record):
+                break
+            if keep is None or keep(record):
+                found.append(record)
+                if len(found) >= limit:
+                    break
+    finally:
+        os.close(fd)
+    return found
+
+
+def stat_regular(info):
+    import stat as stat_module
+    return stat_module.S_ISREG(info.st_mode)
+
+
+def process_text(process):
+    """NAME (pid N, PROGRAM) of a log's "process", escaped; "" when the log names none."""
+    if not isinstance(process, dict):
+        return ""
+    if "unknown" in process:
+        return f"not identified ({shown(process['unknown'], 120)})"
+    pid = process.get("ns_pid") or process.get("pid")
+    exe = process.get("exe")
+    return f"{shown(process.get('comm', '?'), 64)} (pid {shown(pid, 12)}" + (f", {shown(exe, 200)}" if exe else "") + ")"
+
+
+def refusal_kind(reason, approval=None, rule=None, ruleset=None):
+    """Which of BLOCKED_KINDS a refusal is, by its REASON, its APPROVAL (the log's) and its RULE and RULESET."""
+    reason = str(reason or "")
+    answer = approval if isinstance(approval, dict) else {}
+    answered = str(answer.get("reason") or "")
+    if CUT_MARK in reason or CUT_MARK in answered:
+        return "cut"
+    if answered.startswith("no answer") or reason.startswith("no answer"):
+        return "unanswered"
+    if answered == "answered" or reason == "answered":
+        return "denied"
+    if "blocked always" in reason or "blocked always" in answered:
+        return "blocked"
+    if "entered this run" in reason:
+        return "taint"
+    if ruleset == "policy" or "administrator's policy" in reason:
+        return "policy"
+    if str(ruleset or "").startswith("mode ") or "security mode" in reason:
+        return "mode"
+    if reason in ("not allowed by the network options", "not in allowed hosts"):
+        return "network"
+    if rule not in (None, ""):
+        return "rule"
+    return "other"
+
+
+def blocked_why(entry):
+    """Why, in plain words, and what to do: for `approvals blocked` (the app says it in its own language)."""
+    kind, rule, ruleset = entry["kind"], entry.get("rule"), entry.get("ruleset")
+    question = entry.get("question")
+    by_rule = f"the ruleset {ruleset} (rule {rule})" if ruleset else "a rule"
+    if kind == "network":
+        return "not allowed by the run's network options" + (
+            ": allow it for the run (sandbox-ai net allow) or always for the project (--keep)" if entry.get("target")
+            else "")
+    if kind == "rule":
+        return f"{by_rule} denies it; the network settings do not change what a ruleset decides"
+    if kind == "unanswered":
+        asks = f"{by_rule} asks before it" if ruleset else "it was asked about"
+        return f"{asks}, and nobody answered in time: refused for a while, then asked again" + (
+            f" (allow it: sandbox-ai approvals allow {question} --scope run)" if question else "")
+    if kind == "denied":
+        return "you denied it for this run" + (f" (take it back: sandbox-ai approvals ask-again {question})"
+                                               if question else "")
+    if kind == "mode":
+        return "the run's security mode refuses it: start again with a laxer --mode"
+    if kind == "policy":
+        return "the administrator's policy refuses it (ask your administrator)"
+    if kind == "cut":
+        return "the kill switch cuts it: sandbox-ai net cut RUN off lifts the cut"
+    if kind == "blocked":
+        return "you blocked it always for this project (sandbox-ai approvals remembered, forget lifts it)"
+    if kind == "taint":
+        return "the run is tainted: sandbox-ai net untaint RUN takes the taint back (only if you trust what entered)"
+    return shown(entry.get("reason") or "refused", 300)
+
+
+def blocked_actions(entry, record, widest=None):
+    """What may be done about ENTRY of the run RECORD (see BLOCKED_TAIL): a subset of allow-run, ask-again,
+    deny-run and allow-always. The security mode's and the policy's caps (WIDEST: the policy's, read once by the
+    caller): an allow for the run where they approve only once is not offered (the supervisor refuses it anyway);
+    "always" only where they keep answers."""
+    cap = answer_cap(record, policy_scope() if widest is None else widest)
+    kind, question, qkind = entry["kind"], entry.get("question"), entry.get("question_kind")
+    actions = []
+    target = entry.get("target") or {}
+    if kind in ("unanswered", "denied") and question and qkind in REDECIDED:
+        if cap != "once":
+            actions.append("allow-run")
+        actions.append("ask-again")
+        if kind == "unanswered":
+            actions.append("deny-run")
+        if cap == "always" and (qkind == "connect" and target or qkind in ("http", "mcp") and entry.get("ruleset")):
+            actions.append("allow-always")
+    elif kind in ("unanswered", "denied") and question and qkind == "dns":
+        if target.get("host") and cap != "once":
+            actions.append("allow-run")
+        actions.append("ask-again")
+        if target.get("host") and cap == "always":
+            actions.append("allow-always")
+    elif kind == "network" and target:
+        actions.append("allow-run")
+        if cap == "always":
+            actions.append("allow-always")
+    elif kind == "rule" and entry.get("question_kind") in ("http", "mcp") and entry.get("ruleset") and cap == "always":
+        actions.append("allow-always")
+    return actions
+
+
+def blocked_entry(run, kind, what, time_, reason="", process=None, rule=None, ruleset=None, question=None,
+                  question_kind=None, target=None, source=""):
+    return {"time": str(time_ or ""), "run": run, "kind": kind if kind in BLOCKED_KINDS else "other",
+            "what": shown(what, 600), "reason": shown(reason or "", 1000), "process": process_text(process),
+            "rule": shown(rule, 120) if rule not in (None, "") else None,
+            "ruleset": shown(ruleset, 200) if ruleset not in (None, "") else None,
+            "question": question if isinstance(question, str) and ID.fullmatch(question) else None,
+            "question_kind": question_kind, "target": target or None, "source": source, "count": 1}
+
+
+def tcp_target(destination):
+    """{"tcp": "ADDRESS:PORT"} of a connection's destination as the logs write it, or None."""
+    match = re.fullmatch(r"\[?([0-9a-fA-F:.]+)\]?:([0-9]{1,5})", str(destination or ""))
+    if not match:
+        return None
+    try:
+        ip = ipaddress.ip_address(match.group(1))
+    except ValueError:
+        return None
+    port = int(match.group(2))
+    if not 0 < port < 65536:
+        return None
+    return {"tcp": f"[{ip}]:{port}" if ip.version == 6 else f"{ip}:{port}"}
+
+
+def question_target(question):
+    if question.get("kind") == "dns" and isinstance(question.get("name"), str) and HOST.fullmatch(question["name"]):
+        return {"host": question["name"]}
+    if question.get("kind") == "connect":
+        return tcp_target(question.get("destination"))
+    return None
+
+
+def blocked_of_run(run, record, tail=BLOCKED_TAIL):
+    """The refusals of one running sandbox RUN (its run.json RECORD with "directory"), unsorted."""
+    found = []
+    started = str(record.get("started") or "")
+    older = (lambda r: bool(started) and isinstance(r.get("time"), str) and r["time"] < started)
+    directory = Path(record.get("directory") or "")
+    # Its questions: those refused (unanswered, your deny, the kill switch); the open ones are the page's above.
+    questions_dir = directory / "approvals"
+    try:
+        names = sorted((p.name for p in questions_dir.iterdir() if p.suffix == ".json" and ID.fullmatch(p.stem)),
+                       reverse=True)[:BLOCKED_QUESTIONS]
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            question = json.loads((questions_dir / name).read_text()[:1 << 16])
+            done = json.loads((questions_dir / name).with_suffix(".done").read_text()[:1 << 16])
+        except (OSError, ValueError):
+            continue
+        if not isinstance(question, dict) or not isinstance(done, dict) or done.get("decision") != "deny":
+            continue
+        if question.get("kind") in ("browser", "canary", "device"):
+            continue  # not refusals of the network or of a rule: the history lists them
+        reason = str(done.get("reason") or "")
+        found.append(blocked_entry(run, refusal_kind(reason), what(question), question.get("time"), reason,
+                                   question.get("process"), question.get("rule"), question.get("ruleset"),
+                                   question.get("id"), question.get("kind"), question_target(question),
+                                   "approvals"))
+    log_dir = record.get("log_dir")
+    if isinstance(log_dir, str) and log_dir:
+        logs = Path(log_dir)
+        # The proxy's log of this run: connections-TIME-RUN.jsonl.
+        try:
+            connection_logs = sorted((p for p in logs.glob(f"connections-*-{run}.jsonl")), reverse=True)[:2]
+        except OSError:
+            connection_logs = []
+        for path in connection_logs:
+            for entry in tail_records(path, tail=tail, keep=lambda r: r.get("event") == "denied" or (
+                    r.get("event") == "tls-refused" and not r.get("abandoned"))):
+                approval = entry.get("approval") if isinstance(entry.get("approval"), dict) else {}
+                reason = entry.get("reason") or entry.get("error") or ""
+                if entry.get("method") and entry.get("url"):
+                    shown_what = f"{entry['method']} {entry['url']}"
+                    qkind = "http"
+                else:
+                    shown_what = f"connection to {entry.get('destination') or entry.get('host') or '?'}" + (
+                        f" (named {entry['host']} by the agent)" if entry.get("host") else "")
+                    qkind = "connect"
+                kind = refusal_kind(reason, approval, entry.get("rule"), entry.get("ruleset"))
+                target = tcp_target(entry.get("destination")) if qkind == "connect" else None
+                found.append(blocked_entry(run, kind, shown_what, entry.get("time"), reason, entry.get("process"),
+                                           entry.get("rule"), entry.get("ruleset"), approval.get("question"),
+                                           qkind, target, "proxy"))
+        # The firewall's and the DNS stub's refusals (one file for every run of the project: this run's only).
+        for entry in tail_records(logs / "egress-denied.jsonl", tail=tail, stop=older,
+                                  keep=lambda r: (r.get("sandbox") or {}).get("run") in (None, run)
+                                  if isinstance(r.get("sandbox") or {}, dict) else False):
+            if isinstance(entry.get("host"), str):
+                host = entry["host"].lower()
+                found.append(blocked_entry(run, "network", f"lookup of {host}", entry.get("time"),
+                                           entry.get("reason") or "not in allowed hosts", entry.get("process"),
+                                           target={"host": host} if HOST.fullmatch(host) else None, source="dns"))
+            elif entry.get("address") is not None:
+                protocol, port = str(entry.get("protocol") or "?"), entry.get("port")
+                try:
+                    ip = ipaddress.ip_address(str(entry["address"]))
+                except ValueError:
+                    continue
+                if protocol == "tcp" and isinstance(port, int) and 0 < port < 65536:
+                    target = {"tcp": f"[{ip}]:{port}" if ip.version == 6 else f"{ip}:{port}"}
+                else:
+                    target = {"address": str(ip)}
+                found.append(blocked_entry(run, "network", f"{protocol} to {ip}" + (f":{port}" if port else ""),
+                                           entry.get("time"), "not allowed by the network options",
+                                           entry.get("process"), target=target, source="firewall"))
+        # Tool calls a rule refused (the agent's own tools, the MCP servers' tools).
+        for name, source in (("mcp-calls.jsonl", "mcp"), ("tools.jsonl", "tool")):
+            for entry in tail_records(logs / name, tail=tail, stop=older, keep=lambda r: bool(r.get("reason")) and (
+                    r.get("decision") != "allow" or r.get("approval"))):
+                approval = entry.get("approval") if isinstance(entry.get("approval"), dict) else {}
+                tool = entry.get("tool") or "?"
+                shown_what = (f"MCP tool {entry.get('server') or '?'}/{tool}" if source == "mcp" else
+                              f"{entry.get('agent') or 'agent'} tool {tool}") + (
+                    f" with {entry['arguments']}" if isinstance(entry.get("arguments"), str) else "")
+                kind = refusal_kind(entry.get("reason"), approval, entry.get("rule"), entry.get("ruleset"))
+                found.append(blocked_entry(run, kind, shown_what, entry.get("time"), entry.get("reason"),
+                                           entry.get("process"), entry.get("rule"), entry.get("ruleset"),
+                                           approval.get("question") or entry.get("question"), source, None, source))
+    # What the supervisor refused at run time: the security mode's and the policy's refusals.
+    for entry in tail_records(directory / "safeguard-events.jsonl", tail=1 << 20):
+        if entry.get("kind") in ("mode", "policy"):
+            found.append(blocked_entry(run, entry["kind"], entry.get("what") or entry["kind"], entry.get("time"),
+                                       entry.get("why"), source="supervisor"))
+    return found
+
+
+def blocked(record, runs=None, limit=BLOCKED_LIMIT, tail=BLOCKED_TAIL):
+    """What the running sandbox RECORD (run.json with "directory") and its MCP servers, helpers and team members
+    (net.related_runs of RUNS, the running ones) refused, newest first: equal refusals (the same question, or the same
+    kind and target) as one entry with their count and the newest time. Each entry: time, run, kind (BLOCKED_KINDS),
+    what, reason, process, rule, ruleset, question (its ID, when one was asked), question_kind, target (a destination
+    `net allow` takes: {"host"}, {"tcp"} or {"address"}), why (plain words, and what to do) and actions
+    (blocked_actions)."""
+    runs = net().running() if runs is None else runs
+    members = [(record.get("run"), record)] + [(name, other) for name, other in net().related_runs(runs, record)
+                                               if isinstance(other, dict) and other.get("directory")]
+    entries = []
+    for name, member in members:
+        try:
+            entries += blocked_of_run(str(name), member, tail)
+        except OSError:
+            continue
+    grouped = {}
+    for entry in sorted(entries, key=lambda e: e["time"], reverse=True):
+        key = (entry["run"], "q", entry["question"]) if entry["question"] else \
+            (entry["run"], entry["kind"], entry["what"])
+        known = grouped.get(key)
+        if known is None:
+            grouped[key] = entry
+            continue
+        known["count"] += 1
+        for field in ("process", "rule", "ruleset", "target", "question_kind"):  # the question's file has more
+            if not known.get(field) and entry.get(field):
+                known[field] = entry[field]
+        if entry["source"] == "approvals":  # the question's own refusal says what it was asked about
+            known["kind"], known["question_kind"] = entry["kind"], entry["question_kind"]
+            known["what"] = entry["what"]
+    result = sorted(grouped.values(), key=lambda e: e["time"], reverse=True)[:limit]
+    by_run = {name: member for name, member in members}
+    widest = policy_scope()  # (with a policy file, read once: it loads the launcher)
+    for entry in result:
+        entry["why"] = blocked_why(entry)
+        entry["actions"] = blocked_actions(entry, by_run.get(entry["run"], record), widest)
+    return result
+
+
+def decided(record):
+    """The decisions the running sandbox RECORD remembers for the run, and the requests refused for now because
+    nobody answered (its supervisor's control op decide)."""
+    return net().ask(record["directory"], {"op": "decide", "action": "list"})
+
+
+def answered_question(ident, runs=None):
+    """(run, record, question with its "result") of the answered question IDENT of a running sandbox, or None."""
+    matches = [entry for entry in questions(runs, answered=True) if entry[2].get("id") == ident
+               and isinstance(entry[2].get("result"), dict)]
+    if len(matches) > 1:
+        raise ValueError(f"{shown(ident)} names questions of several sandboxes "
+                         f"({', '.join(shown(m[0]) for m in matches)})")
+    return matches[0] if matches else None
+
+
+def redecide(ident, action, runs=None, out=print):
+    """Change what a running sandbox decided about its answered (or unanswered) question IDENT for the rest of the
+    run: ACTION allow or deny (for the run), or forget (its next request is asked again). Through the supervisor's
+    control op decide, which holds the security mode's and the policy's caps; only the human reaches it."""
+    if action not in ("allow", "deny", "forget"):
+        raise ValueError("allow, deny or forget")
+    found = answered_question(ident, runs)
+    if found is None:
+        raise ValueError(f"no answered question {shown(ident)} of a running sandbox; see sandbox-ai approvals history")
+    name, record, question = found
+    if record.get("mcp") and not record.get("pid"):
+        raise ValueError(f"{shown(name)} is an MCP server of its own: its decisions last until it stops "
+                         "(sandbox-ai mcp stop) and cannot be changed during its run")
+    if action == "allow" and widest_answer(question, record, policy_scope()) == "once":
+        raise ValueError(f"{shown(name)} approves at most once (its security mode or the administrator's policy): "
+                         f"ask again (sandbox-ai approvals ask-again {shown(ident)}) and answer the next question")
+    answer = net().ask(record["directory"], {"op": "decide", "action": action, "question": ident})
+    said = {"allow": "allowed for the rest of the run", "deny": "denied for the rest of the run",
+            "forget": "forgotten: its next request is asked again" if answer.get("forgot") else
+            "nothing was remembered for it: its next request is asked"}[action]
+    out(f"{shown(name)}: {said}: {describe(question)}")
+    for note in answer.get("notes") or []:
+        out(f"  {shown(note, 1000)}")
+    return answer
+
+
+# --- "Allow always" for a request a ruleset holds: an exception rule in a ruleset of your own -------------------
+#
+# Each ruleset decides on its own and the strictest decision wins: a rule in another ruleset cannot widen what one
+# asks or denies. So the exception goes into the ruleset that held the request, never into a preset's or anyone
+# else's file: your own rules.json is changed in place (the running start reads it again: sandbox-ai rules reload),
+# the project's own ruleset (the project file's "rules", which a board start passes as a copy) in the trusted project
+# file (net.keep_in_project's checks: the next start has it), and any other file (a preset's, someone else's) is
+# copied to a file of your own with the exception - which a start uses only in its place.
+
+OWN_RULES_DIR = "rules"  # ~/.config/sandbox-ai/rules/: the copies with your exceptions
+
+
+def reload_rules(record):
+    """The running start RECORD reads its HTTP rules anew (sandbox-ai rules reload): None when done, else why not."""
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_rules_for_approvals", HERE / "rules_cmd.py")
+        rules = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rules)
+        rules.reload(record.get("run"), lambda line: None, False)
+        return None
+    except (ValueError, OSError) as exc:
+        return str(exc) or type(exc).__name__
+
+
+def config_dir():
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai"
+
+
+def exception_rule(entry):
+    """The allow rule for the request or tool call ENTRY (a Blocked entry or a question): exactly its method, host and
+    path, or its MCP server and tool."""
+    kind = entry.get("question_kind") or entry.get("kind")
+    stamp = time.strftime("%Y-%m-%d")
+    if kind == "http":
+        method, url = entry.get("method"), entry.get("url")
+        if not (method and url):
+            method, _, url = str(entry.get("what") or "").partition(" ")
+        parts = urllib.parse.urlsplit(str(url))
+        host, path = (parts.hostname or "").lower(), parts.path or "/"
+        if not HOST.fullmatch(host) or not re.fullmatch(r"[A-Z]{1,20}", str(method or "")):
+            raise ValueError("not a request sandbox-ai can name exactly (method, host, path)")
+        if "*" in path:
+            raise ValueError("its path holds a *, which a rule would read as a pattern: write that rule yourself")
+        ident = "allowed-" + hashlib.sha256(f"{method} {host}{path}".encode()).hexdigest()[:8]
+        return {"id": ident, "host": host, "methods": method, "path": path, "decision": "allow",
+                "reason": f"allowed always for this project ({stamp}, sandbox-ai approvals)"}, "http"
+    if kind == "mcp":
+        server, tool = entry.get("server"), entry.get("tool")
+        if not (server and tool):
+            match = re.match(r"MCP tool ([A-Za-z0-9_-]{1,32})/([^ ]{1,128})", str(entry.get("what") or ""))
+            server, tool = match.groups() if match else (None, None)
+        if not (server and tool) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", str(tool)):
+            raise ValueError("not a tool call sandbox-ai can name exactly (server, tool)")
+        ident = "allowed-" + hashlib.sha256(f"{server} {tool}".encode()).hexdigest()[:8]
+        return {"id": ident, "server": server, "tool": tool, "decision": "allow",
+                "reason": f"allowed always for this project ({stamp}, sandbox-ai approvals); every call of this tool"
+                }, "mcp"
+    raise ValueError("only HTTP requests and MCP tool calls get an exception rule")
+
+
+def ruleset_file(record, ruleset):
+    """(path, how) of the ruleset named RULESET in the run RECORD: how is "own" (your rules.json), "project" (the
+    project's own ruleset: its project file, or the board's copy of it) or "other" (a preset's, someone else's)."""
+    name = str(ruleset or "")
+    if name in ("project", ".sandbox-ai.json"):
+        return None, "project"
+    if name == "rules.json":
+        return config_dir() / "rules.json", "own"
+    sources = record.get("rules_sources") if isinstance(record.get("rules_sources"), dict) else {}
+    files = [Path(path) for path in sources.get("files") or [] if isinstance(path, str)]
+    base = re.sub(r" \([0-9]+\)$", "", name.removeprefix("--rules "))
+    matching = [path for path in files if path.name == base]
+    if not name.startswith("--rules ") or len(matching) != 1:
+        raise ValueError(f"the ruleset {shown(name)} is no file of this run sandbox-ai can name (the policy's, the "
+                         "security mode's and --allow-http hold as they are)")
+    path = matching[0]
+    board_copies = config_dir() / "app" / "rules"
+    if path.parent == board_copies and re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+        return path, "project"  # a board start passes the project's ruleset as this copy
+    if path.parent == config_dir() / OWN_RULES_DIR:
+        return path, "own"
+    return path, "other"
+
+
+def with_exception(document, section, rule):
+    """DOCUMENT (a ruleset) with RULE first in SECTION (the first rule that matches decides within a ruleset);
+    the same rule there already: unchanged (None)."""
+    document = dict(document) if isinstance(document, dict) else {"version": 1}
+    rules = list(document.get(section) or [])
+    if any(isinstance(r, dict) and r.get("id") == rule["id"] for r in rules):
+        return None
+    document.setdefault("version", 1)
+    document[section] = [rule] + rules
+    return document
+
+
+def write_ruleset(path, document):
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symlink; refusing to write through it")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(document, indent=2) + "\n")
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def rule_exception(record, entry, write=False):
+    """"Allow always" for the request or tool call ENTRY (a Blocked entry, or a question) of the running sandbox
+    RECORD: what changes ({"rule", "section", "ruleset", "where", "path", "changes", "applies"}) and, with WRITE, the
+    change made. Refused where the administrator's policy approves less than always."""
+    if policy_scope() != "always":
+        raise ValueError(f"the administrator's policy approves at most for {policy_scope()}: nothing is allowed always")
+    ruleset = entry.get("ruleset")
+    if not ruleset:
+        raise ValueError("no ruleset held it")
+    rule, section = exception_rule(entry)
+    path, how = ruleset_file(record, ruleset)
+    plan = {"rule": rule, "section": section, "ruleset": ruleset, "where": how}
+    if how == "own":
+        try:
+            document = json.loads(Path(path).read_text()) if Path(path).exists() else {"version": 1}
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{path}: {exc}") from None
+        plan.update(path=str(path), changes=f"adds the rule {rule['id']} first in {path} (your own ruleset)",
+                    applies="now: the running start reads its rulesets again (sandbox-ai rules reload), and every "
+                            "later start")
+        if write:
+            changed = with_exception(document, section, rule)
+            if changed is not None:
+                write_ruleset(path, changed)
+            plan["written"] = changed is not None
+            plan["reloaded"] = reload_rules(record)
+    elif how == "project":
+        project = record.get("workspace")
+        plan.update(path=str(Path(str(project)) / ".sandbox-ai.json"),
+                    changes=f"adds the rule {rule['id']} first to the project's own ruleset (\"rules\" of its "
+                            ".sandbox-ai.json, trusted at once; the Board shows it in Approvals and rules)",
+                    applies="from the project's next start; this run keeps its rules (allow it for the run as well)")
+        if write:
+            def change(document):
+                updated = with_exception(document.get("rules") if isinstance(document.get("rules"), dict) else
+                                         {"version": 1}, section, rule)
+                if updated is None:
+                    return []
+                document["rules"] = updated
+                return ["rules", rule["id"]]
+            path_written, added = net().keep_in_project(record, [], change=change)
+            plan["written"] = bool(added)
+    else:
+        copy = config_dir() / OWN_RULES_DIR / Path(path).name
+        try:
+            original = json.loads(Path(path).read_text())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{path}: {exc}") from None
+        plan.update(path=str(copy), original=str(path),
+                    changes=f"{path} is not yours (a preset's or someone else's) and stays as it is: a copy of it "
+                            f"with the rule {rule['id']} first is written to {copy}",
+                    applies=f"only where a start uses the copy in place of {Path(path).name} (--rules, or Approvals and "
+                            "rules on the Board): a ruleset of yours beside it cannot widen what it decides")
+        if write:
+            existing = None
+            with contextlib.suppress(OSError, ValueError):
+                existing = json.loads(copy.read_text()) if copy.exists() else None
+            changed = with_exception(existing if isinstance(existing, dict) else original, section, rule)
+            if changed is not None:
+                write_ruleset(copy, changed)
+            plan["written"] = changed is not None
+    return plan
+
+
+def decide_again(found, decision, scope, out=print):
+    """`approvals allow|deny ID` on a question FOUND (run, record, question) answered or refused already: what the run
+    decided is changed for the rest of it (redecide); "allow --scope always" keeps it for the project too."""
+    name, record, question = found
+    kind, ident = question.get("kind"), question.get("id")
+    if decision == "deny":
+        if scope != "run":
+            raise ValueError(f"question {shown(ident)} was answered or refused already: deny it for the rest of the run "
+                             "(--scope run); a name or address is blocked always while its question is open")
+        redecide(ident, "deny", out=out)
+        return 0
+    if scope == "once":
+        raise ValueError(f"question {shown(ident)} was answered or refused already: allow it for the rest of the run "
+                         f"(--scope run), or let it be asked again: sandbox-ai approvals ask-again {shown(ident)}")
+    if scope == "run":
+        if kind == "dns":
+            target = question_target(question)
+            if not target:
+                raise ValueError(f"{shown(question.get('name'))} is no host name")
+            status = net().main(["allow", str(record.get("run")), "--allow-host", target["host"]], out=out)
+            with contextlib.suppress(ValueError, OSError):
+                redecide(ident, "forget", out=lambda line: None)
+            return status
+        redecide(ident, "allow", out=out)
+        return 0
+    if kind in ("http", "mcp"):
+        plan = rule_exception(record, {**question, "question_kind": kind}, write=True)
+        out(f"{shown(name)}: {plan['changes']}; applies {plan['applies']}")
+        if plan.get("reloaded"):
+            out(f"  not reloaded: {shown(plan['reloaded'], 500)}")
+        redecide(ident, "allow", out=out)
+        return 0
+    target = question_target(question)
+    if kind in ("connect", "dns") and target:
+        option = ["--allow-host", target["host"]] if "host" in target else ["--allow-tcp", target["tcp"]]
+        status = net().main(["allow", str(record.get("run")), *option, "--keep"], out=out)
+        with contextlib.suppress(ValueError, OSError):
+            redecide(ident, "forget", out=lambda line: None)
+        return status
+    raise ValueError(f"a {shown(kind, 20)} question is allowed at most for the run (--scope run)")
+
+
 def main(argv, out=print):
     parser = argparse.ArgumentParser(prog="sandbox-ai approvals", description=__doc__.split("\n\n")[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1310,8 +1932,55 @@ def main(argv, out=print):
     forgetting = commands.add_parser("forget", help="forget an entry allowed always")
     forgetting.add_argument("project")
     forgetting.add_argument("entry", help="a host name or IP:PORT, as `remembered` shows it")
+    refused = commands.add_parser("blocked", help="what a running sandbox (and its MCP servers and helpers) refused, "
+                                                  "newest first: why, and what to do")
+    refused.add_argument("run", nargs="?")
+    refused.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts and the app")
+    refused.add_argument("-n", "--limit", type=int, default=BLOCKED_LIMIT, metavar="N", help="at most N entries")
+    remembered_now = commands.add_parser("decided", help="the decisions a running sandbox remembers for the run, and "
+                                                         "the requests refused for now because nobody answered")
+    remembered_now.add_argument("run", nargs="?")
+    remembered_now.add_argument("-j", "--json", action="store_true")
+    again = commands.add_parser("ask-again", help="forget what the run decided about question ID (an answer, or no "
+                                                  "answer): its next request is asked again")
+    again.add_argument("id")
     args = parser.parse_args(argv)
     try:
+        if args.command in ("blocked", "decided"):
+            loaded = net()
+            runs = loaded.running()
+            record = loaded.choose(runs, args.run, command=f"approvals {args.command}")
+            if args.command == "decided":
+                entries = decided(record).get("decided") or []
+                if args.json:
+                    out(json.dumps(entries, indent=2))
+                    return 0
+                textout().table(["QUESTION", "DECISION", "SCOPE", "KIND", "WHAT"],
+                                [[shown(e.get("question")), shown(e.get("decision")), shown(e.get("scope")),
+                                  shown(e.get("kind")), shown(" ".join(str(v) for v in (e.get("details") or {}).values()), 300)]
+                                 for e in entries], out, indent=0, empty="nothing is remembered for this run")
+                return 0
+            if args.limit < 1:
+                raise ValueError("--limit: at least 1")
+            entries = blocked(record, runs, limit=args.limit)
+            if args.json:
+                out(json.dumps(entries, indent=2))
+                return 0
+            t = textout()
+            t.table(["TIME", "RUN", "KIND", "WHAT", "WHY"],
+                    [[shown(e["time"]), shown(e["run"], 40), e["kind"],
+                      shown(e["what"], 300) + (f" (x{e['count']})" if e["count"] > 1 else "") +
+                      (f"; by {e['process']}" if e["process"] else ""), e["why"]] for e in entries], out, indent=0,
+                    empty="nothing was refused")
+            return 0
+        if args.command == "ask-again":
+            redecide(args.id, "forget", out=out)
+            return 0
+        if args.command in ("allow", "deny") and ID.fullmatch(args.id) and \
+                not any(q.get("id") == args.id for _, _, q in questions()):
+            found = answered_question(args.id)
+            if found is not None:
+                return decide_again(found, args.command, args.scope, out)
         if args.command == "remembered":
             known = remembered()
             if args.json:
