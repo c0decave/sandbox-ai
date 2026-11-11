@@ -64,10 +64,17 @@ jobs:
       - run: "python -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nftables iproute2
       - name: Kill switch in the kernel
-        shell: bash  # with pipefail: pytest's status survives the tee
+        shell: bash
         run: |
-          python -m pytest -v -rs tests/test_tor_killswitch_live.py tests/test_killswitch_live.py | tee killswitch.txt
-          ! grep -q SKIPPED killswitch.txt
+          status=0
+          python -m pytest -v -rs -o faulthandler_timeout=300 tests/test_tor_killswitch_live.py tests/test_killswitch_live.py > killswitch.txt 2>&1 || status=$?
+          tail -n 200 killswitch.txt
+          if [ "$status" -ne 0 ] || grep -q SKIPPED killswitch.txt; then
+            # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.
+            text=$(grep -E '^(FAILED|ERROR|SKIPPED)|^E ' killswitch.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=kill switch in the kernel failed::$text"
+            exit 1
+          fi
       # The Tor container as a start runs it (rootless Podman, its capabilities, its tmpfs): tor comes up, becomes
       # debian-tor and owns its data directory; then a real Tor profile is brought up and checked through Tor.
       - name: Tor container under Podman
@@ -77,8 +84,15 @@ jobs:
           SANDBOX_AI_LIVE_NETWORK: "1"
         run: |
           podman --version
-          python -m pytest -v -rs tests/test_tor_container_live.py | tee tor.txt
-          ! grep -q SKIPPED tor.txt
+          status=0
+          python -m pytest -v -rs -o faulthandler_timeout=300 tests/test_tor_container_live.py > tor.txt 2>&1 || status=$?
+          tail -n 200 tor.txt
+          if [ "$status" -ne 0 ] || grep -q SKIPPED tor.txt; then
+            # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.
+            text=$(grep -E '^(FAILED|ERROR|SKIPPED)|^E ' tor.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=Tor container failed::$text"
+            exit 1
+          fi
 
   # --nested-containers in a real sandbox (tests/test_nested_containers_live.py): Podman inside the agent's sandbox
   # runs a container and unshare -rn works, while what the containers send meets the sandbox's own firewall and
@@ -106,8 +120,15 @@ jobs:
       - name: Podman inside a sandbox
         shell: bash
         run: |
-          python -m pytest -v -rs --agent-live tests/test_nested_containers_live.py | tee nested.txt
-          ! grep -q SKIPPED nested.txt
+          status=0
+          python -m pytest -v -rs -o faulthandler_timeout=300 --agent-live tests/test_nested_containers_live.py > nested.txt 2>&1 || status=$?
+          tail -n 200 nested.txt
+          if [ "$status" -ne 0 ] || grep -q SKIPPED nested.txt; then
+            # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.
+            text=$(grep -E '^(FAILED|ERROR|SKIPPED)|^E ' nested.txt | head -60 | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g')
+            echo "::error title=nested containers failed::$text"
+            exit 1
+          fi
 
   package:
     runs-on: ubuntu-24.04  # ubuntu-latest is 26.04 since 2026-10-19: no Python 3.9 there
