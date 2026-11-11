@@ -61,13 +61,16 @@ config, defaults = rt.RUN / "torrc", rt.RUN / "torrc-defaults"
 rt.write_private(config, rt.tor_config({"socks": False}) + "DisableNetwork 1\n")
 rt.write_private(defaults, "")
 tor = subprocess.Popen(["tor", "-f", str(config), "--defaults-torrc", str(defaults)], stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, text=True)
-lines, deadline = [], time.monotonic() + 40
-os.set_blocking(tor.stdout.fileno(), False)
+                       stderr=subprocess.STDOUT)
+lines, deadline, fd = [], time.monotonic() + 40, tor.stdout.fileno()
+os.set_blocking(fd, False)
 while time.monotonic() < deadline and tor.poll() is None:
-    chunk = tor.stdout.read()
+    try:
+        chunk = os.read(fd, 65536)  # (nothing there yet: BlockingIOError)
+    except BlockingIOError:
+        chunk = b""
     if chunk:
-        lines += chunk.splitlines()
+        lines += chunk.decode("utf-8", "replace").splitlines()
     if any("DisableNetwork is set" in line or "Bootstrapped 0%" in line for line in lines):
         time.sleep(1)
         break
@@ -109,7 +112,7 @@ def test_tor_comes_up_in_the_container_as_sandbox_ai_starts_it():
 def test_a_tor_profile_comes_up_through_the_tor_network(tmp_path):
     environment = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_DATA_HOME": str(tmp_path / "data"),
                    "XDG_STATE_HOME": str(tmp_path / "state")}
-    launcher = [sys.executable, str(ROOT / "sandbox-ai")]
+    launcher = [str(ROOT / "sandbox-ai")]  # (a bash script)
     added = subprocess.run([*launcher, "vpn", "add", "live", "--tor"], env=environment, capture_output=True, text=True)
     assert added.returncode == 0, added.stderr
     checked = subprocess.run([*launcher, "vpn", "check", "live"], env=environment, capture_output=True, text=True,

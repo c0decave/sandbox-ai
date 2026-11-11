@@ -1051,8 +1051,8 @@ NESTED_DIR = Path("/run/sandbox-nested")
 NESTED_USERNS = NESTED_DIR / "userns"
 NESTED_HIDDEN = NESTED_DIR / "hidden"
 NESTED_TOP = 65534  # IDs above it ("nobody" is the highest images use) stand in for the reserved ones
-CLONE_NEWUSER, CLONE_NEWNS = 0x10000000, 0x00020000
-MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC, MS_BIND = 1, 2, 4, 8, 4096
+CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWCGROUP = 0x10000000, 0x00020000, 0x02000000
+MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC, MS_REMOUNT, MS_BIND = 1, 2, 4, 8, 32, 4096
 # Firejail's default filter, but what a container engine needs inside its own namespaces: mounting, pivot_root and
 # chroot, a container's host name. They act only on namespaces the agent made (its capabilities count nowhere else);
 # ptrace, keyctl, modules, bpf and the rest stay blocked.
@@ -1168,7 +1168,29 @@ def nested_setup(reserved, libc=None, proc=Path("/proc")):
 NESTED_RUN_DIRS = ("/run/libpod", "/run/containers/storage")
 
 
-def enter_nested_userns(reserved, path=NESTED_USERNS, libc=None, proc=Path("/proc"), run_dirs=NESTED_RUN_DIRS):
+def nested_sys(libc, root=Path("/sys")):
+    """The agent's /sys, in its own mount namespace: inside Firejail the sandbox has none, and Podman's first step,
+    statfs("/sys/fs/cgroup"), failed with a bare "no such file or directory" (CI) - before every command, `podman
+    version` included. A small tmpfs with fs/cgroup in it, and there a cgroup2 file system of a cgroup namespace of
+    the agent's own (it shows the sandbox's cgroup as its root, nothing above it), read-only. Returns "present" (it
+    had one), "cgroup2" or "empty" (the folder alone, where cgroup2 cannot be mounted)."""
+    if (root / "fs" / "cgroup").is_dir():
+        return "present"
+    flags = MS_NOSUID | MS_NODEV | MS_NOEXEC
+    libc_mount(libc, "tmpfs", root, "tmpfs", flags, "mode=0755,size=64k")
+    (root / "fs" / "cgroup").mkdir(mode=0o755, parents=True, exist_ok=True)
+    how = "empty"
+    if libc.unshare(CLONE_NEWCGROUP) == 0:
+        with contextlib.suppress(OSError):
+            libc_mount(libc, "cgroup2", root / "fs" / "cgroup", "cgroup2", flags | MS_RDONLY)
+            how = "cgroup2"
+    with contextlib.suppress(OSError):  # the tmpfs read-only too: nothing is written into the agent's /sys
+        libc_mount(libc, "none", root, None, MS_REMOUNT | MS_BIND | MS_RDONLY | flags)
+    return how
+
+
+def enter_nested_userns(reserved, path=NESTED_USERNS, libc=None, proc=Path("/proc"), run_dirs=NESTED_RUN_DIRS,
+                        sys_root=Path("/sys")):
     """The guard, verified inside Firejail: enter the agent's user namespace (its owner, the sandbox's root, may),
     check that none of RESERVED is mapped in it, then make a mount namespace of that user namespace - where a
     container engine as its root may mount (its storage, its containers' roots). Every mount of Firejail's is
@@ -1193,6 +1215,10 @@ def enter_nested_userns(reserved, path=NESTED_USERNS, libc=None, proc=Path("/pro
     for directory in run_dirs:
         with contextlib.suppress(OSError):  # Podman says it itself if it still cannot
             Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        nested_sys(libc, sys_root)
+    except OSError as exc:  # Podman then says what it misses; the run goes on
+        print(f"agent-sandbox: --nested-containers: no /sys for the containers: {exc}", file=sys.stderr)
 
 
 GIVE_BACK_LIMIT = 2_000_000  # entries looked at in all: a give-back never holds the end of a run for long

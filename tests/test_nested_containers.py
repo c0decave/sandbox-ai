@@ -21,6 +21,12 @@ RESERVED = [1, 2, 950]  # the proxy's, PulseAudio's and tor's IDs
 SUBUIDS = [(0, 1000, 1), (1, 100000, 65536)]  # rootless Podman's own map: your user, then 65536 subordinate IDs
 
 
+@pytest.fixture(autouse=True)
+def experimental(monkeypatch):
+    """--nested-containers is experimental: these tests opt in (test_it_is_refused_unless_opted_into does not)."""
+    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested-containers")
+
+
 @pytest.fixture
 def devices(monkeypatch):
     """/dev/fuse and /dev/net/tun as this host had them (the test machine may lack them); returns the set to change."""
@@ -91,7 +97,7 @@ def test_the_engines_configuration(devices):
     assert 'netns = "host"' in containers and 'cgroups = "disabled"' in containers
     assert 'cgroup_manager = "cgroupfs"' in containers and "keyring = false" in containers
     assert 'driver = "overlay"' in storage and 'mount_program = "/usr/bin/fuse-overlayfs"' in storage
-    assert f'graphroot = "{s.NESTED_GRAPHROOT}"' in storage and s.NESTED_GRAPHROOT.startswith("/var/tmp/")
+    assert f'graphroot = "{s.NESTED_GRAPHROOT}"' in storage and s.NESTED_GRAPHROOT.startswith("/tmp/")
     # containers.conf as a drop-in over the image's own (CONTAINERS_CONF would replace it: Podman then missed the
     # distribution's network backend and helper paths, "no such file or directory" in CI); storage.conf replaced.
     assert set(s.NESTED_ENV) == {"CONTAINERS_STORAGE_CONF", "BUILDAH_ISOLATION"} and "CONTAINERS_CONF" not in s.NESTED_ENV
@@ -335,13 +341,15 @@ def test_the_guard_enters_the_namespace_and_checks_its_map(tmp_path):
     libc = FakeLibc()
     run = tmp_path / "run"
     run.mkdir()
+    present = tmp_path / "sys"
+    (present / "fs" / "cgroup").mkdir(parents=True)
     rt.enter_nested_userns(RESERVED, userns, libc, fake_proc(tmp_path / "good", good),
-                           run_dirs=(str(run / "libpod"), str(run / "containers" / "storage")))
+                           run_dirs=(str(run / "libpod"), str(run / "containers" / "storage")), sys_root=present)
     # Podman's run state exists before its first command (`podman import -` wrote into a missing /run/libpod).
     assert (run / "libpod").is_dir() and (run / "containers" / "storage").is_dir()
     assert rt.NESTED_RUN_DIRS == ("/run/libpod", "/run/containers/storage")
     # Its own user namespace first, then a mount namespace of it (where the engines may mount).
-    assert libc.calls == [("setns", rt.CLONE_NEWUSER), ("unshare", rt.CLONE_NEWNS)]
+    assert libc.calls == [("setns", rt.CLONE_NEWUSER), ("unshare", rt.CLONE_NEWNS)]  # (a /sys there already)
     with pytest.raises(RuntimeError, match=r"maps the reserved IDs \[1, 2, 950\]"):
         rt.enter_nested_userns(RESERVED, userns, FakeLibc(), fake_proc(tmp_path / "all", "0 0 65537\n"))
     with pytest.raises(RuntimeError, match=r"gid_map maps the reserved IDs \[950\]"):
@@ -429,12 +437,12 @@ def test_a_host_that_restricts_user_namespaces_is_named_with_the_way_out(tmp_pat
     monkeypatch.setattr(s, "USERNS_RESTRICTION", restriction)
     monkeypatch.setattr(s, "local_engine", lambda a: True)
     a = parsed("--nested-containers")
-    assert len(s.nested_notes(a)) == 2  # no such file: no restriction
+    assert len(s.nested_notes(a)) == 3  # no such file: no restriction
     restriction.write_text("0\n")
-    assert len(s.nested_notes(a)) == 2
+    assert len(s.nested_notes(a)) == 3
     restriction.write_text("1\n")
     notes = s.nested_notes(a)
-    assert len(notes) == 3 and "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in notes[2]
+    assert len(notes) == 4 and "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in notes[3]
     assert s.nested_notes(parsed()) == []
 
 
@@ -588,3 +596,62 @@ def test_the_supervisor_gives_back_to_the_sandboxs_root_by_default(tmp_path):
     calls = []
     found = rt.give_back([str(tmp_path)], 0, lstat=lstat, lchown=lambda *a: calls.append(a), chmod=lambda *a: None)
     assert calls == [(str(tmp_path / "f"), 0, 0)] and found["count"] == 1
+
+
+def test_the_agent_gets_a_sys_with_cgroups_where_firejail_left_none(tmp_path, capsys):
+    """Inside Firejail the sandbox has no /sys at all, and Podman's first step, statfs("/sys/fs/cgroup"), failed with a
+    bare "no such file or directory" before every command (CI, round 2). The guard makes one in the agent's own mount
+    namespace: a tmpfs, fs/cgroup in it with the cgroup2 file system of a cgroup namespace of the agent's own, all
+    read-only."""
+    root = tmp_path / "sys"
+    root.mkdir()
+    libc = FakeLibc()
+    assert rt.nested_sys(libc, root) == "cgroup2"
+    flags = rt.MS_NOSUID | rt.MS_NODEV | rt.MS_NOEXEC
+    assert libc.calls == [
+        ("mount", "tmpfs", str(root), b"tmpfs", flags, b"mode=0755,size=64k"),
+        ("unshare", rt.CLONE_NEWCGROUP),
+        ("mount", "cgroup2", str(root / "fs" / "cgroup"), b"cgroup2", flags | rt.MS_RDONLY, None),
+        ("mount", "none", str(root), None, rt.MS_REMOUNT | rt.MS_BIND | rt.MS_RDONLY | flags, None)]
+    assert (root / "fs" / "cgroup").is_dir()
+    # A /sys of its own already (a sandbox outside Firejail's way): left as it is.
+    again = FakeLibc()
+    assert rt.nested_sys(again, root) == "present" and again.calls == []
+    # No cgroup namespace to be had: the folder alone (statfs then finds the tmpfs, Podman takes it as cgroup v1).
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert rt.nested_sys(FakeLibc(unshare=-1), bare) == "empty" and (bare / "fs" / "cgroup").is_dir()
+
+
+def test_a_sys_that_cannot_be_made_is_said_and_the_run_goes_on(tmp_path, capsys):
+    class NoMount(FakeLibc):
+        def mount(self, *args):
+            return -1
+    userns = tmp_path / "userns"
+    userns.write_text("")
+    good = rt.id_map_text(rt.nested_id_map(SUBUIDS, RESERVED))
+    missing = tmp_path / "no-sys"
+    missing.mkdir()
+    rt.enter_nested_userns(RESERVED, userns, NoMount(), fake_proc(tmp_path / "p", good), run_dirs=(),
+                           sys_root=missing)
+    assert "no /sys for the containers" in capsys.readouterr().err
+
+
+def test_it_is_refused_unless_opted_into(devices, monkeypatch):
+    """Experimental in this release: refused unless SANDBOX_AI_EXPERIMENTAL names it (the CI job nested does)."""
+    monkeypatch.delenv("SANDBOX_AI_EXPERIMENTAL")
+    with pytest.raises(ValueError, match="experimental in this release.*SANDBOX_AI_EXPERIMENTAL=nested-containers"):
+        s.check_nested(parsed("--nested-containers"))
+    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "something-else, nested-containers")
+    s.check_nested(parsed("--nested-containers"))
+    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested")
+    with pytest.raises(ValueError, match="experimental"):
+        s.check_nested(parsed("--nested-containers"))
+    s.check_nested(parsed())  # without the option nothing is asked
+    assert s.experimental("x", {"SANDBOX_AI_EXPERIMENTAL": "x"}) and not s.experimental("x", {})
+    assert "SANDBOX_AI_EXPERIMENTAL=nested-containers" in s.option_actions()["--nested-containers"].help
+    assert s.nested_plan(parsed("--nested-containers"))["experimental"] is True
+    assert "experimental" in s.nested_notes(parsed("--nested-containers"))[0]
+    ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text()
+    job = ci[ci.index("\n  nested:"):]
+    assert "SANDBOX_AI_EXPERIMENTAL: nested-containers" in job[:job.index("steps:")]

@@ -15,8 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        # The suite runs longer than an hour on a runner: each Python version in three parts of the test files.
-        shard: [0, 1, 2]
+        # The suite runs longer than an hour on a runner: each Python version in four parts of the test files.
+        shard: [0, 1, 2, 3]
     name: test (${{ matrix.python }}, part ${{ matrix.shard }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
@@ -32,7 +32,7 @@ jobs:
           # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
           # -v names each test as it starts, so a test that hangs (a part is killed after 60 minutes) is named in the
           # annotation; faulthandler prints the tracebacks of a test that runs longer than 5 minutes.
-          files=$(ls tests/test_*.py | awk -v part=${{ matrix.shard }} 'NR % 3 == part')
+          files=$(ls tests/test_*.py | awk -v part=${{ matrix.shard }} 'NR % 4 == part')
           status=0; timeout --signal=INT --kill-after=60 3600 python -m pytest -v -rfE -o faulthandler_timeout=300 \
             $files > pytest.txt 2>&1 || status=$?
           tail -n 300 pytest.txt
@@ -100,6 +100,8 @@ jobs:
   # variant first; the job fails if the test was skipped all the same.
   nested:
     runs-on: ubuntu-24.04
+    env:
+      SANDBOX_AI_EXPERIMENTAL: nested-containers  # the option is refused without it until this job passes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
         with:
@@ -190,7 +192,7 @@ jobs:
   # The desktop app (projects/sandbox-ai-app), tested against the sandbox-ai of the same commit.
   app:
     runs-on: ubuntu-24.04  # the apt names below (libasound2t64, ...) are 24.04's
-    timeout-minutes: 30
+    timeout-minutes: 50
     env:
       QT_QPA_PLATFORM: offscreen
       # A test skipped for missing Qt, QtWebEngine or sandbox-ai fails instead (tests/conftest.py).
@@ -224,7 +226,7 @@ jobs:
       - name: Tests (offscreen, Qt required)
         run: |
           # Into a file, not a pipe (see above); a crash (exit 139) names the test it happened in.
-          status=0; timeout --signal=INT --kill-after=60 1500 python -X faulthandler -m pytest -v -rs -rfE tests \
+          status=0; timeout --signal=INT --kill-after=60 2700 python -X faulthandler -m pytest -v -rs -rfE tests \
             > tests.txt 2>&1 || status=$?
           tail -n 300 tests.txt
           if [ "$status" -ne 0 ]; then

@@ -4579,6 +4579,9 @@ app does the same from a secret's menu (Credentials, Secrets: Give to a running 
 
 ## Containers inside the sandbox
 
+**Experimental in this release**: refused unless `SANDBOX_AI_EXPERIMENTAL=nested-containers` is set, until
+its live test (Podman inside a sandbox, CI job `nested`) passes.
+
 `--nested-containers` (`-ct`, Podman only) lets the agent run containers itself: `podman run`, `podman build`,
 `buildah` and `unshare -rn` work in its sandbox (developing sandbox-ai itself, testing images, MCP servers in
 their containers). The image needs Podman: `sandbox-ai images recipe dev --from claude && sandbox-ai build dev`
@@ -4603,7 +4606,7 @@ modules, `bpf` and the rest stay blocked, `no_new_privs` stays set. Podman is co
 (a drop-in over the image's own `containers.conf` in `/etc/containers/containers.conf.d/`, and
 `CONTAINERS_STORAGE_CONF`): the containers share
 the agent's network namespace, have no cgroups of their own (the sandbox's limits hold for all of them), and their
-images live in `/var/tmp/containers` (a tmpfs, `--tmp-size`), so they go with the run and nothing owned by your
+images live in `/tmp/containers` (a tmpfs, `--tmp-size`), so they go with the run and nothing owned by your
 subordinate IDs is left in a HOME. The dry run shows all of it (`nested_containers`).
 
 **What still holds.** The firewall and the connection proxy belong to the sandbox's network namespace, which

@@ -680,7 +680,7 @@ def build_parser():
                         "Tor's, /dev/fuse and /dev/net/tun, and fewer system calls blocked. What its containers send "
                         "leaves through the sandbox's firewall and connection proxy like its own connections. Weakens "
                         "the isolation: more of your host's kernel is reachable (not in the modes high and paranoid, "
-                        "not behind Tor)")
+                        "not behind Tor). Experimental: refused unless SANDBOX_AI_EXPERIMENTAL=nested-containers")
     p.add_argument("--podman-url", metavar="URL", help="Podman service URL, e.g. unix:///example/podman.sock")
     p.add_argument("--binary", metavar="PATH", help="Agent executable (host path with bwrap; image path with podman)")
     p.add_argument("--runtime", action="append", default=[], metavar="DIR", help="bwrap: expose runtime directory read-only at same path")
@@ -7578,9 +7578,10 @@ NESTED_ENV = {"CONTAINERS_STORAGE_CONF": "/sandbox/session/containers/storage.co
 # would replace it, and with it the distribution's choice of network backend and helper paths: Podman then looked
 # for programs the image does not have and failed with "no such file or directory").
 NESTED_CONF_DROPIN = "/etc/containers/containers.conf.d/90-sandbox-ai-nested.conf"
-# Where the images and containers inside are kept: the sandbox's /var/tmp, a tmpfs (--tmp-size) that goes with the run,
-# so that nothing owned by your subordinate IDs is left in a HOME or a workspace.
-NESTED_GRAPHROOT = "/var/tmp/containers/storage"
+# Where the images and containers inside are kept: the sandbox's /tmp, a tmpfs (--tmp-size) that goes with the run,
+# so that nothing owned by your subordinate IDs is left in a HOME or a workspace. (Not /var/tmp: inside Firejail that
+# is a tmpfs of Firejail's own, noexec.)
+NESTED_GRAPHROOT = "/tmp/containers/storage"
 
 
 def nested(a):
@@ -7602,10 +7603,24 @@ def nested_storage(a):
     return "overlay" if "/dev/fuse" in nested_devices(a) else "vfs"
 
 
+EXPERIMENTAL_ENV = "SANDBOX_AI_EXPERIMENTAL"  # comma-separated: what this host opts into before it is done
+
+
+def experimental(name, environ=None):
+    """True if SANDBOX_AI_EXPERIMENTAL names NAME (an option not yet through its live tests)."""
+    value = (os.environ if environ is None else environ).get(EXPERIMENTAL_ENV, "")
+    return name in {part.strip() for part in value.split(",")}
+
+
 def check_nested(a):
-    """--nested-containers: Podman only, never behind Tor, and /dev/net/tun for the containers' networks."""
+    """--nested-containers: experimental (SANDBOX_AI_EXPERIMENTAL), Podman only, never behind Tor, and /dev/net/tun
+    for the containers' networks."""
     if not nested(a):
         return
+    if not experimental("nested-containers"):
+        raise ValueError("--nested-containers is experimental in this release: its live test (Podman inside a "
+                         "sandbox, tests/test_nested_containers_live.py) has not passed yet; to try it anyway: "
+                         f"{EXPERIMENTAL_ENV}=nested-containers sandbox-ai ...")
     if a.backend != "podman":
         raise ValueError("--nested-containers needs the Podman backend (the agent's user namespace is made in the "
                          "pod's container)")
@@ -7657,7 +7672,8 @@ def nested_plan(a):
     """The dry run's account of --nested-containers, or None."""
     if not nested(a):
         return None
-    return {"user_namespace": "the agent is root of a user namespace of its own (its capabilities count only there)",
+    return {"experimental": True,
+            "user_namespace": "the agent is root of a user namespace of its own (its capabilities count only there)",
             "reserved_ids": nested_reserved_ids(), "capabilities_added": ["SETFCAP"], "devices": nested_devices(a),
             "seccomp": "Firejail's default filter but " + ", ".join(
                 name.lstrip("!") for name in RUNTIME.NESTED_SECCOMP.partition("=")[2].split(",")),
@@ -7677,9 +7693,11 @@ USERNS_RESTRICTION = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_usern
 def nested_notes(a):
     if not nested(a):
         return []
-    notes = ["--nested-containers: the agent may run containers (podman, buildah, unshare -rn); it is root of a user "
+    notes = ["--nested-containers is experimental (SANDBOX_AI_EXPERIMENTAL=nested-containers): it has not passed its "
+             "live test yet",
+             "--nested-containers: the agent may run containers (podman, buildah, unshare -rn); it is root of a user "
              "namespace of its own, which reaches more of your host's kernel; its containers' connections pass the "
-             "sandbox's firewall and connection proxy; their images live in /var/tmp (--tmp-size) and go with the run",
+             "sandbox's firewall and connection proxy; their images live in /tmp (--tmp-size) and go with the run",
              "--nested-containers: it can leave files owned by your subordinate IDs (setuid ones included) in the "
              "workspaces and the folders it may write; they are mounted nosuid here, and at the end of the run "
              "everything left so is given back to you (after a run that was killed: podman unshare chown -R 0:0 "

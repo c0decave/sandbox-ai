@@ -4895,6 +4895,9 @@ laufende Sandbox übergeben…).
 
 ## Container in der Sandbox
 
+**Experimentell in dieser Version**: abgelehnt, solange `SANDBOX_AI_EXPERIMENTAL=nested-containers` nicht
+gesetzt ist, bis sein Live-Test (Podman in einer Sandbox, CI-Job `nested`) besteht.
+
 `--nested-containers` (`-ct`, nur Podman) lässt den Agenten selbst Container starten: `podman run`, `podman build`,
 `buildah` und `unshare -rn` funktionieren in seiner Sandbox (sandbox-ai selbst entwickeln, Images testen,
 MCP-Server in ihren Containern). Das Image braucht Podman: `sandbox-ai images recipe dev --from claude &&
@@ -4921,7 +4924,7 @@ Firejails eigener Filter bleibt, lässt aber durch, was eine Container-Engine in
 Sandbox eingerichtet (eine Ergänzung der eigenen `containers.conf` des Images in `/etc/containers/containers.conf.d/`, und
 `CONTAINERS_STORAGE_CONF`): die
 Container teilen den Netz-Namespace des Agenten, haben keine eigenen Cgroups (die Limits der Sandbox gelten für
-alle) und ihre Images liegen in `/var/tmp/containers` (ein tmpfs, `--tmp-size`), gehen also mit dem Lauf, und in
+alle) und ihre Images liegen in `/tmp/containers` (ein tmpfs, `--tmp-size`), gehen also mit dem Lauf, und in
 keinem HOME bleibt etwas zurück, das Ihren untergeordneten IDs gehört. Der Probelauf zeigt alles
 (`nested_containers`).
 

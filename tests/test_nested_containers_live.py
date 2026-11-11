@@ -76,6 +76,9 @@ result podman_version "$(podman version --format '{{.Client.Version}}' 2>/dev/nu
 # What the Podman inside thinks it is (rootful in the agent's namespace), and where it keeps what; an error in full.
 result podman_info "$(podman info --format '{{.Host.Security.Rootless}} {{.Store.GraphDriverName}} {{.Store.GraphRoot}} {{.Host.NetworkBackend}}' 2>&1 | tr '\n' ' ' | head -c 600)"
 result caps "$(grep -E '^Cap(Eff|Bnd)' /proc/self/status | tr '\n' ' ')"
+result sys "$(ls /sys/fs 2>&1 | tr '\n' ' ') $(stat -f -c %T /sys/fs/cgroup 2>&1)"
+# Podman's own account of its start, its last 30 lines (they name a missing file, a refused mount).
+result podman_debug "$(podman --log-level=debug info 2>&1 | tail -n 30 | tr '\n' '|' | cut -c1-6000)"
 unshare -rn true && result unshare ok || result unshare failed
 # A small local image: busybox-static alone, imported from a file (nothing is pulled, no pipe to break).
 mkdir -p /tmp/rootfs/bin /tmp/rootfs/tmp && cp /bin/busybox /tmp/rootfs/bin/busybox \
@@ -154,8 +157,9 @@ def test_podman_inside_the_sandbox_stays_behind_its_firewall_and_proxy(tmp_path)
         command = [str(ROOT / "sandbox-ai"), "claude", "--image", IMAGE, "--workspace", str(work), "--no-config",
                    "--no-auth", "--no-tmux", "--ask", "off", "--log-dir", str(logs), "--nested-containers",
                    "--binary", "/bin/sh", "--", "-c", script]
+        environment = {**os.environ, "SANDBOX_AI_EXPERIMENTAL": "nested-containers"}  # experimental until it passes
         process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=True)
+                                   start_new_session=True, env=environment)
         try:
             stdout, stderr = process.communicate(timeout=900)
         except subprocess.TimeoutExpired:

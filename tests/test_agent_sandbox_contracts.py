@@ -11862,7 +11862,8 @@ def test_nested_storage(scenario, nested_devices_present):
         assert s.nested_storage(a) == "overlay"
 
 
-def test_check_nested(scenario, nested_devices_present):
+def test_check_nested(scenario, nested_devices_present, monkeypatch):
+    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested-containers")
     if scenario == "happy":
         s.check_nested(s.parse_args(["claude", "--nested-containers"]))
         s.check_nested(s.parse_args(["claude", "--backend", "bwrap"]))  # not asked for: nothing checked
@@ -11910,7 +11911,7 @@ def test_nested_plan(scenario, nested_devices_present):
 def test_nested_notes(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(s, "USERNS_RESTRICTION", tmp_path / "restrict")
     if scenario == "happy":
-        assert len(s.nested_notes(s.parse_args(["claude", "--nested-containers"]))) == 2
+        assert len(s.nested_notes(s.parse_args(["claude", "--nested-containers"]))) == 3
     elif scenario == "sad":
         assert s.nested_notes(s.parse_args(["claude"])) == []
     else:
@@ -12075,7 +12076,9 @@ def test_enter_nested_userns(scenario, tmp_path):
             assert kind == rt.CLONE_NEWNS
             return 0
     if scenario == "happy":
-        rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc, run_dirs=(str(tmp_path / "run" / "libpod"),))
+        (tmp_path / "sys" / "fs" / "cgroup").mkdir(parents=True)
+        rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc, run_dirs=(str(tmp_path / "run" / "libpod"),),
+                               sys_root=tmp_path / "sys")
     elif scenario == "sad":
         with pytest.raises(OSError, match="cannot enter"):
             rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc)
@@ -12334,3 +12337,33 @@ def test_not_approved(scenario):
         assert rt.not_approved({}) == "not approved (refused)"
     else:
         assert rt.not_approved({"reason": "answered", "why": ""}, None) == "not approved (answered)"
+
+
+def test_nested_sys(scenario, tmp_path):
+    calls = []
+
+    class Libc:
+        def mount(self, *args):
+            calls.append(os.fsdecode(args[1]))
+            return 0
+
+        def unshare(self, kind):
+            return 0 if scenario == "happy" else -1
+    root = tmp_path / "sys"
+    root.mkdir()
+    if scenario == "happy":
+        assert rt.nested_sys(Libc(), root) == "cgroup2" and calls == [str(root), str(root / "fs" / "cgroup"), str(root)]
+    elif scenario == "sad":  # no cgroup namespace: the folder only
+        assert rt.nested_sys(Libc(), root) == "empty" and (root / "fs" / "cgroup").is_dir()
+    else:  # one there already
+        (root / "fs" / "cgroup").mkdir(parents=True)
+        assert rt.nested_sys(Libc(), root) == "present" and calls == []
+
+
+def test_experimental(scenario):
+    if scenario == "happy":
+        assert s.experimental("nested-containers", {"SANDBOX_AI_EXPERIMENTAL": "a, nested-containers"})
+    elif scenario == "sad":
+        assert not s.experimental("nested-containers", {"SANDBOX_AI_EXPERIMENTAL": "nested"})
+    else:
+        assert not s.experimental("nested-containers", {})
