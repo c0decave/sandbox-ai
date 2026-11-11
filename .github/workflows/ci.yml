@@ -30,10 +30,12 @@ jobs:
       - name: Tests (failures summarised as an annotation, readable through the API)
         run: |
           # Into a file, not a pipe: a process a test leaves behind would hold the pipe open and the step would hang.
+          # In a session of its own (setsid): a signal a test sends to its process group cannot end this step before
+          # it says where the run stopped (part runs ended with exit 143 and no word).
           # -v names each test as it starts, so a test that hangs (a part is killed after 60 minutes) is named in the
           # annotation; faulthandler prints the tracebacks of a test that runs longer than 5 minutes.
           files=$(ls tests/test_*.py | awk -v part=${{ matrix.shard }} 'NR % 4 == part')
-          status=0; timeout --signal=INT --kill-after=60 3600 python -m pytest -v -rfE -o faulthandler_timeout=300 \
+          status=0; timeout --signal=INT --kill-after=60 3600 setsid --wait python -m pytest -v -rfE -o faulthandler_timeout=300 \
             $files > pytest.txt 2>&1 || status=$?
           tail -n 300 pytest.txt
           if [ "$status" -ne 0 ]; then

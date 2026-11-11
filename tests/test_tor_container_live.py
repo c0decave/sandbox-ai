@@ -81,8 +81,9 @@ if tor.poll() is None:
         if line.startswith("Uid:"):
             status["uid"] = int(line.split()[1])
 data = os.stat("/var/lib/tor")
+# (root here has no CAP_DAC_READ_SEARCH: the directory is debian-tor's alone, as it should be - not listed)
 report = {"running": tor.poll() is None, "uid": status.get("uid"), "tor_uid": uid, "data_owner": data.st_uid,
-          "data_mode": oct(data.st_mode & 0o777), "files": sorted(os.listdir("/var/lib/tor")), "log": lines[-30:]}
+          "data_mode": oct(data.st_mode & 0o777), "log": lines[-30:]}
 tor.terminate()
 print(json.dumps(report))
 """
@@ -110,8 +111,8 @@ def test_tor_comes_up_in_the_container_as_sandbox_ai_starts_it():
 
 @pytest.mark.skipif(os.environ.get("SANDBOX_AI_LIVE_NETWORK") != "1", reason="SANDBOX_AI_LIVE_NETWORK=1: through Tor")
 def test_a_tor_profile_comes_up_through_the_tor_network(tmp_path):
-    environment = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_DATA_HOME": str(tmp_path / "data"),
-                   "XDG_STATE_HOME": str(tmp_path / "state")}
+    # (XDG_DATA_HOME stays: rootless Podman keeps its images there, the Tor image among them)
+    environment = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_STATE_HOME": str(tmp_path / "state")}
     launcher = [str(ROOT / "sandbox-ai")]  # (a bash script)
     added = subprocess.run([*launcher, "vpn", "add", "live", "--tor"], env=environment, capture_output=True, text=True)
     assert added.returncode == 0, added.stderr
