@@ -198,6 +198,26 @@ def test_closing_a_tab_with_unapplied_changes_asks(window, env, monkeypatch):
     assert window.tabs.count() == 0
 
 
+def test_a_tab_closed_after_the_question_is_the_one_asked_about(window, env, monkeypatch):
+    """Review: the question blocks no window, and the tab was closed by the index it had before it - another tab
+    closed meanwhile, and that one (or none) went while the board's changes were dropped all the same."""
+    import sandbox_ai_app.ui as ui
+    one, two, three = project(env, "one"), project(env, "two"), project(env, "three")
+    window.set_project(one)
+    window.set_project(two)
+    window.board.add_node("limits", **{"--memory": "4g"})
+    window.set_project(three)
+    asked = []
+
+    def meanwhile(*args, **kwargs):  # the human closes "one" while the question is open, then agrees
+        asked.append(args[2])
+        window.tabs.removeTab(window.tabs.find(f"project:{one}"))
+        return True
+    monkeypatch.setattr(ui, "ask_first", meanwhile)
+    assert window.close_tab(window.tabs.find(f"project:{two}"))
+    assert asked == ["Close tab"] and keys(window) == [f"project:{three}"]
+
+
 def test_tabs_are_moved_and_kept_for_the_next_start(window, env, monkeypatch):
     one, two, three = project(env, "one"), project(env, "two"), project(env, "three")
     fake_session(env, "work", two)

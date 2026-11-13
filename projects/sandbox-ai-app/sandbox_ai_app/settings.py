@@ -159,7 +159,7 @@ class PresetDirs(QWidget):
         row.addWidget(self.remove_button)
         row.addStretch()
         layout.addLayout(row)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         if not sai.has_preset_dirs():
@@ -303,7 +303,7 @@ class TrustedProjects(QWidget):
         row.addWidget(self.forget_button)
         row.addStretch()
         layout.addLayout(row)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.update_buttons()
@@ -472,15 +472,63 @@ class SettingsDialog(QDialog):
                                    "Switched on, terminal tabs work even when none are free, without that "
                                    "protection. Off (the default): the app checks first and opens a terminal window "
                                    "when none are free. Applies when the app is started again."), role="secondary"))
+        # copy, paste and links in the terminal tabs, and the login browser (terminal_tools.py, login_browser.py)
+        self.combo(form, "login_links", tr("Open sign-in links of the agents in"),
+                   (("app", tr("the app's login browser (it hands the result to the terminal)")),
+                    ("system", tr("the system browser"))), current)
+        self.check(form, "copy_on_select", tr("Copy text selected in a terminal tab to the clipboard at once"), current)
+        self.check(form, "paste_warn", tr("Ask before pasting several lines where each line break acts as Enter"),
+                   current)
+        self.combo(form, "terminal_osc52", tr("A program in a terminal tab may put text on the clipboard (OSC 52)"),
+                   (("ask", tr("after asking (the default)")), ("allow", tr("yes, said in the status bar")),
+                    ("off", tr("never"))), current)
+        forget = QPushButton(tr("Forget the login browser's cookies and data"))
+        forget.clicked.connect(self.forget_login_browser)
+        form.addRow("", forget)
+        form.addRow(plain_label(tr("Copy: select with the mouse (double click: a word, triple: a line; Shift - Option "
+                                   "on macOS - selects when the program takes the mouse), then Ctrl+Shift+C (Cmd+C), "
+                                   "Ctrl+Insert or the right-click menu. Paste: Ctrl+Shift+V (Cmd+V), Shift+Insert "
+                                   "or the menu; control characters are always asked about. A link: Ctrl+click "
+                                   "(Cmd+click), or Copy link in the menu - also one drawn over several rows. A "
+                                   "request to read the clipboard is never answered."), role="secondary"))
+        self.check(form, "notifications", tr("Show notifications (popups)"), current)
+        form.addRow(plain_label(tr("Off (the default): nothing pops up. Questions wait on the Approvals page, the "
+                                   "number of open ones is shown in the navigation and the tray, and every "
+                                   "notification is written to the log (the log window)."), role="secondary"))
         self.check(form, "notify", tr("Desktop notification for each new question"), current)
         self.check(form, "auto_tabs", tr("Open a tab for each session or sandbox that starts"), current)
+        self.check(form, "reopen_terminals", tr("Reopen the terminals of running sessions at start"), current)
         self.spin(form, "notify_seconds", tr("Notifications stay (seconds)"), 3, 120, current)
         self.combo(form, "notify_style", tr("Notifications are shown"),
                    [(key, tr(text)) for key, text in notifications.STYLES], current)
+
+        def follow(on):  # (with notifications off nothing of these pops up: not to be changed as if it did)
+            for key in ("notify", "notify_seconds", "notify_style"):
+                self.fields[key].setEnabled(bool(on))
+        self.fields["notifications"].toggled.connect(follow)
+        follow(self.fields["notifications"].isChecked())
         form.addRow(plain_label(tr("In the app's theme: a popup at the corner of the screen in the theme's colours "
                                    "(warnings in its warning colour, errors in its error colour; errors stay until "
                                    "closed). Where a window cannot place itself (Wayland), the desktop's notification "
                                    "is used."), role="secondary"))
+        # What the sandboxes themselves show on the desktop (sandbox-ai's defaults: desktop_notifications) - while
+        # this app runs they show nothing but a canary's alarm anyway; this is for the time it does not run.
+        self.desktop = QComboBox()
+        levels = sai.desktop_notification_levels()
+        texts = {"all": tr("all (questions, safeguards, limits, alarms)"), "alarms": tr("only a canary's alarm"),
+                 "none": tr("none")}
+        for level in levels:
+            self.desktop.addItem(texts.get(level, level), level)
+        defaults, problem = sai.sandbox_defaults()
+        self.desktop.setCurrentIndex(max(0, self.desktop.findData(defaults.get("desktop_notifications", "all"))))
+        self.desktop.setEnabled(bool(levels) and not problem)
+        self.desktop.currentIndexChanged.connect(lambda _: self.save_desktop(self.desktop.currentData()))
+        self.fields["desktop_notifications"] = self.desktop
+        form.addRow(tr("Desktop notifications of the sandboxes"), self.desktop)
+        form.addRow(plain_label(tr("While this app runs, the sandboxes show none of their own (only a canary's "
+                                   "alarm): the app has them. This says what they show when it does not run, for "
+                                   "every start (desktop_notifications in {path}).",
+                                   path=printable(str(sai.sandbox_defaults_file()))), role="secondary"))
         # Safeguards that refuse or end something in a running sandbox (sandbox-ai safeguards)
         self.check(form, "notify_safeguards", tr("A popup when a safeguard refuses or ends something in a running "
                                                  "sandbox"), current)
@@ -519,6 +567,7 @@ class SettingsDialog(QDialog):
         form.addRow(tr("Preset directories"), self.preset_dirs)
         self.trusted = TrustedProjects(sai)
         form.addRow(tr("Trusted projects"), self.trusted)
+        self.loop_rows(form)
 
         # new projects and the board
         page, form = self.tab(tr("New projects"))
@@ -597,6 +646,38 @@ class SettingsDialog(QDialog):
         tame_combos(self)  # a long choice (the telemetry's) does not widen the dialog; the list shows it whole
         self.fit()
         self.explain()
+
+    def loop_rows(self, form):
+        """The loop guard for local models (sandbox-ai's defaults: loop_guard, for every LLM server and start): each
+        layer empty for sandbox-ai's own default (shown in it), a value typed in checked at once and saved only when
+        every layer is valid; a server's own layers (its Parameters…) and a start's win over these."""
+        from . import llm_params as LP
+        from .llm_params_view import LoopFields
+        spec = LP.loop_spec(self.sai)
+        if spec is None:
+            form.addRow(tr("Loop guard for local models"), plain_label(tr(
+                "This sandbox-ai has no loop guard layers yet: update it."), role="secondary"))
+            return
+        defaults, problem = self.sai.sandbox_defaults()
+        own = defaults.get("loop_guard") if isinstance(defaults.get("loop_guard"), dict) else {}
+        self.loop_guard = LoopFields(spec, {k: v for k, v in own.items() if k in spec[0]})
+        self.loop_guard.setEnabled(not problem)
+        self.loop_guard.committed.connect(lambda: self.save_loop_guard(self.loop_guard.values()))
+        self.fields["loop_guard"] = self.loop_guard
+        form.addRow(tr("Loop guard for local models"), self.loop_guard)
+        form.addRow(plain_label(tr("What sandbox-ai does against a model that repeats itself, for every LLM server "
+                                   "(--llm): empty layers keep sandbox-ai's own default; a server's own layers (its "
+                                   "Parameters… on the LLM servers page) and a start's win (loop_guard in {path}).",
+                                   path=breakable(printable(str(self.sai.sandbox_defaults_file())))),
+                                role="secondary"))
+
+    def save_loop_guard(self, layers):
+        try:
+            self.sai.save_sandbox_default("loop_guard", layers or None)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Loop guard for local models"), printable(exc))
+            return
+        self.changed.emit("loop_guard")
 
     def fit(self):
         """Wide enough for every tab title (they scroll only on a screen narrower than that), never wider or
@@ -721,6 +802,14 @@ class SettingsDialog(QDialog):
         self.fields[key] = widget
         return widget
 
+    def save_desktop(self, level):
+        try:
+            self.sai.save_sandbox_default("desktop_notifications", None if level == "all" else level)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Notifications"), printable(exc))
+            return
+        self.changed.emit("desktop_notifications")
+
     def save_telemetry(self, level):
         try:
             self.sai.save_sandbox_default("telemetry", None if level == "off" else level)
@@ -728,6 +817,19 @@ class SettingsDialog(QDialog):
             warn(self, tr("Privacy"), printable(exc))
             return
         self.changed.emit("telemetry")
+
+    def forget_login_browser(self):
+        """The login browser's cookies, storage and cache go (asked first): the next sign-in starts from nothing."""
+        if not ask_first(self, "login-browser-forget", tr("Login browser"), tr(
+                "Forget every sign-in the login browser keeps (its cookies, its storage and its cache)?"), tr("Forget")):
+            return
+        from . import login_browser
+        try:
+            login_browser.forget()
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Login browser"), printable(exc), modal=False)
+            return
+        inform(self, tr("Login browser"), tr("Forgotten."), modal=False)
 
     def choose_autostart(self, on):
         """Written or removed only here or on the System page, when the human ticks the box (the folders sandboxes

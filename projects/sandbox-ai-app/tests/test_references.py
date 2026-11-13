@@ -89,6 +89,8 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
                 "workspaces", "add_workspace", "remove_workspace",
                 "safeguards",  # sandbox-ai safeguards --json: a process, also over SSH
+                "report",  # sandbox-ai report: reads the logs bounded, writes the file (seconds)
+                "user_images", "variant_bases",  # sandbox-ai images list --json: a process, also over SSH
                 "host_version_known",  # one short SSH command (review 6 A-N3)
                 "write_project",
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
@@ -99,7 +101,7 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
                 "recent_folders", "host_install",
                 # starts, MCP servers, net keep, the privacy check, version and demo device on a host (or here)
-                "host_launch_options", "host_dry_run", "host_mcp_servers", "host_mcp_catalog", "host_mcp_targets",
+                "host_launch_options", "host_dry_run", "host_mcp_servers", "host_mcp_list", "host_mcp_catalog", "host_mcp_targets",
                 "host_mcp_attach", "net_keep", "privacy_check", "version_details", "host_doctor", "demo_device",
                 "mcp_servers", "mcp_serving", "mcp_attach", "mcp_attach_targets",
                 # the parity section: the Manage pages, Activity, Statistics and Teams on every host
@@ -123,11 +125,12 @@ BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistic
                 "host_preset", "host_presets", "host_start_choices", "host_project_show", "host_project_trust",
                 "host_trust_defaults", "host_web_users", "host_web_user_remove", "host_web_cert", "host_answer",
                 "host_mcp_detach", "stop_mcp", "stop_run", "secrets_backend", "add_login", "checked",
+                "cut_run", "cut_everywhere", "cut_every_host",  # the kill switch: sandbox-ai net cut, here or over SSH
                 "host_command_options", "require_options", "host_image_variants",
                 # sandbox-ai's registry of what runs (net.running) asks Podman whether the pod of a run whose launcher
                 # is gone still runs (up to its timeout) and removes the directories of runs that ended; the sessions'
                 # rows ask Podman about stopped ones: so does everything that reads them
-                "runs", "sessions", "instances", "run_for", "file_roots", "known_projects", "sandbox_folders",
+                "runs", "sessions", "instances", "run_for", "file_roots", "known_projects", "sandbox_folders", "sandbox_paths",
                 "rw_mounts", "autostart_risk",
                 # a session to another host: sandbox-ai session copy|move (a dry run and a start over SSH, minutes),
                 # and its plan (the session's files and its project file, read in the session's directory)
@@ -147,7 +150,13 @@ BLOCKING_BACKEND = {"read_connections"}
 # files.py: copies (up to 1 GiB), moves, deletes and owner changes of whole trees, podman unshare (the Files page
 # runs them in Task.thread). Called as root.NAME(...) or files.NAME(...): matched by the name alone.
 BLOCKING_FILES = {"copy_out", "copy_in", "copy_entry", "move_entry", "delete_entry", "chown_entry", "take_ownership",
-                  "read_file", "write_file", "measure"}  # (the editor reads and writes whole files; Properties counts)
+                  "read_file", "write_file", "measure",  # (the editor reads and writes whole files; Properties counts)
+                  # files.exists_in and entry_infos: a remote root's are requests to its server (SSH: it may stall)
+                  "exists_in", "entry_infos"}
+# A Root's single steps, called as ROOT.NAME (root, self.root, chosen.root, ...): fast for a local Root, a request to a
+# remote system's server for a remote.RemoteRoot (SSH: it may stall) - the Files page hands them to root_job or on_root.
+BLOCKING_ROOT = {"rename_entry", "make_folder", "make_file", "chmod_entry", "stat_entry", "readlink", "free_space",
+                 "list", "lstat", "read", "exists"}
 # wizard_llm's functions that run `sandbox-ai llm list|add|check|models|detect` (called as WL.NAME or
 # wizard_llm.NAME), and
 # presets' host_documents (`sandbox-ai presets list --json` on a host: PR.NAME or presets.NAME).
@@ -157,21 +166,36 @@ BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models", "de
                     # chromium.check: a child process tries Chromium's namespaces (up to its timeout)
                     "chromium": {"check", "probe"},
                     # name_fields.read_names: a host's secrets or VPN profiles (`secrets list`, `vpn list` there)
-                    "name_fields": {"read_names"}, "NF": {"read_names"}}
+                    "name_fields": {"read_names"}, "NF": {"read_names"},
+                    # remote.py: connecting over SSH (ssh, a handshake), reading a host's keys (ssh-keyscan)
+                    "remote": {"RemoteRoot", "scan_host", "fingerprints", "Sftp"}}
 # widgets.background, ThreadCall, Task.thread and call_watched; the Kits page's start_change (its Task.call_watched)
-WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change", "run_each"}
+WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change", "run_each",
+            # the Files page's: at once for a local root, in a thread (Task with Cancel / background) for a remote one;
+            # run_job: its Task.thread, the remote roots named for Cancel
+            "root_job", "on_root", "run_job"}
 # The modules not checked call by call: backend.py (what is slow is declared above), widgets.py (background, ThreadCall
 # and Task themselves; the waits of the app's end), and the helpers whose slow functions the pages may only hand to a
 # wrapper (files.py, wizard_llm.py, presets.py, name_fields.py, chromium.py: BLOCKING_FILES, BLOCKING_HELPERS) or that
 # start a terminal's command (pty_bridge.py: a fork and exec, read with a QSocketNotifier).
 HELPER_MODULES = {"backend.py", "widgets.py", "files.py", "wizard_llm.py", "presets.py", "pty_bridge.py",
                   "name_fields.py", "chromium.py",
+                  # remote.py itself runs ssh (in the Files page's threads only); what the pages call of it - a
+                  # RemoteRoot's steps, connecting, ssh-keyscan - is checked as files.py's are (BLOCKING_FILES,
+                  # BLOCKING_HELPERS["remote"])
+                  "remote.py",
                   "crashguard.py"}  # (the kernel's log is read in a thread of its own: Guard(wait=False))
 
 
 def call_name(node):
     return node.func.id if isinstance(node.func, ast.Name) else \
         node.func.attr if isinstance(node.func, ast.Attribute) else None
+
+
+def holds_root(node):
+    """root, self.root, chosen.root, where.root, ...: a Root of the Files page (local or remote)."""
+    return (isinstance(node, ast.Name) and node.id in ("root", "src_root", "dst_root", "target_root")) or \
+        (isinstance(node, ast.Attribute) and node.attr in ("root", "src_root", "dst_root", "target_root"))
 
 
 def holds_sai(node):
@@ -195,6 +219,8 @@ def blocking(node):
             return f"backend.{func.attr}()"
         if func.attr in BLOCKING_FILES:
             return f"{func.attr}()"
+        if func.attr in BLOCKING_ROOT and holds_root(func.value):
+            return f"root.{func.attr}()"
         if isinstance(func.value, ast.Name) and func.attr in BLOCKING_HELPERS.get(func.value.id, ()):
             return f"{func.value.id}.{func.attr}()"
     if isinstance(func, ast.Name) and func.id in BLOCKING_BACKEND:
@@ -258,6 +284,34 @@ def test_pages_run_commands_and_slow_reads_only_in_the_background():
     found = [f"{name}:{line} {what}" for name in names
              for line, what in blocking_calls((PACKAGE / name).read_text())]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)
+
+
+def test_a_roots_steps_and_what_connects_to_a_remote_system_are_caught_on_the_gui_thread():
+    """Regression (review of the remote file manager): remote.py's calls from GUI code were not checked - a remote
+    root's rename, new folder, permissions, the "already exists?" check and the first stat of Properties ran on the
+    GUI thread and held up the window while a server stalled. They must go through root_job or on_root."""
+    source = '''
+class Page:
+    def bad(self, chosen, root, pane):
+        chosen.root.rename_entry("a", "b")
+        pane.root.make_folder("", "x")
+        root.chmod_entry("a", 0o600)
+        self.root.stat_entry("a")
+        files.exists_in(self.root, "", ["x"])
+        files.entry_infos(root, [])
+        remote.RemoteRoot("host")
+        remote.scan_host(target)
+
+    def good(self, chosen, root, pane):
+        self.root_job(chosen.root, lambda cancelled: chosen.root.rename_entry("a", "b"), done, "text")
+        on_root(root, lambda: files.entry_infos(root, []), done)
+        background(lambda: remote.RemoteRoot("host"), done=done)
+        self.make_folder(pane, "x")  # (the page's own method: root_job inside)
+        listing.list()
+'''
+    found = [what for _, what in blocking_calls(source)]
+    assert found == ["root.rename_entry()", "root.make_folder()", "root.chmod_entry()", "root.stat_entry()",
+                     "exists_in()", "entry_infos()", "remote.RemoteRoot()", "remote.scan_host()"]
 
 
 # What makes a method of backend.py slow by itself: a process (subprocess, the runner of call()), a pipe served until
@@ -408,7 +462,7 @@ MUTATIONS = {
     "gc": ["collect_as_shown"],
     "approval-forget": ["forget_remembered"],
     "defaults-lower": [("defaults", "set"), ("defaults", "unset")],
-    "net-allow": [("net", "allow")],
+    "net-allow": [("net", "allow"), ("git-logins", "give"), ("secrets", "give")],
     "net-untaint": [("net", "untaint")],
     "workspace-writable": ["add_workspace"],
     "device-add": ["add_device"],

@@ -16,6 +16,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "sandbox" / "agent_sandbox.py"
+# The app is released with the version of sandbox-ai (projects/sandbox-ai-app/tests/test_version.py): raised with it.
+APP = ROOT / "projects" / "sandbox-ai-app" / "sandbox_ai_app" / "__init__.py"
 PATCH_LIMIT = 250  # the patch number stays below it: 0.1.249 -> 0.2.0
 MINOR_LIMIT = 50  # the minor number stays below it: 0.49.249 -> 1.0.0
 LINE = re.compile(r'^__version__ = "([^"]+)"$', re.M)
@@ -62,6 +64,12 @@ def main(argv=None):
     else:
         new = next_version(current, args.part or "patch")
     args.file.write_text(text[:match.start(1)] + new + text[match.end(1):])
+    # The app's __version__ follows (its line keeps its comment), when this is sandbox-ai's own tree.
+    if args.file == SOURCE and APP.exists():
+        app_text = APP.read_text()
+        app_match = re.search(r'^__version__ = "([^"]+)"', app_text, re.M)
+        if app_match:
+            APP.write_text(app_text[:app_match.start(1)] + new + app_text[app_match.end(1):])
     print(new)
     return 0
 

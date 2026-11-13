@@ -5,6 +5,7 @@ launcher options), prerequisite_agent(), host() and, optionally, show_notice(tex
 from __future__ import annotations
 
 import json
+import sys
 
 from . import applog, board as B
 from .files import printable
@@ -12,6 +13,53 @@ from .i18n import tr
 from .widgets import background, confirm, warn
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
+
+# The slow part of preparing a start (an image built, MCP servers added: their images pulled), run in a terminal tab
+# of the app so that it is seen as it goes: each step said with its number, its own output (podman's build and pull
+# output bounded by sandbox-ai's progress.py), how long it took, and the end. Argument: [[title, argv], ...].
+CHAIN = r"""
+import json, subprocess, sys, time
+steps, begun = json.loads(sys.argv[1]), time.monotonic()
+def took(since):
+    return f"{time.monotonic() - since:.0f} s"
+for number, (title, argv) in enumerate(steps, 1):
+    print(f"agent-sandbox: preparing the start ({number}/{len(steps)}): {title}…", flush=True)
+    since = time.monotonic()
+    try:
+        status = subprocess.call(argv)
+    except OSError as exc:
+        status = 127
+        print(f"agent-sandbox: {exc}", flush=True)
+    if status != 0:
+        print(f"agent-sandbox: {title} failed (exit status {status}) after {took(since)}; the start waits", flush=True)
+        sys.exit(status)
+    print(f"agent-sandbox: {title}: done in {took(since)}", flush=True)
+print(f"agent-sandbox: prepared in {took(begun)}; the start goes on", flush=True)
+"""
+
+
+def done_said():
+    """How the end of preparing a start is told: by a notification only while notifications are on (Settings; off by
+    default, when the page's notes alone say it)."""
+    from .backend import setting
+    return tr("A notification says when it is done.") if setting("notifications") else \
+        tr("The notes here say when it is done.")
+
+
+def mcp_add_args(argv, name):
+    """`sandbox-ai mcp add NAME` for a server the start ARGV uses, with the folders the start gives it (--mcp-mount
+    NAME:TARGET=HOST[:MODE]) as its --mount: a catalog server that must have a folder (engram, memory) is not added
+    without one, and the start's is the one it asked for."""
+    mounts = []
+    for index, token in enumerate(argv):
+        option, equals, value = token.partition("=")
+        if option != "--mcp-mount":
+            continue
+        value = value if equals else (argv[index + 1] if index + 1 < len(argv) else "")
+        server, colon, rest = value.partition(":")
+        if colon and server == name and "=" in rest and not B.PLACEHOLDER.search(rest):
+            mounts += ["--mount", rest]
+    return ("mcp", "add", name, *mounts)
 
 
 class Prerequisites:
@@ -125,6 +173,7 @@ class Prerequisites:
         background, the output in the log window; a VPN profile as a Tor profile (nothing to fill in) or on the VPN
         page; MCP servers added from their catalog. Then THEN, once everything is there."""
         agent = agent or self.prerequisite_agent()
+        argv = self.prerequisite_argv()  # (the folders the start gives its MCP servers: --mcp-mount)
         context = context if context is not None else self.prerequisite_context()
         busy = self.__dict__.setdefault("preparing_contexts", set())
         recipes = set()
@@ -171,7 +220,24 @@ class Prerequisites:
         elif problems:
             warn(self, tr("Preparing the start"), "\n".join(problems))
         busy.add(context)
-        self.prerequisite_notice(tr("Preparing what the start needs…"), "notice-warn")
+        steps = [*(tr("identity {name}", name=n) for n in identities),
+                 *(tr("image variant {name} (made and built: some minutes)", name=n) for n in to_build),
+                 *(tr("image variant {name}", name=n) for n in variants if n not in to_build),
+                 *(tr("Tor profile {name}", name=n) for n in tor_profiles),
+                 *(tr("MCP server {name}", name=n) for n in servers)]
+        if not steps:  # nothing to make here (each part said above why): no "Preparing: ." whose end never came
+            busy.discard(context)
+            return
+        self.prerequisite_notice(tr("Preparing what the start needs: {list}.", list=printable(", ".join(steps))) + " "
+                                 + done_said(), "secondary", toast=True)
+        # The builds and MCP servers (minutes) in a terminal tab, seen as they go; the rest (seconds) here.
+        slow = [("build", name, tr("building the image variant {name}", name=name), ("build", "--variant", name))
+                for name in to_build] + \
+            [("mcp", name, tr("adding the MCP server {name} (its image is pulled)", name=name),
+              mcp_add_args(argv, name)) for name in servers]
+        in_tab = self.prerequisite_terminal() if slow else None
+        if in_tab is not None:
+            to_build, servers = [], []
 
         def work():
             def run(*args, timeout=600):
@@ -198,12 +264,29 @@ class Prerequisites:
                     status, text = run("vpn", "add", name, "--tor", "--socks", timeout=120)
                 said.append(("vpn", name, status, text))
             for name in servers:
-                said.append(("mcp", name, *run("mcp", "add", name, timeout=900)))
+                said.append(("mcp", name, *run(*mcp_add_args(argv, name), timeout=900)))
             return said
+
+        def quick_done(said, error):
+            """The quick part made: the slow one in its terminal tab (made() at its end), or the end now."""
+            if error is not None or in_tab is None or any(status != 0 for _, _, status, _ in said):
+                made(said, error)
+                return
+            steps_ = [[title, self.sai.command(*args) if host == LOCAL else self.sai.host_terminal(host, *args)]
+                      for _, _, title, args in slow]
+            argv = [sys.executable, "-I", "-c", CHAIN, json.dumps(steps_)]
+
+            def ended(status):
+                text = "" if status == 0 else tr("see the terminal tab Preparing the start (exit status {status})",
+                                                 status=status)
+                made(said + [(kind, name, 0 if status == 0 else status, text) for kind, name, _, _ in slow], None)
+            if not in_tab(argv, tr("Preparing the start"), ended=ended):
+                ended(-1)
 
         def made(said, error):
             busy.discard(context)
-            if error is not None:
+            if error is not None:  # (the end told as promised, as for a part that failed)
+                self.prerequisite_notice(tr("Not everything could be made for the start."), "notice-error", toast=True)
                 warn(self, tr("Preparing the start"), printable(error))
                 return
             words = {"identity": tr("identity"), "variant": tr("image variant"), "build": tr("built"),
@@ -212,8 +295,10 @@ class Prerequisites:
             failed = [f"{words[kind]} {name}: {printable(text.splitlines()[-1] if text else '')[-300:]}"
                       for kind, name, status, text in said if status != 0]
             if ok:
-                self.prerequisite_notice(tr("Made for the start: {list}.", list=printable(", ".join(ok))), "notice-ok")
+                self.prerequisite_notice(tr("Made for the start: {list}.", list=printable(", ".join(ok))), "notice-ok",
+                                         toast=not failed)
             if failed:
+                self.prerequisite_notice(tr("Not everything could be made for the start."), "notice-error", toast=True)
                 warn(self, tr("Preparing the start"), tr("Not everything could be made (the log window has the output):") +
                      "\n" + "\n".join(failed))
                 return
@@ -223,7 +308,23 @@ class Prerequisites:
             # (a board edited meanwhile to need nothing any more starts at once)
             if then is not None and not self.check_prerequisites(then=then, why=why):
                 then()
-        background(work, owner=self, work=True, timeout=4 * 3600, done=made)
+        background(work, owner=self, work=True, timeout=4 * 3600, done=quick_done)
+
+    def prerequisite_terminal(self):
+        """in_terminal(argv, title, ended=...) of the window when its commands run in a terminal tab of the app (the
+        setting terminal "app", QtWebEngine and xterm.js there), else None: the slow part runs in the background then,
+        its output in the log window."""
+        window = self.window()
+        in_terminal = getattr(window, "in_terminal", None)
+        if not callable(in_terminal):
+            return None
+        try:
+            from . import terminal
+            if self.sai.settings().get("terminal", "app") != "app" or not terminal.available()[0]:
+                return None
+        except Exception:  # noqa: BLE001 - no terminal tabs: in the background
+            return None
+        return lambda argv, title, ended: in_terminal(argv, title, embedded=True, ended=ended)
 
     def ask_vpn_kind(self, name, host):
         """"tor" when the missing VPN profile NAME is to be made as a Tor profile now (nothing to fill in), else None
@@ -242,9 +343,18 @@ class Prerequisites:
         return "tor" if box.clickedButton() is tor else None
 
 
-    def prerequisite_notice(self, text, role="notice-warn"):
+    def prerequisite_notice(self, text, role="notice-warn", toast=False):
+        """TEXT into the page's notes (and so the log window); with TOAST also as a notification: preparing a start
+        takes minutes and goes on in the background, its beginning and its end are told where they are seen."""
         shown = getattr(self, "show_notice", None)
         if callable(shown):
             shown(text, role)
         else:
-            applog.log("WARNING" if role == "notice-warn" else "INFO", "start", text)
+            applog.log({"notice-warn": "WARNING", "notice-error": "ERROR"}.get(role, "INFO"), "start", text)
+        notify = getattr(self.window(), "notify", None) if toast else None
+        if callable(notify):
+            level = {"notice-ok": "success", "notice-error": "error", "notice-warn": "warning"}.get(role, "info")
+            try:
+                notify(tr("Preparing the start"), text, level=level)
+            except Exception:  # noqa: BLE001 - a notification that cannot be shown: the log has it
+                pass

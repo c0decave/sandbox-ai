@@ -1,0 +1,37 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "rust",
+  "title": "Rust",
+  "description": "Rust projects: crates.io, rustup's downloads and GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Rust",
+      "description": "Rust-Projekte: crates.io, die Downloads von rustup und GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-github",
+    "--allow-host",
+    "crates.io",
+    "--allow-host",
+    "index.crates.io",
+    "--allow-host",
+    "static.crates.io",
+    "--allow-host",
+    "static.rust-lang.org",
+    "--allow-host",
+    "sh.rustup.rs"
+  ],
+  "notes": [
+    "The toolchain: rustup into the sandbox's HOME, kept with the start (curl https://sh.rustup.rs -sSf | sh -s -- -y), or Debian's older cargo in an image variant: sandbox-ai images new rust --from claude, sandbox-ai images extend rust --add-apt cargo, sandbox-ai build --variant rust, then start with --image-variant rust.",
+    "A build needs memory: --memory 16g on the command line for a large workspace.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

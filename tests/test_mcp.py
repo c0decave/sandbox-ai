@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -27,6 +28,7 @@ def load(name, file):
 demo = load("mcp_demo_test", "mcp_demo.py")
 s = load("agent_sandbox_mcp_test", "agent_sandbox.py")
 m = load("sandbox_mcp_test", "mcp.py")
+LOAD_VPN = m.launcher().load_vpn_module  # (tests replace it on the launcher)
 
 
 @pytest.fixture(params=["happy", "sad", "edge"])
@@ -198,10 +200,15 @@ def test_dry_run_lists_mcp_without_starting(tmp_path, monkeypatch, capsys):
     module = Mock()
     module.ensure_running.side_effect = AssertionError("must not start")
     module.definitions.side_effect = m.definitions
+    for name in ("start_limits", "start_mounts", "with_limits", "with_mounts", "default_limits", "instance_for",
+                 "instance_of"):
+        getattr(module, name).side_effect = getattr(m, name)
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     s.main(["codex", "--mcp", "demo", "--dry-run"])
     plan = json.loads(capsys.readouterr().out)
-    assert plan["mcp"] == [{"name": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock")}]
+    assert plan["mcp"] == [{"name": "demo", "instance": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock"),
+                            "limits": {"memory": "8g", "cpus": m.host_cpus_default(), "pids": 4096, "tmp": "4096m"},
+                            "own_limits": False, "own_mounts": []}]
 
 
 def test_an_unknown_server_is_refused_before_anything_starts_a_dry_run_too(tmp_path, monkeypatch):
@@ -259,6 +266,26 @@ def fake_supervisor(tmp_path, pid, name, start=None):
     (entry / "cmdline").write_bytes(b"python3\0--mcp-socket-dir\0" + os.fsencode(str(s.mcp_socket_dir(name))) + b"\0")
     if start is not None:
         (entry / "stat").write_text(f"{pid} (python3) S 1" + " 0" * 17 + f" {start} 4096\n")  # start: field 22
+
+
+def vpn_proven(monkeypatch):
+    """The VPN proofs after a start (mcp.verify_network: vpn.check_vpn_container, vpn.check_pod_vpn) as passed, for
+    tests without Podman; returns what was proven: [("container", NAME, PROFILE) | ("pod", POD, PROFILE)]."""
+    proven = []
+    vpn = fake_vpn_module(
+        check_vpn_container=lambda podman, ref, profile=None, run=None:
+            proven.append(("container", ref, profile)) or {"id": "c" * 64, "started": "t"},
+        check_pod_vpn=lambda podman, pod, profile=None, run=None: proven.append(("pod", pod, profile)) or {})
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: vpn)
+    return proven
+
+
+def fake_vpn_module(**replaced):
+    """vpn.py as the launcher loads it, with the functions REPLACED (load_profile of profiles that are not there)."""
+    vpn = LOAD_VPN()
+    for key, value in replaced.items():
+        setattr(vpn, key, value)
+    return vpn
 
 
 def test_status_compares_the_start_time(scenario, tmp_path):
@@ -561,13 +588,13 @@ def test_image_command_is_the_hardened_run_line(tmp_path):
     definition = m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "network": "none", "env": ["KEY"],
                                     "mounts": [{"target": "/work", "host": str(work), "mode": "rw"}],
                                     "memory": "2g", "pids": 256}, "t")
-    command = m.image_command(definition)
+    command = m.image_command(m.server_network("t", definition))
     assert command[:2] == ["podman", "run"] and command[-1] == f"ghcr.io/a/b@{DIGEST}"
     for flag in ("--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--pull=never",
                  "--network=none", "--env=KEY", "--memory=2g", "--pids-limit=256", "--user=0:0",
                  f"--volume={work.resolve()}:/work:rw"):
         assert flag in command, flag
-    full = m.image_command({**definition, "network": "full", "env": [], "mounts": []})
+    full = m.image_command(m.server_network("t", {**definition, "network": "full", "env": [], "mounts": []}))
     assert f"--network={s.POD_NETWORK}" in full and "--user=0:0" not in full
 
 
@@ -609,7 +636,10 @@ def test_image_server_starts_as_a_bridge_on_the_host(tmp_path, monkeypatch):
     cmd, kwargs = started[-1]
     assert cmd[2:4] == [str(ROOT / "sandbox/runtime.py"), "--internal-mcp-serve"]
     assert cmd[4] == str(s.mcp_socket_dir("ddg") / "server.sock") and cmd[5] == "--"
-    assert cmd[6:8] == ["podman", "run"] and "--env=KEY" in cmd and "value" not in " ".join(cmd)
+    # Each connection's container under the watch (what ends its processes is recorded), then podman run.
+    assert cmd[7:10] == ["-I", str(ROOT / "sandbox/mcp.py"), "--internal-watch"] and cmd[10] == str(m.state_dir("ddg"))
+    assert cmd[11:16] == ["ddg", "64m", "512m", "128", "--"]
+    assert cmd[16:18] == ["podman", "run"] and "--env=KEY" in cmd and "value" not in " ".join(cmd)
 
 
 def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
@@ -625,6 +655,18 @@ def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
     assert m.cli(["catalog", "-c", str(first)]) == 0
     assert "DuckDuckGo search  signed" in capsys.readouterr().out
     assert "catalog not read" in captured.err
+
+
+def test_a_malformed_catalog_entry_is_left_out_not_a_traceback(tmp_path, capsys):
+    """Bug hunt: a list as an entry's name (or a number as its hosts) ended `mcp catalog` and `mcp add` with a
+    TypeError for every catalog; such an entry is left out, the others are listed."""
+    bad = [{**ENTRY, "name": ["x"]}, {**BINWALK, "name": "b2", "hosts": 5}, {**BINWALK, "name": "b3", "network": 1},
+           {**BINWALK, "name": "b4", "mounts": [{"target": ["/w"]}]}, {**BRAVE, "name": "b5", "env": ["X"]}]
+    sources = catalog(tmp_path, [*bad, BINWALK])
+    entries, problems = m.catalog_entries(sources)
+    assert [entry["name"] for _, entry in entries] == ["binwalk"] and problems == []
+    assert m.cli(["catalog", "-c", sources[0][1]]) == 0
+    assert "binwalk" in capsys.readouterr().out
 
 
 def test_tool_calls_are_logged_by_the_serve_end(tmp_path):
@@ -696,13 +738,18 @@ def test_image_servers_obey_the_policy(monkeypatch):
     m.check_image_policy("bw", {"image": "x"})  # no network: fine
 
 
-def test_the_catalog_in_sandbox_ais_own_tree_comes_first(tmp_path):
+def test_the_published_catalogs_are_read_and_a_local_copy_only_when_asked(tmp_path):
+    """0.1.93: an installation carried an old unsigned copy of the catalog in its tree and took it before the
+    published, signed one ("its catalog is not signed by a trusted key ... catalog.json.sig cannot be read")."""
     (tmp_path / "projects" / "sandbox-ai-mcp").mkdir(parents=True)
     local = tmp_path / "projects" / "sandbox-ai-mcp" / "catalog.json"
     local.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [{"name": "x"}]}))
-    chosen = dict(m.default_catalogs(tmp_path))
+    chosen = dict(m.default_catalogs(tmp_path, environ={}))
+    assert chosen["mcp"].startswith("https://") and chosen["hub"].startswith("https://")
+    chosen = dict(m.default_catalogs(tmp_path, environ={"SANDBOX_AI_LOCAL_CATALOGS": "1"}))
     assert chosen["mcp"] == str(local) and chosen["hub"].startswith("https://")
-    assert dict(m.default_catalogs(tmp_path / "elsewhere"))["mcp"].startswith("https://")
+    assert dict(m.default_catalogs(tmp_path / "elsewhere", environ={"SANDBOX_AI_LOCAL_CATALOGS": "1"}))[
+        "mcp"].startswith("https://")
 
 
 def test_an_unpublished_catalog_is_named_as_such():
@@ -725,8 +772,11 @@ def test_image_server_vpn_needs_network_full_and_a_profile_name():
         m.validated_image({"image": image, "network": "full", "vpn": "../x"}, "t")
     definition = m.definition_from_entry({**ENTRY, "network": "none"}, network="full", vpn="corp")
     assert definition["vpn"] == "corp"
-    assert "--network=container:sandbox-ai-vpn-mcp-ddg" in m.image_command(definition, vpn_container="sandbox-ai-vpn-mcp-ddg")
-    assert f"--network={s.POD_NETWORK}" in m.image_command(definition)
+    assert "--network=container:sandbox-ai-vpn-mcp-ddg" in m.image_command(m.server_network("ddg", definition))
+    plain = {key: value for key, value in definition.items() if key != "vpn"}
+    assert f"--network={s.POD_NETWORK}" in m.image_command(m.server_network("ddg", plain))
+    with pytest.raises(ValueError, match="network plan"):
+        m.image_command(definition)  # a definition alone, without its plan: never a run line
 
 
 def test_image_server_with_a_vpn_starts_behind_its_container(tmp_path, monkeypatch):
@@ -743,8 +793,10 @@ def test_image_server_with_a_vpn_starts_behind_its_container(tmp_path, monkeypat
             return None
     monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kw: started.append(cmd) or Process())
     monkeypatch.setattr(m, "wait_for_socket", lambda *a, **kw: None)
+    proven = vpn_proven(monkeypatch)
     fake_supervisor(tmp_path, os.getpid(), "ddg", start=4242)
     assert m.ensure_running("ddg", s.parse_args(["codex"])) == "started"
+    assert proven == [("container", "sandbox-ai-vpn-mcp-ddg", "corp")]
     cmd = started[-1]
     sock = s.mcp_socket_dir("ddg")
     assert cmd[1:7] == ["-I", str(ROOT / "sandbox/vpn.py"), "--internal-mcp-vpn", "corp", "sandbox-ai-vpn-mcp-ddg",
@@ -769,10 +821,12 @@ def test_mcp_start_vpn_for_a_command_server(tmp_path, monkeypatch):
         return Mock(pid=4321, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     monkeypatch.setattr(m.launcher(), "remove_stale_pod", Mock(return_value=False))
+    proven = vpn_proven(monkeypatch)
     a = s.parse_args(["codex", "--backend", "podman"])
     with pytest.raises(ValueError, match="profile name"):
         m.ensure_running("demo", a, vpn="bad name")
     assert m.ensure_running("demo", a, vpn="corp") == "started"
+    assert proven == []  # (demo has no network: nothing it could reach past the VPN)
     cmd = launched["cmd"]
     options = cmd[:cmd.index("--")]
     assert options[options.index("--vpn") + 1] == "corp" and m.load_state("demo")["vpn"] == "corp"
@@ -846,7 +900,7 @@ def test_the_catalog_a_server_came_from_is_kept_and_listed(tmp_path, capsys):
                       "mine": ("own (mcp.json)", None, None), "demo": ("built-in", None, None)}
     assert m.cli(["list"]) == 0
     rows = capsys.readouterr().out.splitlines()
-    assert rows[0].split()[:5] == ["NAME", "STATUS", "SERVES", "CATALOG", "COMMAND"]
+    assert rows[0].split()[:6] == ["NAME", "STATUS", "LIMITS", "SERVES", "CATALOG", "COMMAND"]
     assert f"{sources[0][1]}, unsigned" in next(row for row in rows if row.startswith("duckduckgo"))
 
 
@@ -1488,7 +1542,7 @@ def test_servers_that_reach_the_network_run_behind_the_starts_vpn(tmp_path, monk
                "cmd-off": {"command": ["python3", "x.py"], "options": ["--offline"]}}
     monkeypatch.setattr(m, "definitions", lambda project=None: servers)
     types_of = {"anon": "tor", "tor2": "tor", "mullvad": "wireguard", "home": "wireguard"}
-    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]})
+    fake_vpn = fake_vpn_module(load_profile=lambda name: {"type": types_of[name]})
     monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
     tor = types.SimpleNamespace(vpn="anon", vpn_profile={"type": "tor"}, project_document=None)
     assert m.vpn_for_servers(tor, ["browser", "offline", "torred", "cmd", "cmd-off"]) == \
@@ -1516,7 +1570,7 @@ def test_attach_live_starts_the_server_behind_the_runs_vpn(live, monkeypatch):
         return started(name, a, vpn)
     monkeypatch.setattr(m, "ensure_running", ensure_running)
     types_of = {"anon": "tor", "corp": "wireguard"}
-    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]}, check_name=lambda name: None)
+    fake_vpn = fake_vpn_module(load_profile=lambda name: {"type": types_of[name]}, check_name=lambda name: None)
     monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
     assert m.attach_live("web-search", "web", out=live.out)["attached"] == "live"
     assert given == [("web-search", "anon")]
@@ -1535,7 +1589,7 @@ def test_the_vpn_of_a_server_started_for_a_start(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "definitions", lambda project=None: {"web": {"command": ["x"], "options": []},
                                                                  "yara": {"command": ["x"], "options": ["--offline"]}})
     types_of = {"anon": "tor", "tor2": "tor", "corp": "wireguard"}
-    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]})
+    fake_vpn = fake_vpn_module(load_profile=lambda name: {"type": types_of[name]})
     monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
     tor = types.SimpleNamespace(vpn="anon", vpn_profile={"type": "tor"}, project_document=None)
     assert m.server_vpn(tor, "web") == "anon" and m.server_vpn(tor, "yara") is None
@@ -1570,7 +1624,7 @@ def test_a_server_behind_a_vpn_never_runs_under_bubblewrap_instead(tmp_path, mon
         raise Started
     monkeypatch.setattr(m, "start_logged", start_logged)
     import types
-    fake_vpn = types.SimpleNamespace(load_profile=lambda name: {"type": "wireguard"}, check_name=lambda name: None,
+    fake_vpn = fake_vpn_module(load_profile=lambda name: {"type": "wireguard"}, check_name=lambda name: None,
                                      mcp_container=lambda name: f"sandbox-ai-vpn-mcp-{name}")
     monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn)
     a = s.parse_args(["codex", "--backend", "bwrap"])
@@ -1589,7 +1643,7 @@ def test_a_command_server_put_behind_a_vpn_stops_on_a_failed_check(tmp_path, mon
     monkeypatch.setattr(m.launcher(), "mcp_gateway", lambda a, name, directory: None)
     monkeypatch.setattr(m.launcher(), "remove_stale_pod", lambda a, pod, sock: False)
     import types
-    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: types.SimpleNamespace(check_name=lambda name: None))
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: fake_vpn_module(check_name=lambda name: None))
     commands = []
 
     class Started(Exception):
@@ -1621,7 +1675,7 @@ def test_what_a_server_behind_the_starts_vpn_could_not_start_with_is_refused_up_
     monkeypatch.setattr(m, "definitions", lambda project=None: servers)
     types_of = {"anon": "tor", "home": "wireguard"}
     monkeypatch.setattr(m.launcher(), "load_vpn_module",
-                        lambda: types.SimpleNamespace(load_profile=lambda name: {"type": types_of[name]}))
+                        lambda: fake_vpn_module(load_profile=lambda name: {"type": types_of[name]}))
     tor = types.SimpleNamespace(vpn="anon", vpn_profile={"type": "tor"}, project_document=None)
     wireguard = types.SimpleNamespace(vpn="home", vpn_profile={"type": "wireguard"}, project_document=None)
     assert m.vpn_for_servers(tor, ["off", "off2", "ports-ok"]) == {"off": None, "off2": None, "ports-ok": "anon"}
@@ -1646,8 +1700,10 @@ def test_a_server_running_without_the_starts_vpn_is_refused_before_a_restart(tmp
     source = (Path(m.__file__)).read_text()
     attach = source[source.index("def attach("):source.index("def net_module(")]
     # The check comes before anything is started or stopped.
-    assert attach.index("check_running_vpn(name, server_vpn(a, name, vpn))") < attach.index("sessions.stop(key)")
-    assert attach.index("check_running_vpn(name, server_vpn(a, name, vpn))") < attach.index("ensure_running(")
+    assert attach.index("check_running_vpn(instance_of(a, name), server_vpn(a, name, vpn))") < \
+        attach.index("sessions.stop(key)")
+    assert attach.index("check_running_vpn(instance_of(a, name), server_vpn(a, name, vpn))") < \
+        attach.index("ensure_running(")
 
 
 def test_tors_uid_is_found_as_the_engine_reads_the_image_user(monkeypatch):
@@ -1671,3 +1727,648 @@ def test_the_bypass_option_reaches_a_server_only_with_a_vpn_in_front():
     assert "--vpn-bypass-host-ports" in m.server_options(definition, "anon")
     assert m.vpn_conflicts("s", {"command": ["x"], "options": ["--allow-host-port", "8080"]}, "anon", True)
     assert m.vpn_conflicts("s", definition, "anon", True) is None
+
+
+# --- limits: the definition's for every start, a start's own in an instance of its own (--mcp-limits) ---------------
+
+@pytest.mark.parametrize("key,value,why", [
+    ("memory", "1024", "memory must be like 512m or 4g"), ("memory", "2t", "memory must be"), ("memory", 2, "memory"),
+    ("cpus", 0, "cpus must be a number of CPUs from 0.01"), ("cpus", "abc", "cpus must be"), ("cpus", True, "cpus"),
+    ("cpus", 1.234, "cpus must be"), ("cpus", "2000", "cpus must be"), ("pids", 8, "pids must be 16-4096"),
+    ("pids", "5000", "pids must be"), ("pids", "many", "pids must be"),
+])
+def test_a_limit_that_is_not_valid_says_why(key, value, why):
+    """The rules the CLI, the app's dialogs and the board check with (one place): a value someone typed wrong is
+    refused with the reason, never taken."""
+    with pytest.raises(ValueError, match=why):
+        m.checked_limits({key: value})
+
+
+def test_limits_in_their_usual_form():
+    assert m.checked_limits({"memory": " 2G ", "cpus": "1.50", "pids": "512"}) == {"memory": "2g", "cpus": "1.5",
+                                                                                    "pids": 512}
+    assert m.checked_limits({"cpus": 2}) == {"cpus": "2"} and m.checked_limits({"cpus": 0.25}) == {"cpus": "0.25"}
+    with pytest.raises(ValueError, match="limits are memory, cpus, pids and tmp"):
+        m.checked_limits({"swap": "1g"})
+    assert m.cpus_number("2") == 2 and m.cpus_number("1.5") == 1.5
+
+
+def test_the_command_servers_defaults_are_the_launchers():
+    a = s.parse_args(["codex"])
+    assert (a.memory, int(a.pids)) == (m.COMMAND_DEFAULTS["memory"], m.COMMAND_DEFAULTS["pids"]) and a.cpus is None
+
+
+def test_default_limits_of_each_kind_of_server(monkeypatch):
+    monkeypatch.setattr(m.os, "cpu_count", lambda: 8)
+    assert m.default_limits({"image": "x"}) == {"memory": "512m", "cpus": "4", "pids": 128, "tmp": "64m"}
+    assert m.default_limits({"image": "x", "memory": "2g", "cpus": 2, "pids": 512, "tmp": "768m"}) == \
+        {"memory": "2g", "cpus": "2", "pids": 512, "tmp": "768m"}
+    assert m.default_limits({"command": ["x"], "options": ["--memory", "1g", "--pids=none"]}) == \
+        {"memory": "1g", "cpus": "4", "pids": "none", "tmp": "512m"}
+    assert m.default_limits({"command": ["x"], "options": ["--tmp-size", "2g"]}) == \
+        {"memory": "8g", "cpus": "4", "pids": 4096, "tmp": "2g"}
+    assert m.default_limits({"command": ["x"]}) == {"memory": "8g", "cpus": "4", "pids": 4096, "tmp": "4096m"}
+    assert m.default_limits({"helper": "codex"}) is None
+    monkeypatch.setattr(m.os, "cpu_count", lambda: 1)
+    assert m.default_limits({"image": "x"})["cpus"] == "1"
+
+
+def test_a_starts_own_limits_parse_and_merge():
+    a = s.parse_args(["codex", "--mcp", "pw", "--mcp-limits", "pw:memory=2g,cpus=2", "--mcp-limits", "pw:pids=512",
+                      "-mx", "other:memory=1g"])
+    assert m.start_limits(a) == {"pw": {"memory": "2g", "cpus": "2", "pids": 512}, "other": {"memory": "1g"}}
+    for bad, why in (("pw", "NAME:memory=SIZE"), ("pw:", "give memory=SIZE"), ("pw:swap=1g", "give memory"),
+                     ("pw:memory=2g,memory=1g", "each at most once"), ("a b:memory=1g", "NAME:memory"),
+                     ("pw:memory=1024", "memory must be like 512m")):
+        with pytest.raises(ValueError, match=why):
+            m.parse_start_limits(bad)
+
+
+def test_an_instance_of_its_own_only_for_other_limits(monkeypatch):
+    """A running server has one set of limits: a start asking for its defaults shares NAME; one asking for others gets
+    NAME.HASH, shared by every start that asks for the same - however it spells them."""
+    monkeypatch.setattr(m.os, "cpu_count", lambda: 8)
+    definition = {"image": f"ghcr.io/a/b@{DIGEST}", "memory": "512m"}
+    assert m.instance_for("pw", definition, {}) == ("pw", definition)
+    assert m.instance_for("pw", definition, {"memory": "512m", "cpus": "4"}) == ("pw", definition)
+    instance, effective = m.instance_for("pw", definition, {"memory": "2g"})
+    assert re.fullmatch(r"pw\.[0-9a-f]{8}", instance) and re.fullmatch(m.INSTANCE_PATTERN, instance)
+    assert effective == {**definition, "memory": "2g", "cpus": "4", "pids": 128, "tmp": "64m"}
+    assert m.instance_for("pw", definition, {"memory": "2g", "cpus": "4"}) == (instance, effective)
+    assert m.instance_for("pw", definition, {"memory": "4g"})[0] != instance
+    assert m.server_of(instance) == "pw" and m.server_of("pw") == "pw"
+    command = {"command": ["x"], "options": ["--offline", "--memory", "2g"]}
+    instance, effective = m.instance_for("c", command, {"pids": 100})
+    assert effective["options"][:3] == ["--offline", "--memory", "2g"] and \
+        effective["options"][-4:] == ["--pids", "100", "--tmp-size", "1024m"] and m.default_limits(effective)["pids"] == 100
+    for name, other in (("helper-codex-x", {"helper": "codex"}), ("team-alpha", {"command": ["x"]})):
+        with pytest.raises(ValueError, match="takes no limits of its own"):
+            m.instance_for(name, other, {"memory": "2g"})
+    assert not re.fullmatch(m.MCP_NAME_PATTERN, instance), "an instance never takes a defined server's name"
+
+
+def test_the_container_gets_the_cpu_limit_where_it_can_be_set(monkeypatch):
+    monkeypatch.setattr(m.os, "cpu_count", lambda: 4)
+    definition = {"image": f"ghcr.io/a/b@{DIGEST}", "network": "none", "memory": "2g", "pids": 512, "cpus": 2}
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: {"cpu", "memory", "pids"})
+    command = m.image_command(m.server_network("x", definition))
+    assert "--cpus=2" in command and "--memory=2g" in command and "--pids-limit=512" in command
+    more = m.server_network("x", {**definition, "cpus": 16})
+    assert "--cpus=4" in m.image_command(more), "never more than the host has"
+    plain = {k: v for k, v in definition.items() if k != "cpus"}
+    assert "--cpus=2" in m.image_command(m.server_network("x", plain)), "half the host's"
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: {"memory", "pids"})
+    assert not any(flag.startswith("--cpus") for flag in m.image_command(m.server_network("x", definition)))
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)  # not known: given
+    assert "--cpus=2" in m.image_command(m.server_network("x", definition))
+
+
+def test_the_bubblewrap_scope_gets_the_cpu_quota(monkeypatch):
+    rootfs = load("mcp_rootfs_limits_test", "mcp_rootfs.py")
+    monkeypatch.setattr(rootfs.shutil, "which", lambda name: "/usr/bin/systemd-run")
+    launcher = SimpleNamespace(user_manager_running=lambda: True, delegated_controllers=lambda: {"cpu"})
+    prefix = rootfs.limits_prefix({"memory": "2g", "cpus": 1.5, "pids": 512}, launcher)
+    assert ["-p", "MemoryMax=2G"] == prefix[5:7] and "CPUQuota=150%" in prefix and "TasksMax=512" in prefix
+    launcher.delegated_controllers = lambda: {"memory"}
+    assert not any(str(p).startswith("CPUQuota") for p in rootfs.limits_prefix({"cpus": 2}, launcher))
+
+
+def test_add_takes_the_limits_the_catalog_recommends(tmp_path):
+    """The playwright case: the catalog says it needs 2g and 512 processes; mcp add applies it (an entry's own
+    "limits", or rootfs.json's beside the catalog, which axross does not read), what is given on the command line
+    wins, and an old catalog without limits gives the defaults."""
+    browser = {**ENTRY, "id": "mcp:playwright", "name": "playwright", "network": "full", "hosts": []}
+    sources = catalog(tmp_path, [browser, {**BINWALK, "limits": {"memory": "1g", "cpus": 1}}], signed=False)
+    (tmp_path / "rootfs.json").write_text(json.dumps({"version": 1, "rootfs": {},
+                                                      "limits": {"playwright": {"memory": "2g", "pids": 512}}}))
+    entries, problems = m.catalog_entries(sources)
+    assert problems == [] and {e["name"]: e.get("limits") for _, e in entries} == {
+        "playwright": {"memory": "2g", "pids": 512}, "binwalk": {"memory": "1g", "cpus": 1}}
+    out = []
+    definition = m.add("playwright", catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert (definition["memory"], definition["pids"], "cpus" in definition) == ("2g", 512, False)
+    assert any("gets the limits its catalog entry recommends: 2g, 512 processes" in line for line in out)
+    definition = m.add("playwright", catalogs=sources, pull=False, out=out.append, unsigned=True, memory="4g", cpus="3")
+    assert (definition["memory"], definition["cpus"], definition["pids"]) == ("4g", 3, 512)
+    (tmp_path / "old").mkdir()
+    definition = m.add("playwright", catalogs=catalog(tmp_path / "old", [browser], signed=False), pull=False,
+                       out=out.append, unsigned=True)
+    assert not {"memory", "cpus", "pids"} & set(definition), "an old catalog: the defaults"
+    (tmp_path / "bad").mkdir()
+    bad = catalog(tmp_path / "bad", [{**browser, "limits": {"memory": "lots"}}], signed=False)
+    assert "memory" not in m.add("playwright", catalogs=bad, pull=False, out=out.append, unsigned=True)
+    with pytest.raises(ValueError, match="cpus must be"):
+        m.add("playwright", catalogs=sources, pull=False, out=out.append, unsigned=True, cpus="0")
+
+
+def test_add_creates_a_writable_folder_that_is_not_there_yet(tmp_path):
+    """`mcp add memory --mount /data=/work/memory:rw` failed with "is not a directory": a writable folder is created
+    (0700, parents too, said), a read-only one must be there, a file is no folder; the message says what TARGET and HOST
+    are. Nothing is created when the add is refused."""
+    sources = catalog(tmp_path, [BINWALK], signed=False)
+    out = []
+    data = tmp_path / "cases" / "one" / "memory"
+    with pytest.raises(ValueError, match="needs --mount /work"):
+        m.add("binwalk", mounts=[f"/out={data}:rw"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert not data.exists(), "a refused add creates nothing"
+    work = tmp_path / "work"
+    work.mkdir()
+    definition = m.add("binwalk", mounts=[f"/work={work}", f"/out={data}:rw"], catalogs=sources, pull=False,
+                       out=out.append, unsigned=True)
+    assert data.is_dir() and data.stat().st_mode & 0o777 == 0o700 and f"sandbox-mcp: created {data}" in out
+    assert {"target": "/out", "host": str(data), "mode": "rw"} in definition["mounts"]
+    with pytest.raises(ValueError, match="a read-only folder must be there") as caught:
+        m.add("binwalk", mounts=[f"/work={tmp_path / 'missing'}"], catalogs=sources, pull=False, out=out.append,
+              unsigned=True)
+    assert "TARGET is the folder inside the server's container, HOST the folder on this machine" in str(caught.value)
+    (tmp_path / "file").write_text("x")
+    with pytest.raises(ValueError, match="is not a folder"):
+        m.add("binwalk", mounts=[f"/work={work}", f"/out={tmp_path / 'file'}:rw"], catalogs=sources, pull=False,
+              out=out.append, unsigned=True)
+    with pytest.raises(ValueError, match="takes /work, /out"):
+        m.add("binwalk", mounts=[f"/data={work}"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o500)
+    try:
+        if os.geteuid() != 0:
+            with pytest.raises(ValueError, match="cannot be created"):
+                m.mount_host("x", str(locked / "a"), "rw")
+    finally:
+        locked.chmod(0o700)
+
+
+def test_mcp_set_changes_a_server_of_yours_as_add_checks_it(tmp_path, capsys):
+    sources = catalog(tmp_path, [BINWALK], signed=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    m.add("binwalk", mounts=[f"/work={work}"], catalogs=sources, pull=False, out=lambda line: None, unsigned=True)
+    image = m.definitions()["binwalk"]["image"]
+    result = m.set_server("binwalk", {"memory": "2g", "cpus": "1.5", "pids": "512"}, out=lambda line: None)
+    assert result["changed"] == ["cpus", "memory", "pids"] and result["running"] == []
+    saved = m.definitions()["binwalk"]
+    assert (saved["memory"], saved["cpus"], saved["pids"], saved["image"]) == ("2g", 1.5, 512, image)
+    assert m.set_server("binwalk", {"memory": "2g"}, out=lambda line: None)["changed"] == []
+    m.set_server("binwalk", {"memory": None}, out=lambda line: None)  # back to the default
+    assert "memory" not in m.definitions()["binwalk"]
+    with pytest.raises(ValueError, match="memory must be like 512m"):
+        m.set_server("binwalk", {"memory": "1024"}, out=lambda line: None)
+    out_dir = tmp_path / "new" / "out"
+    m.set_server("binwalk", {"mounts": [f"/work={work}", f"/out={out_dir}:rw"]}, catalogs=sources, out=lambda line: None)
+    assert out_dir.is_dir() and len(m.definitions()["binwalk"]["mounts"]) == 2
+    with pytest.raises(ValueError, match="needs --mount /work"):
+        m.set_server("binwalk", {"mounts": []}, catalogs=sources, out=lambda line: None)
+    with pytest.raises(ValueError, match="does not use KEY"):
+        m.set_server("binwalk", {"env": ["KEY"]}, catalogs=sources, out=lambda line: None)
+    with pytest.raises(ValueError, match="a VPN needs network full"):
+        m.set_server("binwalk", {"vpn": "anon"}, out=lambda line: None)
+    m.set_server("binwalk", {"network": "full", "vpn": "anon"}, out=lambda line: None)
+    assert m.definitions()["binwalk"]["vpn"] == "anon"
+    with pytest.raises(ValueError, match="only a server of yours can be set"):
+        m.set_server("demo", {"memory": "1g"}, out=lambda line: None)
+    # A command server of mcp.json: its limits are its options.
+    path, document = m.read_config()
+    document["mine"] = {"command": ["python3", "x.py"], "options": ["--offline", "--memory=1g"]}
+    path.write_text(json.dumps(document))
+    m.set_server("mine", {"memory": "2g", "pids": 100}, out=lambda line: None)
+    assert m.definitions()["mine"]["options"] == ["--offline", "--memory", "2g", "--pids", "100"]
+    with pytest.raises(ValueError, match="only --memory, --cpus, --pids and --tmp"):
+        m.set_server("mine", {"network": "full"}, out=lambda line: None)
+    assert m.cli(["set", "mine", "--cpus", "2", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["changed"] == ["options"]
+    with pytest.raises(ValueError, match="give what to change"):
+        m.cli(["set", "mine"])
+
+
+def test_mcp_set_checks_the_catalogs_signature_before_it_reads_the_entry_again(tmp_path):
+    """Before: `mcp set NAME --mount/--env` read the catalog entry again (which folders and variables it takes) without
+    checking the catalog's signature, which `mcp add` checked: a catalog changed since (on its server, or a file
+    replaced) decided what the server may mount. Now a server added from a signed catalog needs a good signature by
+    a trusted key again; one that does not verify is refused always; one added unsigned may stay unsigned."""
+    entry = {**BINWALK, "mounts": [{"target": "/work", "required": True}, {"target": "/out"}]}
+    sources = catalog(tmp_path, [entry], signed=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    m.add("binwalk", mounts=[f"/work={work}"], catalogs=sources, pull=False, out=lambda line: None)
+    assert m.definitions()["binwalk"].get("signed_by")
+    out_dir = tmp_path / "out"
+    m.set_server("binwalk", {"mounts": [f"/work={work}", f"/out={out_dir}:rw"]}, catalogs=sources,
+                 out=lambda line: None)
+    # The catalog changed since, its signature no longer verifies: refused, nothing written.
+    path = Path(sources[0][1])
+    path.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [
+        {**entry, "mounts": [{"target": "/work", "required": True}, {"target": "/out"}, {"target": "/root-of-host"}]}]}))
+    before = m.definitions()["binwalk"]
+    with pytest.raises(ValueError, match="signature does not verify"):
+        m.set_server("binwalk", {"mounts": [f"/work={work}", f"/root-of-host={tmp_path}"]}, catalogs=sources,
+                     out=lambda line: None)
+    # ... or unsigned now: a server added signed is not changed from an unsigned catalog.
+    Path(str(path) + ".sig").unlink()
+    with pytest.raises(ValueError, match="not signed by a trusted key"):
+        m.set_server("binwalk", {"mounts": [f"/work={work}", f"/root-of-host={tmp_path}"]}, catalogs=sources,
+                     out=lambda line: None)
+    assert m.definitions()["binwalk"] == before
+    # Limits need no catalog: as before.
+    m.set_server("binwalk", {"memory": "1g"}, out=lambda line: None)
+    # A server added unsigned (--unsigned) may be set from its unsigned catalog, as it was added.
+    other = tmp_path / "other"
+    other.mkdir()
+    unsigned = catalog(other, [{**entry, "name": "binwalk2", "id": "hub:binwalk2"}], signed=False)
+    m.add("binwalk2", mounts=[f"/work={work}"], catalogs=unsigned, pull=False, out=lambda line: None, unsigned=True)
+    m.set_server("binwalk2", {"mounts": [f"/work={work}", f"/out={out_dir}:rw"]}, catalogs=unsigned,
+                 out=lambda line: None)
+
+
+def test_mcp_set_on_a_running_server_says_so_or_stops_it(tmp_path, monkeypatch):
+    sources = catalog(tmp_path, [BINWALK], signed=False)
+    work = tmp_path / "work"
+    work.mkdir()
+    m.add("binwalk", mounts=[f"/work={work}"], catalogs=sources, pull=False, out=lambda line: None, unsigned=True)
+    monkeypatch.setattr(m, "instances", lambda name, include_stopped=False: ["binwalk", "binwalk.0123abcd"])
+    stopped = []
+    monkeypatch.setattr(m, "stop", lambda name, timeout=30: stopped.append(name) or 0)
+    said = []
+    result = m.set_server("binwalk", {"pids": 256}, out=said.append)
+    assert stopped == [] and "a start refuses it until then: sandbox-ai mcp stop binwalk" in said[-1]
+    result = m.set_server("binwalk", {"pids": 512}, stop_running=True, out=said.append)
+    assert stopped == ["binwalk", "binwalk.0123abcd"] and result["stopped"] == stopped
+
+
+def test_a_start_with_limits_of_its_own_gets_its_own_instance(tmp_path, monkeypatch):
+    config = m.config_file()
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"pw": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "none"}}))
+    started = []
+
+    class Process:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+    monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)) or Process())
+    monkeypatch.setattr(m, "wait_for_socket", lambda *a, **kw: None)
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)
+    shared = s.parse_args(["codex", "--mcp", "pw"])
+    own = s.parse_args(["codex", "--mcp", "pw", "--mcp-limits", "pw:memory=2g,cpus=1,pids=512"])
+    instance = m.instance_of(own, "pw")
+    assert re.fullmatch(r"pw\.[0-9a-f]{8}", instance) and m.instance_of(shared, "pw") == "pw"
+    assert m.ensure_running("pw", own) == "started"
+    cmd = started[-1][0]
+    assert cmd[4] == str(s.mcp_socket_dir(instance) / "server.sock")
+    assert "--memory=2g" in cmd and "--cpus=1" in cmd and "--pids-limit=512" in cmd
+    state = m.load_state(instance)
+    assert state["server"] == "pw" and state["limits"] == {"memory": "2g", "cpus": "1", "pids": 512, "tmp": "64m"}
+    assert m.load_state("pw") == {}, "the shared one is not touched"
+    fake_supervisor(tmp_path, os.getpid(), instance)
+    (s.mcp_socket_dir(instance) / "server.sock").touch()
+    assert m.ensure_running("pw", own) == "running", "a second start with the same limits shares it"
+    assert m.instances("pw") == [instance]
+    listed = {e["name"]: e for e in m.server_list()}["pw"]
+    assert listed["status"] == "running" and listed["limits"]["memory"] == "512m"
+    assert listed["instances"] == [{"instance": instance, "status": "running", "limits": state["limits"],
+                                    "started_for": None, "last_problem": None, "vpn": None,
+                                    "started": state["started"]}]
+
+
+def test_stop_name_stops_its_instances_too(tmp_path, monkeypatch):
+    for instance in ("pw", "pw.0123abcd", "pw.89abcdef", "pwx.0123abcd"):
+        m.save_state(instance, {"pid": 1})
+    running = {"pw.0123abcd", "pw.89abcdef", "pwx.0123abcd"}
+    monkeypatch.setattr(m, "status", lambda name: "running" if name in running else "stopped")
+    stopped = []
+    monkeypatch.setattr(m, "stop_locked", lambda name, timeout=30, quiet=False: stopped.append((name, quiet)) or 0)
+    assert m.instances("pw") == ["pw.0123abcd", "pw.89abcdef"]
+    assert m.instances("pw", include_stopped=True) == ["pw", "pw.0123abcd", "pw.89abcdef"]
+    assert m.stop("pw") == 0
+    assert stopped == [("pw", True), ("pw.0123abcd", False), ("pw.89abcdef", False)]
+    stopped.clear()
+    assert m.stop("pw.89abcdef") == 0 and stopped == [("pw.89abcdef", False)]
+    with pytest.raises(ValueError, match="Invalid MCP server name"):
+        m.stop("pw.xyz")
+
+
+def test_a_dry_run_shows_the_limits_and_the_agent_mounts_its_instance(tmp_path, monkeypatch, capsys):
+    config = m.config_file()
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"pw": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "none", "memory": "1g"}}))
+    monkeypatch.setattr(s, "load_mcp_module", lambda: m)
+    s.main(["codex", "--mcp", "pw", "--mcp-limits", "pw:memory=2g", "--dry-run"])
+    plan = json.loads(capsys.readouterr().out)["mcp"]
+    assert plan[0]["instance"].startswith("pw.") and plan[0]["limits"]["memory"] == "2g" and plan[0]["own_limits"]
+    s.main(["codex", "--mcp", "pw", "--mcp-limits", "pw:memory=1g", "--dry-run"])  # its defaults: the shared one
+    assert json.loads(capsys.readouterr().out)["mcp"][0]["instance"] == "pw"
+    with pytest.raises(ValueError, match="memory must be like 512m"):
+        s.main(["codex", "--mcp", "pw", "--mcp-limits", "pw:memory=2", "--dry-run"])
+    s.main(["codex", "--mcp", "pw", "--mcp-limits", "other:memory=2g", "--dry-run"])
+    assert "this start does not use the MCP server other" in capsys.readouterr().err
+    a = s.parse_args(["codex", "--mcp", "pw", "--mcp-limits", "pw:memory=2g"])
+    a.mcp_instances = {"pw": "pw.0123abcd"}
+    assert s.mcp_socket_dir(s.mcp_instance(a, "pw")) == s.mcp_socket_dir("pw.0123abcd")
+    source = (ROOT / "sandbox/agent_sandbox.py").read_text()
+    # Every mount of a server's socket goes through the start's instance (Podman, macOS's volume, Bubblewrap).
+    assert source.count("mcp_socket_dir(mcp_instance(a, name))") == 3
+    assert "--mcp-limits" in m.forbidden(), "never in an MCP server's own sandbox"
+
+
+# --- folders: the definition's for every start, a start's own in an instance of its own (--mcp-mount) -------------
+
+def brain_server(tmp_path, mode="rw"):
+    """An image server with one folder (engram's /data), as `mcp add engram --mount /data=DIR:rw` writes it."""
+    default = tmp_path / "brains" / "default"
+    default.mkdir(parents=True, exist_ok=True)
+    config = m.config_file()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    definition = {"image": f"ghcr.io/a/engram@{DIGEST}", "network": "none",
+                  "mounts": [{"target": "/data", "host": str(default), "mode": mode}]}
+    config.write_text(json.dumps({"brain": definition}))
+    return definition
+
+
+def test_a_starts_own_folder_parses_and_the_later_one_wins(tmp_path):
+    a = s.parse_args(["codex", "--mcp", "brain", "--mcp-mount", "brain:/data=~/brains/one:rw",
+                      "-mt", "brain:/data=/srv/two", "--mcp-mount", "other:/x=/srv/x:ro"])
+    assert m.start_mounts(a) == {"brain": {"/data": {"host": "/srv/two", "mode": None}},
+                                 "other": {"/x": {"host": "/srv/x", "mode": "ro"}}}
+    assert m.parse_start_mount("brain:/data=~/b:rw")[2] == os.path.expanduser("~/b")
+    for bad, why in (("brain", "NAME:TARGET=HOST"), ("brain:/data", "NAME:TARGET=HOST"),
+                     ("brain:data=/x", "NAME:TARGET=HOST"), ("brain:/a/../b=/x", "NAME:TARGET=HOST"),
+                     ("a b:/data=/x", "NAME:TARGET=HOST"), ("brain:/data=relative:rw", "HOST must be an absolute"),
+                     ("brain:/data=/a,b", "without , or :"), ("brain:/data=/a:b:rw", "without , or :"),
+                     ("brain:/data=:rw", "HOST must be an absolute"), ("brain:/data=/a\nb", "HOST must be")):
+        with pytest.raises(ValueError, match=why):
+            m.parse_start_mount(bad)
+
+
+def test_a_start_changes_only_the_folder_of_a_target_the_server_has(tmp_path):
+    """--mcp-mount never adds a folder to a server, never makes a read-only one writable, and is for image servers
+    only (a command server's folders are its definition's --mount options; a helper works on its lead's workspace)."""
+    definition = brain_server(tmp_path)
+    mine = str(tmp_path / "brains" / "app")
+    changed = m.with_mounts("brain", definition, {"/data": {"host": mine, "mode": None}})
+    assert changed["mounts"] == [{"target": "/data", "host": mine, "mode": "rw"}], "the definition's mode"
+    assert m.with_mounts("brain", definition, {"/data": {"host": mine, "mode": "ro"}})["mounts"][0]["mode"] == "ro"
+    assert definition["mounts"][0]["host"] != mine, "the definition itself stays as it is"
+    with pytest.raises(ValueError, match="the server mounts /data, not /etc"):
+        m.with_mounts("brain", definition, {"/etc": {"host": mine, "mode": "rw"}})
+    with pytest.raises(ValueError, match="mounts no folder, not /data"):
+        m.with_mounts("pw", {"image": f"ghcr.io/a/b@{DIGEST}"}, {"/data": {"host": mine, "mode": "rw"}})
+    read_only = brain_server(tmp_path, mode="ro")
+    with pytest.raises(ValueError, match="mounts it read-only; a start does not make it writable"):
+        m.with_mounts("brain", read_only, {"/data": {"host": mine, "mode": "rw"}})
+    with pytest.raises(ValueError, match="defined with a command"):
+        m.with_mounts("c", {"command": ["x"], "options": []}, {"/data": {"host": mine, "mode": "rw"}})
+    with pytest.raises(ValueError, match="a helper's or a team's server takes no folders"):
+        m.with_mounts("h", {"helper": "codex"}, {"/data": {"host": mine, "mode": "rw"}})
+
+
+def test_an_instance_of_its_own_for_other_folders(tmp_path, monkeypatch):
+    """One memory per project: the starts that give the same folder share NAME.HASH, another folder is another
+    instance (two projects never reach one running server), the server's own folder is NAME itself; with limits of
+    its own too, both make the hash - and limits alone keep the hash they had (a running instance is found again)."""
+    monkeypatch.setattr(m.os, "cpu_count", lambda: 8)
+    definition = brain_server(tmp_path)
+    one, two = str(tmp_path / "brains" / "one"), str(tmp_path / "brains" / "two")
+    own = definition["mounts"][0]["host"]
+    assert m.instance_for("brain", definition, None, {"/data": {"host": own, "mode": "rw"}}) == ("brain", definition)
+    first, effective = m.instance_for("brain", definition, None, {"/data": {"host": one, "mode": None}})
+    assert re.fullmatch(r"brain\.[0-9a-f]{8}", first) and effective["mounts"][0]["host"] == one
+    assert "pids" not in effective, "the server's own limits stay its own"
+    assert m.instance_for("brain", definition, {}, {"/data": {"host": one, "mode": "rw"}})[0] == first
+    assert m.instance_for("brain", definition, None, {"/data": {"host": two, "mode": None}})[0] != first
+    both = m.instance_for("brain", definition, {"memory": "2g"}, {"/data": {"host": one, "mode": None}})
+    assert both[0] not in (first, m.instance_for("brain", definition, {"memory": "2g"})[0])
+    assert both[1]["memory"] == "2g" and both[1]["mounts"][0]["host"] == one
+    limits_only = m.instance_for("brain", definition, {"memory": "2g"})[0]
+    wanted = {"memory": "2g", "cpus": "4", "pids": 128, "tmp": "64m"}
+    assert limits_only == "brain." + m.hashlib.sha256(json.dumps(wanted, sort_keys=True).encode()).hexdigest()[:8]
+    a = s.parse_args(["codex", "--mcp", "brain", "--mcp-mount", f"brain:/data={one}:rw"])
+    assert m.instance_of(a, "brain") == first and m.instance_of(s.parse_args(["codex", "--mcp", "brain"]),
+                                                                  "brain") == "brain"
+
+
+def test_a_dry_run_shows_the_folder_and_checks_it_without_making_it(tmp_path, monkeypatch, capsys):
+    brain_server(tmp_path)
+    monkeypatch.setattr(s, "load_mcp_module", lambda: m)
+    work = tmp_path / "work"
+    work.mkdir()
+    folder = tmp_path / "brains" / "app"
+    base = ["codex", "--workspace", str(work), "--no-tmux", "--mcp", "brain"]
+    s.main([*base, "--mcp-mount", f"brain:/data={folder}:rw", "--dry-run"])
+    plan = json.loads(capsys.readouterr().out)
+    entry = plan["mcp"][0]
+    assert entry["instance"].startswith("brain.") and entry["own_mounts"] == [
+        {"target": "/data", "host": str(folder), "mode": "rw"}]
+    assert not folder.exists(), "a dry run makes nothing"
+    with pytest.raises(ValueError, match="read-only folder must be there"):
+        s.main([*base, "--mcp-mount", f"brain:/data={tmp_path / 'gone'}:ro", "--dry-run"])
+    with pytest.raises(ValueError, match="the server mounts /data, not /etc"):
+        s.main([*base, "--mcp-mount", f"brain:/etc={folder}:rw", "--dry-run"])
+    # Never inside what the agent writes: it could change what the server keeps, or swap the folder for a link.
+    with pytest.raises(ValueError, match="--mcp-mount: .* lies in .*, which the agent can write"):
+        s.main([*base, "--mcp-mount", f"brain:/data={work / '.brain'}:rw", "--dry-run"])
+    capsys.readouterr()
+    s.main(["codex", "--workspace", str(work), "--no-tmux", "--mcp-mount", f"brain:/data={folder}", "--dry-run"])
+    assert "this start does not use the MCP server brain" in capsys.readouterr().err
+    assert "--mcp-mount" in m.forbidden(), "never in an MCP server's own sandbox"
+    with pytest.raises(ValueError, match="--mcp-mount is for an agent's start"):
+        s.check_mcp_names(s.parse_args(["codex", "--probe", "--mcp-mount", f"brain:/data={folder}"]))
+
+
+def test_paranoid_refuses_a_writable_folder_of_a_starts_own(tmp_path, monkeypatch, capsys):
+    brain_server(tmp_path)
+    monkeypatch.setattr(s, "load_mcp_module", lambda: m)
+    work = tmp_path / "work"
+    work.mkdir()
+    base = ["codex", "--workspace", str(work), "--no-tmux", "--mcp", "brain", "--mode", "paranoid"]
+    with pytest.raises(ValueError, match="--mcp-mount brain:/data=.* an MCP server would keep what the agent gives"):
+        s.main([*base, "--mcp-mount", f"brain:/data={tmp_path / 'b'}:rw", "--dry-run"])
+    with pytest.raises(ValueError, match="--mcp-mount"):
+        s.main([*base, "--mcp-mount", f"brain:/data={tmp_path / 'b'}", "--dry-run"])  # the definition's mode: rw
+    modes = load("modes_mcp_mount_test", "modes.py")
+    assert "--mcp-mount" in modes.WEAKENING_OPTIONS, "a project file naming it is marked before it is trusted"
+
+
+def test_a_start_with_a_folder_of_its_own_makes_it_and_its_instance_mounts_it(tmp_path, monkeypatch):
+    brain_server(tmp_path)
+    started = []
+
+    class Process:
+        pid = os.getpid()
+
+        def poll(self):
+            return None
+    monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)) or Process())
+    monkeypatch.setattr(m, "wait_for_socket", lambda *a, **kw: None)
+    monkeypatch.setattr(m, "verified_or_stopped", lambda *a, **kw: None)
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)
+    folder = tmp_path / "brains" / "app"
+    own = s.parse_args(["codex", "--mcp", "brain", "--mcp-mount", f"brain:/data={folder}:rw"])
+    instance = m.instance_of(own, "brain")
+    assert m.ensure_running("brain", own) == "started"
+    assert folder.is_dir() and oct(folder.stat().st_mode & 0o777) == "0o700", "made as mcp add makes it"
+    cmd = started[-1][0]
+    assert f"--volume={folder.resolve()}:/data:rw" in cmd and cmd[4] == str(s.mcp_socket_dir(instance) / "server.sock")
+    assert str(tmp_path / "brains" / "default") not in " ".join(cmd), "not the server's own folder"
+    state = m.load_state(instance)
+    assert state["mounts"] == [{"target": "/data", "host": str(folder), "mode": "rw"}]
+    assert m.load_state("brain") == {}, "the shared one is not touched"
+    exposed = [str(p) for p in m.launcher().exposed_before()]
+    assert str(folder.resolve()) in exposed, "a folder a server writes is one no later workspace may hold a link in"
+
+def test_a_servers_tmp_is_part_of_its_limits_and_never_more_than_its_memory(monkeypatch):
+    """The Playwright crash: Chromium keeps its profile, cache, shared memory (--disable-dev-shm-usage) and screenshots
+    in /tmp, which every container had at 64m. Its size is a limit like the others; as a tmpfs it is memory, so it is
+    refused larger than the memory limit."""
+    assert m.checked_limits({"tmp": "768M"}) == {"tmp": "768m"}
+    for bad in ("1024", "0m", "1t", 5):
+        with pytest.raises(ValueError, match="tmp must be like 64m or 1g"):
+            m.checked_limits({"tmp": bad})
+    with pytest.raises(ValueError, match="tmp 2g is more than the memory 1g: /tmp is memory"):
+        m.checked_limits({"memory": "1g", "tmp": "2g"})
+    with pytest.raises(ValueError, match="is more than the memory 512m"):
+        m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "tmp": "1g"}, "t")  # the default memory
+    assert m.tmp_warning({"memory": "1g", "tmp": "768m"}) and m.tmp_warning({"memory": "2g", "tmp": "768m"}) is None
+    definition = m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "memory": "2g", "tmp": "768m"}, "t")
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)
+    command = m.image_command(m.server_network("pw", definition))
+    assert "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=768m,notmpcopyup" in command
+    assert "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=64m,notmpcopyup" in m.image_command(m.server_network(
+        "pw", {"image": f"ghcr.io/a/b@{DIGEST}"})), "the default, the line both catalogs test with"
+    a = s.parse_args(["codex", "--mcp", "pw", "--mcp-limits", "pw:tmp=1g,memory=2g"])
+    assert m.start_limits(a) == {"pw": {"tmp": "1g", "memory": "2g"}}
+    with pytest.raises(ValueError, match="tmp 1g is more than the memory 512m"):
+        m.instance_for("pw", {"image": f"ghcr.io/a/b@{DIGEST}"}, {"tmp": "1g"})
+    rootfs = load("mcp_rootfs_tmp_test", "mcp_rootfs.py")
+    assert rootfs.tmp_bytes("768m") == 768 << 20 and rootfs.tmp_bytes("1g") == 1 << 30 and rootfs.tmp_bytes("x") == 64 << 20
+    command = {"command": ["x"], "options": ["--memory", "2g"]}
+    assert m.with_limits("c", command, {"tmp": "1g"})["options"][-2:] == ["--tmp-size", "1g"]
+
+
+def test_add_and_set_take_a_tmp_and_set_applies_what_the_catalog_recommends(tmp_path):
+    browser = {**ENTRY, "id": "mcp:playwright", "name": "playwright", "network": "full", "hosts": []}
+    sources = catalog(tmp_path, [browser], signed=False)
+    definition = m.add("playwright", catalogs=sources, pull=False, out=lambda line: None, unsigned=True,
+                       memory="2g", tmp="1g")
+    assert (definition["memory"], definition["tmp"]) == ("2g", "1g")
+    m.add("playwright", catalogs=sources, pull=False, out=lambda line: None, unsigned=True)  # added without limits
+    assert m.below_recommended(m.definitions()["playwright"]) == {}, "nothing recommended yet"
+    (tmp_path / "rootfs.json").write_text(json.dumps({"version": 1, "rootfs": {}, "limits": {
+        "playwright": {"memory": "2g", "pids": 512, "tmp": "768m", "cpus": 2}}}))
+    m.catalog_entries(sources)  # read again (the MCP page, mcp catalog): its recommendation is remembered
+    below = m.below_recommended(m.definitions()["playwright"])
+    assert {key: below[key] for key in ("memory", "pids", "tmp")} == {"memory": "2g", "pids": 512, "tmp": "768m"}
+    assert "cpus" not in below or float(m.host_cpus_default()) < 2, "half this host's CPUs: not below 2 here"
+    result = m.set_server("playwright", {"recommended": True}, catalogs=sources, out=lambda line: None)
+    saved = m.definitions()["playwright"]
+    assert (saved["memory"], saved["pids"], saved["tmp"], saved["cpus"]) == ("2g", 512, "768m", 2)
+    assert "tmp" in result["changed"] and m.below_recommended(saved) == {}
+    m.set_server("playwright", {"recommended": True, "memory": "4g"}, catalogs=sources, out=lambda line: None)
+    assert m.definitions()["playwright"]["memory"] == "4g", "what is given wins"
+    with pytest.raises(ValueError, match="more than the memory"):
+        m.set_server("playwright", {"tmp": "8g"}, out=lambda line: None)
+    m.set_server("playwright", {"tmp": None}, out=lambda line: None)
+    assert "tmp" not in m.definitions()["playwright"]
+    assert m.cli(["set", "playwright", "--tmp", "512m"]) == 0 and m.definitions()["playwright"]["tmp"] == "512m"
+
+
+def fake_cgroup(tmp_path, name="libpod-abc.scope", oom=0, pids=0, shmem=0):
+    root = tmp_path / "cgroup"
+    scope = root / "user.slice" / "user@1000.service" / "user.slice" / name
+    (scope / "container").mkdir(parents=True, exist_ok=True)
+    (scope / "memory.events").write_text(f"low 0\nhigh 0\nmax 3\noom 1\noom_kill {oom}\n")
+    (scope / "pids.events").write_text(f"max {pids}\n")
+    (scope / "memory.stat").write_text(f"anon 100\nfile 5\nshmem {shmem}\n")
+    (scope / "memory.peak").write_text("2000000\n")
+    return root, scope
+
+
+def test_the_watch_finds_the_containers_cgroup_and_reads_its_counters(tmp_path):
+    root, scope = fake_cgroup(tmp_path, oom=2, pids=5, shmem=3 << 20)
+    proc = tmp_path / "procs"
+    (proc / "42").mkdir(parents=True)
+    (proc / "42" / "cgroup").write_text(f"0::/{scope.relative_to(root)}/container\n")
+    assert m.process_cgroup(42, proc, root) == scope, "the container's scope, not its inner cgroup"
+    (proc / "43").mkdir()
+    (proc / "43" / "cgroup").write_text("0::/user.slice/user@1000.service/app.slice/x.service\n")
+    assert m.process_cgroup(43, proc, root) is None, "never a slice of the host's own"
+    assert m.process_cgroup(44, proc, root) is None
+    assert m.cgroup_counters(scope) == {"oom_kill": 2, "pids_max": 5, "shmem": 3 << 20, "peak": 2000000}
+    assert m.cgroup_counters(tmp_path / "gone") == {}
+
+
+def test_out_of_memory_the_process_limit_and_a_full_tmp_become_records_with_the_fix(tmp_path, capsys):
+    directory = m.state_dir("playwright")
+    directory.mkdir(parents=True)
+    watch = m.ContainerWatch(directory, "playwright", "64m", {"memory": "512m", "pids": "128"})
+    watch.seen = {"oom_kill": 0, "pids_max": 0}
+    watch.look({"oom_kill": 0, "pids_max": 0, "shmem": 10 << 20})
+    assert watch.records == [], "nothing happened"
+    watch.look({"oom_kill": 1, "pids_max": 3, "shmem": 60 << 20})
+    kinds = [r["what"].split(":")[0] for r in watch.records]
+    assert kinds == ["out of memory", "process limit", "/tmp full"]
+    oom, pids, tmp = watch.records
+    assert "its memory limit 512m is used up" in oom["why"] and "sandbox-ai mcp set playwright --memory 1g" in oom["fix"]
+    assert "--mcp-limits playwright:memory=1g" in oom["fix"] and oom["run"] == "mcp-playwright"
+    assert oom["kind"] == "mcp-server" and oom["level"] == "error" and oom["target"] == "playwright"
+    assert "process limit 128 is reached" in pids["why"] and "--pids 512" in pids["fix"]
+    assert "hold 60 MiB of 64m" in tmp["why"] and "--tmp 256m" in tmp["fix"]
+    watch.look({"oom_kill": 1, "pids_max": 3, "shmem": 63 << 20})
+    assert len(watch.records) == 3, "each told once"
+    assert watch.ended(0, False) is None and watch.ended(143, True) is None, "an end that was asked for"
+    ended = watch.ended(137, False)
+    assert "SIGKILL (exit status 137): the kernel's out-of-memory killer" in ended["why"]
+    assert "exit status 125" in m.ContainerWatch(directory, "playwright", "64m").ended(125, False)["why"]
+    stored = m.safeguards_module().read(directory / m.WATCH_FILE)
+    assert [r["id"] for r in stored] == [r["id"] for r in watch.records] + [stored[-1]["id"]]
+    assert m.last_problem("playwright")["why"].startswith("podman could not start")
+    # sandbox-ai safeguards --all finds them; mcp list says it, with the fix.
+    assert directory / m.WATCH_FILE in m.safeguards_module().all_files(runs={})
+    config = m.config_file()
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"playwright": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "full"}}))
+    listed = {e["name"]: e for e in m.server_list()}["playwright"]
+    assert listed["last_problem"]["why"].startswith("podman could not start")
+    assert m.cli(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "stopped (!)" in out and "playwright: " in out and "Fix: read the server's log" in out
+
+
+def test_the_watch_runs_the_command_with_its_stdio_and_records_an_end_nobody_asked_for(tmp_path):
+    directory = tmp_path / "state" / "sandbox-ai" / "mcp" / "pw"
+    directory.mkdir(parents=True)
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+    result = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/mcp.py"), "--internal-watch", str(directory),
+                             "pw", "64m", "512m", "128", "--", "sh", "-c", "cat; exit 137"], input=b"hello\n",
+                            capture_output=True, env=env, timeout=60)
+    assert result.returncode == 137 and result.stdout == b"hello\n", "its stdio is the MCP connection, untouched"
+    records = [json.loads(line) for line in (directory / "safeguards.jsonl").read_text().splitlines()]
+    assert len(records) == 1 and "SIGKILL (exit status 137)" in records[0]["why"]
+    ok = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/mcp.py"), "--internal-watch", str(directory),
+                         "pw", "64m", "512m", "128", "--", "true"], capture_output=True, env=env, timeout=60)
+    assert ok.returncode == 0 and len((directory / "safeguards.jsonl").read_text().splitlines()) == 1
+    assert subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/mcp.py"), "--internal-watch", "x"],
+                          capture_output=True, timeout=60).returncode == 2
+
+
+def test_the_watch_hands_podman_a_cidfile_and_finds_the_container(tmp_path):
+    cid = tmp_path / "c.cid"
+    cid.write_text("a" * 64)
+    seen = []
+
+    def run(command):
+        seen.append(command)
+        return SimpleNamespace(returncode=0, stdout="4242\n")
+    assert m.container_pid(cid, run=run, wait=1, sleep=lambda _s: None) == 4242
+    assert seen == [["podman", "inspect", "--format", "{{.State.Pid}}", "a" * 64]]
+    assert m.container_pid(tmp_path / "none.cid", run=run, wait=0.01, sleep=lambda _s: None) is None
+    source = (ROOT / "sandbox/mcp.py").read_text()
+    assert "with_cidfile(command," in source
+    line = ["podman", "run", "--rm", "-i", "--network=none", "img"]
+    assert m.with_cidfile(line, "/s/1.cid") == (["podman", "run", "--cidfile=/s/1.cid", *line[2:]], "/s/1.cid")
+    # Behind a VPN: the guard's run line gets it, and the guard takes it (no network option).
+    guard = [sys.executable, "-I", str(ROOT / "sandbox/vpn.py"), "--internal-mcp-guard", "sandbox-ai-vpn-mcp-x", "--",
+             "podman", "run", "--rm", "--network=container:sandbox-ai-vpn-mcp-x", "img"]
+    watched_guard, found = m.with_cidfile(guard, "/s/2.cid")
+    assert found == "/s/2.cid" and watched_guard[:6] == guard[:6] and watched_guard[8] == "--cidfile=/s/2.cid"
+    vpn = load("vpn_for_watch_test", "vpn.py")
+    assert vpn.guarded_options(watched_guard[6:], "sandbox-ai-vpn-mcp-x")[1][0] == "--cidfile=/s/2.cid"
+    assert m.with_cidfile(["sh", "-c", "true"], "/s/3.cid") == (["sh", "-c", "true"], None)

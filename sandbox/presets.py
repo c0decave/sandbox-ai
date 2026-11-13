@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """sandbox-ai presets: ready setups to start an agent with.
 
-  sandbox-ai presets list [--json]                      the built-in presets and your own
+  sandbox-ai presets list [--json]                      the built-in presets and your own, by category
+  sandbox-ai presets categories [--json]                the categories (titles and descriptions in English and German)
   sandbox-ai presets show NAME [--json]                 what NAME sets, needs and asks for
   sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]
                                                         what is missing before NAME can start (values, MCP
@@ -25,10 +26,14 @@ A preset never holds a secret: options only name them (--secret-env NAME, --git-
 options that copy a login in are refused. Format (JSON):
 
   {"format": "sandbox-ai preset", "version": 1, "id": "software-analysis", "title": "...", "description": "...",
-   "category": "analysis", "agents": ["claude", "codex", "opencode"], "options": ["--offline", "--mount",
+   "category": "forensics", "agents": ["claude", "codex", "opencode"], "options": ["--offline", "--mount",
    "{samples}:/mnt/samples:ro"], "mcp": ["hub:capa"], "rules": "software-analysis.rules.json",
    "values": {"samples": {"label": "Folder with the samples", "kind": "folder"}},
-   "prompt": "...", "notes": ["..."]}
+   "prompt": "...", "notes": ["..."], "translations": {"de": {"title": "...", "description": "..."}}}
+
+The categories (CATEGORY_INFO) are listed by `sandbox-ai presets categories`; "translations" gives the title and
+description in German for the app. A server a preset gives a folder of its own for the start (--mcp-mount
+NAME:TARGET={folder}:rw, e.g. Engram's brain) is named by `presets check` with the exact `sandbox-ai mcp add` it needs.
 
 Standard library only.
 """
@@ -52,10 +57,74 @@ ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 VALUE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,31})\}")
 KINDS = ("text", "folder", "file", "port", "device", "host", "secret", "llm", "vpn", "number")
-CATEGORIES = ("simple", "development", "llm", "analysis", "research", "media", "privacy", "testing", "fun")
+# The categories of presets, in the order they are listed (sandbox-ai presets list and categories, the app's gallery):
+# the one place they are defined. Each has a title and a short description in English and German; a preset's
+# "category" is one of these ids, or one of LEGACY_CATEGORIES (presets written before, yours and those of an extra
+# directory: they are listed where it points).
+CATEGORY_INFO = {
+    "development": {"title": {"en": "Development", "de": "Entwicklung"},
+                    "description": {"en": "Coding on your projects: languages and their package registries, databases, "
+                                          "browsers, memory for the agent.",
+                                    "de": "Programmieren an Ihren Projekten: Sprachen und ihre Paket-Registries, "
+                                          "Datenbanken, Browser, ein Gedächtnis für den Agenten."}},
+    "research": {"title": {"en": "Research & web", "de": "Recherche & Web"},
+                 "description": {"en": "Searching and reading the web, with a memory of the case; what comes from the "
+                                       "web is untrusted.",
+                                 "de": "Im Web suchen und lesen, mit einem Gedächtnis des Falls; was aus dem Web kommt, "
+                                       "gilt als nicht vertrauenswürdig."}},
+    "llm": {"title": {"en": "Local LLMs", "de": "Lokale LLMs"},
+            "description": {"en": "The agent with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM) "
+                                  "instead of the cloud.",
+                            "de": "Der Agent mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, "
+                                  "vLLM) statt in der Cloud."}},
+    "security": {"title": {"en": "Security analysis", "de": "Sicherheitsanalyse"},
+                 "description": {"en": "Reviewing code for vulnerabilities and testing targets you own, with the "
+                                       "network kept to them.",
+                                 "de": "Code auf Schwachstellen prüfen und eigene Ziele testen, das Netz auf sie "
+                                       "beschränkt."}},
+    "forensics": {"title": {"en": "Forensics & reverse engineering", "de": "Forensik & Reverse Engineering"},
+                  "description": {"en": "Evidence, samples and binaries read-only, the analysis tools as MCP servers "
+                                        "without network.",
+                                  "de": "Beweismittel, Samples und Binärdateien nur lesend, die Analysewerkzeuge als "
+                                        "MCP-Server ohne Netz."}},
+    "hardware": {"title": {"en": "Hardware & devices", "de": "Hardware & Geräte"},
+                 "description": {"en": "Serial ports, debug probes, firmware and phones: a device or a service on the "
+                                       "host, nothing more.",
+                                 "de": "Serielle Schnittstellen, Debug-Probes, Firmware und Telefone: ein Gerät oder "
+                                       "ein Dienst auf dem Host, nicht mehr."}},
+    "network": {"title": {"en": "Network", "de": "Netzwerk"},
+                "description": {"en": "Captures and traffic analysed offline.",
+                                "de": "Mitschnitte und Verkehr offline analysiert."}},
+    "privacy": {"title": {"en": "Privacy & anonymity", "de": "Datenschutz & Anonymität"},
+                "description": {"en": "Everything through Tor, or as little as possible: the strictest settings.",
+                                "de": "Alles über Tor, oder so wenig wie möglich: die strengsten Einstellungen."}},
+    "writing": {"title": {"en": "Writing & docs", "de": "Schreiben & Dokumentation"},
+                "description": {"en": "Documentation written, built and checked against the code.",
+                                "de": "Dokumentation geschrieben, gebaut und gegen den Code geprüft."}},
+    "fun": {"title": {"en": "Learning, games & demos", "de": "Lernen, Spiele & Demos"},
+            "description": {"en": "Small tasks that show what a sandbox does: races, games, a CTF, git archaeology.",
+                            "de": "Kleine Aufgaben, die zeigen, was eine Sandbox tut: Rennen, Spiele, ein CTF, "
+                                  "Git-Archäologie."}},
+    "testing": {"title": {"en": "Testing sandbox-ai", "de": "sandbox-ai testen"},
+                "description": {"en": "Trying sandbox-ai's own limits: canaries, the privacy check, resource limits, "
+                                      "networks, its test suites.",
+                                "de": "sandbox-ai selbst auf die Probe stellen: Köder, Datenschutzprüfung, "
+                                      "Ressourcengrenzen, Netze, seine Testsuiten."}},
+    "other": {"title": {"en": "Other", "de": "Weitere"},
+              "description": {"en": "Presets that name no category of their own.",
+                              "de": "Vorlagen ohne eigene Kategorie."}},
+}
+CATEGORIES = tuple(CATEGORY_INFO)
+DEFAULT_CATEGORY = "other"
+# The categories of earlier versions, still taken (your presets, an extra directory's) and listed where they point.
+LEGACY_CATEGORIES = {"simple": "other", "analysis": "security", "media": "fun"}
 AGENTS = ("claude", "codex", "opencode")
 KEYS = {"format", "version", "id", "title", "description", "category", "agents", "options", "mcp", "rules",
-        "values", "prompt", "notes", "needs"}
+        "values", "prompt", "notes", "needs", "translations"}
+# The languages a preset may give its title and description in besides English ("translations": {"de": {"title":
+# ..., "description": ...}}): the app shows them in its language. Options, values and notes stay English.
+TRANSLATED = ("de",)
+TRANSLATED_KEYS = ("title", "description")
 # What a preset may not set: what copies a login in (a preset is meant to be passed on), what only a start decides,
 # and what is chosen another way (the security mode: --mode on the command line or the project's "mode").
 REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentials", "--git-token-file",
@@ -65,6 +134,24 @@ REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentia
 # Your own presets (~/.config/sandbox-ai/presets, outside every workspace) are yours alone and never passed on: in them
 # you may also name the folders a start gets. Built-in presets and those of an extra directory may not.
 OWN_ALLOWED = ("--workspace",)
+
+
+def category_of(preset):
+    """The category PRESET is listed under: its own (an older one where it points now), else DEFAULT_CATEGORY."""
+    category = preset.get("category", DEFAULT_CATEGORY) if isinstance(preset, dict) else DEFAULT_CATEGORY
+    category = LEGACY_CATEGORIES.get(category, category)
+    return category if category in CATEGORY_INFO else DEFAULT_CATEGORY
+
+
+def category_text(category, key="title", language="en"):
+    """The title (KEY "description": the description) of CATEGORY in LANGUAGE (en, de; English otherwise)."""
+    texts = CATEGORY_INFO.get(LEGACY_CATEGORIES.get(category, category), CATEGORY_INFO[DEFAULT_CATEGORY])[key]
+    return texts.get(language) or texts["en"]
+
+
+def categories():
+    """[{id, title: {en, de}, description: {en, de}}] in the order they are listed (presets categories --json)."""
+    return [{"id": key, **value} for key, value in CATEGORY_INFO.items()]
 
 
 def refused_flags(origin=None):
@@ -211,7 +298,8 @@ def problems(document, where="preset", origin=None):
     for key in ("title", "description"):
         if not isinstance(document.get(key), str) or not document.get(key, "").strip():
             found.append(f"{where}: {key} is a non-empty text")
-    if document.get("category", "simple") not in CATEGORIES:
+    category = document.get("category", DEFAULT_CATEGORY)
+    if not isinstance(category, str) or (category not in CATEGORIES and category not in LEGACY_CATEGORIES):
         found.append(f"{where}: category is one of {', '.join(CATEGORIES)}")
     agents = document.get("agents", list(AGENTS))
     # Compared one by one: an object or a list among them is no agent (a set of them would fail on it).
@@ -251,7 +339,21 @@ def problems(document, where="preset", origin=None):
         found.append(f"{where}: rules names a JSON file beside the preset (no path)")
     if document.get("prompt") is not None and not isinstance(document.get("prompt"), str):
         found.append(f"{where}: prompt is a text")
+    translations = document.get("translations", {})
+    if not isinstance(translations, dict) or set(translations) - set(TRANSLATED) or not all(
+            isinstance(texts, dict) and texts and not set(texts) - set(TRANSLATED_KEYS)
+            and all(isinstance(text, str) and text.strip() for text in texts.values())
+            for texts in translations.values()):
+        found.append(f"{where}: translations is {{LANGUAGE: {{title, description}}}} (languages: "
+                     f"{', '.join(TRANSLATED)}), each a non-empty text")
     return found
+
+
+def translated(preset, key, language="en"):
+    """PRESET's KEY (title, description) in LANGUAGE where it has it, else its own (English)."""
+    texts = (preset.get("translations") or {}).get(language) if isinstance(preset.get("translations"), dict) else None
+    text = texts.get(key) if isinstance(texts, dict) else None
+    return text if isinstance(text, str) and text.strip() else preset.get(key, "")
 
 
 def read_bytes(path, follow=True):
@@ -469,6 +571,17 @@ def option_values(preset, values, flag):
     return found
 
 
+def server_mounts(preset, values, name):
+    """["TARGET=HOST:MODE"] of the folders PRESET gives the MCP server NAME (its --mcp-mount NAME:TARGET=HOST:MODE,
+    VALUES filled in): what `sandbox-ai mcp add` needs once, for a server that must have a folder (engram, memory)."""
+    found = []
+    for value, _names in option_values(preset, values, "--mcp-mount"):
+        server, colon, rest = value.partition(":")
+        if colon and server == name and "=" in rest:
+            found.append(shlex.quote(rest))
+    return found
+
+
 def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
     """What keeps PRESET from starting: [text]; empty when nothing does. What a start leaves out or should know
     goes to NOTES."""
@@ -488,7 +601,8 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
             continue
         name = server.split(":", 1)[-1]
         if name not in known and server not in known:
-            found.append(f"MCP server {server} is not added yet: sandbox-ai mcp add {server}")
+            found.append(f"MCP server {server} is not added yet: sandbox-ai mcp add {server}"
+                         + "".join(f" --mount {mount}" for mount in server_mounts(preset, values or {}, name)))
     if values is None:
         return found
     # What the options name by a value of yours: an MCP server (--mcp), a publishing login (--publish).
@@ -524,12 +638,14 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
                              f"publish-logins add {kind} --secret NAME{leave_out(names)}")
     # A folder, file or device you named that is not there: a start creates a workspace, and fails on anything else.
     if notes is not None:
+        servers = {name for _, names in option_values(preset, values, "--mcp-mount") for name in names}
         for name, spec in preset.get("values", {}).items():
             value = values.get(name)
             if spec.get("kind") in ("folder", "file", "device") and value and name in given \
                     and not os.path.lexists(value):
-                notes.append(f"{name}: {value} does not exist (as a workspace a start creates it empty; a mount or "
-                             "device is refused)")
+                notes.append(f"{name}: {value} does not exist; the start creates it for its MCP server" if name in
+                             servers else f"{name}: {value} does not exist (as a workspace a start creates it empty; "
+                             "a mount or device is refused)")
     return found
 
 
@@ -653,7 +769,21 @@ def split_mode(options):
     return kept, mode
 
 
-def apply(argv, canonical=None, with_mode=False, notes=None):
+def copied_logins(options, credential):
+    """The --copy values among OPTIONS (canonical) that bring a login in (CREDENTIAL: the launcher's
+    copies_credential): a preset may not, as it may not --copy-auth."""
+    found = []
+    for index, token in enumerate(options):
+        name, equals, value = token.partition("=")
+        if name != "--copy":
+            continue
+        value = value if equals else (options[index + 1] if index + 1 < len(options) else "")
+        if credential(value):
+            found.append(value)
+    return found
+
+
+def apply(argv, canonical=None, with_mode=False, notes=None, credential=None):
     """ARGV (the launcher's: AGENT options... [-- agent args]) with --preset NAME and --preset-value KEY=VALUE
     replaced by the preset's options, placed right after the agent so that the command line wins; and its first
     task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset. What
@@ -696,6 +826,11 @@ def apply(argv, canonical=None, with_mode=False, notes=None):
     found = refused_in(options, preset.get("_origin"))
     if found:
         raise ValueError(f"preset {name}: {', '.join(dict.fromkeys(found))} is not allowed in a preset")
+    # CREDENTIAL (the launcher's copies_credential): a --copy of a login file is a login copied in as well.
+    copied = copied_logins(options, credential) if credential else []
+    if copied:
+        raise ValueError(f"preset {name}: --copy {copied[0]} copies a login in, which is not allowed in a preset "
+                         "(as --copy-auth)")
     # The preset's --mode is taken out: the launcher applies it only where it is stricter than what the command
     # line, the project file and your defaults choose (it never lowers a stricter one).
     options, mode = split_mode(options)
@@ -713,7 +848,7 @@ def origin_text(preset):
 
 
 def describe(preset, out=print):
-    out(f"{preset['id']}: {preset['title']}  ({preset.get('category', 'simple')}, {origin_text(preset)})")
+    out(f"{preset['id']}: {preset['title']}  ({category_text(category_of(preset))}, {origin_text(preset)})")
     out(f"  {preset['description']}")
     out(f"  agents: {', '.join(preset.get('agents', AGENTS))}")
     if preset.get("options"):
@@ -836,8 +971,10 @@ def main(argv, out=print):
     p = argparse.ArgumentParser(prog="sandbox-ai presets", description=__doc__.split("\n\nStandard library")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     commands = p.add_subparsers(dest="command", required=True)
-    listing = commands.add_parser("list", help="the built-in presets and your own")
+    listing = commands.add_parser("list", help="the built-in presets and your own, by category")
     listing.add_argument("-j", "--json", action="store_true")
+    kinds = commands.add_parser("categories", help="the categories presets are listed under (English and German)")
+    kinds.add_argument("-j", "--json", action="store_true")
     shown = commands.add_parser("show", help="what a preset sets, needs and asks for")
     shown.add_argument("name")
     shown.add_argument("-j", "--json", action="store_true")
@@ -856,6 +993,13 @@ def main(argv, out=print):
     try:
         if args.command == "dirs":
             return dirs_main(args, out)
+        if args.command == "categories":
+            if args.json:
+                out(json.dumps(categories(), indent=2, ensure_ascii=False))
+            else:
+                for entry in categories():
+                    out(f"{entry['id']:<12} {entry['title']['en']}: {entry['description']['en']}")
+            return 0
         if args.command == "list":
             damaged = []
             presets = catalog(damaged)
@@ -863,9 +1007,9 @@ def main(argv, out=print):
                 out(json.dumps([public(preset) for preset in presets.values()], indent=2))
             else:
                 for category in CATEGORIES:
-                    group = [preset for preset in presets.values() if preset.get("category", "simple") == category]
+                    group = [preset for preset in presets.values() if category_of(preset) == category]
                     if group:
-                        out(f"{category}:")
+                        out(f"{category_text(category)} ({category}):")
                         for preset in sorted(group, key=lambda x: x["id"]):
                             mine = ("  (yours)" if preset["_origin"] == "yours" else
                                     f"  (from {preset['_dir']})" if preset["_origin"] == "extra" else "")

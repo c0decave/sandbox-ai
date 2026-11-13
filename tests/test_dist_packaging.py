@@ -181,6 +181,36 @@ def test_make_dist_adds_packages_and_rewrites_the_checksums(tmp_path):
         make_dist.main(["--sums-only", "--out", str(out), "--add", str(out / "SHA256SUMS")])
 
 
+def test_make_dist_packs_the_apps_videos_into_sha256sums_and_publish_wants_them_listed(tmp_path, capsys):
+    """--videos DIR: the series' videos and subtitles (nothing else) in sandbox-ai-videos.tar, listed in SHA256SUMS;
+    publish_release.py refuses that archive when SHA256SUMS does not list it (the app would refuse it)."""
+    import tarfile
+    make_dist = load("make_dist")
+    rendered = tmp_path / "videos"
+    rendered.mkdir()
+    for name in ("sandbox-ai-app-01-launch-de.mp4", "sandbox-ai-app-01-launch-de.vtt", "notes.txt",
+                 "sandbox-ai-course-de.mp4"):
+        (rendered / name).write_bytes(name.encode())
+    out = tmp_path / "dist"
+    out.mkdir()
+    (out / "sandbox-ai.pyz").write_bytes(b"pyz")
+    assert make_dist.main(["--sums-only", "--out", str(out), "--videos", str(rendered)]) == 0
+    archive = out / make_dist.VIDEOS
+    with tarfile.open(archive) as tar:
+        assert tar.getnames() == ["sandbox-ai-app-01-launch-de.mp4", "sandbox-ai-app-01-launch-de.vtt"]
+    sums = dict(reversed(line.split("  ")) for line in (out / "SHA256SUMS").read_text().splitlines())
+    assert sums[make_dist.VIDEOS] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    (rendered / "sandbox-ai-app-01-launch-de.mp4").unlink()
+    with pytest.raises(SystemExit, match="no sandbox-ai-app-NN-PAGE-LANG.mp4"):
+        make_dist.main(["--sums-only", "--out", str(out), "--videos", str(rendered)])
+    publish = load("publish_release")
+    (out / "SHA256SUMS").write_text(f"{hashlib.sha256(b'pyz').hexdigest()}  sandbox-ai.pyz\n")
+    with pytest.raises(SystemExit, match="does not list sandbox-ai-videos.tar"):
+        publish.check_files([out / "SHA256SUMS", out / "sandbox-ai.pyz", archive], None, True)
+    with pytest.raises(SystemExit, match="without SHA256SUMS"):
+        publish.check_files([archive], None, True)
+
+
 @pytest.mark.parametrize("kind", ["pyz", "appimage", "macos-app"])
 def test_a_packaged_sandbox_ai_is_updated_by_download(tmp_path, kind):
     tree = tmp_path / "tree"

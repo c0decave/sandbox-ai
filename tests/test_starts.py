@@ -106,6 +106,7 @@ def test_entries(scenario, tmp_path):
         assert set(found) == {"web", "old", "claude-1234abcd", "mcp-demo"}
         assert found["web"]["state"] == "running" and found["web"]["run"] == "session-web"
         assert found["web"]["attachable"] is True and found["web"]["home"] == "kept"
+        assert found["web"]["app_tab"] is None and found["old"]["app_tab"] is None
         assert found["old"]["state"] == "stopped" and found["old"]["pid"] is None
         assert found["claude-1234abcd"]["kind"] == "run" and found["claude-1234abcd"]["home"] == "discarded"
         assert found["mcp-demo"]["kind"] == "mcp" and found["mcp-demo"]["state"] == "running"
@@ -1245,3 +1246,10 @@ def test_the_launchers_short_options_after_resume_name_are_its_own():
     assert long_forms == ["resume", "web", "--memory", "4g", "--rules", "r.json", "-m", "/a:/b", "-r", "--", "-me"]
     assert st.launcher_long_forms(["stop", "web", "-w", "3"]) == ["stop", "web", "-w", "3"]
     assert st.launcher_long_forms(["resume", "web", "-me=4g", "-m=/a:/b"]) == ["resume", "web", "--memory=4g", "-m=/a:/b"]
+
+
+def test_list_names_the_app_tab_a_running_start_was_started_in(tmp_path):
+    make_start("web", tmp_path, pid=41, app_tab="0123456789abcdef")
+    make_start("old", app_tab="fedcba9876543210")  # stopped: no tab to attach any more
+    found = {e["name"]: e for e in listed()}
+    assert found["web"]["app_tab"] == "0123456789abcdef" and found["old"]["app_tab"] is None

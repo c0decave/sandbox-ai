@@ -74,7 +74,7 @@ def _page_tips():
 
 KIND_SECTIONS = {"workspace": "workspaces-mounts", "mount": "workspaces-mounts", "home": "secrets", "kits": "kits",
                  "agent": "sandbox", "approvals": "approvals", "proxy": "proxy", "git": "secrets", "mcp": "mcp",
-                 "llm": "llm", "network": "network", "vpn": "vpn-tor", "devices": "devices", "limits": "limits",
+                 "llm": "llm", "service": "services", "network": "network", "vpn": "vpn-tor", "devices": "devices", "limits": "limits",
                  "display": "display", "session": "sessions", "logs": "logs", "engine": "sandbox"}
 KIND_DOES = {
     "workspace": ("Connected to the agent, its folder is mounted: the first at /work (the project file is written "
@@ -90,14 +90,14 @@ KIND_DOES = {
     "kits": ("The kits you tick are copied into HOME at the start; memory and plugins can be switched off.",
              "Die angehakten Kits werden beim Start ins HOME kopiert; Memory und Plugins lassen sich abschalten."),
     "agent": ("Always on the board: which agent runs, its model and arguments. Everything else connects to it.",
-              "Immer auf der Tafel: welcher Agent läuft, sein Modell und seine Argumente. Alles andere verbindet sich"
+              "Immer auf dem Board: welcher Agent läuft, sein Modell und seine Argumente. Alles andere verbindet sich"
               " mit ihm."),
     "approvals": ("Sets when a running sandbox asks you (Approvals page) and which rulesets allow, ask or deny.",
                   "Legt fest, wann eine laufende Sandbox Sie fragt (Seite Freigaben) und welche Regelwerke "
                   "erlauben, fragen oder ablehnen."),
     "proxy": ("Always on the board: every connection passes it. Off (--no-proxy) only where the policy allows; "
               "request rules per host narrow what a host may receive.",
-              "Immer auf der Tafel: Jede Verbindung läuft hindurch. Aus (--no-proxy) nur, wo die Richtlinie es "
+              "Immer auf dem Board: Jede Verbindung läuft hindurch. Aus (--no-proxy) nur, wo die Richtlinie es "
               "erlaubt; Anfrageregeln pro Host begrenzen, was ein Host bekommen darf."),
     "git": ("Commit identity and push tokens; with the token proxy the agent never sees a token.",
             "Commit-Identität und Push-Tokens; mit dem Token-Proxy sieht der Agent nie ein Token."),
@@ -105,18 +105,29 @@ KIND_DOES = {
             "relay that applies your rules.",
             "Mit dem Agenten verbunden, startet der Server in einer eigenen Sandbox, und der Agent erreicht ihn "
             "über ein Relay, das Ihre Regeln anwendet."),
+    "service": ("Connected to the agent, a container of one of your images starts in the sandbox's pod before the "
+                "agent: the agent reaches it at localhost:PORT, and it is behind the same firewall and proxy. Its "
+                "image is unchecked; it is removed with the run.",
+                "Mit dem Agenten verbunden, startet ein Container eines Ihrer Images vor dem Agenten im Pod der "
+                "Sandbox: Der Agent erreicht ihn unter localhost:PORT, und er liegt hinter derselben Firewall und "
+                "demselben Proxy. Sein Image ist ungeprüft; er wird mit dem Lauf entfernt."),
     "llm": ("Opens only the address and port of a server registered with sandbox-ai llm; its key stays with the "
             "proxy.",
             "Öffnet nur Adresse und Port eines mit sandbox-ai llm eingetragenen Servers; sein Schlüssel bleibt "
             "beim Proxy."),
     "network": ("Always on the board: profiles, allowed hosts, addresses, ports and DNS. Nothing listed here is "
-                "reachable (except the agent's provider).",
-                "Immer auf der Tafel: Profile, erlaubte Hosts, Adressen, Ports und DNS. Was hier nicht steht, ist "
-                "nicht erreichbar (außer dem Anbieter des Agenten)."),
+                "reachable (except the agent's provider). A host allowed here is reached; what a ruleset decides about "
+                "its requests (Approvals and rules) still holds: a request a ruleset asks about is asked all the same.",
+                "Immer auf dem Board: Profile, erlaubte Hosts, Adressen, Ports und DNS. Was hier nicht steht, ist "
+                "nicht erreichbar (außer dem Anbieter des Agenten). Ein hier erlaubter Host wird erreicht; was ein "
+                "Regelwerk über seine Anfragen entscheidet (Freigaben und Regeln), gilt trotzdem: Eine Anfrage, nach "
+                "der ein Regelwerk fragt, wird dennoch gefragt."),
     "vpn": ("Every connection leaves through the profile's tunnel; a kill switch blocks the rest, and the start "
-            "checks addresses and DNS first.",
+            "checks addresses and DNS first. The VPN decides the way out, not what is allowed: hosts are opened in "
+            "Network, and rulesets still ask about or deny requests.",
             "Jede Verbindung geht durch den Tunnel des Profils; ein Kill-Switch sperrt den Rest, und der Start "
-            "prüft vorher Adressen und DNS."),
+            "prüft vorher Adressen und DNS. Das VPN bestimmt den Weg hinaus, nicht was erlaubt ist: Hosts werden "
+            "unter Netzwerk geöffnet, und Regelwerke fragen oder lehnen Anfragen weiterhin ab."),
     "devices": ("The devices you list are handed to the agent. Each one weakens the isolation: list only what "
                 "the task needs.",
                 "Die aufgeführten Geräte werden dem Agenten gegeben. Jedes schwächt die Isolation: Nennen Sie nur, "
@@ -141,7 +152,7 @@ def _kind_tips():
     found = {}
     for key, kind in B.KINDS.items():
         options = ", ".join(kind.options[:6]) + (", …" if len(kind.options) > 6 else "")
-        cli = {"workspace": "--workspace, --workspace-ro", "mount": "--mount SRC:DEST[:ro|rw]", "mcp": "--mcp NAME",
+        cli = {"workspace": "--workspace, --workspace-ro", "mount": "--mount SRC:DEST[:ro|rw]", "mcp": "--mcp NAME", "service": "--service NAME[:KEY=VALUE,...]",
                "proxy": "--no-proxy, --allow-http, --no-inspect"}.get(key, options)
         found[f"kind.{key}"] = Tip(f"kind.{key}", both(kind.title), both(kind.help), Text(*KIND_DOES[key]), cli,
                                    KIND_SECTIONS[key])
@@ -222,13 +233,13 @@ AREA_TIPS = (
          ("Everything you can add to the sandbox: folders, network, MCP and LLM servers, VPN, devices, limits and "
           "more. Parts that may exist once and are on the board already are greyed out.",
           "Alles, was Sie der Sandbox hinzufügen können: Ordner, Netzwerk, MCP- und LLM-Server, VPN, Geräte, Grenzen "
-          "und mehr. Teile, die es nur einmal geben darf und die schon auf der Tafel sind, sind ausgegraut."),
+          "und mehr. Teile, die es nur einmal geben darf und die schon auf dem Board sind, sind ausgegraut."),
          ("Drag a part onto the board to place it where you drop it, or double-click it (or press Enter) to add it. "
           "The guide then asks what it needs. The (?) of a row explains that part.",
-          "Ziehen Sie ein Teil auf die Tafel, um es dort abzulegen, oder doppelklicken Sie es (oder drücken Sie "
+          "Ziehen Sie ein Teil auf das Board, um es dort abzulegen, oder doppelklicken Sie es (oder drücken Sie "
           "Enter), um es hinzuzufügen. Der Guide fragt dann, was es braucht. Das (?) einer Zeile erklärt dieses Teil."),
          "", "page-board"),
-    _tip("board.canvas", ("The board", "Die Tafel"),
+    _tip("board.canvas", ("The board", "Das Board"),
          ("One sandbox as parts and connections. An arrow means flow: folders give the agent its files, its "
           "connections pass the proxy to the network.",
           "Eine Sandbox als Teile und Verbindungen. Ein Pfeil bedeutet Fluss: Ordner geben dem Agenten seine "
@@ -247,16 +258,16 @@ AREA_TIPS = (
     _tip("board.inspector", ("Inspector", "Inspektor"),
          ("The settings of the selected part, built from the launcher's own options with their help texts.",
           "Die Einstellungen des gewählten Teils, aufgebaut aus den Optionen des Launchers mit ihren Hilfetexten."),
-         ("A change applies to the board at once and is one step of Undo; Set up step by step… asks the "
+         ("A change applies to the board at once and is one step of Undo; Wizard (bottom left) asks the "
           "questions again. It is a panel: drag its title to another edge of the window, or out of it (or use the "
           "undock button) to make it a window of its own; its arrow folds it to a strip at the edge. A click on a "
           "part unfolds it (or shows it again, closed or floating where it was); Esc or a click on the empty board "
           "fold it while it is docked. View > Panels shows or closes it; where it was is kept for the next start.",
-          "Eine Änderung gilt sofort auf der Tafel und ist ein Schritt von Rückgängig; Schritt für Schritt "
-          "einrichten… stellt die Fragen erneut. Er ist ein Bereich: Ziehen Sie seinen Titel an einen anderen Rand "
+          "Eine Änderung gilt sofort auf dem Board und ist ein Schritt von Rückgängig; Wizard (links unten) "
+          "stellt die Fragen erneut. Er ist ein Bereich: Ziehen Sie seinen Titel an einen anderen Rand "
           "des Fensters oder aus ihm heraus (oder nutzen Sie die Schaltfläche zum Abdocken), um ihn zu einem eigenen "
           "Fenster zu machen; sein Pfeil klappt ihn zu einem Streifen am Rand ein. Ein Klick auf ein Teil klappt ihn "
-          "aus (oder zeigt ihn wieder, geschlossen oder schwebend, wo er war); Esc oder ein Klick auf die leere Tafel "
+          "aus (oder zeigt ihn wieder, geschlossen oder schwebend, wo er war); Esc oder ein Klick auf das leere Board "
           "klappen ihn ein, solange er angedockt ist. Ansicht > Bereiche zeigt oder schließt ihn; wo er war, bleibt "
           "für den nächsten Start."),
          "", "page-board"),
@@ -267,20 +278,20 @@ AREA_TIPS = (
           "schwächt, mit einer Sicherheitspunktzahl von 100."),
          ("Shown when you ask for it: the score's button above the board, or View > Panels. Double-click a finding "
           "to select its part. Apply and Start refuse while there is an error.",
-          "Wird gezeigt, wenn Sie danach fragen: die Schaltfläche des Sicherheitswerts über der Tafel oder Ansicht > "
+          "Wird gezeigt, wenn Sie danach fragen: die Schaltfläche des Sicherheitswerts über dem Board oder Ansicht > "
           "Bereiche. Doppelklicken Sie einen Befund, um sein Teil zu wählen. Übernehmen und Starten verweigern, "
           "solange es einen Fehler gibt."),
          "", "page-board"),
     _tip("board.command", ("Command line and verdict", "Befehlszeile und Urteil"),
          ("The board as the launcher's command line, and below it the launcher's own verdict from a dry run in "
           "the background after each change.",
-          "Die Tafel als Befehlszeile des Launchers und darunter das Urteil des Launchers aus einem Probelauf im "
+          "Das Board als Befehlszeile des Launchers und darunter das Urteil des Launchers aus einem Probelauf im "
           "Hintergrund nach jeder Änderung."),
          None, "sandbox-ai AGENT --dry-run", "page-board"),
     _tip("board.apply", ("Apply", "Übernehmen"),
          ("Writes the board as .sandbox-ai.json into the first workspace and trusts exactly that content; the "
           "layout goes into .sandbox-ai.board.json.",
-          "Schreibt die Tafel als .sandbox-ai.json in den ersten Arbeitsordner und vertraut genau diesem Inhalt; das "
+          "Schreibt das Board als .sandbox-ai.json in den ersten Arbeitsordner und vertraut genau diesem Inhalt; das "
           "Layout geht in .sandbox-ai.board.json."),
          ("You see the file and what changes before anything is written; later starts of the project use it.",
           "Sie sehen die Datei und was sich ändert, bevor etwas geschrieben wird; spätere Starts des Projekts "
@@ -288,22 +299,22 @@ AREA_TIPS = (
          "sandbox-ai wizard trust", "page-board"),
     _tip("board.dry", ("Dry run", "Probelauf"),
          ("Asks the launcher about exactly this board and shows its plan.",
-          "Fragt den Launcher nach genau dieser Tafel und zeigt seinen Plan."),
+          "Fragt den Launcher nach genau diesem Board und zeigt seinen Plan."),
          ("Nothing starts; a refusal names the option it does not accept.",
           "Nichts startet; eine Ablehnung nennt die Option, die er nicht annimmt."),
          "--dry-run", "page-board"),
     _tip("board.presets", ("Presets and wizard", "Vorlagen und Assistent"),
          ("New from preset… opens the gallery: ready boards, sandbox-ai's presets and your own. Wizard… builds a "
           "new project step by step.",
-          "Neu aus Vorlage… öffnet die Galerie: fertige Tafeln, die Vorlagen von sandbox-ai und Ihre eigenen Vorlagen."
+          "Neu aus Vorlage… öffnet die Galerie: fertige Boards, die Vorlagen von sandbox-ai und Ihre eigenen Vorlagen."
           " Assistent… baut ein neues Projekt Schritt für Schritt."),
          ("In the gallery, Save the board as a preset… keeps the board shown now as your own preset.",
-          "In der Galerie speichert Tafel als Vorlage speichern… die gezeigte Tafel als Ihre eigene Vorlage."),
+          "In der Galerie speichert Board als Vorlage speichern… das gezeigte Board als Ihre eigene Vorlage."),
          "sandbox-ai presets list", "app-presets-gallery"),
     _tip("board.tools", ("Undo, arrange, zoom", "Rückgängig, Anordnen, Zoom"),
          ("Undo and Redo go through every change of this project's board; Arrange lays the parts out in columns; "
           "+, − and Fit zoom.",
-          "Rückgängig und Wiederholen gehen durch jede Änderung an der Tafel dieses Projekts; Anordnen legt die Teile"
+          "Rückgängig und Wiederholen gehen durch jede Änderung am Board dieses Projekts; Anordnen legt die Teile"
           " in Spalten; +, − und Einpassen zoomen."),
          ("Ctrl and the mouse wheel zoom too. Drag with the right or the middle mouse button to move the view; a "
           "right click opens a menu (add a part there, select all, fit, zoom 100 %, or the node's own actions).",
@@ -533,7 +544,7 @@ AREA_TIPS = (
          "sandbox-ai kits list", "kits"),
     _tip("kits.use", ("Use in the current project", "Im aktuellen Projekt nutzen"),
          ("Adds the kit to the kits part of the project's board and applies it.",
-          "Fügt das Kit dem Kits-Teil der Tafel des Projekts hinzu und übernimmt es."),
+          "Fügt das Kit dem Kits-Teil des Boards des Projekts hinzu und übernimmt es."),
          ("You see the new .sandbox-ai.json before it is written and trusted.",
           "Sie sehen die neue .sandbox-ai.json, bevor sie geschrieben und ihr vertraut wird."),
          "--kit NAME", "kits"),
@@ -557,7 +568,7 @@ AREA_TIPS = (
           "Die Server, die Sie definiert haben, jeder in einer eigenen Sandbox oder einem eigenen Container, nur "
           "mit dem Netzwerk und den Ordnern, die seine Definition nennt."),
          ("A start names a server with --mcp, or connect an MCP part to the agent on the board.",
-          "Ein Start nennt einen Server mit --mcp, oder verbinden Sie ein MCP-Teil auf der Tafel mit dem Agenten."),
+          "Ein Start nennt einen Server mit --mcp, oder verbinden Sie ein MCP-Teil auf dem Board mit dem Agenten."),
          "sandbox-ai mcp list, --mcp NAME", "mcp"),
     _tip("mcp.catalog", ("Catalogs", "Kataloge"),
          ("Audited servers, pinned by digest, ready to add.", "Geprüfte Server, per Digest festgelegt, bereit zum "
@@ -652,7 +663,7 @@ AREA_TIPS = (
           "WireGuard, OpenVPN, Mullvad, Tailscale oder Tor vor einer Sandbox; Schlüssel bleiben bei sandbox-ai "
           "secrets."),
          ("A start uses one with --vpn NAME, or connect a VPN part on the board.",
-          "Ein Start nutzt eines mit --vpn NAME, oder verbinden Sie ein VPN-Teil auf der Tafel."),
+          "Ein Start nutzt eines mit --vpn NAME, oder verbinden Sie ein VPN-Teil auf dem Board."),
          "sandbox-ai vpn add | list, --vpn NAME", "vpn-tor"),
     # Teams
     _tip("team.host", ("Whose teams", "Wessen Teams"),
@@ -667,11 +678,11 @@ AREA_TIPS = (
           "Jedes Team mit seinen Mitgliedern und seinem gemeinsamen Arbeitsordner; jedes Mitglied ist eine eigene "
           "Sitzung (NAME-AGENT)."),
          None, "sandbox-ai team list", "teams"),
-    _tip("team.board", ("The board", "Die Tafel"),
+    _tip("team.board", ("The board", "Das Board"),
          ("The tasks between the members: who posted each, for whom, its state and what it asks. The board is an "
           "MCP server of the team, in a sandbox without network.",
           "Die Aufgaben zwischen den Mitgliedern: wer sie gestellt hat, für wen, ihr Stand und was sie verlangt. "
-          "Die Tafel ist ein MCP-Server des Teams, in einer Sandbox ohne Netzwerk."),
+          "Das Board ist ein MCP-Server des Teams, in einer Sandbox ohne Netzwerk."),
          ("Post a task… puts one there from you.", "Aufgabe stellen… legt eine von Ihnen dort ab."),
          "sandbox-ai team show NAME, team post NAME AGENT TASK", "teams"),
     _tip("team.start", ("Start a team", "Ein Team starten"),
@@ -754,7 +765,7 @@ AREA_TIPS = (
     # Settings dialog: one per tab
     _tip("settings.appearance", ("Appearance", "Aussehen"),
          ("Theme, fonts and language, the guide for new board parts, the guided tour and the intro.",
-          "Farbschema, Schriften und Sprache, der Guide für neue Teile der Tafel, die geführte Tour und das Intro."),
+          "Farbschema, Schriften und Sprache, der Guide für neue Teile des Boards, die geführte Tour und das Intro."),
          ("Each field is saved when it changes; a new language applies at the next start. A font marked not installed "
           "is not downloaded: install it (the list says how) and start the app again.",
           "Jedes Feld wird gespeichert, wenn es sich ändert; eine neue Sprache gilt beim nächsten Start. Eine als nicht "
@@ -782,7 +793,7 @@ AREA_TIPS = (
          "SANDBOX_AI_HOME", "releases-update"),
     _tip("settings.new-projects", ("New projects", "Neue Projekte"),
          ("The agent, backend and preset a new board starts with, and the board's grid.",
-          "Agent, Backend und Vorlage, mit denen eine neue Tafel beginnt, und das Raster der Tafel."),
+          "Agent, Backend und Vorlage, mit denen ein neues Board beginnt, und das Raster des Boards."),
          None, "", "page-board"),
     _tip("settings.privacy", ("Privacy", "Datenschutz"),
          ("sandbox-ai's own defaults for every start: the agents' telemetry and the privacy check of pushes.",
@@ -797,23 +808,38 @@ AREA_TIPS = (
          None, "/etc/sandbox-ai/policy.json", "policy"),
     # The preset gallery
     _tip("gallery.cards", ("Presets", "Vorlagen"),
-         ("Ready boards by category, sandbox-ai's own presets and yours (My presets), each with a picture of its "
-          "parts, its security score and what is left to fill in.",
-          "Fertige Tafeln nach Kategorie, die eigenen Vorlagen von sandbox-ai und Ihre (Meine Vorlagen), jede mit "
-          "einem Bild ihrer Teile, ihrer Sicherheitspunktzahl und dem, was noch auszufüllen ist."),
-         ("Select one to see it on the right; Create (or Enter, or a double-click) makes it the board.",
-          "Wählen Sie eine, um sie rechts zu sehen; Anlegen (oder Enter, oder ein Doppelklick) macht sie zur Tafel."),
-         "sandbox-ai presets list", "app-presets-gallery"),
+         ("Ready boards by category: the app's own, sandbox-ai's presets by sandbox-ai's categories (Development, "
+          "Research & web, Local LLMs, Security analysis, Forensics & reverse engineering, Hardware & devices, "
+          "Network, Privacy & anonymity, Writing & docs, Learning, games & demos, Testing sandbox-ai) and yours (My "
+          "presets), each with a picture of its parts, its security score and what is left to fill in.",
+          "Fertige Boards nach Kategorie: die der App, die Vorlagen von sandbox-ai nach dessen Kategorien "
+          "(Entwicklung, Recherche & Web, Lokale LLMs, Sicherheitsanalyse, Forensik & Reverse Engineering, Hardware "
+          "& Geräte, Netzwerk, Datenschutz & Anonymität, Schreiben & Dokumentation, Lernen, Spiele & Demos, "
+          "sandbox-ai testen) und Ihre (Meine Vorlagen), jede mit einem Bild ihrer Teile, ihrer "
+          "Sicherheitspunktzahl und dem, was noch auszufüllen ist."),
+         ("Select one to see it on the right; Create (or Enter, or a double-click) makes it the board. A category "
+          "on the left shows its section; its description is under the heading.",
+          "Wählen Sie eine, um sie rechts zu sehen; Anlegen (oder Enter, oder ein Doppelklick) macht sie zum Board. "
+          "Eine Kategorie links zeigt ihren Abschnitt; ihre Beschreibung steht unter der Überschrift."),
+         "sandbox-ai presets list, sandbox-ai presets categories", "app-presets-gallery"),
     _tip("gallery.mine", ("Your own presets", "Ihre eigenen Vorlagen"),
-         ("Save the board as a preset… keeps the board shown now under a name (no workspaces, no secrets). "
-          "Import… adds one from a JSON file, Export… writes the selected one, Delete removes one of yours.",
-          "Tafel als Vorlage speichern… bewahrt die gezeigte Tafel unter einem Namen auf (ohne Arbeitsordner, ohne "
-          "Geheimnisse). Importieren… fügt eine aus einer JSON-Datei hinzu, Exportieren… schreibt die gewählte, "
-          "Löschen entfernt eine Ihrer eigenen."),
-         ("To edit one: create a board from it, change the board, then save it again under the same title: it "
-          "replaces the old one.",
-          "Zum Bearbeiten: Legen Sie daraus eine Tafel an, ändern Sie die Tafel und speichern Sie sie unter demselben"
-          " Titel erneut: Sie ersetzt die alte."),
+         ("Save as preset… (on the Board, its context menu, the File menu, or here) keeps the board under a name "
+          "with a description, a category and notes. By default its folders and the values filled in are kept: "
+          "each folder (workspaces, mounts, an MCP server's folder) is offered with its path of now at the next use, "
+          "and a note names what belongs to this computer. Secrets never: a board with one is not saved. Import… "
+          "adds one from a JSON file, Export… writes the selected one, Rename… changes its name and texts, Delete "
+          "removes one of yours.",
+          "Als Vorlage speichern… (auf dem Board, in seinem Kontextmenü, im Menü Datei oder hier) behält das Board "
+          "unter einem Namen mit Beschreibung, Kategorie und Hinweisen. Standardmäßig bleiben seine Ordner und die "
+          "ausgefüllten Werte: Jeder Ordner (Arbeitsordner, Einbindungen, der Ordner eines MCP-Servers) wird bei der "
+          "nächsten Verwendung mit seinem jetzigen Pfad angeboten, und ein Hinweis nennt, was zu diesem Rechner "
+          "gehört. Geheimnisse nie: Ein Board mit einem wird nicht gespeichert. Importieren… fügt eine aus einer "
+          "JSON-Datei hinzu, Exportieren… schreibt die gewählte, Umbenennen… ändert Name und Texte, Löschen entfernt "
+          "eine Ihrer eigenen."),
+         ("To change one: create a board from it, change the board, then Save as preset…: it offers to replace the "
+          "preset the board came from (after asking).",
+          "Zum Ändern: Legen Sie daraus ein Board an, ändern Sie das Board, dann Als Vorlage speichern…: Es bietet "
+          "an, die Vorlage zu ersetzen, aus der das Board stammt (nach Rückfrage)."),
          "~/.config/sandbox-ai/app/presets.json", "app-presets-gallery"),
 )
 
@@ -1032,7 +1058,7 @@ SETTING_TIPS = _terms(
     ("language", "The language of the app; it applies at the next start.",
      "Die Sprache der App; sie gilt ab dem nächsten Start."),
     ("guide_nodes", "A new part of the board asks what matters for it, one question at a time.",
-     "Ein neues Teil der Tafel fragt nacheinander, worauf es ankommt."),
+     "Ein neues Teil des Boards fragt nacheinander, worauf es ankommt."),
     ("guide_tour", "At the first start the app offers a tour of its pages.",
      "Beim ersten Start bietet die App eine Tour durch ihre Seiten an."),
     ("help_buttons", "Off hides every (?); these short explanations on hover, the Help page, the tours and F1 stay.",
@@ -1050,12 +1076,33 @@ SETTING_TIPS = _terms(
      "Wo Builds, Anmeldungen und andere Befehle laufen: in einem Tab der App oder in einem Terminalfenster."),
     ("web_without_sandbox", "Terminal tabs work without free user namespaces then, but without Chromium's "
      "protection.", "Terminal-Tabs funktionieren dann ohne freie User-Namespaces, aber ohne den Schutz von Chromium."),
+    ("login_links", "An agent's sign-in link opens in the app's login browser (it pastes the code into the "
+     "terminal) or in your usual browser.",
+     "Der Anmelde-Link eines Agenten öffnet sich im Login-Browser der App (er fügt den Code ins Terminal ein) oder "
+     "in Ihrem gewohnten Browser."),
+    ("copy_on_select", "On: text selected in a terminal tab is on the clipboard at once (on Linux it is always the "
+     "primary selection).",
+     "An: in einem Terminal-Tab markierter Text liegt sofort in der Zwischenablage (unter Linux immer in der primären "
+     "Auswahl)."),
+    ("paste_warn", "Asks before pasting several lines where each line break acts as Enter. Control characters are "
+     "always asked about.",
+     "Fragt vor dem Einfügen mehrerer Zeilen, wo jeder Zeilenumbruch als Enter wirkt. Nach Steuerzeichen wird immer "
+     "gefragt."),
+    ("terminal_osc52", "Whether a program in a terminal tab (tmux's copy mode) may put text on the clipboard. Reading "
+     "it is never allowed.",
+     "Ob ein Programm in einem Terminal-Tab (der Copy-Modus von tmux) Text in die Zwischenablage legen darf. Lesen ist "
+     "nie erlaubt."),
+    ("notifications", "Popups at all: off by default - questions wait on the Approvals page and every notification "
+     "goes to the log.", "Überhaupt Popups: aus als Standard - Fragen warten auf der Seite Freigaben, und jede "
+     "Benachrichtigung landet im Log."),
     ("notify", "A desktop notification for each new question of a sandbox.",
      "Eine Desktop-Benachrichtigung für jede neue Frage einer Sandbox."),
     ("auto_tabs", "Each session or sandbox that starts gets one tab; its MCP servers, helpers and a team's other "
      "members get none (Open terminal reaches them).",
      "Jede startende Sitzung oder Sandbox bekommt einen Tab; ihre MCP-Server, Helfer und die anderen Mitglieder "
      "eines Teams keinen (Terminal öffnen erreicht sie)."),
+    ("reopen_terminals", "At start, every running session gets its terminal tab again (attached, never started).",
+     "Beim Start bekommt jede laufende Sitzung ihren Terminal-Tab wieder (angehängt, nie gestartet)."),
     ("notify_seconds", "How long a notification stays on the screen.", "Wie lange eine Benachrichtigung zu sehen ist."),
     ("notify_safeguards", "A notification when a safeguard refuses or ends something; the Safeguards tab lists all.",
      "Eine Benachrichtigung, wenn eine Schutzmaßnahme etwas ablehnt oder beendet; der Tab listet alle."),
@@ -1072,17 +1119,23 @@ SETTING_TIPS = _terms(
      "Wie oft das Verbindungsprotokoll neu gelesen wird."),
     ("sandbox_ai_home", "A sandbox-ai checkout to use instead of the sandbox-ai command; it applies at the next "
      "start.", "Ein sandbox-ai-Checkout statt des Befehls sandbox-ai; er gilt ab dem nächsten Start."),
-    ("default_agent", "The agent a new board starts with.", "Der Agent, mit dem eine neue Tafel beginnt."),
+    ("default_agent", "The agent a new board starts with.", "Der Agent, mit dem ein neues Board beginnt."),
     ("default_backend", "What isolates a new project: Podman (containers) or Bubblewrap.",
      "Was ein neues Projekt abschottet: Podman (Container) oder Bubblewrap."),
-    ("default_template", "The preset a new board starts from.", "Die Vorlage, mit der eine neue Tafel beginnt."),
+    ("default_template", "The preset a new board starts from.", "Die Vorlage, mit der ein neues Board beginnt."),
     ("board_confirm_remove", "On: the [x] of a part asks first. Off: it removes the part at once (Undo brings it "
      "back).", "An: das [x] eines Teils fragt zuerst. Aus: es entfernt das Teil sofort (Rückgängig holt es zurück)."),
     ("board_grid", "Moved parts snap to a grid of this many pixels; 0 switches it off.",
      "Verschobene Teile rasten in einem Raster dieser Pixelzahl ein; 0 schaltet es ab."),
+    ("desktop_notifications", "What the sandboxes show on the desktop themselves while this app does not run: "
+     "everything, only a canary's alarm, or nothing.", "Was die Sandboxen selbst auf dem Desktop zeigen, solange diese "
+     "App nicht läuft: alles, nur den Alarm eines Canary oder nichts."),
     ("telemetry", "Whether the agents send usage statistics, error reports and update checks; off is "
      "recommended.", "Ob die Agenten Nutzungsstatistiken, Fehlerberichte und Update-Abfragen senden; aus wird "
      "empfohlen."),
+    ("loop_guard", "What sandbox-ai does against a local model that repeats itself (--llm starts only): each layer on "
+     "or off, or a count; empty: sandbox-ai's own default.", "Was sandbox-ai gegen ein lokales Modell tut, das sich "
+     "wiederholt (nur mit --llm): jede Schicht an, aus oder eine Anzahl; leer: Standard von sandbox-ai."),
 )
 
 

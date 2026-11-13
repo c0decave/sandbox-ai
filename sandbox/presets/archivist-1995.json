@@ -4,6 +4,12 @@
   "id": "archivist-1995",
   "title": "The archivist of 1995",
   "description": "Your project's documentation as a 1995 homepage on a 640x480 screen; only the provider.",
+  "translations": {
+    "de": {
+      "title": "Der Archivar von 1995",
+      "description": "Die Dokumentation Ihres Projekts als Homepage von 1995 auf einem 640x480-Bildschirm; nur der Anbieter."
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

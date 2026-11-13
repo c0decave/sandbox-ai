@@ -98,7 +98,9 @@ def main(argv=None):
                  f"{os.environ.get('QTWEBENGINE_CHROMIUM_FLAGS', '')!r}, Chromium's sandbox "
                  f"{'off (QTWEBENGINE_DISABLE_SANDBOX)' if no_sandbox else 'on (checked before each terminal tab)'}\n")
 
-    app = QApplication.instance() or QApplication([arg for arg in arguments if arg != "--self-test"])
+    # argv[0] names the windows (X11's WM_CLASS instance): "sandbox-ai-app", not the "__main__.py" of `python -m`.
+    app = QApplication.instance() or QApplication(["sandbox-ai-app", *[arg for arg in arguments[1:]
+                                                                       if arg != "--self-test"]])
     # One app per user (single_instance.py): a second start shows the first one's window and ends - two would write
     # the same state file, the last to quit overwriting the other's unapplied board changes.
     instance = None
@@ -141,9 +143,10 @@ def main(argv=None):
     from . import fonts
     fonts.use(settings, app)  # the fonts chosen in the settings, when installed; theme.apply() applies them
     theme.apply(settings.get("theme", "system"), app)
-    from .widgets import fitting_dialogs, nonblocking_dialogs
+    from .widgets import fitting_dialogs, nonblocking_dialogs, window_close_controls
     nonblocking_dialogs()  # a dialog left open blocks nothing
     fitting_dialogs()  # and never reaches past the screen's edge
+    window_close_controls(app)  # every extra window: an [x] at its top right, Esc closes it
     from .ui import MainWindow, risk_text
     from .widgets import ask_first
     # Before any of sandbox-ai's modules runs in this process: are they (or the app) where a sandbox writes?

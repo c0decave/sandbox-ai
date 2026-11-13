@@ -8,14 +8,20 @@
                                    sandbox/release-signers embedded (they check the very first install)
   SHA256SUMS                       checksums of all of the above; install.sh verifies the bundle with it
   SHA256SUMS.sig                   with --sign KEY: the SSH signature over SHA256SUMS (namespace sandbox-ai-release)
+  sandbox-ai-videos.tar            with --videos DIR: the videos about the app's pages (optional; the app downloads
+                                   it once, checked against the signed SHA256SUMS)
 
 Usage: scripts/make_dist.py [--out DIR] [--allow-dirty] [--skip-python] [--skip-pyz] [--no-isolation] [--add FILE ...]
-                             [--sign KEY]
-       scripts/make_dist.py --sums-only [--out DIR] [--add FILE ...] [--sign KEY]
+                             [--videos DIR] [--sign KEY]
+       scripts/make_dist.py --sums-only [--out DIR] [--add FILE ...] [--videos DIR] [--sign KEY]
 
 --add copies further release files into DIR before the checksums are made: the AppImages and disk images the
 release workflow builds (RELEASING.md). --sums-only keeps DIR as it is and only (re)writes SHA256SUMS (and with
 --sign its signature) over every file in it.
+
+--videos takes the folder docs/video/make_video.py --series pages rendered into: its sandbox-ai-app-NN-PAGE-LANG.mp4
+and .vtt files (nothing else) go into sandbox-ai-videos.tar - uncompressed (MP4 is compressed already), sorted, with
+a fixed owner, mode and time, so one folder always gives the same archive.
 
 --sign takes a private key file (ssh-keygen asks for its passphrase) or the .pub of a key in ssh-agent or on
 a FIDO token. The signature must verify against sandbox/release-signers, or the build stops: an install
@@ -69,6 +75,10 @@ MCP_CATALOG = "projects/sandbox-ai-mcp/catalog.json"  # the MCP servers' catalog
 # ... with what makes it usable: its signature, and the Bubblewrap form of its servers with its own.
 MCP_CATALOG_FILES = (MCP_CATALOG, MCP_CATALOG + ".sig", "projects/sandbox-ai-mcp/rootfs.json",
                      "projects/sandbox-ai-mcp/rootfs.json.sig")
+# The videos about the app's pages: the release file and the names of its members (the app's videos.py NAME and
+# ARCHIVE: it installs nothing else).
+VIDEOS = "sandbox-ai-videos.tar"
+VIDEO_NAME = re.compile(r"sandbox-ai-app-(\d{2})-([a-z]+)-([a-z]{2})\.(mp4|vtt)")
 
 
 def release_files():
@@ -112,6 +122,32 @@ def bundle(out, ver):
             tar.addfile(info, io.BytesIO(data))
     with open(path, "wb") as stream, gzip.GzipFile(fileobj=stream, mode="wb", mtime=mtime, filename="") as gz:
         gz.write(raw.getvalue())
+    return path
+
+
+def videos_archive(folder, out, mtime=None):
+    """OUT/sandbox-ai-videos.tar with the series' videos and subtitles of FOLDER (reproducible)."""
+    folder = Path(folder)
+    try:
+        names = sorted(entry.name for entry in os.scandir(folder) if entry.is_file(follow_symlinks=False)
+                       and VIDEO_NAME.fullmatch(entry.name))
+    except OSError as exc:
+        sys.exit(f"make_dist: --videos: {exc}")
+    if not any(name.endswith(".mp4") for name in names):
+        sys.exit(f"make_dist: --videos: no sandbox-ai-app-NN-PAGE-LANG.mp4 in {folder} (docs/video/make_video.py "
+                 "--series pages renders them)")
+    mtime = source_date() if mtime is None else mtime
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / VIDEOS
+    with tarfile.open(path, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for name in names:
+            data = (folder / name).read_bytes()
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime, info.mode = len(data), mtime, 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            tar.addfile(info, io.BytesIO(data))
     return path
 
 
@@ -160,6 +196,9 @@ def main(argv=None):
                              "packaging/requirements-ci.txt) instead of one python -m build would download")
     parser.add_argument("--add", metavar="FILE", type=Path, nargs="+", default=[],
                         help="Further release files (AppImages, disk images) to copy in before the checksums")
+    parser.add_argument("--videos", metavar="DIR", type=Path,
+                        help="Also pack the videos about the app's pages (make_video.py --series pages) into "
+                             f"{VIDEOS}")
     parser.add_argument("--sums-only", action="store_true",
                         help="Build nothing: (re)write SHA256SUMS over the files in --out (and sign it)")
     parser.add_argument("--sign", metavar="KEY", type=Path,
@@ -206,7 +245,10 @@ def main(argv=None):
 
 
 def finish(out, a, keys, ver):
-    """The --add files copied in, SHA256SUMS over everything in OUT, and its signature with --sign."""
+    """The --add files copied in, the videos packed (--videos), SHA256SUMS over everything in OUT, and its signature
+    with --sign."""
+    if getattr(a, "videos", None):
+        print(f"make_dist: {videos_archive(a.videos, out).name} from {a.videos}", file=sys.stderr)
     for extra in a.add:
         if extra.resolve() != (out / extra.name).resolve():
             shutil.copyfile(extra, out / extra.name)

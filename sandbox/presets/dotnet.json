@@ -1,0 +1,39 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "dotnet",
+  "title": ".NET",
+  "description": ".NET projects: NuGet, the .NET downloads and GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": ".NET",
+      "description": ".NET-Projekte: NuGet, die .NET-Downloads und GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-github",
+    "--allow-host",
+    "api.nuget.org",
+    "--allow-host",
+    "globalcdn.nuget.org",
+    "--allow-host",
+    "dot.net",
+    "--allow-host",
+    "dotnet.microsoft.com",
+    "--allow-host",
+    "builds.dotnet.microsoft.com",
+    "--memory",
+    "12g"
+  ],
+  "notes": [
+    "The SDK: Microsoft's dotnet-install.sh (https://dot.net/v1/dotnet-install.sh) into the sandbox's HOME, kept with the start; Debian has no .NET.",
+    "Telemetry: set DOTNET_CLI_TELEMETRY_OPTOUT=1 in your environment and pass it with --env DOTNET_CLI_TELEMETRY_OPTOUT (its collector is not opened anyway).",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

@@ -109,7 +109,9 @@ def test_packaging_ships_templates_and_marketplace():
     for path in (ROOT / "sandbox").rglob("*"):
         if path.is_file() and path.suffix not in (".py", ".pyc") and "__pycache__" not in path.parts:
             relative = str(path.relative_to(ROOT / "sandbox"))
-            assert any(fnmatch.fnmatch(relative, pattern) and relative.count("/") == pattern.count("/")
+            # setuptools' globs: "*" stays within one folder, "**" spans any (the vendored skills' trees).
+            assert any(fnmatch.fnmatch(relative, pattern) and ("**" in pattern or
+                                                               relative.count("/") == pattern.count("/"))
                        for pattern in patterns), relative
     manifest = (ROOT / "MANIFEST.in").read_text()
     assert all(f"graft sandbox/{name}" in manifest for name in ("templates", "web", "presets"))
@@ -150,7 +152,7 @@ def test_sources_order_and_errors(tmp_path):
         k.sources(s.parse_args(["codex", "--kit-dir", str(tmp_path / "mine")]))
     with pytest.raises(ValueError, match="--kit NAME"):
         s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / "w"), "--kit", "../etc"]))
-    with pytest.raises(ValueError, match="kits for codex: none"):
+    with pytest.raises(ValueError, match="kits for codex: design-system, ffuf, hallmark, hyperframes"):
         k.sources(s.parse_args(["codex", "--kit", "b"]))
 
 
@@ -679,22 +681,22 @@ def test_plugins_sync_reaches_github_only_for_a_github_plugin_of_the_own_marketp
 # --- the built-in kit egm ----------------------------------------------------------------------------
 
 def test_builtin_kit_egm_is_claude_only_and_a_kit_of_the_users_replaces_it(tmp_path):
-    assert k.kit_names(k.BUILTIN_KITS) == ["egm", "superpowers"] and k.builtin_kits("claude") == ["egm", "superpowers"]
-    assert k.builtin_kits("codex") == k.builtin_kits("opencode") == []
+    assert k.kit_names(k.BUILTIN_KITS) == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"] and k.builtin_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
+    assert k.builtin_kits("codex") == k.builtin_kits("opencode") == ["design-system", "ffuf", "hallmark", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
     document = json.loads((k.BUILTIN_KITS / "egm/claude/marketplaces.json").read_text())
     assert document["plugins"] == ["egm@sandbox-ai"]
     # Only marketplaces.json: a CLAUDE.md here would clash with the default kit's memory template.
     assert sorted(p.name for p in (k.BUILTIN_KITS / "egm/claude").iterdir()) == ["marketplaces.json"]
     assert k.kit_path("egm", "claude") == k.BUILTIN_KITS / "egm/claude"
-    assert k.available_kits("claude") == ["egm", "superpowers"] and k.available_kits("claude", builtin=False) == []
+    assert k.available_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"] and k.available_kits("claude", builtin=False) == []
     assert k.sources(args(tmp_path, "claude", "--kit", "egm"))[-1] == ("kit egm", k.BUILTIN_KITS / "egm/claude")
     for agent in ("codex", "opencode"):
         with pytest.raises(ValueError, match=f"built-in kit egm is not available for {agent} \\(only for claude\\)"):
             k.sources(s.parse_args([agent, "--kit", "egm"]))
     # The user's own kit egm (for that agent) wins.
     make(data() / "kits/egm/claude", {"skills/mine/SKILL.md": "x"})
-    assert k.kit_path("egm", "claude") == data() / "kits/egm/claude" and k.builtin_kits("claude") == ["superpowers"]
-    assert k.available_kits("claude") == ["egm", "superpowers"]
+    assert k.kit_path("egm", "claude") == data() / "kits/egm/claude" and "egm" not in k.builtin_kits("claude")
+    assert k.available_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
 
 
 def test_builtin_kit_egm_plan_and_install_hint(tmp_path):
@@ -721,7 +723,9 @@ def test_plugins_sync_installs_the_builtin_kit_only_on_request(tmp_path, monkeyp
     assert plugins.sync(out=lambda line: None, runner=fake, builtin=["egm"]) == 0
     install = next(c for c in fake.commands if c[-1] == "egm@sandbox-ai")
     assert "--allow-github" in install and "--kit" not in install
-    with pytest.raises(ValueError, match="no built-in kit of that name for claude \\(built-in: egm, superpowers\\)"):
+    with pytest.raises(ValueError, match="no built-in kit of that name for claude \\(built-in: design-system, egm, "
+                                         "ffuf, hallmark, hallmark-hook, hyperframes, playwright-skill, security-audit, "
+                                         "superpowers, tdd\\)"):
         plugins.sync(out=lambda line: None, runner=FakeClaude(), builtin=["nope"])
     lines = []
     plugins.status(lines.append)
@@ -868,12 +872,15 @@ def test_wizard_new_configuration_offers_kits_only_when_there_are_some():
     # Claude has the built-in kit egm: named, not asked for, while the user has no kits of their own.
     p = Prompter([])
     assert wizard.ask_new_kits(p, "claude") == [] and p.questions == []
-    assert "Built-in kits for claude: egm, superpowers; choose them later with: sandbox-ai wizard edit, part k" in p.lines[1]
+    assert ("Built-in kits for claude: design-system, egm, ffuf, hallmark, hallmark-hook, hyperframes, playwright-skill, "
+            "security-audit, superpowers, tdd; choose them later with: sandbox-ai wizard edit, part k") in p.lines[1]
     make(data() / "kits/review/claude", {"skills/a/SKILL.md": "x"})
     make(data() / "kits/python/codex", {"skills/a/SKILL.md": "x"})
     p = Prompter(["nope, review", "review, egm"])
     assert wizard.ask_new_kits(p, "claude") == ["--kit", "review", "--kit", "egm"]
-    assert "available for claude: egm (built-in), review, superpowers (built-in))" in p.questions[0]
+    assert ("available for claude: design-system (built-in), egm (built-in), ffuf (built-in), hallmark (built-in), "
+            "hallmark-hook (built-in), hyperframes (built-in), playwright-skill (built-in), review, security-audit "
+            "(built-in), superpowers (built-in), tdd (built-in))") in p.questions[0]
     assert any("No kit 'nope'" in l for l in p.lines)
 
 
@@ -1201,12 +1208,14 @@ def test_builtin_skill_ships_for_every_agent_and_a_kit_can_replace_it(tmp_path):
 
 
 def test_superpowers_is_offered_pinned_with_a_built_in_kit_but_not_by_default():
+    """The plugin superpowers@sandbox-ai stays in the marketplace (with its SessionStart hook, for a kit of yours
+    that names it), pinned to v7.0.1 - v7.0.2 was younger than 14 days; the built-in kit superpowers brings the same
+    skills vendored, for every agent, without a plugin (tests/test_vendored_skills.py)."""
     manifest = json.loads((k.MARKETPLACE / ".claude-plugin/marketplace.json").read_text())
     entry = next(e for e in manifest["plugins"] if e["name"] == "superpowers")
     assert entry["source"] == {"source": "github", "repo": "obra/superpowers",
-                               "sha": "22f0b463e7a5e579904dd6211a520321035526f7"}  # the commit of tag v7.0.2
-    assert entry["license"] == "MIT" and entry["version"] == "7.0.2"
-    kit = json.loads((k.BUILTIN_KITS / "superpowers/claude/marketplaces.json").read_text())
-    assert kit["plugins"] == ["superpowers@sandbox-ai"] and set(kit["marketplaces"]) == {"sandbox-ai"}
+                               "sha": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b"}  # the commit of tag v7.0.1
+    assert entry["license"] == "MIT" and entry["version"] == "7.0.1"
+    assert not (k.BUILTIN_KITS / "superpowers/claude/marketplaces.json").exists()
     assert "superpowers@sandbox-ai" not in json.loads((k.TEMPLATES / "claude/marketplaces.json").read_text())["plugins"]
-    assert "superpowers" in k.builtin_kits("claude") and "superpowers" not in k.builtin_kits("codex")
+    assert all("superpowers" in k.builtin_kits(agent) for agent in AGENTS)

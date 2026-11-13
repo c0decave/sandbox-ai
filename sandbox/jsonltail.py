@@ -1,10 +1,23 @@
 """The newest lines of a log, read from its end: a command that shows the last N records of a JSON-lines log
 (activity.jsonl, safeguards.jsonl) reads only as far back as it needs instead of the whole file, which grows for
 as long as the log directory is used (every run of the project). Standard library only."""
+import json
 import os
 
 CHUNK = 1 << 20        # read backwards in pieces of this size
 LINE_LIMIT = 4 << 20   # a line longer than this is skipped (never held whole)
+
+
+DECODER = json.JSONDecoder()
+
+
+def loads(line):
+    """json.loads(LINE), a line of bytes: one that starts with "{" (every record of the logs) is decoded as UTF-8 at
+    once - what json.loads makes of it too - without json.loads's look for UTF-16 or UTF-32, a quarter of the time a
+    line took. ValueError for a line that is no JSON (or no UTF-8), as json.loads."""
+    if line[:1] == b"{" and line[1:2] != b"\x00":  # json.detect_encoding: UTF-8 (no BOM starts with "{")
+        return DECODER.decode(line.decode("utf-8", "surrogatepass"))
+    return json.loads(line)
 
 
 def complete_end(fd, size, chunk=CHUNK):

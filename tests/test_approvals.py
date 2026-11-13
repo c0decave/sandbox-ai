@@ -177,6 +177,26 @@ def test_a_tor_runs_url_never_opens_in_your_browser(run):
     ap.answer("1-1-2", "allow", runs=run, opener=opened.append, out=said.append)
     assert opened == ["https://login.example/"]
 
+def test_a_cut_runs_url_never_opens_in_your_browser_also_when_cuts_hold_together(run):
+    """The kill switch cuts the internet: your browser would fetch the agent's URL for it. Cuts that hold together
+    (a helper cut by itself and by its lead, a shared MCP server) are named "api+remote"; each of them but local
+    cuts the internet, so the URL stays closed for every such combination."""
+    directory = Path(run["claude-1"]["directory"])
+    opened, said = [], []
+    for index, mode in enumerate(("remote", "api+remote", "local+api", "all", "local", None), start=1):
+        if mode:
+            (directory / "cut.json").write_text(json.dumps({"mode": mode, "cuts": {}}))
+        else:
+            (directory / "cut.json").unlink()
+        ask(run, f"1-1-{index}", kind="browser", url=f"https://login.example/{index}")
+        ap.answer(f"1-1-{index}", "allow", runs=run, opener=opened.append, out=said.append)
+        if mode in (None, "local"):
+            assert opened[-1] == f"https://login.example/{index}", mode
+        else:
+            assert f"https://login.example/{index}" not in opened and "not opened: the run's network is cut" in \
+                said[-1], mode
+
+
 def test_watch_notifies_once_per_question(run):
     directory = Path(run["claude-1"]["directory"]) / "approvals"
     notes, stop = [], threading.Event()
@@ -665,3 +685,51 @@ def test_the_policy_file_is_the_launchers_and_without_it_the_launcher_is_not_loa
     with pytest.raises(ValueError):  # not root's: the launcher refuses it (fail closed), as before
         ap.policy_scope()
     assert loaded[0] == "agent_sandbox_for_approvals"
+
+
+def test_no_desktop_notification_of_the_launcher_while_the_app_watches(monkeypatch, tmp_path):
+    """While the desktop app (or the web interface) watches the questions, the launcher shows no notification of its
+    own - not for a question, nor for a safeguard or a limit reached (they came twice: the desktop's and the app's)
+    - only a canary's alarm. Without a watcher (or with a stale heartbeat) everything is shown as before."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    calls = []
+    monkeypatch.setattr(ap.shutil, "which", lambda name: "/usr/bin/notify-send")
+    monkeypatch.setattr(ap.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(ap.sys, "platform", "linux")
+    ap.desktop_notification("safeguard", "refused", urgency="normal")
+    assert len(calls) == 1, "nobody watches: the launcher shows it"
+    ap.heartbeat("app")
+    assert ap.watched()
+    ap.desktop_notification("safeguard", "refused", urgency="normal")
+    ap.desktop_notification("limit", "memory at 90%")
+    assert len(calls) == 1, "the app watches: it shows them, not the launcher too"
+    ap.desktop_notification("canary", "went off", alarm=True)
+    assert len(calls) == 2 and calls[-1][-2] == "canary", "a canary's alarm is shown all the same"
+    stale = json.loads((ap.watchers_dir() / f"{os.getpid()}.json").read_text())
+    stale["time"] -= ap.WATCHER_STALE + 1
+    (ap.watchers_dir() / f"{os.getpid()}.json").write_text(json.dumps(stale))
+    ap.desktop_notification("safeguard", "refused")
+    assert len(calls) == 3, "a stale heartbeat counts no more"
+    ap.end_heartbeat()
+
+
+@pytest.mark.parametrize("level, shown", [("all", ["question", "canary"]), ("alarms", ["canary"]), ("none", []),
+                                           ("loud", ["question", "canary"]), (None, ["question", "canary"])])
+def test_the_desktop_notifications_default_says_what_the_launchers_show(monkeypatch, tmp_path, level, shown):
+    """desktop_notifications in the defaults file: all (the default; also for a value it does not know), alarms (only
+    a canary's alarm), none. It holds for the plain notifications and for those with buttons."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    if level is not None:
+        (tmp_path / "config" / "sandbox-ai").mkdir(parents=True)
+        (tmp_path / "config" / "sandbox-ai" / "defaults.json").write_text(
+            json.dumps({"version": 1, "desktop_notifications": level}))
+    calls = []
+    monkeypatch.setattr(ap.shutil, "which", lambda name: "/usr/bin/notify-send")
+    monkeypatch.setattr(ap.subprocess, "run", lambda argv, **kw: calls.append(argv[-2]))
+    monkeypatch.setattr(ap.sys, "platform", "linux")
+    ap.desktop_notification("question", "x")
+    ap.desktop_notification("canary", "went off", alarm=True)
+    assert calls == shown
+    assert ap.shows(alarm=True) is bool(shown) and ap.shows() is ("question" in shown)

@@ -9,9 +9,13 @@ a new terminal while Chromium's sandbox cannot get its namespaces (chromium.py: 
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import sys
 import weakref
@@ -21,12 +25,15 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import chromium, theme
+from . import chromium, terminal_text, theme
 from .backend import setting as backend_setting
 from .files import printable
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
-from .widgets import ask_first, background, disclosure, fill, fit_columns, inform, plain_label, row_key, safe_tooltip, table, warn
+from .widgets import (
+    ask_first, background, disclosure, fill, fit_columns, inform, on_screen, plain_label, row_key, safe_tooltip, table,
+    warn,
+)
 
 WEB = Path(__file__).resolve().with_name("web")
 QWIDGETSIZE_MAX = (1 << 24) - 1  # Qt's "no maximum" of a widget's size
@@ -38,6 +45,11 @@ _ending = set()  # bridges of closed tabs whose command has not ended yet (kept 
 _views = weakref.WeakSet()
 CHANNEL_SCRIPT = "qrc:///qtwebchannel/qwebchannel.js"
 LOCAL = "local"  # this machine, as sandbox-ai hosts names it
+# The variable each terminal tab of a start gets: the start records it (sandbox-ai's sessions.launch, list --json
+# "app_tab"), so that after a restart the app knows which running session its tab showed.
+TAB_TAG = "SANDBOX_AI_APP_TAB"
+SAVED_TABS = "terminal-tabs"  # the app's state: the terminal tabs of running starts, in their order
+SAVED_LIMIT = 40  # tabs remembered at most
 
 try:
     from PySide6.QtWebChannel import QWebChannel
@@ -147,27 +159,65 @@ if not MISSING:
             settings.setAttribute(attribute, value)
 
 
+    class TerminalWebView(QWebEngineView):
+        """The web view of a terminal: its context menu is the terminal's (TerminalView.menu), not Chromium's."""
+
+        def contextMenuEvent(self, event):  # noqa: N802 - Qt's name
+            owner = self.parent()
+            if hasattr(owner, "menu"):
+                owner.menu(event.globalPos())
+            event.accept()
+
+
+def login_of(argv):
+    """The agent of a terminal that runs `sandbox-ai login AGENT` (here, or on a host over SSH), else None."""
+    argv = [str(arg) for arg in argv]
+    if argv and os.path.basename(argv[0]) == "ssh":
+        words = remote_words(argv[-1])
+        return terminal_text.login_agent(words) if words else None
+    return terminal_text.login_agent(argv)
+
+
 class TerminalView(QWidget):
-    """One terminal: the web view and the command's pseudo-terminal."""
+    """One terminal: the web view and the command's pseudo-terminal, the bar it asks its questions in (a paste, a
+    program's OSC 52, a sign-in link), and, for `sandbox-ai login AGENT`, what watches the login for its sign-in
+    link and one-time code (terminal_text.LoginWatch) and opens the login browser (login_browser.py)."""
     exited = Signal(int)
 
-    def __init__(self, argv, web=WEB, cwd=None, parent=None):
+    def __init__(self, argv, web=WEB, cwd=None, parent=None, env=None):
         super().__init__(parent)
+        from .terminal_tools import TerminalBar, TerminalHelper
         self.argv = list(argv)
+        self.tab_title = " ".join(os.path.basename(str(a)) for a in self.argv[:3])
+        # What the tab shows, for its reopening after a restart (TerminalsPage.remembered): the tag the start in it
+        # records (SANDBOX_AI_APP_TAB in ENV), and the host and start it attaches to.
+        self.tab_tag = (env or {}).get(TAB_TAG)
+        self.start_host = self.start_name = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         page_url = QUrl.fromLocalFile(str(Path(web) / "terminal.html"))
-        self.bridge = PtyBridge(self.argv, cwd=cwd, theme=theme.terminal_theme(),
+        self.bridge = PtyBridge(self.argv, cwd=cwd, env=env, theme=theme.terminal_theme(),
                                 exit_text=tr("[sandbox-ai: exit status {status}; close the tab with ×]"), parent=self)
         self.bridge.exited.connect(self.exited)
-        self.view = QWebEngineView(self)
+        self.bar = TerminalBar(self)
+        layout.addWidget(self.bar)
+        self.helper = TerminalHelper(self, self)
+        self.view = TerminalWebView(self)
         self.page = TerminalPage(profile(web), page_url, self.view)
         lock_down(self.page.settings())
         self.channel = QWebChannel(self.page)
         self.channel.registerObject("pty", self.bridge)
+        self.channel.registerObject("helper", self.helper)
         self.page.setWebChannel(self.channel)
         self.view.setPage(self.page)
         layout.addWidget(self.view)
+        # A login: its output is read for the sign-in link (and a device code), its end closes the login browser.
+        self.login_agent = login_of(self.argv)
+        self.watch, self.offered, self.code_shown = None, None, False
+        if self.login_agent:
+            self.watch = terminal_text.LoginWatch()
+            self.bridge.output.connect(self.login_output)
+            self.exited.connect(self.login_exited)
         # Chromium's page process may end on its own (out of memory, a crash in it): the app goes on, the tab says
         # so, and the log window and app.log keep why (it was silent before: an empty tab).
         self.page.renderProcessTerminated.connect(self.page_ended)
@@ -185,6 +235,181 @@ class TerminalView(QWidget):
     @property
     def running(self):
         return self.bridge.running
+
+    # -- what the terminal's tools need of it --
+
+    def title(self):
+        tabs = self.tabs_widget()
+        if tabs is not None and tabs.indexOf(self) >= 0:
+            return tabs.tabText(tabs.indexOf(self))
+        return self.tab_title
+
+    def tabs_widget(self):
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, QTabWidget):
+            widget = widget.parentWidget()
+        return widget
+
+    def status(self, text):
+        window = self.window()
+        if window is not self and hasattr(window, "statusBar"):
+            window.statusBar().showMessage(text, 5000)
+        else:
+            self.bar.say(text, seconds=3)
+
+    def focus_terminal(self):
+        self.view.setFocus()
+
+    def reveal(self):
+        """This tab, shown and focused (the login browser has pasted into it)."""
+        window = self.window()
+        if hasattr(window, "show_page"):
+            window.show_page("terminals")
+        tabs = self.tabs_widget()
+        if tabs is not None:
+            tabs.setCurrentWidget(self)
+        window.raise_()
+        window.activateWindow()
+        self.view.setFocus()
+
+    def paste_line(self, text):
+        """TEXT pasted as the program asked for (bracketed or not), then Enter (a sign-in's code)."""
+        self.run_js(f"window.sandboxTerminal && window.sandboxTerminal.pasteLine({json.dumps(str(text))})",
+                    lambda _result: None)
+
+    def launcher(self):
+        page = self.parentWidget()
+        while page is not None and not hasattr(page, "launcher"):
+            page = page.parentWidget()
+        return page.launcher() if page is not None else None
+
+    def hosts_for(self, url):
+        """(agent, hosts): the hosts the login browser opens without asking for URL from this terminal - those of
+        its login's agent, else those of the provider URL belongs to (no agent: none)."""
+        launcher = self.launcher()
+        agent = self.login_agent or terminal_text.agent_of_url(url, launcher)
+        return agent, terminal_text.login_hosts(agent, launcher) if agent else ()
+
+    def open_link(self, url, where=None):
+        """Open URL (a link of the terminal): a provider's sign-in page in the login browser when Settings say so
+        (WHERE "app" or "system" decides instead), everything else in the system browser."""
+        from .terminal_tools import system_browser
+        if not terminal_text.plausible(url):
+            return
+        agent, hosts = self.hosts_for(url)
+        in_scope = terminal_text.host_in(terminal_text.host_of(url), hosts)
+        if where == "app" or (where is None and in_scope and backend_setting("login_links") == "app"):
+            self.open_login(url, agent, hosts)
+        else:
+            system_browser(url)
+
+    def open_login(self, url, agent=None, hosts=None):
+        from . import login_browser
+        if hosts is None:
+            agent, hosts = self.hosts_for(url)
+
+        def done(window, why):
+            if window is None and why:
+                self.bar.say(tr("Opened in the system browser instead: {why}", why=why), seconds=0, level="warn")
+        login_browser.open_login(url, hosts, target=self, code=self.watch.code if self.watch else None,
+                                 title=agent or "", parent=self, done=done)
+
+    # -- a login --
+
+    def login_output(self, encoded):
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return
+        for url in self.watch.feed(data):
+            if self.offered is None and terminal_text.host_in(terminal_text.host_of(url), self.hosts_for(url)[1]):
+                self.offered = url
+                self.offer_signin(url, auto=True)
+        if self.offered and self.watch.code and not self.code_shown:
+            self.code_shown = True
+            from . import login_browser
+            window = login_browser.window_for(self)
+            if window is not None:
+                window.show_code(self.watch.code)
+            self.offer_signin(self.offered)
+
+    def offer_signin(self, url, auto=False):
+        """The login printed its sign-in link: said above the terminal, with Open and Copy; opened in the login
+        browser at once when Settings say sign-in links open in the app (AUTO: the first time)."""
+        from .terminal_tools import system_browser
+        code = self.watch.code if self.watch else None
+        text = tr("Sign-in link: {url}", url=terminal_text.shown_url(url, 160))
+        if code:
+            text += " " + tr("One-time code: {code}", code=code)
+        choices = [(tr("Open in the app's browser"), lambda: self.open_login(url)),
+                   (tr("Open in the system browser"), lambda: system_browser(url)),
+                   (tr("Copy link"), lambda: self.helper.copy_text(url))]
+        if backend_setting("login_links") == "system":
+            choices = [choices[1], choices[0], choices[2]]
+        self.bar.ask(text, choices, level="info")
+        if auto and backend_setting("login_links") == "app":
+            self.open_login(url)
+
+    def login_exited(self, status):
+        from . import login_browser
+        window = login_browser.window_for(self)
+        if window is not None:
+            window.login_ended(status)
+        if status == 0 and self.offered:
+            self.bar.dismiss()
+
+    # -- the context menu --
+
+    def menu(self, position):
+        """Right click: what the page says is selected and under the mouse, then the menu at POSITION."""
+        self.run_js("window.sandboxTerminal ? window.sandboxTerminal.menuState() : ''",
+                    lambda state: self.show_menu(state, position))
+
+    def menu_actions(self, state):
+        """[(text, enabled, callback or None for a separator)] of the context menu for STATE (the page's
+        menuState(): whether something is selected, the link under the mouse)."""
+        from .terminal_tools import shortcut_names
+        link = state.get("link") if isinstance(state.get("link"), str) else None
+        selected = bool(state.get("selection"))
+        copy_keys, paste_keys = shortcut_names()
+        actions = [(tr("Copy") + "\t" + copy_keys, selected, lambda: self.run_js("window.sandboxTerminal.copy()",
+                                                                                  lambda _r: None)),
+                   (tr("Paste") + "\t" + paste_keys, True, lambda: self.run_js("window.sandboxTerminal.paste()",
+                                                                                lambda _r: None))]
+        if link and terminal_text.plausible(link):
+            actions += [("", False, None), (tr("Copy link"), True, lambda: self.helper.copy_text(link)),
+                        (tr("Open link"), True, lambda: self.open_link(link))]
+            agent, hosts = self.hosts_for(link)
+            if terminal_text.host_in(terminal_text.host_of(link), hosts):
+                if backend_setting("login_links") == "app":
+                    actions.append((tr("Open in the system browser"), True,
+                                    lambda: self.open_link(link, where="system")))
+                else:
+                    actions.append((tr("Open in the app's browser"), True, lambda: self.open_link(link, where="app")))
+        actions += [("", False, None),
+                    (tr("Select all"), True, lambda: self.run_js("window.sandboxTerminal.selectAll()",
+                                                                 lambda _r: None)),
+                    (tr("Clear selection"), selected, lambda: self.run_js("window.sandboxTerminal.clearSelection()",
+                                                                          lambda _r: None))]
+        return actions
+
+    def show_menu(self, state, position):
+        from PySide6.QtWidgets import QMenu
+        try:
+            state = json.loads(state) if state else {}
+        except ValueError:
+            state = {}
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        for text, enabled, callback in self.menu_actions(state if isinstance(state, dict) else {}):
+            if callback is None:
+                menu.addSeparator()
+                continue
+            action = menu.addAction(text)
+            action.setEnabled(enabled)
+            action.triggered.connect(lambda _=False, f=callback: f())
+        menu.popup(position)
+        return menu
 
     def run_js(self, script, callback):
         self.page.runJavaScript(script, 0, callback)
@@ -214,6 +439,9 @@ def shutdown():
     the interpreter deletes a web view whose QtWebEngine is gone: "shared QObject was deleted directly", a crash).
     Called when the application quits; a second call does nothing."""
     from shiboken6 import isValid
+    if not MISSING:
+        from . import login_browser
+        login_browser.shutdown()  # (its pages, then its profile: before QtWebEngine goes)
     views = [view for view in list(_views) if isValid(view)]
     for view in views:
         view.close_terminal()
@@ -334,6 +562,22 @@ def remote_words(command):
     return None
 
 
+def tab_key(index, platform=None):
+    """The key that shows terminal tab INDEX (0-9): Alt+1 ... Alt+9, Alt+0 - on macOS Control+1 ... (Qt's Meta there):
+    Option+digit types characters on a Mac - [ ] | { } on a German keyboard (Option+5 ... 9), ¡ ™ £ ... on an
+    American one - and as the shortcut it took them from every terminal (no pipe could be typed)."""
+    platform = sys.platform if platform is None else platform
+    return f"{'Meta' if platform == 'darwin' else 'Alt'}+{(index + 1) % 10}"
+
+
+def attached_name(words):
+    """The start NAME of `sandbox-ai [session] attach NAME` (WORDS), else None."""
+    words = [str(w) for w in words or []]
+    if len(words) >= 3 and words[-2] == "attach" and words[1:-2] in ([], ["session"]):
+        return words[-1]
+    return None
+
+
 def detaches(argv, launcher=None):
     """Whether closing the terminal of ARGV only detaches it, the start running on: attaching to a start (tmux),
     a start with --session, or an interactive agent start, which the launcher runs as a detachable session in tmux
@@ -405,6 +649,19 @@ class TerminalsPage(QWidget):
         # A terminal needs some rows: the page (and so the window) keeps that much height, Sessions folded or not.
         self.tabs.setMinimumHeight(TABS_MIN_HEIGHT)
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        # Tabs move left and right by dragging (every lookup goes by the view, indexOf, never a kept index), and
+        # Alt+1 ... Alt+9, Alt+0 show the first ten (while the page or one of its terminals has the focus); on macOS
+        # Control+1 ... (tab_key: Option+digit types characters there).
+        self.tabs.setMovable(True)
+        from PySide6.QtGui import QKeySequence, QShortcut
+        self.tab_keys = []
+        for number in range(10):
+            key = QShortcut(QKeySequence(tab_key(number)), self)
+            key.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            key.activated.connect(lambda index=number: self.show_tab(index))
+            self.tab_keys.append(key)
+        self.tabs.tabBar().tabMoved.connect(lambda *_: self.save_tabs())
+        self.store, self.reopening = None, False  # the app's state (MainWindow), and while reopen() opens tabs
         self.entries, self.problem, self.reading, self.shown_rows, self.ticks = [], "", None, None, 0
         self.starts = self.make_starts() if sai is not None else None
         if self.starts is None:
@@ -422,6 +679,14 @@ class TerminalsPage(QWidget):
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.tick)
             self.timer.setInterval(backend_setting("sandboxes_interval"))  # started while the page is shown
+
+    def show_tab(self, index):
+        """Alt+1 ... Alt+0: the tab at INDEX (0-9) of the terminals, with the focus in its terminal; none there: nothing."""
+        if 0 <= index < self.tabs.count():
+            self.tabs.setCurrentIndex(index)
+            widget = self.tabs.widget(index)
+            if widget is not None:
+                widget.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
     # -- the running starts (Sessions) --
 
@@ -536,9 +801,10 @@ class TerminalsPage(QWidget):
             self.timer.stop()
 
     def tick(self):
-        """The timer: while the page is shown; another host (SSH) every fifth time only."""
+        """The timer: while the page is shown (not in a minimised window: `sandbox-ai list`, a Python start, every few
+        seconds for nobody); another host (SSH) every fifth time only."""
         self.ticks += 1
-        if self.isVisible() and (self.chosen_host() == LOCAL or self.ticks % 5 == 0):
+        if on_screen(self) and (self.chosen_host() == LOCAL or self.ticks % 5 == 0):
             self.refresh_starts()
 
     def refresh_starts(self):
@@ -758,13 +1024,21 @@ class TerminalsPage(QWidget):
                 done(view)
 
     def make_tab(self, argv, title, cwd=None):
-        view = TerminalView(argv, self.web, cwd, self)
+        env = None
+        start_host, start_name = self.start_of(argv)
+        if start_name is None and detaches(argv, self.launcher()):
+            # A start in this tab (not an attach): the start records the tag, by which the tab is found again
+            env = {**os.environ, TAB_TAG: secrets.token_hex(8)}
+        view = TerminalView(argv, self.web, cwd, self, env=env)
+        view.start_host, view.start_name = start_host, start_name
+        view.tab_title = title
         index = self.tabs.addTab(view, title)
         self.tabs.setTabToolTip(index, shlex.join(argv))
         view.exited.connect(lambda status, v=view: self._ended(v, status))
         self.tabs.setCurrentIndex(index)
         view.view.setFocus()
         self.show_starts()
+        self.save_tabs()
         return view
 
     def _ended(self, view, status):
@@ -772,6 +1046,131 @@ class TerminalsPage(QWidget):
         if index >= 0:
             self.tabs.setTabText(index, tr("{title} (ended)", title=self.tabs.tabText(index)))
         self.show_starts()
+        self.save_tabs()
+
+    # -- the tabs of running starts, kept for the next start of the app --
+
+    def start_of(self, argv):
+        """(host, start name) a terminal of ARGV attaches to: (LOCAL, NAME) for `sandbox-ai attach NAME` here, (HOST,
+        NAME) over SSH; (HOST, None) for another command on a host; (None, None) for everything else."""
+        key = attach_key(argv)
+        if key is not None and key[0] == "here":
+            return LOCAL, key[1]
+        argv = [str(arg) for arg in argv]
+        if not argv or os.path.basename(argv[0]) != "ssh":
+            return None, None
+        host = self.host_of(argv)
+        return host, (attached_name(remote_words(argv[-1])) if host else None)
+
+    def host_of(self, argv):
+        """The host of sandbox-ai hosts an ssh ARGV goes to (as host_terminal makes it), or None."""
+        try:
+            names = [e["name"] for e in self.sai.host_entries() if e.get("kind") != LOCAL] \
+                if self.sai is not None and self.sai.hosts_supported() else []
+        except Exception:  # noqa: BLE001 - no hosts file: no host
+            return None
+        for name in names:
+            try:
+                prefix = list(self.sai.host_terminal(name, "list"))[:-1]
+            except Exception:  # noqa: BLE001
+                continue
+            if prefix and argv[:len(prefix)] == prefix:
+                return name
+        return None
+
+    def remembered(self):
+        """The tabs of starts that run on when the app ends (sessions in tmux, attached starts), in their order:
+        [{"host", "name", "id", "tag", "title"}] - what reopen() attaches again."""
+        launcher, found = self.launcher(), []
+        for view in self.views():
+            if not view.running or not detaches(view.argv, launcher):
+                continue
+            host, name, tag = view.start_host, view.start_name, view.tab_tag
+            if host is None and tag is None:
+                continue  # (a start on another host whose host is not one of sandbox-ai hosts)
+            listed = next((e for e in self.entries if (tag and e.get("app_tab") == tag) or
+                           (name and e.get("name") == name and (host or LOCAL) == self.chosen_host())), None) \
+                if self.starts is not None else None
+            entry = {"host": host or LOCAL, "name": name or (listed or {}).get("name"),
+                     "id": (listed or {}).get("id"), "tag": tag, "title": self.tabs.tabText(self.tabs.indexOf(view))}
+            found.append({k: v for k, v in entry.items() if isinstance(v, str) and v and len(v) <= 200})
+        return found[:SAVED_LIMIT]
+
+    def save_tabs(self):
+        """The tabs of running starts into the app's state (not while they are being reopened)."""
+        if self.store is not None and not self.reopening:
+            self.store.set(SAVED_TABS, self.remembered())
+
+    def reopen(self, everything=None, done=None):
+        """At the app's start: a tab attached again to each start whose tab was open when the app ended, in that
+        order - and with EVERYTHING (the setting reopen_terminals; default: it) also to every other start in tmux
+        that runs on this machine and on the hosts whose terminals were open. Never starts anything: only what runs
+        and can be attached; a start that ended meanwhile is left out and said. DONE(opened, skipped) at the end."""
+        if self.store is None or self.sai is None or not available(self.web)[0]:
+            return False
+        saved = [e for e in self.store.get(SAVED_TABS, []) or [] if isinstance(e, dict)
+                 and isinstance(e.get("host"), str)][:SAVED_LIMIT]
+        everything = backend_setting("reopen_terminals") if everything is None else everything
+        hosts = list(dict.fromkeys(([LOCAL] if everything else []) + [e["host"] for e in saved]))
+        if not hosts:
+            return False
+        self.reopening = True
+        listed = {}
+
+        def one(result, error, host):
+            listed[host] = result if error is None and isinstance(result, list) else None
+            if len(listed) == len(hosts):
+                self.reopen_listed(saved, listed, everything, done)
+        for host in hosts:
+            background(self.sai.host_json, host, "list", "--json", owner=self, timeout=90,
+                       done=lambda result, error, host=host: one(result, error, host))
+        return True
+
+    def reopen_listed(self, saved, listed, everything, done=None):
+        """reopen(), once every host's starts were read (LISTED: {host: entries of list --json, None: not read})."""
+        wanted, skipped, seen = [], [], set()
+        runs = {host: [e for e in grouped(host, [e for e in entries if isinstance(e, dict)
+                                                 and isinstance(e.get("name"), str)])
+                       if e.get("state") == "running" and e.get("attachable")]
+                for host, entries in listed.items() if entries is not None}
+        for entry in saved:
+            found = None
+            for start in runs.get(entry["host"], []):
+                if (entry.get("tag") and start.get("app_tab") == entry["tag"]) or \
+                        (entry.get("id") and start.get("id") == entry["id"]) or \
+                        (entry.get("name") and start["name"] == entry["name"]):
+                    found = start
+                    break
+            if found is None:
+                if entry["host"] in runs:  # (a host that did not answer: nothing is said of its starts)
+                    skipped.append(entry.get("name") or entry.get("title") or "?")
+                continue
+            if (entry["host"], found["name"]) not in seen:
+                seen.add((entry["host"], found["name"]))
+                wanted.append((entry["host"], found["name"]))
+        if everything:
+            for host, starts in runs.items():
+                for start in starts:
+                    # One tab per start: its MCP servers, helpers and a team's members are reached from it.
+                    if OWNER not in start and (host, start["name"]) not in seen:
+                        seen.add((host, start["name"]))
+                        wanted.append((host, start["name"]))
+        for host, name in wanted:
+            try:
+                argv = self.attach_argv(host, name)
+            except (OSError, ValueError):
+                continue
+            self.open(argv, name if host == LOCAL else f"{host}: {name}")
+        self.reopening = False
+        if skipped:
+            from . import applog
+            text = tr("Not reopened (ended meanwhile): {names}", names=", ".join(printable(n) for n in skipped))
+            applog.log("INFO", "terminal", text)
+            self.say(text)
+        if wanted:
+            QTimer.singleShot(0, self.save_tabs)
+        if done is not None:
+            done([name for _, name in wanted], skipped)
 
     def views(self):
         return [self.tabs.widget(i) for i in range(self.tabs.count())]
@@ -809,6 +1208,7 @@ class TerminalsPage(QWidget):
         self.tabs.removeTab(index)
         view.deleteLater()
         self.show_starts()
+        self.save_tabs()
 
     def close_all(self):
         for index in reversed(range(self.tabs.count())):

@@ -4,6 +4,12 @@
   "id": "sandbox-ai-tests",
   "title": "sandbox-ai tests",
   "description": "Runs sandbox-ai's own test suites (core, desktop app offscreen, packages) and fixes what fails: PyPI and GitHub open for the test environments, memory and processes for the long runs.",
+  "translations": {
+    "de": {
+      "title": "sandbox-ai-Tests",
+      "description": "Führt die Testsuiten von sandbox-ai aus (Kern, Desktop-App ohne Bildschirm, Pakete) und behebt, was fehlschlägt: PyPI und GitHub offen für die Testumgebungen, Speicher und Prozesse für die langen Läufe."
+    }
+  },
   "category": "testing",
   "agents": [
     "claude",

@@ -13,12 +13,13 @@ import os
 import re
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit, QMessageBox,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QMessageBox,
     QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .files import printable
 from . import widgets
+from .credential_tab import CredentialTab
 from .i18n import N_, tr
 from .host_choice import on_host
 from .name_fields import NameField, publish
@@ -381,18 +382,17 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
     background(lambda: sai.secret_exists(secret, host), owner=parent, timeout=90, done=looked)
 
 
-class VpnBox(QGroupBox):
+class VpnBox(CredentialTab):
     """The VPN profiles of sandbox-ai vpn on the host chosen (the Credentials page's), with Add, Show, Check and
-    Remove."""
+    Remove (laid out as every tab of that page)."""
 
     def __init__(self, sai):
         super().__init__(tr("VPN profiles (sandbox-ai vpn)"))
         self.sai, self.entries, self.on_change, self.host, self.token = sai, [], None, LOCAL, 0
         self.host_label = lambda host: tr("{name} (this machine)", name=LOCAL) if host == LOCAL else printable(host)
-        layout = QVBoxLayout(self)
-        self.profiles = table([tr("Profile"), tr("Kind"), tr("Provider")], stretch=0, compact=(1,))
-        layout.addWidget(self.profiles)
-        row = QHBoxLayout()
+        self.add_about(tr("The VPN profiles a start may go out through (--vpn PROFILE): WireGuard, OpenVPN, Mullvad, "
+                          "Tailscale; their keys kept as secrets, and nothing of the sandbox leaves past the VPN."))
+        self.profiles = self.set_list(table([tr("Profile"), tr("Kind"), tr("Provider")], stretch=0, compact=(1,)))
         self.add_button, self.show_button, self.check_button, self.remove_button = \
             QPushButton(tr("Add…")), QPushButton(tr("Show")), QPushButton(tr("Check")), QPushButton(tr("Remove…"))
         self.show_button.setToolTip(tr("sandbox-ai vpn show: what the profile holds (no keys)"))
@@ -402,12 +402,7 @@ class VpnBox(QGroupBox):
         self.show_button.clicked.connect(lambda _=False: self.show_profile())
         self.check_button.clicked.connect(lambda _=False: self.check())
         self.remove_button.clicked.connect(lambda _=False: self.remove())
-        for widget in (self.add_button, self.show_button, self.check_button, self.remove_button):
-            row.addWidget(widget)
-        row.addStretch()
-        layout.addLayout(row)
-        self.message = plain_label()
-        layout.addWidget(self.message)
+        self.add_buttons(self.add_button, self.show_button, self.check_button, self.remove_button)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Show and Check one
         multi_select(self.profiles)
         delete_key(self.profiles, self.remove)

@@ -27,7 +27,14 @@ first: llm-replace) or is copied as NAME:MODEL for --llm.
 What the CLI or a host answers is shown through printable(); names that go back as arguments are checked first
 (never one that reads as an option). The dialog also offers the further options of `llm add`: headers the proxy adds
 from secrets (--header-secret), a CA (--ca, a file of that host), plain http to a public address (--insecure-http,
-asked first: llm-insecure) and replacing an endpoint of the same name (--replace); Show runs `llm show`."""
+asked first: llm-insecure) and replacing an endpoint of the same name (--replace); Show runs `llm show`.
+
+Parameters… edits the sampling parameters of the selected server (llm_params.ParamsDialog): every model's, or the
+model selected in the models table (another model of the server can be chosen in the dialog), each with Force, the
+loop guard and whether the server may unload its other models; read with `llm show NAME --json` and `llm params --kind
+KIND --json` (the names, types and ranges come from sandbox-ai there), checked before the dialog closes and saved with
+`llm set NAME [--model MODEL] --reset ...` (a refusal shown in the dialog). A sandbox-ai without `llm params` (this
+machine's, or a host's once asked) leaves the button disabled, its tooltip saying why."""
 from __future__ import annotations
 
 import functools
@@ -43,6 +50,8 @@ from PySide6.QtWidgets import (
 from .files import printable
 from .host_choice import follow_hosts, on_host
 from . import backend, theme, widgets
+from . import llm_params as LP
+from . import llm_params_view as LPV
 from . import wizard_llm as WL
 from .i18n import N_, tr
 from .model_combo import searchable
@@ -73,6 +82,7 @@ MODEL_EXAMPLE = "qwen2.5-coder:7b"
 SECRET_EXAMPLE = "LLM_KEY"
 VPN_EXAMPLE = "home"
 LIST_SECONDS, ADD_SECONDS, CHECK_SECONDS, MODELS_SECONDS, REMOVE_SECONDS = 60, 90, 150, 120, 60
+PARAMS_SECONDS = 60
 SHOW_SECONDS = 60
 CONNECTION = ("kind", "url", "secret", "headers", "ca")  # what decides how the server is reached
 
@@ -190,7 +200,7 @@ class LlmDialog(QDialog):
         self.test_button.setToolTip(tr("Ask the server for its models now, without saving it (sandbox-ai wizard "
                                        "models), and offer them as the default model"))
         self.test_button.clicked.connect(lambda _=False: self.test())
-        self.test_result = plain_label(role="secondary")
+        self.test_result = plain_label(role="secondary", selectable=True)
         self.test_result.setAccessibleName(tr("Result of the test"))
         self.test_row = QWidget()
         test = QHBoxLayout(self.test_row)
@@ -527,6 +537,8 @@ class LlmPage(QWidget):
         self.dialog = None  # the dialog open now (what a save's answer goes to)
         self.kept_status = ""  # what a change said: the list asked again after it says it first
         self.models_of, self.model_list, self.models_default = None, [], ""
+        self.params_old = set()  # hosts whose sandbox-ai has no `llm params` (asked once)
+        self.params_dialog = None
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("LLM servers (sandbox-ai llm) the agents can use: start one with --llm NAME. "
                                         "Keys stay secrets of sandbox-ai; the connection proxy adds them on the wire, "
@@ -548,14 +560,14 @@ class LlmPage(QWidget):
         layout.addWidget(self.servers, 2)
         # What each server has loaded and uses now (`llm status --json` on that host): read in the background after
         # the list, on Refresh and every STATUS_REFRESH seconds while the page is shown - never on the GUI thread.
-        self.server_status = plain_label(role="secondary")
+        self.server_status = plain_label(role="secondary", selectable=True)
         self.server_status.setAccessibleName(tr("What the servers have loaded and use now"))
         self.server_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.server_status)
         self.statuses, self.status_host, self.status_reading, self.status_old = {}, None, None, set()
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(WL.STATUS_REFRESH * 1000)
-        self.status_timer.timeout.connect(lambda: self.read_status())
+        self.status_timer.timeout.connect(lambda: widgets.on_screen(self) and self.read_status())  # (not minimised)
         self.add_button = QPushButton(tr("Add…"))
         self.edit_button = QPushButton(tr("Edit…"))
         self.check_button = QPushButton(tr("Check"))
@@ -575,6 +587,12 @@ class LlmPage(QWidget):
         self.show_button.setAccessibleName(tr("Show"))
         self.show_button.setToolTip(tr("sandbox-ai llm show: the endpoint with what the agents get (no key)"))
         self.show_button.clicked.connect(lambda _=False: self.show_server())
+        self.params_button = QPushButton(tr("Parameters…"))
+        self.params_button.setAccessibleName(tr("Parameters"))
+        self.params_button.setToolTip(tr("Sampling parameters (temperature, top_k, repeat_penalty, max_tokens, "
+                                         "num_ctx …), the loop guard and the other models (sandbox-ai llm set): "
+                                         "every model's, or the model selected below"))
+        self.params_button.clicked.connect(lambda _=False: self.parameters())
         self.remove_button = QPushButton(tr("Remove…"))
         self.refresh_button = QPushButton(tr("Refresh"))
         for button, name, tip in (
@@ -597,9 +615,10 @@ class LlmPage(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         # A row that wraps when the window is narrow (it made the window 1300 px wide in German before).
         layout.addWidget(flow(self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
-                              self.sort, self.show_button, self.remove_button, self.refresh_button))
+                              self.sort, self.show_button, self.params_button, self.remove_button,
+                              self.refresh_button))
         layout.addWidget(self.build_models(), 3)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.load_hosts()
@@ -796,11 +815,17 @@ class LlmPage(QWidget):
 
     def update_buttons(self):
         keys = selected_keys(self.servers)
-        for button in (self.edit_button, self.check_button, self.models_button, self.show_button, self.remove_button):
+        for button in (self.edit_button, self.check_button, self.models_button, self.show_button, self.remove_button,
+                       self.params_button):
             set_enabled(button, bool(keys), tr("Select a server first."))
         if len(keys) > 1:  # several: Remove… takes them all; what acts on one server waits
-            for button in (self.edit_button, self.check_button, self.models_button, self.show_button):
+            for button in (self.edit_button, self.check_button, self.models_button, self.show_button,
+                           self.params_button):
                 set_enabled(button, False, tr("Acts on one row: {count} are selected.", count=len(keys)))
+        if keys and self.params_missing(self.host()):
+            set_enabled(self.params_button, False, tr("The sandbox-ai of {host} has no model parameters yet "
+                                                      "(sandbox-ai llm params): update it there.",
+                                                      host=self.host_label()))
         if keys and self.models_of and self.models_of != (self.host(), keys[0]):
             self.models_box.hide()  # the models shown are another server's
             self.models_of = None
@@ -978,6 +1003,107 @@ class LlmPage(QWidget):
             self.refresh()
         if status == 0 and check:
             self.run_check(host, name, None)
+
+    # -- the sampling parameters (llm set), the loop guard, the other models --
+
+    def params_missing(self, host):
+        """Whether HOST's sandbox-ai is known to have no `llm params` (this machine's: looked at; a host's: once
+        asked)."""
+        if host in self.params_old:
+            return True
+        if host == LOCAL:
+            try:
+                return not hasattr(self.sai.module("llm"), "params_catalogue")
+            except Exception:  # noqa: BLE001 - a sandbox-ai that does not load: the command says so when asked
+                return False
+        return False
+
+    def parameters(self):
+        """Parameters…: the server's parameters and the catalogue of its kind, read in the background, then the
+        dialog (for the model selected in the models table, else every model)."""
+        host, name = valid_host(self.host()), self.chosen()
+        if host is None or name is None:
+            return
+        self.status.setText(tr("Reading {name}…", name=name))
+
+        def work():
+            status, out, err = self.sai.host_run(host, "llm", "show", name, "--json", timeout=SHOW_SECONDS)
+            if status != 0:
+                raise ValueError((err or out).strip()[-1500:] or tr("exit status {status}", status=status))
+            view = WL.parse_show(out)
+            kind = view.get("kind") if isinstance(view.get("kind"), str) and re.fullmatch(
+                r"[a-z-]{1,30}", view.get("kind")) else None
+            status, out, err = self.sai.host_run(host, "llm", "params", *(["--kind", kind] if kind else []),
+                                                 "--json", timeout=PARAMS_SECONDS)
+            if status != 0:
+                return view, None, (status, out, err)
+            return view, LP.parse_catalogue(out), None
+
+        background(work, owner=self, source=self.params_button, timeout=SHOW_SECONDS + PARAMS_SECONDS + 15,
+                   done=lambda result, error: self.params_read(host, name, result, error))
+
+    def params_read(self, host, name, result, error):
+        if error is not None:
+            self.status.setText(tr("Could not read {name}: {error}", name=name, error=lines_of(str(error))))
+            return
+        view, catalogue, failed = result
+        if catalogue is None:
+            status, out, err = failed
+            if status == 2 and "invalid choice" in (err or ""):
+                self.params_old.add(host)
+                self.update_buttons()
+                self.status.setText(tr("The sandbox-ai of {host} has no model parameters yet (sandbox-ai llm "
+                                       "params): update it there.", host=self.host_label(host)))
+            else:
+                self.status.setText(tr("Could not read the parameters: {error}", error=failure(failed, None)))
+            return
+        self.status.setText("")
+        same = self.models_of == (host, name)
+        scope = (self.chosen_model() if same else None) or LP.SCOPE_ALL
+        models = [m["name"] for m in self.model_list] if same else list(view.get("models") or [])
+        # The loop guard's layers: this machine's sandbox-ai knows their ranges; a host's: the layers it shows.
+        spec = LP.loop_spec(self.sai if host == LOCAL else None, view)
+        dialog = LPV.ParamsDialog(view, catalogue, scope=scope, models=models, host_label=self.host_label(host),
+                                  spec=spec, parent=self)
+        self.open_params(dialog, host, name)
+
+    def open_params(self, dialog, host, name):
+        """DIALOG until it saved or was cancelled."""
+        self.params_dialog = dialog
+        dialog.on_save = lambda argvs: self.save_params(dialog, host, name, argvs)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted and not dialog.saved:
+                dialog.accept()  # an exec() that stood in for the human (the tests): OK as they would press it
+        finally:
+            self.params_dialog = None
+            dialog.deleteLater()
+
+    def save_params(self, dialog, host, name, argvs):
+        """`llm set` once per scope changed, one after the other (the first refusal stops: its message shown in the
+        dialog, which stays open with everything typed)."""
+        self.status.setText(tr("Saving the parameters of {name}…", name=name))
+
+        def work():
+            result = (0, "", "")
+            for argv in argvs:
+                result = self.sai.host_run(host, *argv, timeout=ADD_SECONDS)
+                if result[0] != 0:
+                    break
+            return result
+        background(work, owner=self, work=True, source=self.params_button, timeout=(ADD_SECONDS + 15) * len(argvs),
+                   done=lambda result, error: self.params_saved(dialog, host, name, result, error))
+
+    def params_saved(self, dialog, host, name, result, error):
+        status, out, err = outcome(result, error)
+        open_ = self.params_dialog is dialog
+        if status != 0:
+            self.status.setText(tr("Could not change {name}: {error}", name=name, error=failure(result, error)))
+            if open_:
+                dialog.failed(tr("sandbox-ai llm set refused it: {error}", error=failure(result, error)))
+            return
+        self.status.setText(tr("The parameters of {name} are saved.", name=name))
+        if open_:
+            dialog.finish()
 
     # -- check, models, show, remove --
 
@@ -1217,7 +1343,7 @@ class ServerStatusLine(QLabel):
         self.setAccessibleName(tr("The LLM server's status"))
         self.timer = QTimer(self)
         self.timer.setInterval(WL.STATUS_REFRESH * 1000)
-        self.timer.timeout.connect(lambda: self.read() if self.isVisible() else None)
+        self.timer.timeout.connect(lambda: self.read() if widgets.on_screen(self) else None)  # (not minimised)
         self.hide()
 
     def watch(self, host, value):

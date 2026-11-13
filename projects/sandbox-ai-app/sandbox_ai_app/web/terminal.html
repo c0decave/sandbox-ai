@@ -11,6 +11,12 @@
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e; }
   body.light { background: #ffffff; }
   #terminal { position: absolute; top: 4px; left: 6px; right: 2px; bottom: 2px; }
+  /* The target of the link under the mouse, as a browser's status line shows it. */
+  #hover { position: absolute; left: 6px; bottom: 4px; max-width: 80%; padding: 1px 6px; z-index: 10;
+           font: 12px sans-serif; color: #d4d4d4; background: #333333; border: 1px solid #555555;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  body.light #hover { color: #1e1e1e; background: #f3f3f3; border-color: #c8c8c8; }
+  #hover[hidden] { display: none; }
 </style>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 <script src="vendor/xterm.js"></script>
@@ -19,5 +25,6 @@
 </head>
 <body>
 <div id="terminal"></div>
+<div id="hover" hidden></div>
 </body>
 </html>

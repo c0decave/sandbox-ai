@@ -4,6 +4,12 @@
   "id": "chaos-monkey",
   "title": "Chaos monkey",
   "description": "Build and test the project with 1 GiB, half a CPU and 64 processes: finds what eats resources.",
+  "translations": {
+    "de": {
+      "title": "Chaos-Affe",
+      "description": "Das Projekt bauen und testen mit 1 GiB, einer halben CPU und 64 Prozessen: findet, was Ressourcen frisst."
+    }
+  },
   "category": "testing",
   "agents": [
     "claude",

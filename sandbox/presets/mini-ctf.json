@@ -4,6 +4,12 @@
   "id": "mini-ctf",
   "title": "Mini CTF",
   "description": "A capture-the-flag against your own sandbox's limits: a service on the host's port, reached only through it.",
+  "translations": {
+    "de": {
+      "title": "Mini-CTF",
+      "description": "Ein Capture-the-Flag gegen die Grenzen Ihrer eigenen Sandbox: ein Dienst auf einem Port des Hosts, nur über ihn erreichbar."
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

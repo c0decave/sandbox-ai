@@ -4,6 +4,12 @@
   "id": "lm-studio",
   "title": "LM Studio",
   "description": "The agent works with a model on your LM Studio server instead of the cloud: only the server's address is opened, nothing else.",
+  "translations": {
+    "de": {
+      "title": "LM Studio",
+      "description": "Der Agent arbeitet mit einem Modell auf Ihrem LM-Studio-Server statt in der Cloud: nur die Adresse des Servers ist offen, sonst nichts."
+    }
+  },
   "category": "llm",
   "agents": [
     "claude",

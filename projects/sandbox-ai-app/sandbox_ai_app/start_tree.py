@@ -10,6 +10,7 @@ work on it as on a table filled by widgets.fill()."""
 from __future__ import annotations
 
 import calendar
+import functools
 import time
 
 from PySide6.QtCore import QItemSelectionModel, Qt, Signal
@@ -99,8 +100,14 @@ def _moment(value):
     """A time as sandbox-ai writes it (UTC, "YYYY-MM-DDTHH:MM:SSZ") in seconds, or None."""
     if not isinstance(value, str) or len(value) < 19:
         return None
+    return _seconds(value[:19])
+
+
+@functools.lru_cache(maxsize=4096)
+def _seconds(value):
+    """_moment of the first 19 characters, kept (the same start times at every look at a host)."""
     try:
-        return calendar.timegm(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S"))
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%S"))
     except (ValueError, OverflowError):
         return None
 
@@ -151,6 +158,14 @@ def owners(instances):
     for i in instances:
         if i.kind == "mcp":
             servers.setdefault(server_name(i), i)
+    # What each start reaches, worked out once (not once per MCP server: a host with 150 starts and 300 servers spent
+    # 60 ms of every look at it here), and the starts that reach each server name, in the order of STARTS.
+    reach = {id(s): reached(s) for s in starts}
+    users_of = {}
+    for s in starts:
+        for name in dict.fromkeys(n for n, _ in reach[id(s)]):
+            users_of.setdefault(name, []).append(s)
+    moments = {id(s): _moment(s.started) for s in starts}
     direct = {}
     for i in instances:
         record = i.record if isinstance(i.record, dict) else {}
@@ -160,18 +175,18 @@ def owners(instances):
             if owner is not None:
                 found = (owner, "started")
             name = server_name(i) if i.kind == "mcp" else None
-            users = [s for s in starts if name is not None and any(n == name for n, _ in reached(s))]
+            users = list(users_of.get(name, ())) if name is not None else []
             if found is None and users:
-                users.sort(key=lambda s: (not any(n == name and now for n, now in reached(s)), str(s.started)))
+                users.sort(key=lambda s: (not any(n == name and now for n, now in reach[id(s)]), str(s.started)))
                 found = (users[0], "uses")
             listed = record.get("listed_under")
             if found is None and isinstance(listed, str) and listed in by_ref:
                 found = (by_ref[listed], "listed")
             if found is None and not record.get("owner_recorded"):
                 moment = _moment(i.started)
-                near = [(abs(_moment(s.started) - moment), str(s.started), s) for s in starts
-                        if moment is not None and _moment(s.started) is not None
-                        and abs(_moment(s.started) - moment) <= GUESS_SECONDS]
+                near = [(abs(moments[id(s)] - moment), str(s.started), s) for s in starts
+                        if moment is not None and moments[id(s)] is not None
+                        and abs(moments[id(s)] - moment) <= GUESS_SECONDS]
                 if near:
                     found = (min(near, key=lambda n: n[:2])[2], "time")
         else:
@@ -182,7 +197,7 @@ def owners(instances):
             elif isinstance(lead, str) and lead in by_ref:
                 found = (by_ref[lead], "team")
             else:
-                for name, _ in reached(i):
+                for name, _ in reach[id(i)]:
                     board = servers.get(name) if name.startswith(TEAM_PREFIX) else None
                     owner = started_for(board.record, by_ref) if board is not None else None
                     if owner is not None:

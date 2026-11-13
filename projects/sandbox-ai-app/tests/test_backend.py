@@ -231,10 +231,11 @@ def test_paths_of_runs_and_sessions(sai, tmp_path):
     launcher = sai.launcher
     paths = backend.paths_from_options(launcher, ["-w", "/a,/b", "--workspace=rel", "-S", "home", "-D", "--", "-w", "/x"],
                                        "/base")
-    assert paths == {"workspaces": ["/a", "/b", "/base/rel"], "state_dir": "/base/home", "mounts": []}
+    assert paths == {"workspaces": ["/a", "/b", "/base/rel"], "state_dir": "/base/home", "mounts": [],
+                     "workspace_names": {}}
     # --workspace-ro (-W) is a flag: the option after it is read as an option, not as its value.
     paths = backend.paths_from_options(launcher, ["-W", "-w", "/ro", "--workspace-ro", "--state-dir", "st"], "/base")
-    assert paths == {"workspaces": ["/ro"], "state_dir": "/base/st", "mounts": []}
+    assert paths == {"workspaces": ["/ro"], "state_dir": "/base/st", "mounts": [], "workspace_names": {}}
     # rw mount sources are folders the sandbox writes; ro ones are not.
     assert backend.paths_from_options(launcher, ["-m", "/data:/mnt/data:rw", "--mount=rel:/x:rw", "--mount",
                                                  "/etc/ssl:/etc/ssl:ro"], "/base")["mounts"] == ["/data", "/base/rel"]
@@ -247,7 +248,8 @@ def test_paths_of_runs_and_sessions(sai, tmp_path):
                                                 str(tmp_path / "w2").encode(), b"--state-dir", b"st", b""]))
     (proc / "cwd").symlink_to(tmp_path)
     assert backend.run_paths(launcher, 4242, tmp_path / "proc") == {"workspaces": [str(tmp_path / "w2")],
-                                                                    "state_dir": str(tmp_path / "st"), "mounts": []}
+                                                                    "state_dir": str(tmp_path / "st"), "mounts": [],
+                                                                    "workspace_names": {}}
     assert backend.run_paths(launcher, "nope", tmp_path / "proc")["workspaces"] == []
 
 

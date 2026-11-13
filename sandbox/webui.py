@@ -901,8 +901,9 @@ TELEMETRY_ORDER = ("on", "off", "strict")
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
 # The keys of defaults.json (agent_sandbox.DEFAULTS_KEYS but "version"; tests/test_web.py checks they agree): any
 # other key is refused before anything reaches a host.
-DEFAULT_KEYS = ("canaries", "keep_days", "mode", "name_style", "preset_dirs", "safeguard_mute", "subnet", "subnet6",
-                "telemetry")
+DEFAULT_KEYS = ("canaries", "desktop_notifications", "keep_days", "loop_guard", "mode", "name_style", "preset_dirs",
+                "safeguard_mute", "subnet", "subnet6", "telemetry")
+DESKTOP_NOTIFICATIONS = ("all", "alarms", "none")  # agent_sandbox.DESKTOP_NOTIFICATIONS
 NAME_STYLES = ("codename", "project")  # agent_sandbox.NAME_STYLES: name_style's values
 
 
@@ -1140,6 +1141,7 @@ class Api:
             ("GET", H + r"/limits/(?P<name>[^/]+)", self.limits, ()),
             ("POST", H + r"/limits/(?P<name>[^/]+)", self.set_limits, ("limits-raise",)),
             ("GET", H + r"/presets", self.presets, ()),
+            ("GET", H + r"/preset-categories", self.preset_categories, ()),
             ("GET", H + r"/vpn", self.vpn_list, ()),
             ("POST", H + r"/vpn", self.vpn_add, ("vpn-socks", "vpn-replace")),
             ("POST", H + r"/vpn/(?P<name>[^/]+)/check", self.vpn_check, ()),
@@ -2085,6 +2087,11 @@ class Api:
     def presets(self, params, body):
         return self.json_of(params["host"], ["presets", "list", "--json"], 30)
 
+    def preset_categories(self, params, body):
+        """sandbox-ai presets categories --json of the host: the categories its presets are listed under, in order, with
+        English and German titles and descriptions (an older sandbox-ai has none: the page keeps its own list)."""
+        return self.json_of(params["host"], ["presets", "categories", "--json"], 30, ok=(0,))
+
     # secrets (sandbox-ai secrets) of a host: their names and where each is kept, never a value. A value is sent
     # once, as {"secret": VALUE} (a field the audit log leaves out), to `secrets set NAME` on its standard input as
     # the command reads it (one line): never on a command line, in a response or in a log.
@@ -2468,12 +2475,21 @@ class Api:
             raise Refused(400, "canaries is false, a list of categories, all or none")
         if key == "name_style" and value is not None and value not in NAME_STYLES:
             raise Refused(400, f"name_style is {' or '.join(NAME_STYLES)}")
+        if key == "desktop_notifications" and value is not None and value not in DESKTOP_NOTIFICATIONS:
+            raise Refused(400, f"desktop_notifications is {', '.join(DESKTOP_NOTIFICATIONS)}")
+        if key == "loop_guard" and value is not None:
+            # The launcher's own check (llm.check_loop): a value it refuses would stop every start on that host.
+            try:
+                module("llm").check_loop(value, "the default")
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise Refused(400, str(exc) if "loop_guard" in str(exc) else f"loop_guard: {exc}") from None
         if key == "safeguard_mute" and value is not None and not (
                 isinstance(value, list) and all(isinstance(item, str) for item in value)):
             raise Refused(400, "safeguard_mute is a list of kinds (sandbox-ai safeguards kinds)")
-        # How starts are named and which safeguard warnings pop up protect nothing (the safeguards still refuse,
-        # and every record stays listed): no step down to confirm.
-        if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute"):
+        # How starts are named, which safeguard warnings pop up and how a local model is kept from looping protect
+        # nothing (the safeguards still refuse, and every record stays listed): no step down to confirm. Fewer desktop
+        # notifications are one (lowered_default): "none" silences a canary's alarm while the app is closed.
+        if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute", "loop_guard"):
             weakest = {"mode": MODE_ORDER[0], "telemetry": TELEMETRY_ORDER[0]}.get(key)
             if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
@@ -2530,6 +2546,16 @@ class Api:
             if added:
                 return f"preset_dirs: later starts read presets from {', '.join(added)} too"
             return None
+        if key == "desktop_notifications":
+            # all > alarms (only a canary's alarm) > none (not even that), as the launchers read it (approvals.shows)
+            now = before if before in DESKTOP_NOTIFICATIONS else "all"
+            after = "all" if value is None else value
+            if DESKTOP_NOTIFICATIONS.index(after) <= DESKTOP_NOTIFICATIONS.index(now):
+                return None
+            return (f"desktop_notifications {after} instead of {now}: " + (
+                "the launchers show nothing on that host's desktop while its app is closed, not even a canary's "
+                "alarm" if after == "none" else "only a canary's alarm is shown on that host's desktop while its "
+                "app is closed, no question or safeguard"))
         if key in ("subnet", "subnet6"):
             if value == before:
                 return None

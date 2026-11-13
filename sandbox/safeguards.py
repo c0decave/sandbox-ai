@@ -12,7 +12,9 @@ lookup refused, the proxy refusing a connection or a request, a rule's deny, a q
 the privacy check refusing a push, a publishing request refused, the security mode or the administrator's
 policy refusing a run-time change, the run's taint holding an action, a device refused, the memory watch ending
 a process, the supervisor dropping its caches, the kernel's out-of-memory killer, a failed safety check and a
-canary that went off. A record says when, which run, what was refused or ended, why (the rule, mode, policy or
+canary that went off; and what ended or failed an MCP server's process (its container out of memory, at its
+process limit, its /tmp full, an exit nobody asked for: the server's state directory's safeguards.jsonl). A record
+says when, which run, what was refused or ended, why (the rule, mode, policy or
 check), the process when it is known, and the fix: the exact command or option that would allow it, or that it
 stays refused.
 
@@ -81,6 +83,10 @@ KINDS = {
     "canary": ("error", "a canary went off", "{count} canary events in the last minute"),
     "oom": ("error", "out of memory: the kernel ended a process",
             "the kernel ended {count} processes for lack of memory in the last minute"),
+    # An MCP server's container (mcp.py's watch): out of memory, its process limit, a full /tmp, an exit nobody asked for.
+    "mcp-server": ("error", "an MCP server's process ended or failed",
+                   "{count} times an MCP server's process ended or failed in the last minute ({target})"),
+    "loop": ("warning", "loop guard intervened", "{count} loop guard interventions at {target} in the last minute"),
 }
 # What the supervisor may report itself (it runs beside the agent: nothing else is taken from its file).
 SUPERVISOR_KINDS = {"mode", "policy", "guard"}
@@ -286,8 +292,12 @@ def rule_fix(kind, run, rule, ruleset, reason, approval=None):
         return (f"sandbox-ai net untaint {run_word(run)} takes the taint back (only if you trust what entered); "
                 "otherwise it stays held", False)
     if kind == "approval-timeout":
-        return ("nobody answered in time: it is refused for the rest of the run; answer the next question in time "
-                "(sandbox-ai approvals list, the app, the web interface)", False)
+        question = approval.get("question") if isinstance(approval, dict) else None
+        question = question if isinstance(question, str) and re.fullmatch(r"[0-9-]{1,40}", question) else None
+        return ("nobody answered in time: it is refused for 2 minutes without asking, then asked again; allow it for "
+                "the run on the app's Approvals page (Blocked)" + (f" or with sandbox-ai approvals allow {question} "
+                                                                    "--scope run" if question else "")
+                + ", or answer the next question in time", False)
     if kind == "publish":
         return ("publishing is asked first: start with --ask on (the default) and answer the question; with --ask "
                 "off it stays refused", False)
@@ -336,10 +346,34 @@ def connection_target(entry):
     return str(entry.get("destination") or "?")
 
 
+LOOP_WHAT = {"note": "a note to the model", "paused tools": "tool use paused for one answer",
+             "answer stopped": "a repeating answer ended"}
+
+
+def from_loop(entry, run, redact):
+    """The loop guard on an --llm server's request (the proxy's llm_loop): what it found and did."""
+    loop = entry["llm_loop"]
+    action, kind = str(loop.get("action") or "?"), str(loop.get("kind") or "?")
+    endpoint = str(loop.get("endpoint") or "the LLM server")
+    if kind == "text":
+        why = str(loop.get("detail") or "the answer repeated itself")
+    elif kind == "watchdog":
+        why = f"the watchdog: {loop.get('watchdog') or 'the turn went on too long'}"
+    else:
+        why = f"the model called {loop.get('tool') or 'a tool'} {loop.get('count') or 'several'} times with the same " \
+              "arguments and the same result"
+    fix = (f"nothing to allow: the model goes on with the note; to change it: sandbox-ai llm set {endpoint} "
+           "--loop-guard LAYER=VALUE (warn, block, text, watchdog_requests ...) or --loop-guard off")
+    return record("loop", f"{LOOP_WHAT.get(action, action)} ({endpoint})", why, fix, run, entry.get("process"),
+                  endpoint, source="proxy", when=entry.get("time"), redact=redact)
+
+
 def from_connection(entry, run, redact):
-    """A line of the proxy's connection log: refusals, refused pushes, the run becoming tainted."""
+    """A line of the proxy's connection log: refusals, refused pushes, the run becoming tainted, the loop guard."""
     event = entry.get("event")
     when = entry.get("time")
+    if event == "http" and isinstance(entry.get("llm_loop"), dict):
+        return from_loop(entry, run, redact)
     if event == "taint":
         state = entry.get("taint") if isinstance(entry.get("taint"), dict) else {}
         source = state.get("source") if isinstance(state.get("source"), dict) else {}
@@ -470,7 +504,8 @@ def from_question(question, done, run, redact):
         return None  # connections, requests and tool calls: their logs name the refusal with this answer
     about = question.get("name") or question.get("url") or question.get("value") or question.get("path") or kind
     return record("approval-timeout", f"question about {kind} {about}", done.get("reason"),
-                  rule_fix("approval-timeout", run, None, None, "")[0], run, question.get("process"), str(about),
+                  rule_fix("approval-timeout", run, None, None, "", {"question": question.get("id")})[0], run,
+                  question.get("process"), str(about),
                   source="approvals", when=question.get("time"), redact=redact)
 
 
@@ -835,11 +870,21 @@ def all_files(runs=None):
     except OSError:
         directories = []
     files += [d / FILE for d in directories]
+    files += mcp_files()
     unique = []
     for path in files:
         if path not in unique and path.is_file():
             unique.append(path)
     return unique
+
+
+def mcp_files():
+    """The safeguards.jsonl of every MCP server instance here (mcp.py's watch writes them into its state directory)."""
+    root = logs_root().parent / "mcp"
+    try:
+        return sorted(p / FILE for p in root.iterdir() if p.is_dir() and not p.is_symlink() and (p / FILE).is_file())
+    except OSError:
+        return []
 
 
 def find_run(run):

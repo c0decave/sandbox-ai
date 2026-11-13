@@ -4,7 +4,13 @@
   "id": "mobile-android",
   "title": "Mobile: Android",
   "description": "An Android device through the adb server on the host (port 5037); APK analysis in the workspace.",
-  "category": "development",
+  "translations": {
+    "de": {
+      "title": "Mobil: Android",
+      "description": "Ein Android-Gerät über den adb-Server auf dem Host (Port 5037); APK-Analyse im Arbeitsordner."
+    }
+  },
+  "category": "hardware",
   "agents": [
     "claude",
     "codex",

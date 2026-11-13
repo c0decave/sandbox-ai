@@ -18,16 +18,17 @@
   sandbox-ai logs [DIR|--project PATH]                               blocked egress and file access, with suggestions
   sandbox-ai activity [RUN|--session NAME|--project PATH] [--follow]  what the agents did: prompts, tools, files, network
   sandbox-ai privacy-check [PATH ...]                                what the next push would publish that should stay private
-  sandbox-ai net list|show|allow|revoke|untaint ...                  change what a running sandbox may reach
+  sandbox-ai net list|show|allow|revoke|untaint|cut ...              change what a running sandbox may reach (cut: the kill switch)
   sandbox-ai devices list|add|remove [RUN] PATH|usb:VID:PID          hand devices to a running sandbox
   sandbox-ai workspace list|add|remove [RUN] DIR|FILE [--ro] [--name NAME]  hand a host folder or file to a running sandbox
   sandbox-ai limits [RUN] --memory|--cpus|--pids ...                 change a running sandbox's limits
   sandbox-ai usage [RUN|--all] [--json] [--follow]                   what a running sandbox uses: CPU, memory, processes
-  sandbox-ai approvals list|allow|deny|history|remembered|forget ... answer what running sandboxes ask
+  sandbox-ai approvals list|allow|deny|ask-again|blocked|decided|history|remembered|forget ... answer what running sandboxes ask
   sandbox-ai rules check|show|reload ...                              check rulesets, show a start's, reload a running one's
   sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them
   sandbox-ai safeguards [RUN|--all] [--follow] [--json]               what the safeguards refused or ended, why, the fix
-  sandbox-ai secrets list|set|delete|backend ...                     API keys and tokens in your keyring
+  sandbox-ai report [NAME|--session NAME|--all] [-f md|html|pdf] [-o FILE]  one report: runs, stats, network, security
+  sandbox-ai secrets list|set|delete|backend|give|revoke ...         API keys and tokens in your keyring; give a run one
   sandbox-ai llm add|list|show|remove|models|status|check ...         LLM servers, local or remote, for --llm
   sandbox-ai vpn add|list|show|remove|check|rotate ...               VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale, Tor)
   sandbox-ai hosts list|add|set|remove|test|update|install|run ...    other machines (LXC containers) managed over SSH
@@ -35,11 +36,12 @@
   sandbox-ai web [serve|user|vendor|cert] ...                         the web interface (HTTPS, password and TOTP)
   sandbox-ai presets list|show|check|dirs ...                         ready setups to start an agent with (--preset NAME)
   sandbox-ai defaults [show|set|unset] ...                            your defaults for every start (defaults.json)
-  sandbox-ai git-logins add|list|remove|check ...                     Git logins for pushes, used by the proxy
+  sandbox-ai git-logins add|list|remove|check|give|revoke ...         Git logins for pushes; give a running sandbox one
   sandbox-ai publish-logins add|list|remove|check|kinds ...           package registry logins, used by the proxy
   sandbox-ai identities add|set|login|publish|list|show|check|remove ...  commit identities with their logins
   sandbox-ai demo-device start|serve|status|stop ...                  a virtual device to try the device rules
-  sandbox-ai images [packages|extend|check|new|remove|history|recipe] ...  the agent images, their contents and extensions
+  sandbox-ai images [packages|extend|check|new|remove|history|recipe|pull|build-image|list] ...  the agent images,
+                                                                      their extensions, your images (services, bases)
   sandbox-ai update [--check] [--version X.Y.Z] ...                  update an installation made by install.sh (signed)
   sandbox-ai version [--verbose]                                     version; --verbose: install place, release keys
   sandbox-ai completion bash|zsh|fish|install                        Tab completion for your shell (install.sh sets it up)
@@ -65,7 +67,8 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "privacy-check": ("privacy.py", "check"), "net": ("net.py",),
                    "approvals": ("approvals.py",), "canaries": ("canary.py",), "safeguards": ("safeguards.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
-                   "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",)}
+                   "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",),
+                   "report": ("report.py",)}
 
 
 def version():

@@ -4,6 +4,12 @@
   "id": "vllm",
   "title": "vLLM",
   "description": "The agent works with a model on your vLLM server instead of the cloud: only the server's address is opened, nothing else.",
+  "translations": {
+    "de": {
+      "title": "vLLM",
+      "description": "Der Agent arbeitet mit einem Modell auf Ihrem vLLM-Server statt in der Cloud: nur die Adresse des Servers ist offen, sonst nichts."
+    }
+  },
   "category": "llm",
   "agents": [
     "claude",

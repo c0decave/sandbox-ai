@@ -4,7 +4,13 @@
   "id": "onboarding-buddy",
   "title": "Onboarding buddy",
   "description": "A guided tour of the project for a new team member, with screenshots from a virtual screen.",
-  "category": "development",
+  "translations": {
+    "de": {
+      "title": "Einarbeitungs-Buddy",
+      "description": "Eine geführte Tour durch das Projekt für ein neues Teammitglied, mit Bildschirmfotos von einem virtuellen Bildschirm."
+    }
+  },
+  "category": "writing",
   "agents": [
     "claude",
     "codex",

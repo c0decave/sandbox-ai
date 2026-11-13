@@ -1,0 +1,48 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "coding-memory",
+  "title": "Coding with memory",
+  "description": "The agent works without asking, but only in the project's folder (the one host folder it can write); PyPI, npm and GitHub open, nothing else. Engram keeps decisions, bugs and conventions in a brain folder of this project, outside the workspace, from one session to the next.",
+  "translations": {
+    "de": {
+      "title": "Programmieren mit Gedächtnis",
+      "description": "Der Agent arbeitet ohne Rückfragen, aber nur im Ordner des Projekts (der einzige Host-Ordner, den er schreiben kann); PyPI, npm und GitHub offen, sonst nichts. Engram behält Entscheidungen, Fehler und Konventionen in einem Brain-Ordner dieses Projekts, außerhalb des Arbeitsordners, von einer Sitzung zur nächsten."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github",
+    "--dangerously-skip-permissions",
+    "--mcp-mount",
+    "engram:/data={brain}:rw"
+  ],
+  "mcp": [
+    "mcp:engram"
+  ],
+  "values": {
+    "brain": {
+      "label": "Brain folder of this project (created if missing), outside the workspace",
+      "kind": "folder",
+      "hint": "one folder per project, e.g. ~/brains/PROJECT; the server once: sandbox-ai mcp add engram --mount /data=~/brains/default:rw"
+    }
+  },
+  "notes": [
+    "-D (--dangerously-skip-permissions) turns the agent's own questions off: Claude Code runs with its --dangerously-skip-permissions, Codex bypasses its approvals and its own sandbox, OpenCode allows every tool. sandbox-ai's sandbox stays the boundary: the workspace (/work) is the only folder of this computer the agent can write (no writable --mount here; its HOME and /tmp are the sandbox's own), and the network is what this preset opens, through the connection proxy, whose rules and questions hold as always. The security mode paranoid refuses -D.",
+    "The brain: Engram's database (engram.db) in the brain folder, one folder per project. The start gives it to the server (--mcp-mount engram:/data=FOLDER:rw) in an instance of its own, engram.HASH, shared only by the starts with the same folder: two projects never reach one memory. The folder is created if it is not there, and refused inside a workspace (the agent could change the memory behind the server's back); a local file system (Engram refuses NFS and SMB).",
+    "Add the server once: sandbox-ai mcp add engram --mount /data=~/brains/default:rw (its own folder, for starts that give none). sandbox-ai mcp list shows each project's instance with its folder.",
+    "Engram's project inside the folder stays its default (brain): the folder is what keeps projects apart. The server has no network and no tool that takes a path.",
+    "What the memory returns was written by earlier sessions, perhaps after reading untrusted text: data, not instructions.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ],
+  "needs": [
+    "the MCP server engram, once: sandbox-ai mcp add engram --mount /data=~/brains/default:rw"
+  ]
+}

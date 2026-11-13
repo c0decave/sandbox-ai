@@ -94,7 +94,7 @@ class StartDialog(QDialog):
         form.addRow(tr("Workspace"), where)
         form.addRow(tr("Options"), self.options)
         layout.addLayout(form)
-        self.problem = plain_label(role="notice-error")
+        self.problem = plain_label(role="notice-error", selectable=True)
         layout.addWidget(self.problem)
         buttons = QDialogButtonBox()
         buttons.addButton(tr("Start"), QDialogButtonBox.ButtonRole.AcceptRole)
@@ -232,7 +232,7 @@ class TeamPage(QWidget):
         self.delete_button.clicked.connect(lambda _=False: self.delete())
         layout.addWidget(flow(self.start_button, self.attach_button, self.post_button, self.stop_button,
                               self.delete_button, self.refresh_button))  # wraps when the window is narrow
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.update_buttons()

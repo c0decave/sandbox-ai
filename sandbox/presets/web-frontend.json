@@ -1,0 +1,46 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "web-frontend",
+  "title": "Web frontend",
+  "description": "Web apps with npm: Playwright's browsers in the sandbox on a virtual screen for your app, and a Playwright MCP browser for public pages; npm and GitHub open.",
+  "translations": {
+    "de": {
+      "title": "Web-Frontend",
+      "description": "Web-Apps mit npm: die Browser von Playwright in der Sandbox auf einem virtuellen Bildschirm für Ihre App, und ein Playwright-MCP-Browser für öffentliche Seiten; npm und GitHub offen."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-npm",
+    "--allow-github",
+    "--allow-host",
+    "cdn.playwright.dev",
+    "--allow-host",
+    "playwright.download.prss.microsoft.com",
+    "--gui",
+    "--memory",
+    "12g",
+    "--mcp",
+    "{browser}"
+  ],
+  "values": {
+    "browser": {
+      "label": "Browser MCP server for public pages (sandbox-ai mcp list); empty: none",
+      "kind": "text",
+      "default": "playwright",
+      "optional": true,
+      "hint": "once: sandbox-ai mcp add playwright --network full"
+    }
+  },
+  "notes": [
+    "Your app runs in the sandbox (npm run dev at localhost): the agent tests it with Playwright there (npx playwright install chromium; the browsers come from cdn.playwright.dev), and you watch it on the virtual screen (--gui). Chromium's libraries missing: an image variant with them, sandbox-ai images extend claude --add-apt chromium.",
+    "The Playwright MCP server runs in a container of its own with the full network: it opens public pages (documentation, a deployed preview), never the sandbox's localhost. Add it once: sandbox-ai mcp add playwright --network full; --preset-value browser= leaves it out. What its pages say is untrusted data.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

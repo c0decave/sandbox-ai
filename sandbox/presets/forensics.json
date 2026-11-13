@@ -4,7 +4,13 @@
   "id": "forensics",
   "title": "Forensics and incident response",
   "description": "Evidence read-only, the agent reaching only its provider in the security mode high, decoy credentials that report any attempt to use them; The Sleuth Kit, ExifTool and YARA as MCP servers.",
-  "category": "analysis",
+  "translations": {
+    "de": {
+      "title": "Forensik und Incident Response",
+      "description": "Beweismittel nur lesend, der Agent erreicht im Sicherheitsmodus high nur seinen Anbieter, Köder-Zugangsdaten melden jeden Versuch, sie zu benutzen; The Sleuth Kit, ExifTool und YARA als MCP-Server."
+    }
+  },
+  "category": "forensics",
   "agents": [
     "claude",
     "codex",

@@ -12,6 +12,7 @@ CHAPTERS    a list of chapters. Each has an "id" (the test checks the list of id
             as subtitles: one cue each, burned into the video and written to the .vtt files).
 LIVE_SETUP  what the generator prepares in a throwaway HOME before it runs the commands marked "live".
 STILLS      scenes the generator saves as PNG stills with --stills.
+SERIES      series of short videos (pages: one per page of the desktop app), rendered with --series; see there.
 
 A text is T(english, german). Text in `backticks` is drawn in the monospace font (commands, options, paths).
 
@@ -87,18 +88,18 @@ COURSE = {
 
 # The pages of the desktop app (sandbox-ai-app), in the order of its navigation; used for the schematic when no
 # screenshot was captured, and by capture_app.py for the page keys.
-APP_NAV = [  # the app's own words (its German translation calls the Board "Tafel" and approvals "Freigaben")
-    (T("Project", "Projekt"), [("launch", T("Start", "Start")), ("board", T("Board", "Tafel"))]),
+APP_NAV = [  # the app's own words (its German translation calls approvals "Freigaben")
+    (T("Project", "Projekt"), [("launch", T("Start", "Start")), ("board", T("Board", "Board"))]),
     (T("Running", "Laufend"), [("sandboxes", T("Sandboxes & sessions", "Sandboxen & Sitzungen")),
                                ("approvals", T("Approvals", "Freigaben")),
                                ("terminals", T("Terminals", "Terminals"))]),
-    (T("Insight", "Einblick"), [("connections", T("Connections", "Verbindungen")),
-                                ("activity", T("Activity", "Aktivität")),
-                                ("statistics", T("Statistics", "Statistik")), ("files", T("Files", "Dateien"))]),
-    (T("Manage", "Verwalten"), [("kits", T("Kits & plugins", "Kits & Plugins")),
+    (T("Manage", "Verwalten"), [("files", T("File manager", "Dateimanager")), ("kits", T("Kits & plugins", "Kits & Plugins")),
                                 ("mcp", T("MCP servers", "MCP-Server")), ("llm", T("LLM servers", "LLM-Server")),
                                 ("images", T("Images", "Images")), ("credentials", T("Credentials", "Zugangsdaten")),
                                 ("team", T("Teams", "Teams"))]),
+    (T("Insight", "Einblick"), [("connections", T("Connections", "Verbindungen")),
+                                ("activity", T("Activity", "Aktivität")),
+                                ("statistics", T("Statistics", "Statistik"))]),
     (T("System", "System"), [("system", T("System", "System")), ("hosts", T("Hosts", "Hosts")),
                              ("help", T("Help", "Hilfe"))]),
 ]
@@ -386,7 +387,7 @@ DIAGRAMS = {
     "team": {
         "boxes": [
             {"id": "board", "x": 33, "y": 0, "w": 34, "h": 12, "style": "proxy", "step": 0,
-             "label": T("Task board: MCP server team-app", "Aufgabenbrett: MCP-Server team-app"),
+             "label": T("Task board: MCP server team-app", "Aufgaben-Board: MCP-Server team-app"),
              "sub": T("own sandbox, no network · post · wait_for_task · done · board",
                       "eigene Sandbox, kein Netz · post · wait_for_task · done · board")},
             {"id": "lead", "x": 2, "y": 20, "w": 28, "h": 10, "style": "ok", "step": 1,
@@ -1169,7 +1170,7 @@ CHAPTERS = [
     {
         "id": "app-web",
         "title": T("The desktop app and the web interface", "Die Desktop-App und die Weboberfläche"),
-        "topics": [T("Pages, board, terminals, approvals", "Seiten, Tafel, Terminals, Freigaben"),
+        "topics": [T("Pages, board, terminals, approvals", "Seiten, Board, Terminals, Freigaben"),
                    T("sandbox-ai web", "sandbox-ai web"), T("Other hosts over SSH", "Andere Hosts über SSH")],
         "scenes": [
             {"kind": "app", "page": "launch", "heading": T("The app: Start", "Die App: Start"),
@@ -1184,44 +1185,55 @@ CHAPTERS = [
                  T("The Start page is built from the launcher's own option parser, so a new option appears without a new app.",
                    "Die Seite Start wird aus dem Optionsparser des Starters gebaut, eine neue Option erscheint also ohne neue App."),
              ]},
-            {"kind": "app", "page": "board", "heading": T("The board: one sandbox as a graph", "Die Tafel: eine Sandbox als Graph"),
+            {"kind": "app", "page": "board", "shot": "board-preset", "heading": T("The board: one sandbox as a graph", "Das Board: eine Sandbox als Graph"),
              "bullets": [
-                 T("Agent, workspaces, proxy, network, MCP, VPN, limits as parts, dragged from the list beside it",
-                   "Agent, Workspaces, Proxy, Netz, MCP, VPN, Limits als Teile, aus der Liste daneben gezogen"),
-                 T("Right-click a part: Properties, Cut, Copy, Paste", "Rechtsklick auf ein Teil: Eigenschaften, Ausschneiden, Kopieren, Einfügen"),
-                 T("Panels for the properties and for the security score with its findings: docked, undocked or folded",
-                   "Bereiche für die Eigenschaften und für den Sicherheitswert mit seinen Befunden: angedockt, abgedockt oder eingeklappt"),
-                 T("New from preset…, Wizard…; Apply… writes `.sandbox-ai.json`", "Neu aus Vorlage…, Assistent…; Übernehmen… schreibt `.sandbox-ai.json`"),
+                 T("Agent, workspaces, proxy, network, MCP, VPN, services, limits as parts, dragged from the list beside it",
+                   "Agent, Workspaces, Proxy, Netz, MCP, VPN, Services, Limits als Teile, aus der Liste daneben gezogen"),
+                 T("Findings, badges and a security score follow every change", "Befunde, Abzeichen und ein Sicherheitswert folgen jeder Änderung"),
+                 T("New from preset… prepares what the preset needs: an identity, an image variant, a Tor profile, MCP servers",
+                   "Neu aus Vorlage… bereitet vor, was das Preset braucht: Identität, Image-Variante, Tor-Profil, MCP-Server"),
+                 T("Apply… writes `.sandbox-ai.json`; Clone makes a new project or session of it", "Übernehmen… schreibt `.sandbox-ai.json`; Klonen macht ein neues Projekt oder eine Session daraus"),
              ],
              "captions": [
                  T("The board shows one sandbox as a node graph. Problems, badges and a security score follow every change.",
-                   "Die Tafel zeigt eine Sandbox als Knotengraph. Probleme, Abzeichen und ein Sicherheitswert folgen jeder Änderung."),
-                 T("Apply shows the change, writes the project file and trusts it.",
-                   "Übernehmen zeigt die Änderung, schreibt die Projektdatei und vertraut ihr."),
+                   "Das Board zeigt eine Sandbox als Knotengraph. Probleme, Abzeichen und ein Sicherheitswert folgen jeder Änderung."),
+                 T("A preset is prepared before the start: what it needs is made, then the start goes on. Apply shows the change, writes the project file and trusts it.",
+                   "Ein Preset wird vor dem Start vorbereitet: Was es braucht, wird angelegt, dann geht der Start weiter. Übernehmen zeigt die Änderung, schreibt die Projektdatei und vertraut ihr."),
              ]},
-            {"kind": "app", "page": "sandboxes", "heading": T("Sandboxes, sessions and terminals", "Sandboxen, Sitzungen und Terminals"),
+            {"kind": "app", "page": "sandboxes", "shot": "sandboxes-cut", "heading": T("Sandboxes, sessions and the kill switch", "Sandboxen, Sessions und der Kill-Switch"),
              "bullets": [
-                 T("Every instance of this account in one table", "Jede Instanz dieses Kontos in einer Tabelle"),
-                 T("Attach, pause, resume, stop; allow, revoke; devices and limits", "Verbinden, pausieren, fortsetzen, beenden; erlauben, widerrufen; Geräte und Limits"),
-                 T("Terminal tabs inside the app (xterm.js)", "Terminal-Reiter in der App (xterm.js)"),
+                 T("Every start of this account, grouped with its MCP servers, helpers and team", "Jeder Start dieses Kontos, gruppiert mit MCP-Servern, Helfern und Team"),
+                 T("Attach, pause, resume, stop; allow, revoke; devices, limits, workspaces", "Verbinden, pausieren, fortsetzen, beenden; erlauben, zurücknehmen; Geräte, Limits, Workspaces"),
+                 T("Kill switch: cut the internet, the local network, all but the model API, or everything", "Kill-Switch: Internet, lokales Netz, alles außer der Modell-API oder alles kappen"),
+                 T("Emergency stop (Ctrl+Shift+X): every sandbox here and on your hosts", "Notaus (Strg+Umschalt+X): jede Sandbox hier und auf Ihren Hosts"),
              ],
              "captions": [
-                 T("Sandboxes and sessions lists everything that runs or is kept, wherever it was started, with buttons for each command.",
-                   "Sandboxen & Sitzungen listet alles, was läuft oder aufbewahrt ist, egal wo gestartet, mit Knöpfen für jeden Befehl."),
-                 T("Sessions can be attached in a terminal tab of the app or in a terminal window.",
-                   "Sessions lassen sich in einem Terminal-Reiter der App oder in einem Terminalfenster verbinden."),
+                 T("Sandboxes and sessions lists everything that runs or is kept, each start with its parts, and a button for each command.",
+                   "Sandboxen & Sitzungen listet alles, was läuft oder aufbewahrt ist, jeden Start mit seinen Teilen, und einen Knopf für jeden Befehl."),
+                 T("The kill switch cuts a sandbox's network at once, out of the agent's reach; the emergency stop cuts all of them.",
+                   "Der Kill-Switch kappt das Netz einer Sandbox sofort, außerhalb der Reichweite des Agenten; der Notaus kappt alle."),
              ]},
             {"kind": "app", "page": "approvals", "heading": T("Approvals in the app", "Rückfragen in der App: Freigaben"),
              "bullets": [
-                 T("Open questions of all sandboxes, with a countdown", "Offene Rückfragen aller Sandboxes, mit Countdown"),
-                 T("Allow with the scope once, run or always; deny; block always", "Erlauben mit Reichweite once, run oder always; ablehnen; immer blockieren"),
-                 T("Desktop notification and a count in the navigation", "Desktop-Benachrichtigung und ein Zähler in der Navigation"),
+                 T("Open questions of all sandboxes, each saying why it is asked", "Offene Fragen aller Sandboxen, jede mit dem Grund"),
+                 T("Allow once, for the run or always; deny; block always", "Einmal, für den Lauf oder immer erlauben; ablehnen; immer sperren"),
+                 T("Blocked: every refusal of the run with its reason and process, to allow or ask again", "Blockiert: jede Ablehnung des Laufs mit Grund und Prozess, zum Erlauben oder Wieder-Fragen"),
              ],
              "captions": [
-                 T("The approvals page shows the open questions of every running sandbox, with the run, what is asked and the countdown to the refusal.",
-                   "Die Seite Freigaben zeigt die offenen Fragen jeder laufenden Sandbox, mit Lauf, Anliegen und Countdown bis zur Ablehnung."),
-                 T("It keeps answering from the system tray while the window is closed.",
-                   "Sie antwortet weiter aus dem Infobereich, während das Fenster geschlossen ist."),
+                 T("The approvals page shows the open questions of every running sandbox, with the run, what is asked and why.",
+                   "Die Seite Freigaben zeigt die offenen Fragen jeder laufenden Sandbox, mit Lauf, Anliegen und Grund."),
+                 T("Below them, Blocked lists every refusal of the run: one click allows it for the run, or asks again next time.",
+                   "Darunter listet Blockiert jede Ablehnung des Laufs: Ein Klick erlaubt sie für den Lauf oder fragt beim nächsten Mal wieder."),
+             ]},
+            {"kind": "app", "page": "files", "shot": "files-editor", "heading": T("Files: a two-pane file manager", "Dateien: ein Dateimanager mit zwei Bereichen"),
+             "bullets": [
+                 T("A sandbox's workspaces and HOME beside this machine", "Workspaces und HOME einer Sandbox neben diesem Rechner"),
+                 T("Copy, move, drag and drop; nothing gets a mount", "Kopieren, verschieben, Drag and Drop; nichts bekommt einen Mount"),
+                 T("Text and hex editor with find and replace, a Markdown viewer; links never followed", "Text- und Hex-Editor mit Suchen und Ersetzen, eine Markdown-Ansicht; Links werden nie verfolgt"),
+             ],
+             "captions": [
+                 T("Files shows a sandbox's folders beside your own: copy, move or drag files across, and edit them in the app's text or hex editor.",
+                   "Dateien zeigt die Ordner einer Sandbox neben Ihren eigenen: Dateien kopieren, verschieben oder hinüberziehen und im Text- oder Hex-Editor der App bearbeiten."),
              ]},
             {"kind": "app", "page": "kits", "heading": T("Kits & plugins and the marketplaces", "Kits & Plugins und die Marktplätze"),
              "bullets": [
@@ -1229,13 +1241,10 @@ CHAPTERS = [
                    "Jedes Kit mit dem, was es je Agent mitbringt; neue Kits, Skills, Plugins und Hooks"),
                  T("Marketplaces: sandbox-ai's, the kits', Claude's and Codex's, each plugin with its state",
                    "Marktplätze: die von sandbox-ai, der Kits, von Claude und von Codex, jedes Plugin mit seinem Zustand"),
-                 T("Add, enable or disable a plugin in a kit, asked first", "Ein Plugin in einem Kit hinzufügen, einschalten oder ausschalten, nach Rückfrage"),
              ],
              "captions": [
-                 T("Kits and plugins shows every kit and, on its Marketplaces tab, every marketplace this machine knows, with its plugins.",
-                   "Kits & Plugins zeigt jedes Kit und auf dem Reiter Marktplätze jeden Marktplatz, den dieser Rechner kennt, mit seinen Plugins."),
-                 T("Each change runs sandbox-ai kits for the kit you chose; the app does nothing the command line cannot.",
-                   "Jede Änderung führt sandbox-ai kits für das gewählte Kit aus; die App kann nichts, was die Kommandozeile nicht kann."),
+                 T("Kits and plugins shows every kit and, on its Marketplaces tab, every marketplace this machine knows; each change runs sandbox-ai kits, asked first.",
+                   "Kits & Plugins zeigt jedes Kit und auf dem Reiter Marktplätze jeden Marktplatz, den dieser Rechner kennt; jede Änderung führt sandbox-ai kits aus, nach Rückfrage."),
              ]},
             {"kind": "terminal", "heading": T("The web interface", "Die Weboberfläche"),
              "steps": [
@@ -1273,15 +1282,15 @@ CHAPTERS = [
     {
         "id": "teams",
         "title": T("Agent teams", "Agenten-Teams"),
-        "topics": [T("One sandbox per agent", "Eine Sandbox je Agent"), T("The task board", "Das Aufgabenbrett"),
+        "topics": [T("One sandbox per agent", "Eine Sandbox je Agent"), T("The task board", "Das Aufgaben-Board"),
                    T("Limits of teams", "Grenzen von Teams")],
         "scenes": [
-            {"kind": "diagram", "diagram": "team", "heading": T("A team works through a task board", "Ein Team arbeitet über ein Aufgabenbrett"),
+            {"kind": "diagram", "diagram": "team", "heading": T("A team works through a task board", "Ein Team arbeitet über ein Aufgaben-Board"),
              "captions": [
                  T("sandbox-ai team starts one sandbox per agent on a shared workspace. The first agent leads and splits the work.",
                    "sandbox-ai team startet eine Sandbox je Agent auf einem gemeinsamen Workspace. Der erste Agent leitet und teilt die Arbeit auf."),
                  T("The task board is an MCP server in a sandbox of its own, without network; every member reaches it through its relay, so the MCP rules hold.",
-                   "Das Aufgabenbrett ist ein MCP-Server in einer eigenen Sandbox, ohne Netz; jedes Mitglied erreicht es über sein Relay, die MCP-Regeln gelten also."),
+                   "Das Aufgaben-Board ist ein MCP-Server in einer eigenen Sandbox, ohne Netz; jedes Mitglied erreicht es über sein Relay, die MCP-Regeln gelten also."),
              ]},
             {"kind": "terminal", "heading": T("Running a team", "Ein Team betreiben"),
              "steps": [
@@ -1296,13 +1305,13 @@ CHAPTERS = [
                  T("Each member is a named session such as app-claude: attach, pause or stop it like any start. Options after -- hold for every member.",
                    "Jedes Mitglied ist eine benannte Session wie app-claude: verbinden, pausieren oder beenden wie jeden Start. Optionen nach -- gelten für alle."),
                  T("You can post tasks yourself; team show prints the members and the board.",
-                   "Sie können selbst Aufgaben einstellen; team show zeigt die Mitglieder und das Brett."),
+                   "Sie können selbst Aufgaben einstellen; team show zeigt die Mitglieder und das Board."),
              ]},
             {"kind": "bullets", "heading": T("Good to know", "Gut zu wissen"),
              "bullets": [
                  T("Members share the workspace: nothing stops two from editing one file",
                    "Mitglieder teilen den Workspace: nichts hindert zwei daran, eine Datei zu ändern"),
-                 T("The board does not know who calls it: a member names itself", "Das Brett weiß nicht, wer es aufruft: ein Mitglied nennt sich selbst"),
+                 T("The board does not know who calls it: a member names itself", "Das Board weiß nicht, wer es aufruft: ein Mitglied nennt sich selbst"),
                  T("A task taken but never reported comes back at the next wait", "Eine genommene, nie gemeldete Aufgabe kommt beim nächsten Warten wieder"),
              ],
              "captions": [
@@ -1375,6 +1384,959 @@ REQUIRED_CHAPTERS = ["what-why", "install", "first-start", "network", "security"
 # Scenes saved as stills with --stills: "CHAPTER-ID/INDEX" (0-based scene index), or "intro", "contents", "outro".
 STILLS = ["what-why/1", "first-start/0", "network/4", "security/1", "app-web/1", "teams/0"]
 
+# --- the series: one short video per page of the desktop app ----------------------------------------------------
+#
+# SERIES["pages"]["videos"] holds one video per key of APP_PAGES, in the app's order. A video has the "page" it
+# is about, "topics" for its title card, "intro" (the narration over the title card) and "scenes" (the kinds
+# above; an "app" scene may name a "shot": a state captured by capture_app.py, such as "files-editor", else the
+# page itself; "focus" [x0, y0, x1, y1] (fractions of the picture) frames a part of it, "zoom" shows only that
+# part, larger; a scene without bullets shows the picture over the whole width). The narration of the German
+# videos is spoken (narrate.py, with the English IT terms of pronunciation.py), so it holds no paths, options or
+# symbols: what is typed goes into the bullets.
+SERIES = {
+    "pages": {
+        "title": T("The desktop app, page by page", "Die Desktop-App, Seite für Seite"),
+        "part": T("Part", "Teil"),
+        "next": T("Next", "Als Nächstes"),
+        "last": T("That was the last page", "Das war die letzte Seite"),
+        "outro_bullets": [
+            T("Every part of a page has a (?) with a short explanation", "Jeder Teil einer Seite hat ein (?) mit einer kurzen Erklärung"),
+            T("Help (F1): every page in detail, with tours", "Hilfe (F1): jede Seite im Detail, mit Touren"),
+            T("The app runs the sandbox-ai commands: the same works in a terminal", "Die App führt die sandbox-ai-Befehle aus: dasselbe geht im Terminal"),
+        ],
+        "outro_captions": [
+            T("Every part of the page has a small question mark that explains it, and Help has every page in detail.",
+              "Jeder Teil der Seite hat ein kleines Fragezeichen, das ihn erklärt, und die Hilfe beschreibt jede Seite im Detail."),
+        ],
+        "videos": [
+            {
+                "id": "launch", "page": "launch",
+                "topics": [T("Host, agent, model and preset", "Host, Agent, Modell und Preset"),
+                           T("Every option of the launcher", "Jede Option des Starters"),
+                           T("Dry run, start, session", "Probelauf, Start, Session")],
+                "intro": [T("The Start page starts one agent in one sandbox: you choose what it may reach, the app runs sandbox-ai with exactly these options.",
+                            "Die Seite Start startet einen Agenten in einer Sandbox: Sie wählen, was er erreichen darf, und die App führt sandbox-ai mit genau diesen Optionen aus.")],
+                "scenes": [
+                    {"kind": "app", "page": "launch", "heading": T("Who starts where", "Wer startet wo"),
+                     "focus": [0.16, 0.15, 0.92, 0.31],
+                     "bullets": [
+                         T("Host: this machine or one of `sandbox-ai hosts`", "Host: dieser Rechner oder einer aus `sandbox-ai hosts`"),
+                         T("Agent: Claude Code, Codex or OpenCode", "Agent: Claude Code, Codex oder OpenCode"),
+                         T("Model: the provider's, or your own model server", "Modell: das des Anbieters oder Ihr eigener Modellserver"),
+                         T("Preset with Gallery…; profiles keep a whole form", "Preset mit Galerie…; Profile merken ein ganzes Formular"),
+                     ],
+                     "captions": [
+                         T("The row at the top chooses the host, the agent and its model: the provider's, or a model server of your own from the page LLM servers.",
+                           "Die Zeile oben wählt den Host, den Agenten und sein Modell: das des Anbieters oder einen eigenen Modellserver von der Seite LLM-Server."),
+                         T("A preset fills the form with a tested setup; the gallery shows each one as a picture of its board. A profile keeps a whole form under a name.",
+                           "Ein Preset füllt das Formular mit einem erprobten Setup; die Galerie zeigt jedes als Bild seines Boards. Ein Profil merkt sich ein ganzes Formular unter einem Namen."),
+                     ]},
+                    {"kind": "app", "page": "launch", "shot": "launch-network", "heading": T("Every option, in groups", "Jede Option, in Gruppen"),
+                     "zoom": [0.16, 0.3, 0.99, 0.76],
+                     "bullets": [
+                         T("Built from the launcher's own option parser", "Gebaut aus dem Optionsparser des Starters"),
+                         T("Workspace, network, proxy, Git, login, display, hardware, limits, engine", "Arbeitsordner, Netzwerk, Proxy, Git, Anmeldung, Anzeige, Hardware, Grenzen, Engine"),
+                         T("Forbidden by the administrator's policy: greyed out", "Von der Richtlinie des Administrators verboten: ausgegraut"),
+                         T("New: services beside the agent (`--service`), a model's parameters (`--llm-param`)", "Neu: Services neben dem Agenten (`--service`), Parameter eines Modells (`--llm-param`)"),
+                     ],
+                     "captions": [
+                         T("The tabs below hold every option of the launcher, built from its own option parser: a new option of sandbox-ai appears here without a new app.",
+                           "Die Reiter darunter enthalten jede Option des Starters, gebaut aus seinem eigenen Optionsparser: Eine neue Option von sandbox-ai erscheint hier ohne neue App."),
+                         T("On the Network tab you open exactly the destinations the task needs, such as GitHub or the Python package index. Everything else stays closed.",
+                           "Auf dem Reiter Netzwerk öffnen Sie genau die Ziele, die die Aufgabe braucht, etwa GitHub oder den Python-Paketindex. Alles andere bleibt zu."),
+                         T("A service, a database for example, runs beside the agent in the same pod and behind the same firewall; a local model gets its parameters per start.",
+                           "Ein Service, etwa eine Datenbank, läuft neben dem Agenten im selben Pod und hinter derselben Firewall; ein lokales Modell bekommt seine Parameter je Start."),
+                     ]},
+                    {"kind": "app", "page": "launch", "heading": T("Check, then start", "Erst prüfen, dann starten"),
+                     "focus": [0.16, 0.79, 0.99, 0.92],
+                     "bullets": [
+                         T("The exact command line, to copy into a terminal", "Die genaue Kommandozeile, zum Kopieren ins Terminal"),
+                         T("Dry run: the launcher checks everything, starts nothing", "Probelauf: Der Starter prüft alles und startet nichts"),
+                         T("Start in the app or a terminal window; as a session it keeps running", "Start in der App oder im Terminalfenster; als Session läuft er weiter"),
+                         T("Save as project configuration… writes `.sandbox-ai.json`, asked first", "Als Projektkonfiguration speichern… schreibt `.sandbox-ai.json`, nach Rückfrage"),
+                     ],
+                     "captions": [
+                         T("Below the form is the exact command the app will run. Dry run lets the launcher check everything and show its plan, without starting anything.",
+                           "Unter dem Formular steht der genaue Befehl, den die App ausführt. Der Probelauf lässt den Starter alles prüfen und seinen Plan zeigen, ohne etwas zu starten."),
+                         T("Start runs it in a tab of the app or in your terminal. As a session, named by a codename, it keeps running when the window closes.",
+                           "Start führt ihn in einem Tab der App oder in Ihrem Terminal aus. Als Session, benannt mit einem Codenamen, läuft er weiter, wenn das Fenster schließt."),
+                         T("Save as project configuration writes the project file and trusts it, but only after showing it: every later start in the project applies it.",
+                           "Als Projektkonfiguration speichern schreibt die Projektdatei und vertraut ihr, aber erst, nachdem es sie gezeigt hat: Jeder spätere Start im Projekt wendet sie an."),
+                     ]},
+                    {"kind": "terminal", "heading": T("A start says what it does", "Ein Start sagt, was er tut"),
+                     "steps": [
+                         {"comment": T("in the start's terminal tab, before the agent appears",
+                                       "im Terminal-Tab des Starts, bevor der Agent erscheint"),
+                          "cmd": "sandbox-ai claude --mcp fetch", "example": True, "out": [
+                              "agent-sandbox: starting the MCP server fetch (its image is pulled once, its sandbox started)…",
+                              "agent-sandbox: starting the MCP server fetch (its image is pulled once, its sandbox started): done in 7.8 s",
+                              "agent-sandbox: preparing the kits and plugins…",
+                              "agent-sandbox: starting the sandbox: its firewall, connection proxy and the agent…",
+                              "agent-sandbox: ready in 11 s",
+                          ]},
+                     ],
+                     "captions": [
+                         T("A start shows progress lines in its terminal: each step before the agent appears, how long a slow one took, and when it is ready. Tokens and passwords in a line are masked.",
+                           "Ein Start zeigt Fortschrittszeilen in seinem Terminal: jeden Schritt, bevor der Agent erscheint, wie lange ein langsamer dauerte, und wann er bereit ist. Tokens und Passwörter in einer Zeile werden maskiert."),
+                         T("What takes minutes, an image variant or new MCP servers, is prepared first in a tab of its own, Preparing the start, each step numbered and timed; then the start goes on.",
+                           "Was Minuten dauert, eine Image-Variante oder neue MCP-Server, wird zuerst in einem eigenen Tab vorbereitet, Der Start wird vorbereitet, jeder Schritt nummeriert und mit Zeit; dann geht der Start weiter."),
+                     ]},
+                ],
+            },
+            {
+                "id": "board", "page": "board",
+                "topics": [T("A sandbox as parts you connect", "Eine Sandbox als verbundene Teile"),
+                           T("Presets and what they need", "Presets und was sie brauchen"),
+                           T("Findings, score, Apply", "Befunde, Wert, Übernehmen")],
+                "intro": [T("The board shows one sandbox as a graph of parts: the agent, its workspaces, the proxy, the network and everything else it may use.",
+                            "Das Board zeigt eine Sandbox als Graph aus Teilen: den Agenten, seine Workspaces, den Proxy, das Netz und alles andere, was er benutzen darf.")],
+                "scenes": [
+                    {"kind": "app", "page": "board", "heading": T("Parts and connections", "Teile und Verbindungen"),
+                     "zoom": [0.14, 0.13, 0.99, 0.95],
+                     "bullets": [
+                         T("Drag a part from the list onto the board, or double-click it", "Ein Teil aus der Liste aufs Board ziehen oder doppelklicken"),
+                         T("Drag from a part's port onto another to connect them", "Vom Anschluss eines Teils auf ein anderes ziehen, um sie zu verbinden"),
+                         T("Drop folders from your file manager: workspace or mount", "Ordner aus dem Dateimanager fallen lassen: Workspace oder Mount"),
+                         T("Every change is one step of Undo", "Jede Änderung ist ein Schritt von Rückgängig"),
+                     ],
+                     "captions": [
+                         T("On the left is the list of parts. Drag one onto the board and the guide asks the few things it needs, each with what it means.",
+                           "Links ist die Liste der Teile. Ziehen Sie eines aufs Board, und der Guide fragt die wenigen Dinge, die es braucht, jeweils mit ihrer Bedeutung."),
+                         T("Connect parts by dragging from one port to another. A workspace, a mount or an MCP server counts only while it is connected to the agent.",
+                           "Teile verbinden Sie, indem Sie von einem Anschluss zum anderen ziehen. Ein Workspace, ein Mount oder ein MCP-Server zählt nur, solange er mit dem Agenten verbunden ist."),
+                     ]},
+                    {"kind": "app", "page": "board", "shot": "board-gallery", "heading": T("New from preset…", "Neu aus Vorlage…"),
+                     "zoom": [0.06, 0.03, 0.97, 0.99],
+                     "captions": [
+                         T("New from preset opens the gallery: tested setups in categories, from offline work to Tor, each with its board, its score and what it leaves to fill in.",
+                           "Neu aus Vorlage öffnet die Galerie: erprobte Setups in Kategorien, von der Offline-Arbeit bis zu Tor, jedes mit seinem Board, seinem Wert und dem, was noch auszufüllen ist."),
+                         T("What a preset needs is prepared before the start: a missing identity, an image variant, a Tor profile, MCP servers from their catalogs.",
+                           "Was ein Preset braucht, wird vor dem Start vorbereitet: eine fehlende Identität, eine Image-Variante, ein Tor-Profil, MCP-Server aus ihren Katalogen."),
+                     ]},
+                    {"kind": "app", "page": "board", "shot": "board-preset", "heading": T("Findings, score and Apply", "Befunde, Wert und Übernehmen"),
+                     "focus": [0.27, 0.14, 0.79, 0.24],
+                     "bullets": [
+                         T("Findings, badges and a security score follow every change", "Befunde, Abzeichen und ein Sicherheitswert folgen jeder Änderung"),
+                         T("The launcher's own verdict: a dry run in the background", "Das eigene Urteil des Starters: ein Probelauf im Hintergrund"),
+                         T("Apply… shows the file and asks; Cancel is the default", "Übernehmen… zeigt die Datei und fragt; Abbrechen ist vorgewählt"),
+                         T("Clone: the setup as a new project or a new session", "Klonen: das Setup als neues Projekt oder neue Session"),
+                     ],
+                     "captions": [
+                         T("Above the board are the command line and the security score; findings, badges and the launcher's own verdict follow every change.",
+                           "Über dem Board stehen die Kommandozeile und der Sicherheitswert; Befunde, Abzeichen und das Urteil des Starters folgen jeder Änderung."),
+                         T("Apply shows the project file and what changes, and asks first; then it writes the file and trusts it. Dry run and Start are beside it.",
+                           "Übernehmen zeigt die Projektdatei und was sich ändert, und fragt zuerst; dann schreibt es die Datei und vertraut ihr. Probelauf und Start stehen daneben."),
+                         T("Clone takes the same setup to another folder as a new project, or starts it as a new session.",
+                           "Klonen nimmt dasselbe Setup als neues Projekt in einen anderen Ordner mit oder startet es als neue Session."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Services, MCP servers and models", "Services, MCP-Server und Modelle"),
+                     "bullets": [
+                         T("Service (container): one of your images beside the agent, marked UNCHECKED and scored", "Service (Container): eines Ihrer Images neben dem Agenten, als UNGEPRÜFT markiert und bewertet"),
+                         T("MCP part: memory, CPUs, processes, /tmp; the server's own as default; Defaults for every start…", "MCP-Teil: Speicher, CPUs, Prozesse, /tmp; die des Servers als Vorgabe; Standard für jeden Start…"),
+                         T("LLM part: the model's sampling parameters and the loop guard", "LLM-Teil: die Sampling-Parameter des Modells und der Loop Guard"),
+                     ],
+                     "captions": [
+                         T("A service part runs one of your own images beside the agent, a database for example. Nobody has reviewed such an image: it is marked unchecked and lowers the score.",
+                           "Ein Service-Teil lässt eines Ihrer eigenen Images neben dem Agenten laufen, etwa eine Datenbank. Niemand hat so ein Image geprüft: Es ist als ungeprüft markiert und senkt den Wert."),
+                         T("An MCP part has limits of its own for memory, CPUs and processes, and an LLM part the model's parameters and the loop guard.",
+                           "Ein MCP-Teil hat eigene Grenzen für Speicher, CPUs und Prozesse, und ein LLM-Teil die Parameter des Modells und den Loop Guard."),
+                     ]},
+                ],
+            },
+            {
+                "id": "sandboxes", "page": "sandboxes",
+                "topics": [T("Every start, grouped with its parts", "Jeder Start, mit seinen Teilen gruppiert"),
+                           T("Change a running sandbox", "Eine laufende Sandbox ändern"),
+                           T("Kill switch and emergency stop", "Kill-Switch und Notaus")],
+                "intro": [T("Sandboxes and sessions lists every sandbox of your account, here and on your hosts, with a button for each thing you can do with it.",
+                            "Sandboxen & Sitzungen listet jede Sandbox Ihres Kontos, hier und auf Ihren Hosts, mit einem Knopf für alles, was Sie damit tun können.")],
+                "scenes": [
+                    {"kind": "app", "page": "sandboxes", "heading": T("One tree of everything", "Ein Baum für alles"),
+                     "focus": [0.16, 0.11, 0.99, 0.62],
+                     "bullets": [
+                         T("Hosts, under them their starts: runs, sessions, MCP servers", "Hosts, darunter ihre Starts: Läufe, Sessions, MCP-Server"),
+                         T("A start with its MCP servers, helpers and team as one group", "Ein Start mit MCP-Servern, Helfern und Team als eine Gruppe"),
+                         T("State, proxy, memory; asking when a question waits", "Zustand, Proxy, Speicher; fragt, wenn eine Frage wartet"),
+                     ],
+                     "captions": [
+                         T("Every host is a branch, and under it its starts: one-off runs, sessions, MCP servers. A start stands together with everything that belongs to it.",
+                           "Jeder Host ist ein Zweig, darunter seine Starts: einzelne Läufe, Sessions, MCP-Server. Ein Start steht zusammen mit allem, was zu ihm gehört."),
+                         T("The columns show the agent, the backend, when it started, its state and memory. A start whose question waits is marked as asking.",
+                           "Die Spalten zeigen Agent, Backend, Startzeit, Zustand und Speicher. Ein Start, dessen Frage wartet, ist als fragend markiert."),
+                     ]},
+                    {"kind": "app", "page": "sandboxes", "heading": T("Sessions and running sandboxes", "Sessions und laufende Sandboxen"),
+                     "focus": [0.16, 0.64, 0.99, 0.92],
+                     "bullets": [
+                         T("Attach, in a window or in the app; pause, resume, stop", "Verbinden, im Fenster oder in der App; pausieren, fortsetzen, stoppen"),
+                         T("While it runs: allow, revoke, devices, limits", "Im Lauf: erlauben, zurücknehmen, Geräte, Grenzen"),
+                         T("Add a workspace or an MCP server without a restart", "Einen Workspace oder MCP-Server ohne Neustart hinzufügen"),
+                         T("Copy or move a session to another host, checked there first", "Eine Session auf einen anderen Host kopieren oder verschieben, dort zuerst geprüft"),
+                     ],
+                     "captions": [
+                         T("A session can be attached in a window or in the app, paused and resumed. Its HOME is kept, so the agent continues where it stopped.",
+                           "Eine Session lässt sich im Fenster oder in der App verbinden, pausieren und fortsetzen. Ihr HOME bleibt erhalten, der Agent macht also dort weiter, wo er aufgehört hat."),
+                         T("While a sandbox runs, you change what it may reach, give it a device, more memory, another workspace or an MCP server, without a restart.",
+                           "Während eine Sandbox läuft, ändern Sie, was sie erreichen darf, geben ihr ein Gerät, mehr Speicher, einen weiteren Workspace oder einen MCP-Server, ohne Neustart."),
+                         T("Move to host checks what the session will meet on the other host, starts it there and only then stops it here. Report writes a report of the start.",
+                           "Auf Host verschieben prüft, was die Session auf dem anderen Host vorfindet, startet sie dort und stoppt sie erst dann hier. Bericht schreibt einen Bericht über den Start."),
+                     ]},
+                    {"kind": "app", "page": "sandboxes", "shot": "sandboxes-cut", "heading": T("Kill switch and emergency stop", "Kill-Switch und Notaus"),
+                     "zoom": [0.45, 0.52, 1.0, 0.97],
+                     "bullets": [
+                         T("Cut the internet, the local network, all but the model API, or everything", "Internet, lokales Netz, alles außer der Modell-API oder alles kappen"),
+                         T("With the start's MCP servers, helpers and team", "Mit den MCP-Servern, Helfern und dem Team des Starts"),
+                         T("Lift the cut gives back exactly what it had", "Kappung aufheben gibt genau das zurück, was er hatte"),
+                         T("Emergency stop, Ctrl+Shift+X: every sandbox, every host", "Notaus, Strg+Umschalt+X: jede Sandbox, jeder Host"),
+                     ],
+                     "captions": [
+                         T("The kill switch cuts the network of the selected sandboxes at once, without a question: the internet, the local network, everything but the model API, or everything.",
+                           "Der Kill-Switch kappt das Netz der gewählten Sandboxen sofort, ohne Rückfrage: das Internet, das lokale Netz, alles außer der Modell-API, oder alles."),
+                         T("The firewall, the proxy and the supervisor hold the cut, out of the agent's reach, and open connections end. Lift the cut gives back exactly what it had.",
+                           "Firewall, Proxy und Supervisor halten die Kappung, außerhalb der Reichweite des Agenten, und offene Verbindungen enden. Kappung aufheben gibt genau das zurück, was er hatte."),
+                         T("The emergency stop, the red button at the top or Ctrl Shift X, cuts every sandbox here and on all your hosts.",
+                           "Der Notaus, der rote Knopf oben oder Strg Umschalt X, kappt jede Sandbox hier und auf allen Ihren Hosts."),
+                     ]},
+                ],
+            },
+            {
+                "id": "approvals", "page": "approvals",
+                "topics": [T("Questions, and why they are asked", "Fragen, und warum sie gestellt werden"),
+                           T("Blocked: every refusal of a run", "Blockiert: jede Ablehnung eines Laufs"),
+                           T("Allowed now, remembered, history", "Jetzt erlaubt, gemerkt, Verlauf")],
+                "intro": [T("When an agent wants something its options do not allow, its sandbox asks you instead of failing. The Approvals page is where you answer.",
+                            "Wenn ein Agent etwas will, das seine Optionen nicht erlauben, fragt seine Sandbox Sie, statt zu scheitern. Auf der Seite Freigaben antworten Sie.")],
+                "scenes": [
+                    {"kind": "app", "page": "approvals", "heading": T("Open questions", "Offene Fragen"),
+                     "zoom": [0.14, 0.07, 1.0, 0.66],
+                     "bullets": [
+                         T("A connection, a lookup, a push, a request a rule asks about, a page to open", "Eine Verbindung, ein Lookup, ein Push, eine Anfrage, nach der eine Regel fragt, eine Seite zum Öffnen"),
+                         T("The selected question says why it is asked", "Die gewählte Frage sagt, warum gefragt wird"),
+                         T("Allow once, for this run or always; deny; block always", "Einmal, für diesen Lauf oder immer erlauben; ablehnen; immer sperren"),
+                     ],
+                     "captions": [
+                         T("The questions of every sandbox, here and on your hosts, wait at the top: a connection, a name lookup, a push with privacy warnings, a page to open.",
+                           "Oben warten die Fragen jeder Sandbox, hier und auf Ihren Hosts: eine Verbindung, ein Lookup, ein Push mit Datenschutz-Warnungen, eine Seite zum Öffnen."),
+                         T("The selected question says why it is asked. You allow it once, for this run or always for the project, and the app confirms what you allow first.",
+                           "Die gewählte Frage sagt, warum sie gestellt wird. Sie erlauben sie einmal, für diesen Lauf oder immer für das Projekt, und die App bestätigt vorher, was Sie erlauben."),
+                         T("Without an answer within a minute the request is refused, refused at once for two minutes, then asked again: no answer is no decision.",
+                           "Ohne Antwort innerhalb einer Minute wird die Anfrage abgelehnt, zwei Minuten lang sofort abgelehnt und dann wieder gefragt: Keine Antwort ist keine Entscheidung."),
+                     ]},
+                    {"kind": "app", "page": "approvals", "shot": "approvals-blocked", "heading": T("Blocked", "Blockiert"),
+                     "zoom": [0.14, 0.3, 1.0, 0.94],
+                     "bullets": [
+                         T("Every refusal of the run, with its reason and the process", "Jede Ablehnung des Laufs, mit Grund und Prozess"),
+                         T("Allow for this run, Allow always…, Ask again, Deny for this run", "Für diesen Lauf erlauben, Immer erlauben…, Wieder fragen, Für diesen Lauf ablehnen"),
+                         T("The security mode, the policy and the kill switch still hold", "Sicherheitsmodus, Richtlinie und Kill-Switch gelten weiter"),
+                     ],
+                     "captions": [
+                         T("Below the questions the page is about one sandbox. Blocked lists everything it was refused, with the reason and the process that tried.",
+                           "Unter den Fragen geht es um eine Sandbox. Blockiert listet alles, was ihr verweigert wurde, mit dem Grund und dem Prozess, der es versucht hat."),
+                         T("From there you allow it for this run, allow it always as an exception rule, shown before it is written, or let the next try ask again.",
+                           "Von dort erlauben Sie es für diesen Lauf, immer als Ausnahmeregel, die vor dem Schreiben gezeigt wird, oder lassen den nächsten Versuch wieder fragen."),
+                         T("The network settings open destinations, but they do not change what a ruleset decides: a request a rule asks about is asked even when its host is open.",
+                           "Die Netzeinstellungen öffnen Ziele, ändern aber nicht, was ein Regelwerk entscheidet: Eine Anfrage, nach der eine Regel fragt, wird gefragt, auch wenn ihr Host offen ist."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Allowed now, remembered, history", "Jetzt erlaubt, gemerkt, Verlauf"),
+                     "bullets": [
+                         T("Allowed now: what the run may reach beyond its options; Revoke… takes it back", "Jetzt erlaubt: was der Lauf über seine Optionen hinaus erreicht; Zurücknehmen… nimmt es zurück"),
+                         T("Remembered: answers that hold for later starts; Forget… asks again", "Gemerkt: Antworten für spätere Starts; Vergessen… fragt wieder"),
+                         T("History: every question with its answer", "Verlauf: jede Frage mit ihrer Antwort"),
+                         T("Notifications only when turned on in Settings; one answer settles a question everywhere", "Benachrichtigungen nur, wenn in den Einstellungen eingeschaltet; eine Antwort erledigt eine Frage überall"),
+                     ],
+                     "captions": [
+                         T("Allowed now shows what the run may reach beyond its start options, and takes it back. Remembered keeps your answers for later starts.",
+                           "Jetzt erlaubt zeigt, was der Lauf über seine Startoptionen hinaus erreichen darf, und nimmt es zurück. Gemerkt hält Ihre Antworten für spätere Starts."),
+                         T("The page keeps reading the questions while the window is closed to the tray; pop-up notifications are off unless you turn them on. When you are unsure, allow once.",
+                           "Die Seite liest die Fragen weiter, auch wenn das Fenster im Infobereich ist; Benachrichtigungen sind aus, außer Sie schalten sie ein. Wenn Sie unsicher sind, erlauben Sie einmal."),
+                     ]},
+                ],
+            },
+            {
+                "id": "terminals", "page": "terminals",
+                "topics": [T("Terminal tabs in the app", "Terminal-Tabs in der App"),
+                           T("Sessions in tmux", "Sessions in tmux"), T("xterm.js, pinned and checked", "xterm.js, festgelegt und geprüft")],
+                "intro": [T("Terminals shows the agents started in the app and the sessions you attach to, each in a tab of its own.",
+                            "Terminals zeigt die in der App gestarteten Agenten und die Sessions, mit denen Sie sich verbinden, jede in einem eigenen Tab.")],
+                "scenes": [
+                    {"kind": "app", "page": "terminals", "heading": T("A tab for each start", "Ein Tab für jeden Start"),
+                     "bullets": [
+                         T("Agents started in the app, sessions attached in the app", "In der App gestartete Agenten, in der App verbundene Sessions"),
+                         T("One tab per start; its MCP servers and helpers open none", "Ein Tab je Start; seine MCP-Server und Helfer öffnen keinen"),
+                         T("Sessions, below the tabs: every start, here and on your hosts", "Sitzungen, unter den Tabs: jeder Start, hier und auf Ihren Hosts"),
+                     ],
+                     "captions": [
+                         T("A start opens one tab, for its agent. Its MCP servers, helpers and the other members of a team open none, unless you ask for one.",
+                           "Ein Start öffnet einen Tab, für seinen Agenten. Seine MCP-Server, Helfer und die übrigen Mitglieder eines Teams öffnen keinen, außer Sie wollen es."),
+                         T("Below the tabs, Sessions lists every start that runs here or on a host, however it was started; Open terminal attaches to it.",
+                           "Unter den Tabs listet Sitzungen jeden Start, der hier oder auf einem Host läuft, egal wie er gestartet wurde; Terminal öffnen verbindet sich damit."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Tabs you arrange, terminals that come back", "Tabs zum Ordnen, Terminals, die wiederkommen"),
+                     "bullets": [
+                         T("Drag a tab to move it; Alt+1 … Alt+0 show the first ten", "Einen Tab ziehen, um ihn zu verschieben; Alt+1 … Alt+0 zeigen die ersten zehn"),
+                         T("At the app's start: the terminals of running sessions reopened, in their order", "Beim Start der App: die Terminals laufender Sessions wieder geöffnet, in ihrer Reihenfolge"),
+                         T("Only attached, never started again; one that ended meanwhile is named", "Nur verbunden, nie neu gestartet; eine inzwischen beendete wird genannt"),
+                         T("Settings: Reopen the terminals of running sessions at start (on)", "Einstellungen: Terminals laufender Sitzungen beim Start wieder öffnen (an)"),
+                     ],
+                     "captions": [
+                         T("Tabs move by dragging them, and Alt with a digit from one to zero shows one of the first ten.",
+                           "Tabs verschieben Sie, indem Sie sie ziehen, und Alt mit einer Ziffer von eins bis null zeigt einen der ersten zehn."),
+                         T("When the app starts again, it reopens the terminals of the sessions that still run, in their order. They are only attached, never started again; a session that ended meanwhile is named.",
+                           "Startet die App neu, öffnet sie die Terminals der Sessions, die noch laufen, wieder, in ihrer Reihenfolge. Sie werden nur verbunden, nie neu gestartet; eine inzwischen beendete Session wird genannt."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Sessions and tmux", "Sessions und tmux"),
+                     "bullets": [
+                         T("The agent runs in the tmux window `agent`, a shell in `shell`", "Der Agent läuft im tmux-Fenster `agent`, eine Shell in `shell`"),
+                         T("Ctrl-b d detaches: the session keeps running", "Strg-b d trennt: Die Session läuft weiter"),
+                         T("Ctrl+W and Ctrl+Tab go to the terminal on this page", "Strg+W und Strg+Tab gehen auf dieser Seite an das Terminal"),
+                     ],
+                     "captions": [
+                         T("In a session the agent runs in tmux: one window for the agent, one for a shell. Control b, then d, detaches; the session keeps running.",
+                           "In einer Session läuft der Agent in tmux: ein Fenster für den Agenten, eines für eine Shell. Strg b, dann d, trennt; die Session läuft weiter."),
+                         T("Attach on the page Sandboxes and sessions brings it back, in the app or in a terminal window.",
+                           "Verbinden auf der Seite Sandboxen & Sitzungen holt sie zurück, in der App oder in einem Terminalfenster."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Copy, paste and logins", "Kopieren, Einfügen und Anmelden"),
+                     "bullets": [
+                         T("Ctrl+Shift+C and Ctrl+Shift+V (Cmd on macOS), and a right-click menu", "Strg+Umschalt+C und Strg+Umschalt+V (Cmd auf macOS) und ein Rechtsklick-Menü"),
+                         T("Links broken over rows are joined; Ctrl+click opens one", "Über Zeilen umbrochene Links werden zusammengefügt; Strg+Klick öffnet einen"),
+                         T("A paste guard: control characters, several lines, more than 1 MiB are asked first", "Ein Schutz beim Einfügen: Steuerzeichen, mehrere Zeilen, mehr als 1 MiB werden erst erfragt"),
+                         T("Logins in the app's login browser: provider pages only, the code goes back into the tab", "Anmeldungen im Login-Browser der App: nur Seiten des Anbieters, der Code geht zurück in den Tab"),
+                     ],
+                     "captions": [
+                         T("Control Shift C copies and Control Shift V pastes, and a right click opens a menu. Pasting control characters, several lines or a lot of text is asked first.",
+                           "Strg Umschalt C kopiert und Strg Umschalt V fügt ein, und ein Rechtsklick öffnet ein Menü. Steuerzeichen, mehrere Zeilen oder viel Text einzufügen wird zuerst erfragt."),
+                         T("A login opens in the app's own login browser. It opens only the provider's pages, never this machine or your network, and hands the code back to the terminal.",
+                           "Eine Anmeldung öffnet sich im eigenen Login-Browser der App. Er öffnet nur die Seiten des Anbieters, nie diesen Rechner oder Ihr Netz, und gibt den Code an das Terminal zurück."),
+                     ]},
+                    {"kind": "bullets", "heading": T("xterm.js, pinned and checked", "xterm.js, festgelegt und geprüft"),
+                     "bullets": [
+                         T("The tabs use xterm.js in QtWebEngine", "Die Tabs nutzen xterm.js in QtWebEngine"),
+                         T("Downloaded once, checked against its pinned digest", "Einmal geladen, gegen seinen festgelegten Digest geprüft"),
+                         T("The page loads only local files", "Die Seite lädt nur lokale Dateien"),
+                         T("Without it: a terminal window instead (AppImage, macOS app)", "Ohne: stattdessen ein Terminalfenster (AppImage, macOS-App)"),
+                     ],
+                     "captions": [
+                         T("The tabs use xterm.js. It is not part of the app: it is downloaded once and checked against its pinned digest, and the page reaches nothing remote.",
+                           "Die Tabs nutzen xterm.js. Es gehört nicht zur App: Es wird einmal geladen und gegen seinen festgelegten Digest geprüft, und die Seite erreicht nichts im Netz."),
+                         T("Without it, as in the AppImage and the macOS app, every command opens in a terminal window instead.",
+                           "Ohne es, wie im AppImage und in der macOS-App, öffnet sich jeder Befehl stattdessen in einem Terminalfenster."),
+                     ]},
+                ],
+            },
+            {
+                "id": "connections", "page": "connections",
+                "topics": [T("The proxy's log", "Das Protokoll des Proxys"), T("Filters and refusals", "Filter und Ablehnungen"),
+                           T("The option that allows it", "Die Option, die es erlaubt")],
+                "intro": [T("Every connection of a sandbox passes its proxy, which logs each request. Connections shows that log.",
+                            "Jede Verbindung einer Sandbox passiert ihren Proxy, der jede Anfrage protokolliert. Verbindungen zeigt dieses Protokoll.")],
+                "scenes": [
+                    {"kind": "app", "page": "connections", "heading": T("Every request, push and refusal", "Jede Anfrage, jeder Push, jede Ablehnung"),
+                     "zoom": [0.14, 0.1, 1.0, 0.8],
+                     "bullets": [
+                         T("The log of a project and run, following while it runs", "Das Protokoll eines Projekts und Laufs, mitlaufend"),
+                         T("Filter by host, path or method", "Filter nach Host, Pfad oder Methode"),
+                         T("Only refused and errors: what was not let through, in red", "Nur Abgelehntes und Fehler: was nicht durchgelassen wurde, in Rot"),
+                     ],
+                     "captions": [
+                         T("Pick the project and the run, and the log follows while the sandbox runs: the model calls, downloads, Git, and what was refused, in red.",
+                           "Wählen Sie Projekt und Lauf, und das Protokoll läuft mit, während die Sandbox läuft: die Modellaufrufe, Downloads, Git, und was abgelehnt wurde, in Rot."),
+                         T("Here a connection over SSH was refused, a ruleset denied a gist, and the privacy check stopped a push that carried an access key.",
+                           "Hier wurde eine Verbindung über SSH abgelehnt, ein Regelwerk hat einen Gist verweigert, und die Datenschutzprüfung hat einen Push mit einem Zugangsschlüssel gestoppt."),
+                     ]},
+                    {"kind": "app", "page": "connections", "shot": "connections-record", "heading": T("The full record", "Der vollständige Eintrag"),
+                     "zoom": [0.14, 0.28, 1.0, 0.92],
+                     "bullets": [
+                         T("Method, URL, headers and bodies, credentials redacted", "Methode, URL, Header und Bodies, Zugangsdaten geschwärzt"),
+                         T("The rule that decided, and the answer", "Die Regel, die entschied, und die Antwort"),
+                         T("A refusal comes with the option that would allow it", "Eine Ablehnung kommt mit der Option, die sie erlauben würde"),
+                     ],
+                     "captions": [
+                         T("Select a line to see its full record: method, URL, headers and bodies with credentials redacted, the rule that decided and the answer.",
+                           "Wählen Sie eine Zeile, um den ganzen Eintrag zu sehen: Methode, URL, Header und Bodies mit geschwärzten Zugangsdaten, die Regel, die entschied, und die Antwort."),
+                         T("After a failed download, look here first, then open only what the task needs: each suggested option opens the sandbox a little further.",
+                           "Nach einem gescheiterten Download schauen Sie zuerst hier und öffnen dann nur, was die Aufgabe braucht: Jede vorgeschlagene Option öffnet die Sandbox ein Stück weiter."),
+                         T("Texts that come from the sandbox, such as hosts and URLs, are shown escaped. In Activity, Show in Connections opens a network event here, filtered to its host.",
+                           "Texte aus der Sandbox, etwa Hosts und URLs, werden maskiert gezeigt. In Aktivität öffnet In Verbindungen zeigen ein Netzereignis hier, gefiltert auf seinen Host."),
+                     ]},
+                ],
+            },
+            {
+                "id": "activity", "page": "activity",
+                "topics": [T("What the agents did, in order", "Was die Agenten taten, der Reihe nach"),
+                           T("Canaries", "Canaries"), T("Safeguards and the fix", "Schutzmaßnahmen und die Abhilfe")],
+                "intro": [T("Activity shows what the agents did in a run, a session or every run of a project, in order and live.",
+                            "Aktivität zeigt, was die Agenten in einem Lauf, einer Session oder allen Läufen eines Projekts getan haben, der Reihe nach und live.")],
+                "scenes": [
+                    {"kind": "app", "page": "activity", "heading": T("The timeline", "Die Zeitleiste"),
+                     "zoom": [0.14, 0.08, 1.0, 0.72],
+                     "bullets": [
+                         T("Prompts, replies, tool calls, commands with exit code", "Prompts, Antworten, Tool-Aufrufe, Befehle mit Exit-Code"),
+                         T("File changes, network, approvals, MCP calls, tokens", "Dateiänderungen, Netz, Freigaben, MCP-Aufrufe, Tokens"),
+                         T("Filter by kind and text; Export… writes what is shown", "Filter nach Art und Text; Exportieren… schreibt, was gezeigt wird"),
+                     ],
+                     "captions": [
+                         T("The timeline holds the prompts, the replies, the tool calls, shell commands with exit code and duration, file changes, network events and the tokens of each turn.",
+                           "Die Zeitleiste enthält die Prompts, die Antworten, die Tool-Aufrufe, Befehle mit Exit-Code und Dauer, Dateiänderungen, Netzereignisse und die Tokens jeder Runde."),
+                         T("Filter it by kind and text. A network event opens in Connections, a file event in Files. Refusals and errors are red.",
+                           "Filtern Sie nach Art und Text. Ein Netzereignis öffnet sich in Verbindungen, ein Dateiereignis in Dateien. Ablehnungen und Fehler sind rot."),
+                         T("Everything here may quote the agent, so it is shown as plain text with control characters escaped. Export writes what the filters show as JSON lines or text.",
+                           "Alles hier kann den Agenten zitieren, deshalb erscheint es als reiner Text mit maskierten Steuerzeichen. Exportieren schreibt, was die Filter zeigen, als JSON-Zeilen oder Text."),
+                     ]},
+                    {"kind": "app", "page": "activity", "shot": "activity-safeguards", "heading": T("Canaries and safeguards", "Canaries und Schutzmaßnahmen"),
+                     "zoom": [0.14, 0.08, 1.0, 0.5],
+                     "bullets": [
+                         T("Canaries: every decoy file opened, every canary token that left", "Canaries: jede geöffnete Köderdatei, jeder Canary-Token, der hinausging"),
+                         T("Safeguards: everything a safeguard refused or ended, with why", "Schutzmaßnahmen: alles, was eine Schutzmaßnahme ablehnte oder beendete, mit Grund"),
+                         T("Copy the fix: the command that would allow it", "Abhilfe kopieren: der Befehl, der es erlauben würde"),
+                     ],
+                     "captions": [
+                         T("The Canaries tab lists every decoy file that was opened and every canary token that left, with the process and the agent's turn at that moment.",
+                           "Der Reiter Canaries listet jede geöffnete Köderdatei und jeden Canary-Token, der hinausging, mit dem Prozess und der Runde des Agenten in diesem Moment."),
+                         T("Safeguards lists everything a safeguard refused or ended, each with the reason and the command that would allow it. New ones pop up while sandboxes run.",
+                           "Schutzmaßnahmen listet alles, was eine Schutzmaßnahme abgelehnt oder beendet hat, mit Grund und dem Befehl, der es erlauben würde. Neue melden sich, während Sandboxen laufen."),
+                     ]},
+                ],
+            },
+            {
+                "id": "statistics", "page": "statistics",
+                "topics": [T("Model calls and tokens", "Modellaufrufe und Tokens"), T("Hosts and credentials", "Hosts und Zugangsdaten"),
+                           T("Reports", "Berichte")],
+                "intro": [T("Statistics sums up the logs of a project: what the agents called, how much, and where.",
+                            "Statistik fasst die Protokolle eines Projekts zusammen: was die Agenten aufgerufen haben, wie viel, und wohin.")],
+                "scenes": [
+                    {"kind": "app", "page": "statistics", "heading": T("The figures of a project", "Die Zahlen eines Projekts"),
+                     "bullets": [
+                         T("Model calls and tokens, per run and per agent", "Modellaufrufe und Tokens, je Lauf und je Agent"),
+                         T("HTTP requests per host; credential headers sent (names only)", "HTTP-Anfragen je Host; gesendete Zugangsdaten-Header (nur Namen)"),
+                         T("Pushes checked and refused, refused connections, programs", "Geprüfte und abgelehnte Pushes, abgelehnte Verbindungen, Programme"),
+                     ],
+                     "captions": [
+                         T("Pick a project's logs and the page counts the model calls and tokens, the requests per host, the pushes, the refusals and the programs started.",
+                           "Wählen Sie die Protokolle eines Projekts, und die Seite zählt die Modellaufrufe und Tokens, die Anfragen je Host, die Pushes, die Ablehnungen und die gestarteten Programme."),
+                         T("A host you do not expect, or a credential header sent to it, is a reason to look at Connections. Compare two runs before and after a change of options.",
+                           "Ein Host, den Sie nicht erwarten, oder ein Zugangsdaten-Header an ihn ist ein Grund, in Verbindungen nachzusehen. Vergleichen Sie zwei Läufe vor und nach einer Änderung der Optionen."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Report…", "Bericht…"),
+                     "bullets": [
+                         T("Every run of the log folder, as PDF, HTML or Markdown", "Jeder Lauf des Protokollordners, als PDF, HTML oder Markdown"),
+                         T("Every destination, and why it was allowed or refused", "Jedes Ziel, und warum es erlaubt oder abgelehnt wurde"),
+                         T("A security report of what was not allowed, the most severe first", "Ein Sicherheitsbericht über das Nicht-Erlaubte, das Schwerste zuerst"),
+                         T("No secrets, but hosts, paths and commands: share it with care", "Keine Geheimnisse, aber Hosts, Pfade und Befehle: mit Bedacht teilen"),
+                     ],
+                     "captions": [
+                         T("Report writes one report of the runs: a summary, the statistics, every destination with the reason, and a security report of everything that was not allowed.",
+                           "Bericht schreibt einen Bericht über die Läufe: eine Zusammenfassung, die Statistik, jedes Ziel mit dem Grund und einen Sicherheitsbericht über alles, was nicht erlaubt war."),
+                         T("It holds no secret, but it names hosts, paths and commands: share it with care.",
+                           "Er enthält kein Geheimnis, nennt aber Hosts, Pfade und Befehle: Teilen Sie ihn mit Bedacht."),
+                         T("The tokens come from what the model APIs reported in their answers, so the figures match what the provider counts.",
+                           "Die Tokens stammen aus dem, was die Modell-APIs in ihren Antworten gemeldet haben, die Zahlen passen also zu dem, was der Anbieter zählt."),
+                     ]},
+                ],
+            },
+            {
+                "id": "files", "page": "files",
+                "topics": [T("Two panes: a sandbox, this machine, a remote system", "Zwei Bereiche: Sandbox, dieser Rechner, ein entferntes System"),
+                           T("Copy, move, drag and drop", "Kopieren, verschieben, Drag and Drop"),
+                           T("Editor, Markdown, properties", "Editor, Markdown, Eigenschaften")],
+                "intro": [T("The file manager shows the workspaces and HOME of every sandbox and session, this machine and remote systems over SSH, without opening a shell in the sandbox.",
+                            "Der Dateimanager zeigt die Workspaces und das HOME jeder Sandbox und Session, diesen Rechner und entfernte Systeme über SSH, ohne dass Sie eine Shell in der Sandbox öffnen.")],
+                "scenes": [
+                    {"kind": "app", "page": "files", "heading": T("Two panes", "Zwei Bereiche"),
+                     "bullets": [
+                         T("Left: a sandbox's workspaces and HOME; right: this machine", "Links: Workspaces und HOME einer Sandbox; rechts: dieser Rechner"),
+                         T("Copy (F5), Move (F6), New folder (F7), Delete (F8), Rename (F2)", "Kopieren (F5), Verschieben (F6), Neuer Ordner (F7), Löschen (F8), Umbenennen (F2)"),
+                         T("Drag and drop between the panes and from other programs", "Drag and Drop zwischen den Bereichen und aus anderen Programmen"),
+                         T("Take ownership… of what a rootless Podman sandbox wrote", "Besitz übernehmen… von dem, was eine rootless Podman-Sandbox schrieb"),
+                         T("Recently visited folders (Alt+Down), the free space below each list", "Zuletzt besuchte Ordner (Alt+Unten), der freie Platz unter jeder Liste"),
+                         T("`.` and `..` lead every folder; Home, Up and Refresh as icons; New file (Shift+F4)", "`.` und `..` vor jedem Ordner; Home, Hoch und Neu laden als Symbole; Neue Datei (Umschalt+F4)"),
+                     ],
+                     "captions": [
+                         T("The left pane shows a sandbox's folders, chosen above it; the right pane shows this machine. Copy and move work between them with the function keys.",
+                           "Der linke Bereich zeigt die Ordner einer Sandbox, darüber gewählt; der rechte zeigt diesen Rechner. Kopieren und Verschieben gehen zwischen beiden mit den Funktionstasten."),
+                         T("Drag and drop works too, between the panes and from other programs. Nothing gets a mount: the files are copied, and nothing is replaced unless you allow it.",
+                           "Auch Drag and Drop geht, zwischen den Bereichen und aus anderen Programmen. Nichts bekommt einen Mount: Die Dateien werden kopiert, und nichts wird ersetzt, außer Sie erlauben es."),
+                         T("Every folder begins with the dot and the two dots. Each pane remembers its recent folders and shows the space free there.",
+                           "Jeder Ordner beginnt mit dem Punkt und den zwei Punkten. Jeder Bereich merkt sich seine letzten Ordner und zeigt den freien Platz dort."),
+                     ]},
+                    {"kind": "app", "page": "files", "shot": "files-editor", "heading": T("The editor", "Der Editor"),
+                     "zoom": [0.15, 0.12, 0.86, 0.89],
+                     "captions": [
+                         T("A double click opens a file in the app's own editor: text when it is text, else the hex editor. F3 views, F4 edits.",
+                           "Ein Doppelklick öffnet eine Datei im eigenen Editor der App: als Text, wenn es Text ist, sonst im Hex-Editor. F3 zeigt an, F4 bearbeitet."),
+                         T("Ctrl+F finds, also bytes in the hex view, and Ctrl+H replaces: the match shown, or all of them as one step to undo.",
+                           "Strg+F sucht, im Hex-Editor auch Bytes, und Strg+H ersetzt: den gezeigten Treffer oder alle auf einmal, als ein Schritt zum Rückgängigmachen."),
+                         T("Save writes back through the same pane, never through a link, and asks first when the agent changed the file meanwhile. Invisible characters are named above the text.",
+                           "Speichern schreibt über denselben Bereich zurück, nie über einen Link, und fragt zuerst, wenn der Agent die Datei inzwischen geändert hat. Unsichtbare Zeichen werden über dem Text genannt."),
+                     ]},
+                    {"kind": "app", "page": "files", "shot": "files-menu", "heading": T("Context menu and properties", "Kontextmenü und Eigenschaften"),
+                     "zoom": [0.14, 0.14, 0.6, 0.8],
+                     "bullets": [
+                         T("Open, view, edit, hex editor; copy, cut, paste", "Öffnen, ansehen, bearbeiten, Hex-Editor; kopieren, ausschneiden, einfügen"),
+                         T("Properties (Alt+Enter): owner, group, permissions as checkboxes, a folder's size", "Eigenschaften (Alt+Enter): Besitzer, Gruppe, Rechte als Kästchen, die Größe eines Ordners"),
+                         T("Copy path, relative path (Ctrl+Shift+C), path in the sandbox, quoted for the shell", "Pfad, relativen Pfad (Strg+Umschalt+C), Pfad in der Sandbox, für die Shell maskiert kopieren"),
+                     ],
+                     "captions": [
+                         T("The context menu opens, edits, copies and pastes; Copy path in the sandbox gives a path the way the agent sees it.",
+                           "Das Kontextmenü öffnet, bearbeitet, kopiert und fügt ein; Pfad in der Sandbox kopieren gibt einen Pfad so, wie der Agent ihn sieht."),
+                         T("Properties show owner, group and permissions as checkboxes, and count a folder's size at once.",
+                           "Eigenschaften zeigen Besitzer, Gruppe und Rechte als Kästchen und zählen die Größe eines Ordners sofort."),
+                     ]},
+                    {"kind": "app", "page": "files", "shot": "files-markdown", "heading": T("Markdown, rendered", "Markdown, gerendert"),
+                     "zoom": [0.15, 0.1, 0.85, 0.9],
+                     "captions": [
+                         T("Markdown files open rendered, with tables, task lists, highlighted code and an outline. Nothing in them runs or is loaded from the network, and links are never followed there.",
+                           "Markdown-Dateien öffnen sich gerendert, mit Tabellen, Aufgabenlisten, hervorgehobenem Code und einer Gliederung. Nichts darin läuft oder wird aus dem Netz geladen, und Links werden dort nie verfolgt."),
+                     ]},
+                    # The remote pane: capture_app.py serves the remote HOME with the app's test SFTP server.
+                    {"kind": "app", "page": "files", "shot": "files-remote", "heading": T("A remote system over SSH", "Ein entferntes System über SSH"),
+                     "zoom": [0.14, 0.13, 1.0, 0.92],
+                     "bullets": [
+                         T("SSH…: a sandbox-ai host, a Host of `~/.ssh/config`, or user@host", "SSH…: ein Host von sandbox-ai, ein Host aus `~/.ssh/config` oder user@host"),
+                         T("SFTP through your OpenSSH: no remote shell, keys and ssh-agent only", "SFTP über Ihr OpenSSH: keine entfernte Shell, nur Schlüssel und ssh-agent"),
+                         T("An unknown host's keys shown and asked; a changed key refused", "Die Schlüssel eines unbekannten Hosts gezeigt und erfragt; ein geänderter abgelehnt"),
+                         T("Copy, move, drag and drop, editor, Markdown and Properties as in the other panes", "Kopieren, Verschieben, Drag and Drop, Editor, Markdown und Eigenschaften wie in den anderen Bereichen"),
+                     ],
+                     "captions": [
+                         T("SSH puts a remote system into the left pane: one of your hosts, a host of your SSH configuration, or an address you type.",
+                           "SSH holt ein entferntes System in den linken Bereich: einen Ihrer Hosts, einen Host Ihrer SSH-Konfiguration oder eine Adresse, die Sie tippen."),
+                         T("The app speaks SFTP through your OpenSSH, with your keys only: no shell runs there, no password is kept. An unknown host key is asked about, a changed one refused.",
+                           "Die App spricht SFTP über Ihr OpenSSH, nur mit Ihren Schlüsseln: Dort läuft keine Shell, kein Passwort wird gemerkt. Ein unbekannter Host-Key wird erfragt, ein geänderter abgelehnt."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Safe by design", "Sicher gebaut"),
+                     "bullets": [
+                         T("Symbolic links are shown, never followed or copied", "Symbolische Links werden gezeigt, nie verfolgt oder kopiert"),
+                         T("Copies stop at 1 GiB, run in the background, can be cancelled", "Kopien enden bei 1 GiB, laufen im Hintergrund, lassen sich abbrechen"),
+                         T("Files copied to the host lose their executable bits", "Auf den Host kopierte Dateien verlieren ihre Ausführungsrechte"),
+                         T("`.git/config`, hooks, `.envrc`: a warning after the copy", "`.git/config`, Hooks, `.envrc`: eine Warnung nach dem Kopieren"),
+                     ],
+                     "captions": [
+                         T("Symbolic links are shown with their target but never followed. A file gets its name only when its copy is complete, so nothing half copied is left.",
+                           "Symbolische Links werden mit ihrem Ziel gezeigt, aber nie verfolgt. Eine Datei bekommt ihren Namen erst, wenn ihre Kopie fertig ist, also bleibt nichts halb Kopiertes zurück."),
+                         T("What the agent wrote counts as untrusted: copied out, files lose their executable bits, and files that tools run, such as Git hooks, come with a warning.",
+                           "Was der Agent schrieb, gilt als nicht vertrauenswürdig: Herauskopiert verlieren Dateien ihre Ausführungsrechte, und Dateien, die Werkzeuge ausführen, etwa Git-Hooks, kommen mit einer Warnung."),
+                     ]},
+                ],
+            },
+            {
+                "id": "kits", "page": "kits",
+                "topics": [T("Kits: what every sandbox brings", "Kits: was jede Sandbox mitbringt"),
+                           T("Marketplaces and plugins", "Marktplätze und Plugins"), T("Hooks after your review", "Hooks nach Ihrer Prüfung")],
+                "intro": [T("Kits give every sandbox the agent's skills, agents, commands and plugins, without exposing your own configuration.",
+                            "Kits geben jeder Sandbox die Skills, Agents, Commands und Plugins des Agenten, ohne Ihre eigene Konfiguration freizulegen.")],
+                "scenes": [
+                    {"kind": "app", "page": "kits", "heading": T("Every kit", "Jedes Kit"),
+                     "zoom": [0.14, 0.1, 1.0, 0.8],
+                     "bullets": [
+                         T("sandbox-ai's own kit and the default kit: in every sandbox", "Das eigene Kit von sandbox-ai und das Standard-Kit: in jeder Sandbox"),
+                         T("Per agent: skills, agents, commands, prompts, memory template, plugins", "Je Agent: Skills, Agents, Commands, Prompts, Memory-Vorlage, Plugins"),
+                         T("New kit…, Add to the kit, Use in the current project…", "Neues Kit…, Zum Kit hinzufügen, Im aktuellen Projekt nutzen…"),
+                     ],
+                     "captions": [
+                         T("The list shows every kit: sandbox-ai's own and the default kit, which every sandbox gets, built-in kits and yours, with what each brings per agent.",
+                           "Die Liste zeigt jedes Kit: das eigene von sandbox-ai und das Standard-Kit, die jede Sandbox bekommt, eingebaute Kits und Ihre, mit dem, was jedes je Agent mitbringt."),
+                         T("New kit, skills, plugins and hooks are added with buttons above the list; Use in the current project adds the kit to the project file through the board.",
+                           "Neues Kit, Skills, Plugins und Hooks fügen Sie mit den Knöpfen über der Liste hinzu; Im aktuellen Projekt nutzen trägt das Kit über das Board in die Projektdatei ein."),
+                     ]},
+                    {"kind": "app", "page": "kits", "shot": "kits-marketplaces", "heading": T("Marketplaces", "Marktplätze"),
+                     "zoom": [0.14, 0.1, 1.0, 0.8],
+                     "bullets": [
+                         T("sandbox-ai's, the kits', Claude's and Codex's marketplaces", "Die Marktplätze von sandbox-ai, der Kits, von Claude und von Codex"),
+                         T("Each plugin with its state: in which kits, on or off, installed", "Jedes Plugin mit Zustand: in welchen Kits, an oder aus, installiert"),
+                         T("A kit declares plugins; Install the kits' plugins downloads them", "Ein Kit gibt Plugins an; Plugins der Kits installieren lädt sie"),
+                     ],
+                     "captions": [
+                         T("The Marketplaces tab shows each marketplace and its plugins, with their state. Adding a plugin to a kit downloads nothing: the kit only declares it.",
+                           "Der Reiter Marktplätze zeigt jeden Marktplatz und seine Plugins mit ihrem Zustand. Ein Plugin zu einem Kit hinzuzufügen lädt nichts: Das Kit gibt es nur an."),
+                         T("Install the kits' plugins downloads them once into the plugin store, in a sandbox of its own and in the background; the log window shows its output.",
+                           "Plugins der Kits installieren lädt sie einmal in den Plugin-Speicher, in einer eigenen Sandbox und im Hintergrund; das Protokollfenster zeigt die Ausgabe."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Hooks and plugins run code", "Hooks und Plugins führen Code aus"),
+                     "bullets": [
+                         T("Review and approve hooks… opens a terminal: read every file, then confirm", "Hooks prüfen und freigeben… öffnet ein Terminal: jede Datei lesen, dann bestätigen"),
+                         T("The app never approves a hook on its own", "Die App gibt nie selbst einen Hook frei"),
+                         T("A changed hook stops running until approved again", "Ein geänderter Hook läuft erst nach neuer Freigabe wieder"),
+                     ],
+                     "captions": [
+                         T("A hook runs code at the agent's events, and a plugin runs code in every sandbox that enables it. Approve and install only what you trust.",
+                           "Ein Hook führt bei den Ereignissen des Agenten Code aus, und ein Plugin führt Code in jeder Sandbox aus, die es einschaltet. Geben Sie nur frei und installieren Sie nur, was Sie für vertrauenswürdig halten."),
+                     ]},
+                ],
+            },
+            {
+                "id": "mcp", "page": "mcp",
+                "topics": [T("Your servers and their state", "Ihre Server und ihr Zustand"), T("Signed catalogs", "Signierte Kataloge"),
+                           T("Network only where needed", "Netz nur, wo nötig")],
+                "intro": [T("MCP servers give the agent tools, such as a web search or a binary analysis. Each runs in a sandbox of its own.",
+                            "MCP-Server geben dem Agenten Werkzeuge, etwa eine Websuche oder eine Binäranalyse. Jeder läuft in einer eigenen Sandbox.")],
+                "scenes": [
+                    {"kind": "app", "page": "mcp", "heading": T("Your servers", "Ihre Server"),
+                     "zoom": [0.14, 0.08, 1.0, 0.47],
+                     "bullets": [
+                         T("Each with its status; select it to see its definition", "Jeder mit Status; auswählen zeigt seine Definition"),
+                         T("Start or stop it; a start uses it with `--mcp NAME`", "Starten oder stoppen; ein Start nutzt ihn mit `--mcp NAME`"),
+                         T("Agents reach it through a relay that applies your rules", "Agenten erreichen ihn über ein Relay, das Ihre Regeln anwendet"),
+                     ],
+                     "captions": [
+                         T("At the top are your servers with their state. Each runs in a sandbox or container of its own, with only the network and folders its definition names.",
+                           "Oben stehen Ihre Server mit ihrem Zustand. Jeder läuft in einer eigenen Sandbox oder einem eigenen Container, nur mit dem Netz und den Ordnern, die seine Definition nennt."),
+                         T("The agent reaches a server through a relay that applies your rules and logs every call; there is no network path between the sandboxes.",
+                           "Der Agent erreicht einen Server über ein Relay, das Ihre Regeln anwendet und jeden Aufruf protokolliert; zwischen den Sandboxen gibt es keinen Netzweg."),
+                     ]},
+                    {"kind": "app", "page": "mcp", "heading": T("The catalogs", "Die Kataloge"),
+                     "zoom": [0.14, 0.46, 1.0, 0.88],
+                     "bullets": [
+                         T("sandbox-ai-mcp and axross-mcp-hub, signed", "sandbox-ai-mcp und axross-mcp-hub, signiert"),
+                         T("Every server reviewed in full, pinned by digest", "Jeder Server vollständig geprüft, per Digest festgelegt"),
+                         T("Add… asks for folders, variables, network and limits", "Hinzufügen… fragt nach Ordnern, Variablen, Netz und Grenzen"),
+                         T("Unsigned only when you say so", "Unsigniert nur, wenn Sie es sagen"),
+                     ],
+                     "captions": [
+                         T("Below are the catalogs: ready-made servers, each reviewed in full, pinned by digest and signed. The column Signature says whether it was verified.",
+                           "Darunter stehen die Kataloge: fertige Server, jeder vollständig geprüft, per Digest festgelegt und signiert. Die Spalte Signatur sagt, ob sie geprüft wurde."),
+                         T("Give a server network only where you would give it to the agent: a fetch or browser server sends whatever the agent asks it to.",
+                           "Geben Sie einem Server nur dort Netz, wo Sie es dem Agenten geben würden: Ein Fetch- oder Browser-Server sendet, was immer der Agent von ihm verlangt."),
+                         T("A start uses a server by name, or you connect it to the agent on the board; Add MCP server on the Sandboxes page gives it to a running sandbox without a restart.",
+                           "Ein Start nutzt einen Server per Namen, oder Sie verbinden ihn auf dem Board mit dem Agenten; MCP-Server hinzufügen auf der Seite Sandboxen gibt ihn einer laufenden Sandbox ohne Neustart."),
+                     ]},
+                    {"kind": "app", "page": "mcp", "shot": "mcp-properties", "heading": T("Properties and limits", "Eigenschaften und Grenzen"),
+                     "zoom": [0.37, 0.25, 0.63, 0.74],
+                     "bullets": [
+                         T("Properties… (double click, Alt+Enter, right click): limits, network, folders, VPN", "Eigenschaften… (Doppelklick, Alt+Enter, Rechtsklick): Grenzen, Netz, Ordner, VPN"),
+                         T("Memory, CPUs, processes and /tmp, checked while typed", "Speicher, CPUs, Prozesse und /tmp, beim Tippen geprüft"),
+                         T("Use the recommended limits: what the catalog recommends", "Die empfohlenen Grenzen nehmen: was der Katalog empfiehlt"),
+                         T("What ended a server is recorded: out of memory, its process limit, a full /tmp", "Was einen Server beendete, wird festgehalten: kein Speicher, Prozessgrenze, volles /tmp"),
+                     ],
+                     "captions": [
+                         T("Properties shows a server's own limits, network and folders, and checks every value while you type. A start that needs more gets an instance of its own.",
+                           "Eigenschaften zeigt die eigenen Grenzen, das Netz und die Ordner eines Servers und prüft jeden Wert beim Tippen. Ein Start, der mehr braucht, bekommt eine eigene Instanz."),
+                         T("When a server ends without being asked to, for lack of memory or a full temporary folder, the page says why and what fixes it.",
+                           "Endet ein Server ungefragt, aus Mangel an Speicher oder mit vollem temporärem Ordner, sagt die Seite, warum, und was es behebt."),
+                     ]},
+                ],
+            },
+            {
+                "id": "llm", "page": "llm",
+                "topics": [T("Your own model servers", "Ihre eigenen Modellserver"), T("What they have loaded", "Was sie geladen haben"),
+                           T("Keys stay in the proxy", "Schlüssel bleiben im Proxy")],
+                "intro": [T("LLM servers lists the model servers an agent can use instead of the cloud: Ollama, LM Studio, llama.cpp, vLLM or another compatible server.",
+                            "LLM-Server listet die Modellserver, die ein Agent statt der Cloud nutzen kann: Ollama, LM Studio, llama.cpp, vLLM oder ein anderer kompatibler Server.")],
+                "scenes": [
+                    {"kind": "app", "page": "llm", "heading": T("Every server by name", "Jeder Server mit Namen"),
+                     "zoom": [0.14, 0.08, 1.0, 0.36],
+                     "bullets": [
+                         T("Name, kind, URL, default model, key, VPN profile", "Name, Art, URL, Standardmodell, Schlüssel, VPN-Profil"),
+                         T("What it has loaded now: models, VRAM and RAM, requests", "Was er gerade geladen hat: Modelle, VRAM und RAM, Anfragen"),
+                         T("On this machine or a host of `sandbox-ai hosts`", "Auf diesem Rechner oder einem Host aus `sandbox-ai hosts`"),
+                     ],
+                     "captions": [
+                         T("The table shows each server with its kind, address and default model. Below it, a line per server says what it has loaded now and what it uses.",
+                           "Die Tabelle zeigt jeden Server mit Art, Adresse und Standardmodell. Darunter sagt eine Zeile je Server, was er gerade geladen hat und was er verbraucht."),
+                         T("What a server's API does not report is said, never guessed.",
+                           "Was die API eines Servers nicht meldet, wird gesagt, nie geraten."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Add…, Check, Models", "Hinzufügen…, Prüfen, Modelle"),
+                     "bullets": [
+                         T("Add… checks the server first, then keeps the key as a secret", "Hinzufügen… prüft den Server zuerst, dann wird der Schlüssel als Geheimnis gespeichert"),
+                         T("Test connection lists the models, loaded first", "Verbindung testen listet die Modelle, geladene zuerst"),
+                         T("Check: reachability, TLS, key, model, the API the agent needs", "Prüfen: Erreichbarkeit, TLS, Schlüssel, Modell, die API, die der Agent braucht"),
+                         T("A start: `--llm NAME:MODEL`, or an LLM part on the board", "Ein Start: `--llm NAME:MODEL`, oder ein LLM-Teil auf dem Board"),
+                     ],
+                     "captions": [
+                         T("Add registers a server: it is checked first, and only then is a key you type kept as a secret. Check tests reachability, TLS, the key and the API the agent needs.",
+                           "Hinzufügen registriert einen Server: Er wird zuerst geprüft, und erst dann wird ein eingegebener Schlüssel als Secret gespeichert. Prüfen testet Erreichbarkeit, TLS, den Schlüssel und die API, die der Agent braucht."),
+                         T("A start opens only the server's address and port, and the proxy adds the key on the wire: the agent only ever sees a placeholder.",
+                           "Ein Start öffnet nur Adresse und Port des Servers, und der Proxy setzt den Schlüssel unterwegs ein: Der Agent sieht nur einen Platzhalter."),
+                         T("A server can sit behind a VPN profile, and on another host the list is that host's own, read over SSH.",
+                           "Ein Server kann hinter einem VPN-Profil liegen, und auf einem anderen Host ist die Liste die eigene dieses Hosts, über SSH gelesen."),
+                     ]},
+                    {"kind": "app", "page": "llm", "shot": "llm-parameters", "heading": T("Parameters and the loop guard", "Parameter und Loop Guard"),
+                     "zoom": [0.33, 0.01, 0.67, 0.99],
+                     "bullets": [
+                         T("Sampling parameters per model: temperature, top_k, context size", "Sampling-Parameter je Modell: Temperatur, top_k, Kontextgröße"),
+                         T("Set by the proxy in that server's requests, for every agent", "Vom Proxy in die Anfragen an diesen Server gesetzt, für jeden Agenten"),
+                         T("Loop guard: a note, a pause of tool use, a clean end of a repeating answer", "Loop Guard: ein Hinweis, eine Pause der Tools, ein sauberes Ende einer sich wiederholenden Antwort"),
+                     ],
+                     "captions": [
+                         T("Parameters sets a model's sampling, such as temperature and context size. The proxy puts them into that server's requests, whichever agent asks.",
+                           "Parameter setzt das Sampling eines Modells, etwa Temperatur und Kontextgröße. Der Proxy setzt sie in die Anfragen an diesen Server, egal welcher Agent fragt."),
+                         T("The loop guard keeps a local model from going round in circles: it adds a note, pauses tool use for one answer, or ends an answer that repeats itself.",
+                           "Der Loop Guard bewahrt ein lokales Modell davor, sich im Kreis zu drehen: Er fügt einen Hinweis an, pausiert die Tools für eine Antwort oder beendet eine Antwort, die sich wiederholt."),
+                     ]},
+                ],
+            },
+            {
+                "id": "images", "page": "images",
+                "topics": [T("The agents' images and variants", "Die Images der Agenten und Varianten"),
+                           T("Build", "Bauen"), T("The extension editor", "Der Erweiterungs-Editor")],
+                "intro": [T("Images lists the container image of each agent and your variants: built or not, current or due for a rebuild.",
+                            "Images listet das Container-Image jedes Agenten und Ihre Varianten: gebaut oder nicht, aktuell oder fällig für einen Neubau.")],
+                "scenes": [
+                    {"kind": "app", "page": "images", "heading": T("Images and variants", "Images und Varianten"),
+                     "zoom": [0.14, 0.08, 1.0, 0.5],
+                     "bullets": [
+                         T("Built, current with its extension, agent version, size", "Gebaut, aktuell mit seiner Erweiterung, Agent-Version, Größe"),
+                         T("The installed packages of the selected image", "Die installierten Pakete des gewählten Images"),
+                         T("Build; Other builds: the extension layer only, or all images", "Bauen; Weitere Builds: nur die Erweiterungsschicht oder alle Images"),
+                         T("New variant…: a copy with its own extension, `--image-variant`", "Neue Variante…: eine Kopie mit eigener Erweiterung, `--image-variant`"),
+                     ],
+                     "captions": [
+                         T("Each row says whether the image is built and current, or needs a rebuild for a changed extension or a new base. Build runs sandbox-ai build for it.",
+                           "Jede Zeile sagt, ob das Image gebaut und aktuell ist oder einen Neubau braucht, für eine geänderte Erweiterung oder eine neue Basis. Bauen führt dafür sandbox-ai build aus."),
+                         T("A variant is a copy of an agent's image with its own extension, for one kind of work; a start chooses it by name.",
+                           "Eine Variante ist eine Kopie des Images eines Agenten mit eigener Erweiterung, für eine Art von Arbeit; ein Start wählt sie per Namen."),
+                     ]},
+                    {"kind": "app", "page": "images", "shot": "images-yours", "heading": T("Your images", "Eigene Images"),
+                     "zoom": [0.14, 0.48, 1.0, 0.92],
+                     "bullets": [
+                         T("Pull and pin: an image from a registry, pinned by its digest", "Holen und pinnen: ein Image aus einer Registry, per Digest gepinnt"),
+                         T("Add from a Containerfile…: every FROM pulled once and pinned", "Aus einem Containerfile hinzufügen…: jedes FROM einmal geholt und gepinnt"),
+                         T("Marked UNCHECKED wherever it appears; no start ever pulls one", "Überall als UNGEPRÜFT markiert; kein Start holt je eines"),
+                         T("Used as a service beside the agent, or as the base of a variant", "Genutzt als Service neben dem Agenten oder als Basis einer Variante"),
+                     ],
+                     "captions": [
+                         T("Your images comes from a registry or a Containerfile of yours, pulled once and pinned by its digest. Nobody has reviewed them, so they are marked unchecked everywhere.",
+                           "Eigene Images kommen aus einer Registry oder aus Ihrem Containerfile, einmal geholt und per Digest gepinnt. Niemand hat sie geprüft, deshalb sind sie überall als ungeprüft markiert."),
+                         T("Such an image runs as a service beside the agent, or becomes the base of a variant.",
+                           "So ein Image läuft als Service neben dem Agenten oder wird zur Basis einer Variante."),
+                     ]},
+                    {"kind": "app", "page": "images", "shot": "images-extension", "heading": T("The extension editor", "Der Erweiterungs-Editor"),
+                     "zoom": [0.14, 0.47, 1.0, 0.97],
+                     "bullets": [
+                         T("Debian and npm packages, Python tools, files", "Debian- und npm-Pakete, Python-Werkzeuge, Dateien"),
+                         T("A Containerfile fragment with the validator's findings in place", "Ein Containerfile-Fragment mit den Befunden des Validators an Ort und Stelle"),
+                         T("Save runs `sandbox-ai images extend`, refused while there are errors", "Speichern führt `sandbox-ai images extend` aus, abgelehnt, solange es Fehler gibt"),
+                     ],
+                     "captions": [
+                         T("The extension editor has a tab for Debian packages, npm packages, Python tools, files and a Containerfile fragment, with a preview of the final Containerfile.",
+                           "Der Erweiterungs-Editor hat Reiter für Debian-Pakete, npm-Pakete, Python-Werkzeuge, Dateien und ein Containerfile-Fragment, mit einer Vorschau des fertigen Containerfiles."),
+                         T("Save is refused while the validator finds errors, and it changes only the extension: the image changes when you build it again.",
+                           "Speichern wird abgelehnt, solange der Validator Fehler findet, und ändert nur die Erweiterung: Das Image ändert sich, wenn Sie es neu bauen."),
+                         T("The app never writes an extension itself: Save runs sandbox-ai images extend, and the build runs in a terminal you can watch.",
+                           "Die App schreibt nie selbst eine Erweiterung: Speichern führt sandbox-ai images extend aus, und der Build läuft in einem Terminal, dem Sie zusehen können."),
+                     ]},
+                ],
+            },
+            {
+                "id": "credentials", "page": "credentials",
+                "topics": [T("Agent logins", "Logins der Agenten"), T("Secrets and Git logins", "Secrets und Git-Logins"),
+                           T("Identities and VPN profiles", "Identitäten und VPN-Profile")],
+                "intro": [T("Credentials keeps what sandboxes may log in with. A value kept here is never read back or shown.",
+                            "Zugangsdaten verwaltet, womit sich Sandboxen anmelden dürfen. Ein hier gespeicherter Wert wird nie zurückgelesen oder angezeigt.")],
+                "scenes": [
+                    {"kind": "app", "page": "credentials", "heading": T("The overview", "Die Übersicht"),
+                     "zoom": [0.14, 0.1, 1.0, 0.6],
+                     "bullets": [
+                         T("Every agent's login, valid or expired; Log in… in a terminal", "Der Login jedes Agenten, gültig oder abgelaufen; Anmelden… im Terminal"),
+                         T("A sandbox gets the login when it starts", "Eine Sandbox bekommt den Login beim Start"),
+                         T("Tabs for secrets, Git and publish logins, identities, VPN", "Reiter für Geheimnisse, Git- und Veröffentlichungs-Logins, Identitäten, VPN"),
+                         T("Every tab laid out alike: nothing moves when you switch", "Jeder Reiter gleich aufgebaut: Beim Wechseln verschiebt sich nichts"),
+                     ],
+                     "captions": [
+                         T("The overview shows every agent's login, whether it is valid, and where it comes from. Logging in runs in a terminal; a sandbox gets the login when it starts.",
+                           "Die Übersicht zeigt den Login jedes Agenten, ob er gültig ist und woher er kommt. Die Anmeldung läuft in einem Terminal; eine Sandbox bekommt den Login beim Start."),
+                         T("Every tab has the same layout: a header that says what it is for, the list, the buttons and a message area, so nothing moves when you switch tabs.",
+                           "Jeder Reiter hat denselben Aufbau: eine Kopfzeile, die sagt, wofür er ist, die Liste, die Knöpfe und einen Bereich für Meldungen, damit sich beim Wechseln nichts verschiebt."),
+                     ]},
+                    {"kind": "app", "page": "credentials", "shot": "credentials-secrets", "heading": T("Secrets", "Secrets"),
+                     "zoom": [0.14, 0.1, 1.0, 0.5],
+                     "bullets": [
+                         T("API keys and tokens by name, in your keyring or private files", "API-Schlüssel und Tokens mit Namen, im Schlüsselbund oder in privaten Dateien"),
+                         T("Passed on standard input, never as an argument", "Über die Standardeingabe übergeben, nie als Argument"),
+                         T("The agent sees a placeholder; the proxy adds the token on the wire", "Der Agent sieht einen Platzhalter; der Proxy setzt den Token unterwegs ein"),
+                     ],
+                     "captions": [
+                         T("Secrets are API keys and tokens, kept by name in your keyring. A value is passed on standard input, never on a command line, and never shown again.",
+                           "Secrets sind API-Schlüssel und Tokens, mit Namen in Ihrem Schlüsselbund gespeichert. Ein Wert geht über die Standardeingabe, nie über eine Kommandozeile, und wird nie wieder angezeigt."),
+                         T("With an API key, Git logins or the token proxy, the token never enters the sandbox: the proxy adds it on the wire, and the agent sees a placeholder.",
+                           "Mit API-Key, Git-Logins oder dem Token-Proxy kommt der Token nie in die Sandbox: Der Proxy setzt ihn unterwegs ein, und der Agent sieht einen Platzhalter."),
+                     ]},
+                    {"kind": "app", "page": "credentials", "shot": "credentials-give", "heading": T("Give to a running sandbox", "An eine laufende Sandbox übergeben"),
+                     "zoom": [0.14, 0.12, 1.0, 0.86],
+                     "bullets": [
+                         T("A secret as an API key for one host, without a restart", "Ein Secret als API-Schlüssel für einen Host, ohne Neustart"),
+                         T("For a Git server: As a Git login (for git push)", "Für einen Git-Server: Als Git-Login (für git push)"),
+                         T("`sandbox-ai secrets give RUN NAME --api-key HOST`", "`sandbox-ai secrets give LAUF NAME --api-key HOST`"),
+                         T("`sandbox-ai git-logins give RUN URL --secret NAME`", "`sandbox-ai git-logins give LAUF URL --secret NAME`"),
+                     ],
+                     "captions": [
+                         T("Give to a running sandbox hands a secret to a sandbox that already runs, as an API key for one server: the proxy adds it there, and nowhere else.",
+                           "An laufende Sandbox übergeben gibt ein Secret einer Sandbox, die schon läuft, als API-Schlüssel für einen Server: Der Proxy setzt ihn dort ein, und nirgends sonst."),
+                         T("When the server is a Git server, such as GitHub, the dialog offers the secret as a Git login, so that git push works there.",
+                           "Ist der Server ein Git-Server, etwa GitHub, bietet der Dialog das Secret als Git-Login an, damit git push dort funktioniert."),
+                         T("The same works in a terminal, with the commands secrets give and git-logins give; revoke takes it back, and nothing is left half applied.",
+                           "Dasselbe geht im Terminal, mit den Befehlen secrets give und git-logins give; revoke nimmt es zurück, und nichts bleibt halb angewendet."),
+                     ]},
+                    {"kind": "app", "page": "credentials", "shot": "credentials-vpn", "heading": T("Identities and VPN profiles", "Identitäten und VPN-Profile"),
+                     "bullets": [
+                         T("Identities: commit name and address, Git and publish logins", "Identitäten: Commit-Name und Adresse, Git- und Veröffentlichungs-Logins"),
+                         T("VPN: WireGuard, OpenVPN, Mullvad, Tailscale or Headscale", "VPN: WireGuard, OpenVPN, Mullvad, Tailscale oder Headscale"),
+                         T("Keys and passwords become secrets; the profile only names them", "Schlüssel und Passwörter werden Geheimnisse; das Profil nennt nur ihre Namen"),
+                     ],
+                     "captions": [
+                         T("An identity says who a sandbox works as: the name and address of its commits and its logins. A VPN profile puts a tunnel in front of a sandbox.",
+                           "Eine Identität sagt, als wer eine Sandbox arbeitet: Name und Adresse ihrer Commits und ihre Logins. Ein VPN-Profil setzt einen Tunnel vor eine Sandbox."),
+                         T("Keys and passwords of a VPN become secrets too; the profile only names them.",
+                           "Auch Schlüssel und Passwörter eines VPN werden Secrets; das Profil nennt nur ihre Namen."),
+                     ]},
+                ],
+            },
+            {
+                "id": "team", "page": "team",
+                "topics": [T("Two or three agents, one workspace", "Zwei oder drei Agenten, ein Workspace"),
+                           T("The lead and the task board", "Die Leitung und das Aufgaben-Board"), T("Start, talk, stop", "Starten, sprechen, stoppen")],
+                "intro": [T("Teams lists the teams of agents: two or three agents, each in a sandbox of its own, on one shared workspace.",
+                            "Teams listet die Agenten-Teams: zwei oder drei Agenten, jeder in einer eigenen Sandbox, auf einem gemeinsamen Workspace.")],
+                "scenes": [
+                    {"kind": "diagram", "diagram": "team", "heading": T("A team works through a task board", "Ein Team arbeitet über ein Aufgaben-Board"),
+                     "captions": [
+                         T("The first agent leads: you talk to it, and it hands the others tasks on the team's board, an MCP server in a sandbox without network.",
+                           "Der erste Agent leitet: Mit ihm sprechen Sie, und er gibt den anderen Aufgaben über das Aufgaben-Board des Teams, einen MCP-Server in einer Sandbox ohne Netz."),
+                     ]},
+                    {"kind": "app", "page": "team", "heading": T("The Teams page", "Die Seite Teams"),
+                     "bullets": [
+                         T("Start a team…: name, lead, members, workspace, options", "Team starten…: Name, Leitung, Mitglieder, Workspace, Optionen"),
+                         T("Members: sessions NAME-AGENT, with their state, and the board", "Mitglieder: Sessions NAME-AGENT mit Zustand, und das Aufgaben-Board"),
+                         T("Talk to the lead; Post a task… for one member", "Mit der Leitung sprechen; Aufgabe stellen… für ein Mitglied"),
+                         T("Stop… and Delete… ask first; the workspace stays", "Stoppen… und Löschen… fragen zuerst; der Workspace bleibt"),
+                     ],
+                     "captions": [
+                         T("Start a team asks for a name, the lead, the members, the workspace and the options every member starts with, then starts them one after the other.",
+                           "Team starten fragt nach Name, Leitung, Mitgliedern, Workspace und den Optionen, mit denen jedes Mitglied startet, und startet sie dann nacheinander."),
+                         T("Select a team to see its members and its board. Talk to the lead attaches to the lead's session; Post a task gives one member a task from you.",
+                           "Wählen Sie ein Team, um seine Mitglieder und sein Aufgaben-Board zu sehen. Mit der Leitung sprechen verbindet mit der Session der Leitung; Aufgabe stellen gibt einem Mitglied eine Aufgabe von Ihnen."),
+                         T("Members share the workspace, so nothing stops two of them from editing one file: plan the work accordingly.",
+                           "Die Mitglieder teilen den Workspace, nichts hindert also zwei daran, dieselbe Datei zu ändern: Planen Sie die Arbeit entsprechend."),
+                         T("Stop ends every member and the board; Delete also removes their HOMEs and the board for good. Both ask first, and the workspace stays.",
+                           "Stoppen beendet jedes Mitglied und das Aufgaben-Board; Löschen entfernt auch ihre HOMEs und das Board endgültig. Beide fragen zuerst, und der Workspace bleibt."),
+                     ]},
+                ],
+            },
+            {
+                "id": "system", "page": "system",
+                "topics": [T("Version, updates, policy", "Version, Updates, Richtlinie"), T("The host check", "Die Host-Prüfung"),
+                           T("Settings and the log window", "Einstellungen und das Protokollfenster")],
+                "intro": [T("System shows the sandbox-ai in use and keeps this machine in order.",
+                            "System zeigt das verwendete sandbox-ai und hält diesen Rechner in Ordnung.")],
+                "scenes": [
+                    {"kind": "app", "page": "system", "heading": T("sandbox-ai and the host check", "sandbox-ai und die Host-Prüfung"),
+                     "bullets": [
+                         T("Version and folder; Check for updates", "Version und Ordner; Auf Updates prüfen"),
+                         T("The administrator's policy, in one line", "Die Richtlinie des Administrators, in einer Zeile"),
+                         T("Host check: what is wrong and how to fix it", "Host-Prüfung: was fehlt und wie man es behebt"),
+                         T("Build images, update, privacy check of a repository", "Images bauen, aktualisieren, Datenschutzprüfung eines Repositorys"),
+                     ],
+                     "captions": [
+                         T("At the top are the version and the administrator's policy. The host check runs sandbox-ai doctor: each row says what is wrong and how to fix it.",
+                           "Oben stehen die Version und die Richtlinie des Administrators. Die Host-Prüfung führt sandbox-ai doctor aus: Jede Zeile sagt, was fehlt und wie man es behebt."),
+                         T("Run it after installing, and fix the first red row first.",
+                           "Führen Sie sie nach der Installation aus und beheben Sie die erste rote Zeile zuerst."),
+                         T("Below it are the buttons to build the images, to update sandbox-ai and to check a repository for private data before it is published.",
+                           "Darunter stehen die Knöpfe, um die Images zu bauen, sandbox-ai zu aktualisieren und ein Repository vor der Veröffentlichung auf private Daten zu prüfen."),
+                     ]},
+                    {"kind": "app", "page": "system", "shot": "system-settings", "heading": T("Settings", "Einstellungen"),
+                     "zoom": [0.19, 0.04, 0.81, 0.96],
+                     "captions": [
+                         T("Settings choose the theme, the language, where builds and logins run, and whether the app keeps answering questions from the tray when its window is closed.",
+                           "Die Einstellungen wählen Farbschema, Sprache, wo Builds und Anmeldungen laufen, und ob die App aus dem Infobereich weiter Fragen beantwortet, wenn ihr Fenster zu ist."),
+                         T("Pop-up notifications are off by default and switched on here; the loop guard for local models has its section here too.",
+                           "Benachrichtigungen sind anfangs aus und werden hier eingeschaltet; auch der Loop Guard für lokale Modelle hat hier seinen Abschnitt."),
+                         T("Here, too, you choose whether the app reopens the terminals of running sessions when it starts; that is on by default.",
+                           "Hier wählen Sie auch, ob die App beim Start die Terminals laufender Sessions wieder öffnet; das ist anfangs an."),
+                     ]},
+                    {"kind": "app", "page": "system", "shot": "system-log", "heading": T("The log in a window of its own", "Das Protokoll in einem eigenen Fenster"),
+                     "zoom": [0.15, 0.17, 0.93, 0.82],
+                     "captions": [
+                         T("The app's log has a window of its own, Control Shift L, also from inside a dialog: what a dialog reports can be read and copied while it is open.",
+                           "Das Protokoll der App hat ein eigenes Fenster, Strg Umschalt L, auch aus einem Dialog heraus: Was ein Dialog meldet, lässt sich lesen und kopieren, während er offen ist."),
+                         T("No dialog blocks the app: the page it came from waits behind a veil, and the rest of the app stays usable.",
+                           "Kein Dialog blockiert die App: Die Seite, von der er kam, wartet hinter einem Schleier, und der Rest der App bleibt benutzbar."),
+                         T("Every extra window, a dialog, the log or an editor, has a cross at its top right and closes with Escape, also where the window manager draws no title bar.",
+                           "Jedes weitere Fenster, ein Dialog, das Protokoll oder ein Editor, hat oben rechts ein Kreuz und schließt sich mit Esc, auch wo der Fenstermanager keine Titelleiste zeichnet."),
+                     ]},
+                ],
+            },
+            {
+                "id": "hosts", "page": "hosts",
+                "topics": [T("Other machines over SSH", "Andere Rechner über SSH"), T("Updates", "Updates"),
+                           T("Each host's defaults", "Die Vorgaben jedes Hosts")],
+                "intro": [T("Hosts manages other machines, such as Proxmox containers or servers, whose sandbox-ai this app controls over SSH.",
+                            "Hosts verwaltet andere Rechner, etwa Proxmox-Container oder Server, deren sandbox-ai diese App über SSH steuert.")],
+                "scenes": [
+                    {"kind": "app", "page": "hosts", "heading": T("One row per host", "Eine Zeile je Host"),
+                     "zoom": [0.14, 0.07, 0.55, 0.75],
+                     "bullets": [
+                         T("SSH address, whether it answered, version, starts, questions", "SSH-Adresse, ob er antwortete, Version, Starts, Fragen"),
+                         T("Show starts, Show questions: the other pages, for this host", "Starts zeigen, Fragen zeigen: die anderen Seiten, für diesen Host"),
+                         T("Add…, Test: SSH, the host's sandbox-ai and its doctor", "Hinzufügen…, Testen: SSH, das sandbox-ai des Hosts und sein doctor"),
+                     ],
+                     "captions": [
+                         T("Each row is a host: its address, whether it answered, its sandbox-ai version, how many starts run there and how many questions wait.",
+                           "Jede Zeile ist ein Host: seine Adresse, ob er geantwortet hat, seine sandbox-ai-Version, wie viele Starts dort laufen und wie viele Fragen warten."),
+                         T("Its starts and questions are on the pages Sandboxes and Approvals, as for this computer. SSH uses your keys, and the host key is checked strictly after the first contact.",
+                           "Seine Starts und Fragen stehen auf den Seiten Sandboxen und Freigaben, wie für diesen Rechner. SSH nutzt Ihre Schlüssel, und der Host-Key wird nach dem ersten Kontakt streng geprüft."),
+                     ]},
+                    {"kind": "app", "page": "hosts", "shot": "hosts-defaults", "heading": T("Updates and defaults", "Updates und Vorgaben"),
+                     "zoom": [0.53, 0.07, 1.0, 0.6],
+                     "bullets": [
+                         T("Update, Update all: each host's own signed update", "Aktualisieren, Alle aktualisieren: das eigene signierte Update jedes Hosts"),
+                         T("Update from here…: this machine's sandbox-ai, for a host without the internet", "Von hier aktualisieren…: das sandbox-ai dieses Rechners, für einen Host ohne Internet"),
+                         T("Defaults: security mode, canaries, keep_days, telemetry", "Vorgaben: Sicherheitsmodus, Canaries, keep_days, Telemetrie"),
+                     ],
+                     "captions": [
+                         T("Update runs each host's own signed update. Update from here puts this machine's sandbox-ai on a host that cannot reach the release server.",
+                           "Aktualisieren führt das eigene signierte Update jedes Hosts aus. Von hier aktualisieren bringt das sandbox-ai dieses Rechners auf einen Host, der den Release-Server nicht erreicht."),
+                         T("The tabs on the right are about the chosen host: its doctor, its updates and its defaults. A step down in security is asked first.",
+                           "Die Reiter rechts betreffen den gewählten Host: seinen doctor, seine Updates und seine Vorgaben. Ein Schritt nach unten bei der Sicherheit wird zuerst erfragt."),
+                         T("Every action runs sandbox-ai on the host over SSH, each argument quoted on its own; nothing listens on the hosts but their SSH server.",
+                           "Jede Aktion führt sandbox-ai auf dem Host über SSH aus, jedes Argument einzeln gequotet; auf den Hosts lauscht nichts außer ihrem SSH-Server."),
+                     ]},
+                ],
+            },
+            {
+                "id": "help", "page": "help",
+                "topics": [T("Every page and concept", "Jede Seite und jedes Konzept"), T("Tours", "Touren"),
+                           T("Working with the app", "Arbeiten mit der App")],
+                "intro": [T("The Help page explains every page and feature of the app and the concepts of sandbox-ai, in English and German.",
+                            "Die Seite Hilfe erklärt jede Seite und Funktion der App und die Konzepte von sandbox-ai, auf Deutsch und Englisch.")],
+                "scenes": [
+                    {"kind": "app", "page": "help", "shot": "help-section", "heading": T("Sections, search, tours", "Abschnitte, Suche, Touren"),
+                     "bullets": [
+                         T("Sections: the app and the concepts", "Abschnitte: die App und die Konzepte"),
+                         T("Search in English and German at once", "Suche auf Deutsch und Englisch zugleich"),
+                         T("Related commands and options, as they are typed", "Zugehörige Befehle und Optionen, wie man sie tippt"),
+                         T("Tour about… (Ctrl+F1): tours and sections on a topic", "Tour zu… (Strg+F1): Touren und Abschnitte zu einem Thema"),
+                     ],
+                     "captions": [
+                         T("On the left are the sections, grouped into the app and the concepts; the search keeps only sections with every word you type.",
+                           "Links stehen die Abschnitte, gruppiert in die App und die Konzepte; die Suche behält nur Abschnitte mit jedem Wort, das Sie tippen."),
+                         T("Buttons start the tours of a section, and Tour about asks for a topic, such as network or presets, and lists the best tours and sections first.",
+                           "Knöpfe starten die Touren eines Abschnitts, und Tour zu fragt nach einem Thema, etwa Netz oder Presets, und listet die besten Touren und Abschnitte zuerst."),
+                     ]},
+                    {"kind": "bullets", "heading": T("Working with the app", "Arbeiten mit der App"),
+                     "bullets": [
+                         T("A (?) on every page, panel and part", "Ein (?) auf jeder Seite, jedem Bereich und Teil"),
+                         T("Mouse side buttons and Alt+Left/Right: back and forward", "Maus-Seitentasten und Alt+Links/Rechts: zurück und vor"),
+                         T("Several rows at once (Ctrl, Shift, Ctrl+A); Ctrl+C copies", "Mehrere Zeilen auf einmal (Strg, Umschalt, Strg+A); Strg+C kopiert"),
+                         T("No dialog blocks the app; [x] or Esc closes every extra window; Ctrl+1 to Ctrl+9 open the pages", "Kein Dialog blockiert die App; [x] oder Esc schließt jedes weitere Fenster; Strg+1 bis Strg+9 öffnen die Seiten"),
+                     ],
+                     "captions": [
+                         T("Every page, panel and part has a small question mark: it opens a short explanation that ends with a link to its section here.",
+                           "Jede Seite, jeder Bereich und jedes Teil hat ein kleines Fragezeichen: Es öffnet eine kurze Erklärung, die mit einem Link zu ihrem Abschnitt hier endet."),
+                         T("The mouse's side buttons go back and forward through the pages. In every list you select several rows at once and copy them.",
+                           "Die Seitentasten der Maus gehen durch die Seiten zurück und vor. In jeder Liste wählen Sie mehrere Zeilen auf einmal und kopieren sie."),
+                         T("A switch shows the help in English or German; it follows the app's language unless you change it.",
+                           "Ein Schalter zeigt die Hilfe auf Deutsch oder Englisch; er folgt der Sprache der App, außer Sie ändern ihn."),
+                     ]},
+                ],
+            },
+        ],
+    },
+}
+
+
+# The series follows the app's navigation (APP_PAGES' order), wherever a video is written above.
+SERIES["pages"]["videos"].sort(key=lambda video: list(APP_PAGES).index(video["page"]))
+
 
 def text(value, lang):
     """VALUE in LANG: a T() dictionary, or a plain string shown in every language."""
@@ -1390,6 +2352,29 @@ def iter_scenes():
     for chapter in CHAPTERS:
         for index, scene in enumerate(chapter["scenes"]):
             yield chapter, index, scene
+
+
+def series_videos(name="pages"):
+    """The videos of series NAME."""
+    return SERIES[name]["videos"]
+
+
+def iter_series_scenes(name="pages"):
+    """(video, index, scene) for every scene of every video of series NAME; its id is VIDEO-ID/INDEX."""
+    for video in series_videos(name):
+        for index, scene in enumerate(video["scenes"]):
+            yield video, index, scene
+
+
+def narration(lang, name="pages"):
+    """(where, text) of every narration of series NAME in LANG: title cards, scenes, the closing card."""
+    found = []
+    for video in series_videos(name):
+        found += [(f"{video['id']}/intro", text(c, lang)) for c in video["intro"]]
+        for index, scene in enumerate(video["scenes"]):
+            found += [(f"{video['id']}/{index}", text(c, lang)) for c in scene["captions"]]
+    found += [("outro", text(c, lang)) for c in SERIES[name]["outro_captions"]]
+    return found
 
 
 def texts_of(scene):
@@ -1428,4 +2413,10 @@ def commands():
         for span in re.findall(r"`([^`]+)`", value["en"]):
             if span.startswith("sandbox-ai "):
                 found.append(("outro", span))
+    for video, index, scene in iter_series_scenes():
+        for value in texts_of(scene):
+            for lang in LANGUAGES:
+                for span in re.findall(r"`([^`]+)`", text(value, lang)):
+                    if span.startswith("sandbox-ai "):
+                        found.append((f"pages/{video['id']}/{index}", span))
     return found

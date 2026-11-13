@@ -208,6 +208,101 @@ def test_hosts_paths_and_methods():
     assert not rt.path_matches("/a/**/z", "/a/bz") and rt.path_matches("/**", "")
 
 
+def verdict_before(rules, facts):
+    """Ruleset.http as it was before 0.1.94's second performance round: every rule of every source held against the
+    request (http_match), the hosts compared by Ruleset.host for each rule."""
+    def applies(rule):
+        return rt.Ruleset.host(rule["host"], facts["names"]) or facts["address"] in rule["addresses"]
+    methods = list(facts["methods"])
+    method, path = facts["methods"][0], facts["paths"][0] or "/"
+    shown_host = facts["claimed"] or facts["server"]
+    applying = [source["name"] for source in rules.sources if any("*" not in rule["host"] and applies(rule)
+                                                                   for rule in source["http"])]
+    if applying and facts["claimed"] and not facts["literal"] and facts["claimed"] != facts["server"]:
+        return {"decision": "deny", "rule": "(host)", "ruleset": applying[0]}
+    best, model = None, bool(facts.get("model_api")) or rules.provider(facts)
+    for source in rules.sources:
+        verdict, exempt = None, model and source["name"] != "policy"
+        for rule in source["http"]:
+            if exempt and "*" in rule["host"]:
+                continue
+            outcome = rules.http_match(rule, facts, methods)
+            if outcome or (outcome is None and rule["decision"] != "allow"):
+                verdict = {"decision": rule["decision"], "rule": rule["id"], "ruleset": source["name"]}
+                break
+        else:
+            if any(rule["decision"] == "allow" and "*" not in rule["host"] and applies(rule) for rule in source["http"]):
+                verdict = {"decision": "deny", "rule": "(unlisted)", "ruleset": source["name"]}
+            elif source["defaults"]["http"] != "allow" and not exempt:
+                verdict = {"decision": source["defaults"]["http"], "rule": "(default)", "ruleset": source["name"]}
+        if verdict and (best is None or rt.RULE_DECISIONS.index(verdict["decision"]) >
+                        rt.RULE_DECISIONS.index(best["decision"])):
+            best = verdict
+    return best or {"decision": "allow", "rule": None, "ruleset": None}
+
+
+def test_each_request_meets_only_the_rules_that_apply_with_the_same_verdict():
+    """Performance round 2: a request is held against the rules whose hosts or addresses apply (compared through
+    Ruleset.matchers), each rule looked at once; the verdict is the one every rule held against it gave."""
+    import random
+    chosen = random.Random(7)
+    patterns = ["*", "*.corp.example", "*.example", "api.example", "a.corp.example", "192.0.2.7", "2001:db8::7",
+                "x.example", "*.x.example"]
+    names = ["api.example", "a.corp.example", "corp.example", "x.example", "b.x.example", "other.test"]
+    for _ in range(400):
+        documents = []
+        for index in range(chosen.randint(1, 3)):
+            rules_ = [rule(f"r{index}-{n}", chosen.choice(rt.RULE_DECISIONS),
+                           host=chosen.sample(patterns, chosen.randint(1, 3)),
+                           methods=chosen.choice(["*", "GET", ["GET", "POST"]]),
+                           path=chosen.choice(["/**", "/a/**", "/b"]))
+                      for n in range(chosen.randint(0, 6))]
+            documents.append({"version": 1, "http": rules_,
+                              **({"defaults": {"http": chosen.choice(rt.RULE_DECISIONS)}} if chosen.random() < 0.3
+                                 else {})})
+        sources = [{"name": "policy" if index == 0 and chosen.random() < 0.3 else f"r{index}", **document}
+                   for index, document in enumerate(documents)]
+        rules = rt.Ruleset(sources, {"api.example": ["192.0.2.7"], "x.example": ["2001:db8::7"]},
+                           chosen.choice([[], ["api.example"]]))
+        for _ in range(5):
+            host = chosen.choice(names)
+            origin = chosen.choice([host, host, chosen.choice(names), "192.0.2.7:443", "[2001:db8::7]:443"])
+            facts = rt.Ruleset.request(origin, chosen.choice(["GET", "POST", "DELETE"]), chosen.choice(["/a/1", "/b", "/"]),
+                                       [["Host", host]], chosen.choice([None, "192.0.2.7", "2001:db8::7", "198.51.100.1"]))
+            facts.update(body=rt.AMBIGUOUS, taint=None, model_api=chosen.random() < 0.2)
+            found = rules.http(facts)
+            assert {key: found[key] for key in ("decision", "rule", "ruleset")} == verdict_before(rules, facts), \
+                (sources, facts)
+            for source in rules.sources:  # the compiled comparison is Ruleset.host's
+                for each in source["http"]:
+                    assert rules.applies(each, facts) == bool(
+                        rt.Ruleset.host(each["host"], facts["names"]) or facts["address"] in each["addresses"])
+                    assert rules.applies(each, {**facts, "names": set()}) == (facts["address"] in each["addresses"])
+
+
+def test_a_host_name_is_told_from_an_address_as_ipaddress_tells_it():
+    """Performance round 2: maybe_address() spares host names ipaddress's exception; what is an address stays so."""
+    import ipaddress
+
+    def address(value):
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            return False
+    values = ["api.example", "1.2.3.4", "1.2.3.4.", "01.2.3.4", "1.2.3", "::1", "[::1]", "fe80::1%eth0", "", ".",
+              "256.1.1.1", "1.2.3.4a", "١.2.3.4", "1.2.3.²", "１.2.3.4", " 1.2.3.4", "2001:db8::7", "a:b"]
+    values += [f"1.2.3.{chr(code)}" for code in range(0x3000)] + [chr(code) for code in range(0x3000)]
+    for value in values:
+        assert rt.Ruleset.is_address(value) == address(value), repr(value)
+        assert rt.is_address_origin(f"{value}:443") == address(value.strip("[]")), repr(value)
+        if rt.HOST_HEADER.fullmatch(value.strip()):
+            found = rt.host_authority(value)
+            if found is not None and not value.strip().startswith("["):
+                plain = value.strip().lower().rstrip(".")
+                assert found[0] == (str(ipaddress.ip_address(plain)) if address(plain) else plain), repr(value)
+
+
 def test_pinned_addresses_and_the_host_header_carry_the_rules():
     rules = ruleset({"version": 1, "http": [rule("read", "allow", host="api.example", methods="GET")]},
                     pinned={"api.example": ["192.0.2.21"], "other.example": ["192.0.2.99"]})
@@ -815,7 +910,7 @@ def test_an_ask_rule_waits_for_the_answer_in_the_approvals_directory(tmp_path):
         assert approvals.describe(question).startswith('call the MCP tool delete_file of files with {"path": "/work/a"}')
         calls = relay.records("call")
         assert calls[0]["question"] == question["id"] and calls[0]["approval"] == {
-            "decision": "allow", "scope": "run", "reason": "answered"}
+            "decision": "allow", "scope": "run", "reason": "answered", "question": question["id"]}
         assert "question" not in calls[1] and calls[1]["approval"]["scope"] == "run"  # asked once for the run
         assert relay.ran() == ["delete_file", "delete_file"]
         # Another rule's question is asked anew; a deny for once refuses this call only.
@@ -1084,6 +1179,11 @@ def test_mcp_servers_behind_a_vpn_keep_their_gateway(host, monkeypatch):
     monkeypatch.setattr(m, "wait_for_socket", lambda *args: None)
     monkeypatch.setattr(m.launcher(), "remove_stale_pod", lambda *args: False)
     monkeypatch.setattr(m, "PROC", host / "proc")
+    # The VPN proofs after the start (mcp.verify_network) as passed: no Podman here.
+    vpn = m.launcher().load_vpn_module()
+    vpn.check_vpn_container = lambda *args, **kwargs: {"id": "c" * 64, "started": "t"}
+    vpn.check_pod_vpn = lambda *args, **kwargs: {}
+    monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: vpn)
     assert m.ensure_running("img", s.parse_args(["codex"])) == "started"
     cmd = started[-1]
     assert cmd[2:4] == [str(ROOT / "sandbox/vpn.py"), "--internal-mcp-vpn"] and cmd[4] == "corp"
@@ -1147,3 +1247,59 @@ def test_the_relay_entry_point_takes_the_gateway(tmp_path):
     bad = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/runtime.py"), "--internal-mcp-serve", "/x.sock",
                           "--gateway", "not-base64!", "--", "true"], capture_output=True, text=True, timeout=30)
     assert bad.returncode == 1
+
+
+def test_the_agents_model_api_is_not_held_by_rules_for_every_host():
+    """0.1.94: a ruleset's rules for every host ("*") and its default are not meant for the agent's own model API -
+    a Tor start's "writes" rule asked about every chat completion to the --llm server, and an unanswered one
+    stopped the agent for the run. A rule naming the host still holds; so does the administrator's policy."""
+    writes = {"id": "writes", "host": "*", "methods": ["POST"], "decision": "ask", "reason": "sends data"}
+    preset = {"name": "tor-researcher", "version": 1, "http": [writes]}
+    rules = rt.Ruleset([preset], {}, ["api.anthropic.com"])
+    llm = rt.Ruleset.request("192.0.2.20:1234", "POST", "/v1/chat/completions", [], "192.0.2.20")
+    assert rules.http(llm)["decision"] == "ask"  # not known as the model API: asked
+    assert rules.http({**llm, "model_api": True})["decision"] == "allow"
+    provider = rt.Ruleset.request("api.anthropic.com", "POST", "/v1/messages", [["Host", "api.anthropic.com"]])
+    assert rules.http(provider)["decision"] == "allow"
+    other = rt.Ruleset.request("example.org", "POST", "/form", [])
+    assert rules.http(other)["decision"] == "ask"
+    named = {"name": "mine", "version": 1, "http": [{"id": "no-llm", "host": "192.0.2.20", "methods": ["POST"],
+                                                      "decision": "deny"}]}
+    assert rt.Ruleset([preset, named]).http({**llm, "model_api": True})["decision"] == "deny"
+    default_ask = {"name": "strict", "version": 1, "defaults": {"http": "ask"}, "http": []}
+    assert rt.Ruleset([default_ask]).http({**llm, "model_api": True})["decision"] == "allow"
+    policy = {"name": "policy", "version": 1, "http": [writes]}
+    assert rt.Ruleset([policy]).http({**llm, "model_api": True})["decision"] == "ask"
+
+
+def test_the_proxy_knows_the_llm_endpoint_of_a_request():
+    entry = {"name": "macbook", "scheme": "http", "host": "192.0.2.20", "port": 1234, "addresses": ["192.0.2.20"],
+             "prefix": "/v1"}
+    assert rt.llm_endpoint([entry], "http", "192.0.2.20:1234", 1234, "/v1/chat/completions") is entry
+    assert rt.llm_endpoint([entry], "http", "192.0.2.20:1234", 1234, "/admin") is None
+    assert rt.llm_endpoint([entry], "http", "192.0.2.21:1234", 1234, "/v1/chat/completions") is None
+    assert rt.llm_endpoint([entry], "http", "192.0.2.20:1235", 1235, "/v1/chat/completions") is None
+    assert rt.llm_endpoint([entry], "https", "192.0.2.20:1234", 1234, "/v1/chat/completions") is None
+
+
+def test_a_request_at_the_llm_endpoint_naming_another_host_is_no_model_api_request():
+    """The exemption of the agent's model API from rules for every host holds only for requests that name the
+    endpoint in their Host header: a front end routes by it, so "Host: other.example" at the endpoint's name or
+    address reaches another server there, and the ruleset's "*" rules (writes asked, a tainted run's) still hold -
+    as for the provider, whose claimed name must be the verified one."""
+    https = {"name": "gw", "scheme": "https", "host": "llm.example.org", "port": 8443, "addresses": ["192.0.2.30"],
+             "prefix": "/v1"}
+    http = {"name": "macbook", "scheme": "http", "host": "macbook.lan", "port": 1234, "addresses": ["192.0.2.20"],
+            "prefix": "/v1"}
+    local = {"name": "ollama", "scheme": "http", "host": "localhost", "port": 11434, "addresses": ["127.0.0.1"]}
+    path = "/v1/chat/completions"
+    assert rt.model_api_endpoint([https], "https", "llm.example.org", 8443, path,
+                                 [("Host", "llm.example.org:8443")]) is https
+    assert rt.model_api_endpoint([https], "https", "llm.example.org", 8443, path,
+                                 [("Host", "other.example:8443")]) is None
+    assert rt.model_api_endpoint([https], "https", "llm.example.org", 8443, path, []) is None
+    for host in ("macbook.lan:1234", "192.0.2.20:1234"):
+        assert rt.model_api_endpoint([http], "http", "192.0.2.20:1234", 1234, path, [("Host", host)]) is http
+    assert rt.model_api_endpoint([http], "http", "192.0.2.20:1234", 1234, path, [("Host", "evil.example")]) is None
+    for host in ("localhost:11434", "127.0.0.1:11434"):
+        assert rt.model_api_endpoint([local], "http", "127.0.0.1:11434", 11434, "/api/chat", [("Host", host)]) is local

@@ -264,3 +264,15 @@ def test_the_wizard_for_the_boards_own_folder_asks_before_dropping_its_changes(p
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)  # "Drop the changes"
     page.open_wizard(ask=False)
     assert page.board.first("limits") is None and B.values(page.board)[0] == "codex", "the wizard's board"
+
+
+def test_the_agent_part_says_its_model_and_effort():
+    """The agent's card names the model and the effort it works with (the agent's defaults when none is chosen),
+    then -D."""
+    from sandbox_ai_app import board as B, board_view as BV
+    node = B.Node(1, "agent", {"agent": "claude", "--dangerously-skip-permissions": True})
+    assert BV.summary(node) == "default model · default effort · -D"
+    node.props.update(model="claude-opus-5-5", effort="high")
+    assert BV.summary(node) == "claude-opus-5-5 · effort high · -D"
+    node.props.pop("--dangerously-skip-permissions")
+    assert BV.summary(node) == "claude-opus-5-5 · effort high"

@@ -143,9 +143,23 @@ red), and Apply and Start refuse until it is filled in; an optional part left em
 preset with VPN profiles and LLM servers registered by sandbox-ai's own commands in a private configuration and have
 the launcher check each in a dry run.
 
-*Save the board as a preset…* keeps the board shown as your own preset (name, description, category; without the
-workspaces, so it fits any project) in `~/.config/sandbox-ai/app/presets.json` (0600), listed under *My presets*;
-*Export…* and *Import…* pass presets on as JSON files. A preset never holds a secret: an imported file is checked
+sandbox-ai's own presets (`sandbox-ai presets list`) follow in sections of sandbox-ai's categories, in its order
+(*sandbox-ai: Development*, *Research & web*, *Local LLMs*, *Security analysis*, *Forensics & reverse engineering*,
+*Hardware & devices*, *Network*, *Privacy & anonymity*, *Writing & docs*, *Learning, games & demos*, *Testing
+sandbox-ai*), each with its description under the heading; in German with sandbox-ai's German titles and
+descriptions. A preset that gives an MCP server a folder of its own (`coding-memory`'s brain, `research-memory`'s case)
+asks for it as a folder, and preparing the start adds that server with it (`sandbox-ai mcp add engram --mount
+/data=FOLDER:rw`).
+
+*Save as preset…* (on the Board, in its context menu, in the File menu and in the gallery) keeps the board as your own
+preset in `~/.config/sandbox-ai/app/presets.json` (0600), listed under *My presets*: a name, a description of several
+lines, a category (sandbox-ai's), notes, and by default its folders and the values filled in - the services, MCP
+servers with their limits and folders, LLM parameters, the ruleset, the agent's arguments and the layout. Each folder
+(the workspaces, the mounts' sources, an MCP server's folder) becomes a placeholder offered with its path of now at
+the next use, and a note names what belongs to this computer (paths, devices, names registered here); unticked, the
+workspaces are left out and every folder is asked for anew. A board made from a preset of yours replaces it (after
+asking) unless unticked; *Rename…* changes a preset's name, description, category and notes. *Export…* and
+*Import…* pass presets on as JSON files; a workspace in one is only ever a placeholder, never a path wired in. A preset never holds a secret: an imported file is checked
 like untrusted data (the launcher's own parser for the options, sandbox-ai's own checks for MCP definitions and
 rulesets, size and types) and refused when anything looks like a token or key, or when it would copy a login in
 (`--copy-auth`, `--auth-file`, `--import-codex-auth`, `--git-credentials`).
@@ -411,20 +425,20 @@ Oben im Fenster steht groß das aktuelle Projekt mit dem Zustand seiner `.sandbo
 listet die Projekte, die sandbox-ai und die App kennen (zuletzt geöffnete, vertraute Projektkonfigurationen,
 Sitzungen, laufende Sandboxen, dauerhaft gemerkte Freigaben, frühere Läufe), dazu *Ordner öffnen…* und *Neues
 Projekt (Assistent)…*. *Hilfe → Geführte Tour* führt durch jede Seite in der Reihenfolge der Navigation (was
-sie kann, was man dort probiert; Zurück, Weiter, Esc beendet) und wird beim ersten Start einmal angeboten. Jede Seite hat außerdem eine eigene Tour (F1 auf der Seite, *Hilfe → Bereichs-Touren*, das Kontextmenü der Navigation oder *Diesen Bereich kennenlernen* in der geführten Tour): wenige Schritte, jeder umrahmt das Bedienelement, um das es geht. Die Abschnitte der Navigation klappen per Klick ein, *Ansicht → Navigation* klappt alle ein oder aus, *Nur Symbole* (Strg+Umschalt+B) macht sie zu einer schmalen Symbolleiste. Die App schreibt bei jeder Art von Start `~/.local/state/sandbox-ai/app.log` (rotiert, bei einem Absturz mit dem Python-Stack aller Threads); der *Debug-Modus* (*Einstellungen → Fenster*, `--debug`) protokolliert jeden Schritt, *Hilfe → Log anzeigen* zeigt das Ende des Logs, *Hilfe → Intro noch einmal ansehen* spielt das Intro. Jede Seite, jeder Bereich und jedes Teil der Tafel hat ein kleines rundes *?*: Es erklärt, was das Ding ist, wozu es dient, was passiert, wenn man es benutzt, und welche Option der Befehlszeile dahintersteht; *Mehr in der Hilfe* öffnet die Seite *Hilfe* (Navigation, Abschnitt *System*; *Hilfe → Hilfe*, Umschalt+F1) beim passenden Abschnitt. Die Hilfe erklärt jede Seite und Funktion der App und die Konzepte von sandbox-ai, durchsuchbar auf Englisch und Deutsch; *Hilfe → Touren durch eine Aufgabe* führen über mehrere Seiten durch ganze Aufgaben (erster Start, eigenes Konstrukt auf der Tafel als eigene Vorlage, Freigaben und Netzwerk, Vorlagen-Galerie, die Hilfe selbst) und haken erledigte Schritte ab. Auf der Tafel zieht man Bausteine per Drag and Drop dorthin, wo sie hin sollen (eine gestrichelte Karte zeigt die Stelle), verbindet Teile durch Ziehen vom rechten Anschluss auf ein anderes Teil (Esc bricht ab) und legt Ordner und Dateien aus dem Dateimanager als Arbeitsordner oder Einbindung ab; eine `.sandbox-ai.json` öffnet ihr Projekt, eine Vorlagen-Datei wird importiert. Doppelklick und Enter fügen Bausteine weiterhin hinzu; jede Änderung ist ein Schritt von Rückgängig. Ein Teil,
-den man aus der Liste der Tafel hinzufügt, wird Frage für Frage eingerichtet, mit dem, was die Tafel danach noch
+sie kann, was man dort probiert; Zurück, Weiter, Esc beendet) und wird beim ersten Start einmal angeboten. Jede Seite hat außerdem eine eigene Tour (F1 auf der Seite, *Hilfe → Bereichs-Touren*, das Kontextmenü der Navigation oder *Diesen Bereich kennenlernen* in der geführten Tour): wenige Schritte, jeder umrahmt das Bedienelement, um das es geht. Die Abschnitte der Navigation klappen per Klick ein, *Ansicht → Navigation* klappt alle ein oder aus, *Nur Symbole* (Strg+Umschalt+B) macht sie zu einer schmalen Symbolleiste. Die App schreibt bei jeder Art von Start `~/.local/state/sandbox-ai/app.log` (rotiert, bei einem Absturz mit dem Python-Stack aller Threads); der *Debug-Modus* (*Einstellungen → Fenster*, `--debug`) protokolliert jeden Schritt, *Hilfe → Log anzeigen* zeigt das Ende des Logs, *Hilfe → Intro noch einmal ansehen* spielt das Intro. Jede Seite, jeder Bereich und jedes Teil des Boards hat ein kleines rundes *?*: Es erklärt, was das Ding ist, wozu es dient, was passiert, wenn man es benutzt, und welche Option der Befehlszeile dahintersteht; *Mehr in der Hilfe* öffnet die Seite *Hilfe* (Navigation, Abschnitt *System*; *Hilfe → Hilfe*, Umschalt+F1) beim passenden Abschnitt. Die Hilfe erklärt jede Seite und Funktion der App und die Konzepte von sandbox-ai, durchsuchbar auf Englisch und Deutsch; *Hilfe → Touren durch eine Aufgabe* führen über mehrere Seiten durch ganze Aufgaben (erster Start, eigenes Konstrukt auf dem Board als eigene Vorlage, Freigaben und Netzwerk, Vorlagen-Galerie, die Hilfe selbst) und haken erledigte Schritte ab. Auf dem Board zieht man Bausteine per Drag and Drop dorthin, wo sie hin sollen (eine gestrichelte Karte zeigt die Stelle), verbindet Teile durch Ziehen vom rechten Anschluss auf ein anderes Teil (Esc bricht ab) und legt Ordner und Dateien aus dem Dateimanager als Arbeitsordner oder Einbindung ab; eine `.sandbox-ai.json` öffnet ihr Projekt, eine Vorlagen-Datei wird importiert. Doppelklick und Enter fügen Bausteine weiterhin hinzu; jede Änderung ist ein Schritt von Rückgängig. Ein Teil,
+den man aus der Liste des Boards hinzufügt, wird Frage für Frage eingerichtet, mit dem, was das Board danach noch
 findet; *Schritt für Schritt einrichten…* im Inspektor fragt für einen vorhandenen Teil erneut. *Einstellungen →
-Darstellung* schaltet beides ab. Start, Tafel, Verbindungen, Statistik, Dateien, Freigaben, Sandboxen und Kits folgen dem
+Darstellung* schaltet beides ab. Start, Board, Verbindungen, Statistik, Dateien, Freigaben, Sandboxen und Kits folgen dem
 Projekt. Offene Projekte, Sitzungen und Sandboxen stehen als Tabs über den Seiten (Zustand als Punkt, Kontextmenü
 zum Anhängen, Pausieren, Fortsetzen, Stoppen; schließen mit Mittelklick oder Strg+W, verschieben per Ziehen,
-wechseln mit Strg+Tab; *+* öffnet weitere); jedes Projekt behält seine eigene Tafel samt Rückgängig und Zoom, eine
+wechseln mit Strg+Tab; *+* öffnet weitere); jedes Projekt behält sein eigenes Board samt Rückgängig und Zoom, eine
 neu startende Sitzung oder Sandbox bekommt automatisch einen Tab, und die Tabs bleiben über einen Neustart
 erhalten. Eine Menüleiste (Datei, Ansicht, Einstellungen - *Einstellungen…*, Strg+, -, Gehe zu, Hilfe) und Schaltflächen im Kopf (Minimieren, Maximieren,
-Vollbild, Systembereich, Beenden) ersetzen fehlende Fensterknöpfe; die Bausteine und Eigenschaften der Tafel und
+Vollbild, Systembereich, Beenden) ersetzen fehlende Fensterknöpfe; die Bausteine und Eigenschaften des Boards und
 die offenen Freigaben sind abdockbare Bereiche, deren Anordnung gespeichert wird. Alles, was im Fenster
 eingerichtet ist - Größe und Zustand, Seite, eingeklappte Abschnitte, Bereiche, Trenner, Sortierung und
 Spaltenbreiten, Filter, Ordner der Dateidialoge, Tabs, das Formular der Startseite je Agent und je Projekt Zoom
-und nicht übernommene Änderungen der Tafel (mit Hinweis, Rückgängig und Verwerfen) -, steht nach einem Neustart
+und nicht übernommene Änderungen des Boards (mit Hinweis, Rückgängig und Verwerfen) -, steht nach einem Neustart
 wieder da (`~/.config/sandbox-ai/app/state.json`, 0600, atomar geschrieben); Geheimnisse gelangen nie in die
 Datei, und eine beschädigte Datei wird beiseitegelegt und gemeldet. Die Navigation ist in
 Abschnitte gegliedert (Projekt, Laufend, Einblick, Verwalten, System); Strg+1 … Strg+9 öffnen die ersten neun
@@ -437,8 +451,8 @@ kein Terminal) sagt, warum es nichts zum Verbinden gibt. *Kits & Plugins*
 zeigt alle Kits (auch das eingebaute `egm` mit dem Elephant-Goldfish-Plugin) und auf dem Reiter *Marktplätze* jeden
 Marktplatz des Hosts (den von sandbox-ai, die der Kits, des Plugin-Speichers, von Claude und Codex) mit seinen
 Plugins und ihrem Zustand (`sandbox-ai plugins marketplaces`),
-legt Kits, Skills, Plugins, Marktplätze und Hooks über `sandbox-ai kits` an und trägt ein Kit über *Übernehmen* der
-Tafel (gezeigt, geschrieben, vertraut) in das Projekt ein. Die Hooks eines Kits stehen mit ihrer Freigabe da;
+legt Kits, Skills, Plugins, Marktplätze und Hooks über `sandbox-ai kits` an und trägt ein Kit über *Übernehmen* des
+Boards (gezeigt, geschrieben, vertraut) in das Projekt ein. Die Hooks eines Kits stehen mit ihrer Freigabe da;
 *Hooks prüfen und freigeben…* startet `sandbox-ai kits trust-hooks KIT` in einem Terminal, wo Sie jede Datei lesen
 und bestätigen (die App gibt nie selbst frei). *LLM-Server* verwaltet die Server von `sandbox-ai llm` (Hinzufügen,
 Bearbeiten, Prüfen, Modelle, Entfernen; *Verbindung testen* vor dem Speichern) und zeigt, was jeder geladen hat und
@@ -448,7 +462,7 @@ Agenten-Logins, Geheimnisse, Git- und Veröffentlichungs-Logins, Identitäten un
 andere Rechner über SSH: Version, Updates (auch *Von hier aktualisieren…*), Doctor, Vorgaben und Weboberfläche je
 Host. Fast jede Seite arbeitet auf diesem Rechner oder, über die Host-Auswahl, auf einem Host.
 
-*Neu aus Vorlage…* auf der Tafel (und die Seite *Ausgangspunkt* des Assistenten) bietet fertige Tafeln in einer
+*Neu aus Vorlage…* auf dem Board (und die Seite *Ausgangspunkt* des Assistenten) bietet fertige Boards in einer
 Galerie: je Vorlage eine Karte mit einem Bild des Graphen im aktuellen Farbschema, Beschreibung, Schwierigkeit,
 Sicherheitswertung und der Zahl der auszufüllenden Werte; mit Suche, Enter oder Doppelklick legt sie an, fertig
 angeordnet. Die Kategorien: Einfach (offline, Entwicklung, Review nur lesend), Entwicklung (Web-App mit Datenbank
@@ -459,10 +473,24 @@ verschiedenen VPNs, interne Dienste nur im Tailnet, eigenes Subnetz mit nur lese
 (strenge Regeln für GitHub, lang laufende Sitzung mit Grenzen und `--log-debug`, GPU-Workstation). Was nur Sie wissen,
 ist ein Platzhalter (`<vpn:search>`, `<llm:local>`, `<mcp:browser>`, `<folder:samples>`): ein kurzes Formular bietet
 die VPN-Profile aus `sandbox-ai vpn list --json`, die LLM-Server aus `sandbox-ai llm list --json` und die MCP-Server
-an; *Später ausfüllen* lässt sie stehen, jeder ist dann ein Problem auf der Tafel, und Übernehmen und Starten
-verweigern, bis er ausgefüllt ist. *Tafel als Vorlage speichern…* behält die gezeigte Tafel als eigene Vorlage
-(ohne Arbeitsordner) in `~/.config/sandbox-ai/app/presets.json` (0600), unter *Meine Vorlagen*; *Exportieren…* und
-*Importieren…* geben Vorlagen als JSON-Dateien weiter. Eine Vorlage enthält nie ein Geheimnis: eine importierte Datei
+an; *Später ausfüllen* lässt sie stehen, jeder ist dann ein Problem auf dem Board, und Übernehmen und Starten
+verweigern, bis er ausgefüllt ist. Die Vorlagen von sandbox-ai folgen in Abschnitten nach dessen Kategorien, in
+dessen Reihenfolge (*sandbox-ai: Entwicklung*, *Recherche & Web*, *Lokale LLMs*, *Sicherheitsanalyse*, *Forensik &
+Reverse Engineering*, *Hardware & Geräte*, *Netzwerk*, *Datenschutz & Anonymität*, *Schreiben & Dokumentation*,
+*Lernen, Spiele & Demos*, *sandbox-ai testen*), jeder mit seiner Beschreibung unter der Überschrift, mit den deutschen
+Titeln und Beschreibungen von sandbox-ai. Eine Vorlage, die einem MCP-Server einen eigenen Ordner gibt (das Gedächtnis
+von `coding-memory`, der Fall von `research-memory`), fragt ihn als Ordner ab, und die Vorbereitung des Starts fügt
+diesen Server damit hinzu (`sandbox-ai mcp add engram --mount /data=ORDNER:rw`). *Als Vorlage speichern…* (auf dem
+Board, in seinem Kontextmenü, im Menü Datei und in der Galerie) behält das Board als eigene Vorlage in
+`~/.config/sandbox-ai/app/presets.json` (0600), unter *Meine Vorlagen*: Name, eine mehrzeilige Beschreibung, eine
+Kategorie (die von sandbox-ai), Hinweise und standardmäßig seine Ordner und die ausgefüllten Werte - Services,
+MCP-Server mit ihren Grenzen und Ordnern, LLM-Parameter, das Regelwerk, die Argumente des Agenten und die Anordnung.
+Jeder Ordner (Arbeitsordner, Quellen der Einbindungen, der Ordner eines MCP-Servers) wird ein Platzhalter, bei der
+nächsten Verwendung mit seinem jetzigen Pfad angeboten, und ein Hinweis nennt, was zu diesem Rechner gehört;
+abgewählt bleiben die Arbeitsordner weg und jeder Ordner wird neu erfragt. Ein Board aus einer eigenen Vorlage ersetzt
+diese (nach Rückfrage), außer abgewählt; *Umbenennen…* ändert Name, Beschreibung, Kategorie und Hinweise.
+*Exportieren…* und *Importieren…* geben Vorlagen als JSON-Dateien weiter; ein Arbeitsordner darin ist immer nur ein
+Platzhalter, nie ein fest eingetragener Pfad. Eine Vorlage enthält nie ein Geheimnis: eine importierte Datei
 wird wie fremde Daten geprüft (Optionen mit dem Parser des Launchers, MCP-Definitionen und Regelsätze mit den
 Prüfungen von sandbox-ai) und abgelehnt, wenn etwas wie ein Token oder Schlüssel aussieht oder sie eine Anmeldung
 hineinkopieren würde.

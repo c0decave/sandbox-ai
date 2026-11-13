@@ -732,9 +732,15 @@ def test_several_models_and_the_opencode_allow_list(team):
     # Without a list, the endpoint's models as before (the golden file).
     assert "mistral-7b" in llm.opencode_config(llm.endpoint("team"), "llama-3.1-8b")["provider"]["llm-team"]["models"]
     written = {}
-    llm.prepare_home(a, Path("/h"), lambda data, home, relative: written.update({relative: json.loads(data)}),
-                     None, None)
+    llm.prepare_home(a, Path("/h"), lambda data, home, relative: written.update(
+        {relative: json.loads(data) if relative.endswith(".json") else data.decode()}), None, None)
     assert list(written[llm.OPENCODE_CONFIG]["provider"]["llm-team"]["models"]) == ["llama-3.1-8b", "qwen3-coder-30b"]
+    # The loop guard's OpenCode layers (on by default for --llm): steps, compaction, the instruction file.
+    config = written[llm.OPENCODE_CONFIG]
+    assert config["agent"]["build"]["steps"] == 40 and config["agent"]["plan"]["steps"] == 18
+    assert config["compaction"]["auto"] is True and config["tool_output"] == {"max_lines": 1000, "max_bytes": 50000}
+    assert config["instructions"] == ["/root/" + llm.LOOP_INSTRUCTIONS]
+    assert "[sandbox-ai loop guard]" in written[llm.LOOP_INSTRUCTIONS]
 
 
 # --- the context window: what each server reports --------------------------------------------------------------

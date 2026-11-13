@@ -110,12 +110,34 @@ def iter_lines(path, budget=None, tail=None, line_bytes=None):
             yield line
 
 
-def iter_records(path, budget=None, tail=None):
+_tails = None
+
+
+def jsonltail():
+    """sandbox/jsonltail.py, loaded once: its loads() parses a line."""
+    global _tails
+    if _tails is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_jsonltail_for_logs", HERE / "jsonltail.py")
+        with LOADING:
+            if _tails is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _tails = loaded
+    return _tails
+
+
+def iter_records(path, budget=None, tail=None, needs=None):
     """The JSON objects of the newest lines of PATH (iter_lines), one at a time. Damaged lines are skipped (the
-    agent cannot write these files, but a crash can cut a line)."""
+    agent cannot write these files, but a crash can cut a line). NEEDS (bytes, ASCII): only the lines that hold it are
+    parsed, and those with a \\u escape or a NUL (which could spell it: an escape, UTF-16 or UTF-32): a caller that
+    wants only records with that text in a value reads the same records and skips parsing the rest; the budget counts
+    every line all the same."""
+    loads = jsonltail().loads
     for line in iter_lines(path, budget, tail):
+        if needs is not None and needs not in line and b"\\u" not in line and b"\x00" not in line:
+            continue
         try:
-            record = json.loads(line)
+            record = loads(line)
         except (ValueError, RecursionError):
             continue
         if isinstance(record, dict):
@@ -211,7 +233,9 @@ def refusals(directory, limit=20):
     for path in paths:
         connections = path.name.startswith("connections-")
         newest = deque(maxlen=limit)  # (a file is written in time order: its last LIMIT refusals)
-        for record in iter_records(path, budget, tail=TAIL_BYTES if connections else TAIL_BYTES // 4):
+        # A connection log's refusals have "event": "denied": the other lines are not parsed (most of them).
+        for record in iter_records(path, budget, tail=TAIL_BYTES if connections else TAIL_BYTES // 4,
+                                   needs=b"denied" if connections else None):
             if connections and (record.get("event") != "denied" or record.get("abandoned")):
                 continue
             newest.append(record)
@@ -230,18 +254,52 @@ def refusals(directory, limit=20):
     return sorted(found, key=lambda entry: str(entry["time"]))[-limit:]
 
 
+def suggestion_key(record):
+    """What suggestion() reads of RECORD, with the types (1, 1.0 and true are equal keys, not equal records); None
+    when a value is no key (a list, an object)."""
+    key = tuple((type(value), value) for value in (record.get(name) for name in ("host", "address", "protocol", "port")))
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
+def parent_of(path, known):
+    """str(Path(PATH).parent), kept in KNOWN for every PATH in the same folder: PATH is that folder's text, a "/" and a
+    name, and pathlib makes the parent of the folder's text alone ("a//b/c" and "a//b/d" have "a/b"). A PATH ending in
+    "/" or "/." is worked out on its own (pathlib drops that end)."""
+    name = path.rpartition("/")[2]
+    if name in ("", "."):
+        return str(Path(path).parent)
+    folder = path[:len(path) - len(name)]
+    parent = known.get(folder)
+    if parent is None:
+        parent = known[folder] = str(Path(path).parent)
+    return parent
+
+
 def summarize(directory):
     budget = new_budget()
     targets = Counter()
     suggestions = {}
     denied = 0
+    # A destination is refused again and again (each retry): its suggestion is worked out once per summary, as is the
+    # folder of the files in one (parent_of; both took more time than reading the lines).
+    suggested, parents = {}, {}
     for record in iter_records(Path(directory) / "egress-denied.jsonl", budget):
         denied += 1
         if "host" in record:
             targets[f"DNS {record['host']}{by(record)}"] += 1
         else:
             targets[f"{record.get('protocol', '?')} {record.get('address', '?')}:{record.get('port', '-')}{by(record)}"] += 1
-        found = suggestion(record)
+        key = suggestion_key(record)
+        if key is None:
+            found = suggestion(record)
+        elif key in suggested:
+            found = suggested[key]
+        else:
+            found = suggested[key] = suggestion(record)
         if found:
             key, option, why = found
             entry = suggestions.setdefault(key, {"option": option, "why": why, "count": 0})
@@ -252,7 +310,7 @@ def summarize(directory):
             file_events += 1
             actions[record["action"]] += 1
             if isinstance(record.get("path"), str):
-                directories[str(Path(record["path"]).parent)] += 1
+                directories[parent_of(record["path"], parents)] += 1
         if isinstance(record.get("error"), str) and len(errors) < 100:
             errors.add(record["error"])
     return {"directory": str(directory), "denied": denied, "targets": targets.most_common(),

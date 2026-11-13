@@ -1,0 +1,5 @@
+This kit of sandbox-ai contains files of https://github.com/mattpocock/skills
+at commit 59db609eb1e18aaf59b63284d0e52255aff0c63c (2026-10-27T07:44:12+00:00), unchanged.
+Licence: MIT, the upstream licence text in LICENSE.
+sandbox-ai chose which files to include (kit.json: "files", "left_out") and added README.md, NOTICE,
+kit.json and the agent folders' markers. Security review: docs/skills-review.md.

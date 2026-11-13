@@ -15,6 +15,7 @@ A release consists of
 | `sandbox-ai.pyz` | the command line in one file (`./sandbox-ai.pyz …` or `python3 -I sandbox-ai.pyz …`); made by `make_dist.py` from the bundle |
 | `sandbox-ai-x86_64.AppImage`, `sandbox-ai-aarch64.AppImage` | the app with sandbox-ai, Python and PySide6 inside, for Linux; built by `release.yml` |
 | `sandbox-ai-arm64.dmg`, `sandbox-ai-x86_64.dmg` | `sandbox-ai.app` for macOS (not notarised); built by `release.yml` |
+| `sandbox-ai-videos.tar` | optional: the videos about the app's pages, which the app downloads once (`make_dist.py --videos DIR`, see below) |
 | `SHA256SUMS` | `install.sh` verifies the bundle with it; it lists every file above |
 | `SHA256SUMS.sig` | `install.sh` verifies `SHA256SUMS` with it: an SSH signature by a release key |
 
@@ -65,6 +66,33 @@ section) and the quickstarts with the release's changes, and refresh `docs/scree
 changed (`docs/video/capture_app.py`; see [docs/video/README.md](docs/video/README.md)). The video itself is not
 kept in Git: after the tag, render it with the release's checkout (`docs/video/make_video.py --out DIR`) and
 attach the MP4 and VTT files to the release.
+
+### The videos about the app's pages (optional release file)
+
+The desktop app plays the series *The desktop app, page by page* (one video per page) in its own player, and
+downloads it once from the release of its version when it is not on the computer. That download is the release file
+`sandbox-ai-videos.tar`: the series' `sandbox-ai-app-NN-PAGE-LANG.mp4` and `.vtt` files, uncompressed (MP4 is
+compressed already), sorted, with a fixed owner, mode and time. It is optional - a release without it works, the app
+then says the release has no videos - and, like every file, listed in `SHA256SUMS`: the app installs it only after the
+signature of `SHA256SUMS` is good by a key of the installed `sandbox/release-signers`, the archive has the SHA-256
+listed there and it holds nothing but the series' files.
+
+```bash
+# render the series with the release's checkout (docs/video/README.md: the tools and the voice)
+/tmp/video-venv/bin/python docs/video/make_video.py --out ~/videos-X.Y.Z --series pages --lang de \
+    --voice /tmp/piper-voices/de_DE-thorsten-high.onnx
+# put the archive into dist/ with the rest and sign SHA256SUMS over all of it
+python3 scripts/make_dist.py --no-isolation --videos ~/videos-X.Y.Z --sign ~/.config/sandbox-ai/release-key
+#   or, to a dist/ that CI built (see "Sign" below):
+python3 scripts/make_dist.py --sums-only --out dist --add packages/*/* --videos ~/videos-X.Y.Z --sign ~/.config/sandbox-ai/release-key
+python3 scripts/publish_release.py --source https://github.com/c0decave/sandbox-ai dist/*
+```
+
+`make_dist.py --videos DIR` takes only the files with the series' names from DIR (nothing else ends up in the
+archive) and stops when DIR holds no video. `publish_release.py` refuses to upload `sandbox-ai-videos.tar` that
+`SHA256SUMS` does not list. To check the archive by hand: `sha256sum --ignore-missing -c SHA256SUMS`, then
+`tar tf sandbox-ai-videos.tar`. Users who have the files already put them into `~/.local/share/sandbox-ai/videos`
+(or name a folder with `SANDBOX_AI_VIDEOS`); the app does not download then.
 
 ## The ready-made packages
 

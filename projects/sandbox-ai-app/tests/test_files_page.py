@@ -53,9 +53,10 @@ def settle(*panes):
 
 
 def names(pane):
-    """The entries listed (not "..", the folder above)."""
+    """The entries listed (not "." and "..", the folder shown and the one above)."""
     settle(pane)
-    return sorted(text for text in (pane.table.item(r, 0).text() for r in range(pane.table.rowCount())) if text != "..")
+    rows = (pane.table.item(r, 0).text() for r in range(pane.table.rowCount()))
+    return sorted(text for text in rows if text not in (".", ".."))
 
 
 def select(pane, *wanted):
@@ -257,7 +258,7 @@ def test_home_up_and_refresh_are_actions_not_toggles(setup, qapp, wait):
     from PySide6.QtTest import QTest
     page = setup[0]
     page.show()
-    buttons = {b.text(): b for b in page.right.findChildren(QtWidgets.QPushButton)}
+    buttons = {b.accessibleName(): b for b in page.right.findChildren(QtWidgets.QPushButton)}  # (icons: by name)
     for name in ("Home", "Up", "Refresh"):
         widget = buttons[name]
         QTest.mouseClick(widget, Qt.MouseButton.LeftButton)
@@ -266,3 +267,38 @@ def test_home_up_and_refresh_are_actions_not_toggles(setup, qapp, wait):
         assert widget.focusPolicy() == Qt.FocusPolicy.TabFocus, "still reached with Tab"
     assert page.right.path_text() == os.path.realpath(os.path.expanduser("~")) or page.right.path_text()
     page.hide()
+
+
+def test_a_folder_listed_in_part_says_so(setup, monkeypatch):
+    """Review: a folder of more entries than are listed was shown as if it were whole (Select all, Move, Delete left
+    the rest without a word)."""
+    from sandbox_ai_app import files
+    page = setup[0]
+    monkeypatch.setattr(files, "MAX_ENTRIES", 2)
+    page.left.list()
+    settle(page.left)
+    assert "only 2 are listed" in page.message.text()
+
+
+def test_a_project_folder_counts_as_the_agents_before_the_list_is_read(qapp, tmp_path, monkeypatch):
+    """Review: the sandbox side's list is read in the background; until it came, no host folder was below a
+    sandbox - a workspace opened in the host pane meanwhile kept the agent's exec bits and followed its links."""
+    import threading
+    ws = tmp_path / "project"
+    (ws / "src").mkdir(parents=True)
+    gate = threading.Event()
+
+    class Slow(FakeSai):
+        def file_roots(self, extra=()):
+            gate.wait(10)
+            return super().file_roots(extra)
+    page = files_page.FilesPage(Slow([]), projects=lambda: [("project", "", str(ws))])
+    try:
+        assert page.roots_reading and page.roots.count() == 0
+        assert page.below_sandbox(str((ws / "src").resolve()))
+        assert not page.below_sandbox(str(tmp_path.resolve()))
+    finally:
+        gate.set()
+        from conftest import wait_until
+        wait_until(qapp, lambda: not page.roots_reading, 15)
+        page.deleteLater()

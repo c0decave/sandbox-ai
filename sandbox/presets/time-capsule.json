@@ -4,6 +4,12 @@
   "id": "time-capsule",
   "title": "Time capsule",
   "description": "Git archaeology, read-only, only the provider: why did a line, a bug or a decision come to be?",
+  "translations": {
+    "de": {
+      "title": "Zeitkapsel",
+      "description": "Git-Archäologie, nur lesend, nur der Anbieter: Wie kam es zu einer Zeile, einem Fehler oder einer Entscheidung?"
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

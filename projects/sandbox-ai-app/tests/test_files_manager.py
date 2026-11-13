@@ -1,4 +1,4 @@
-"""The file manager's own features (user feedback): ".." in every folder below the top of a pane, columns that stay put
+"""The file manager's own features (user feedback): "." and ".." in every folder of both panes, columns that stay put
 when the folder changes, drag and drop (between the panes, onto a folder, from and to other programs), a built-in text
 and hex editor (double click), the context menu with the clipboard (Copy, Cut, Paste), Copy path and Properties.
 files.py's read_file, write_file and measure first (no Qt). Everything the tests change is below tmp_path."""
@@ -40,6 +40,34 @@ def test_read_file_reads_regular_files_only_and_says_when_it_stopped(root, tmp_p
     assert files.text_of(b"caf\xc3\xa9") == "café" and files.text_of(b"a\0b") is None
     assert files.text_of(b"\xff\xfe") is None
     assert files.text_of(b"ok \xc3", truncated=True) == "ok ", "a character cut at the limit"
+
+
+def test_a_file_written_while_it_is_read_is_read_again_or_never_saved_over_unasked(root, monkeypatch):
+    """Review: the identity a save checks was taken after the read - a file the agent wrote in place meanwhile was
+    read half old, half new, and a save replaced the agent's write with that mix without a question."""
+    r, ws = root
+    (ws / "log.txt").write_bytes(b"old " * 100)
+    real_read, writes = os.read, {"left": 1}
+
+    def read(fd, size):
+        chunk = real_read(fd, min(size, 16))
+        if writes["left"]:  # the agent appends while the first chunk is read
+            writes["left"] -= 1
+            with open(ws / "log.txt", "ab") as stream:
+                stream.write(b"new!")
+        return chunk
+    monkeypatch.setattr(files.os, "read", read)
+    data = r.read_file("log.txt")
+    monkeypatch.setattr(files.os, "read", real_read)
+    assert data.data == b"old " * 100 + b"new!", "read again once it held still"
+    assert data.identity == files._identity((ws / "log.txt").stat())
+    # Never still: the identity of before the read - a save asks first.
+    writes["left"] = 10 ** 9  # (a 1000 bytes read at most: every attempt sees it change)
+    monkeypatch.setattr(files.os, "read", read)
+    data = r.read_file("log.txt", limit=1000)
+    monkeypatch.setattr(files.os, "read", real_read)
+    with pytest.raises(files.Changed):
+        r.write_file("log.txt", data.data, expected=data.identity)
 
 
 def test_write_file_replaces_never_writes_through_and_keeps_the_mode(root, tmp_path):
@@ -106,18 +134,36 @@ def shown(page):
     return page
 
 
-def test_dotdot_goes_up_and_is_never_an_entry(setup, wait):
+def test_dot_and_dotdot_lead_every_folder_and_are_never_entries(setup, wait):
+    """User report: "." and ".." were missing - ".." showed only below the top of a pane, and the sandbox pane opens
+    at its top. Both lead every folder of both panes now; at the top ".." is greyed out and says why."""
     page, ws, host, _ = setup
     left, right = page.left, page.right
-    assert rows(left)[0] != "..", "no folder above the top of the sandbox's folder"
-    assert rows(right)[0] == ".." and right.path_text() == str(host)
+    model = left.table.model()
+    assert rows(left)[:2] == [".", ".."] and rows(right)[:2] == [".", ".."] and right.path_text() == str(host)
+    up = model.index(1, 0)
+    assert not model.flags(up) & Qt.ItemFlag.ItemIsEnabled, "the top of the sandbox's folder: greyed out"
+    assert "is the top of this pane" in model.data(up, Qt.ItemDataRole.ToolTipRole)
+    left.open_row(1)
+    assert left.relative == "" and "is the top of this pane" in page.message.text(), "never above the top"
     left.go("sub")
-    assert rows(left) == ["..", "b.txt"]
+    assert rows(left) == [".", "..", "b.txt"]
+    assert model.flags(model.index(1, 0)) & Qt.ItemFlag.ItemIsEnabled
+    assert not model.flags(model.index(0, 0)) & Qt.ItemFlag.ItemIsSelectable
+    assert not model.flags(model.index(1, 0)) & Qt.ItemFlag.ItemIsSelectable
     left.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
-    assert rows(left)[0] == "..", "first however the list is sorted"
-    left.table.selectAll()
-    assert [entry.name for entry in left.chosen()] == ["b.txt"], ".. is never copied, moved or deleted"
-    left.open_row(0)  # a double click on ".."
+    assert rows(left)[:2] == [".", ".."], "first however the list is sorted"
+    press(left, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    assert [entry.name for entry in left.chosen()] == ["b.txt"] and \
+        [widgets.row_key(left.table, row) for row in widgets.selected_rows(left.table)] == ["b.txt"], \
+        "Ctrl+A: every entry, never . or .."
+    left.table.selectAll()  # (even Qt's own select all: neither is ever chosen)
+    assert [entry.name for entry in left.chosen()] == ["b.txt"]
+    left.table.clearSelection()
+    left.open_row(0)  # a double click on ".": listed again, still here
+    settle(left)
+    assert left.relative == "sub"
+    left.open_row(1)  # a double click on ".."
     settle(left)
     assert left.relative == "" and [entry.name for entry in left.chosen()] == ["sub"], "the folder come from"
     assert left.table.currentRow() == widgets.find_row(left.table, "sub")
@@ -126,11 +172,12 @@ def test_dotdot_goes_up_and_is_never_an_entry(setup, wait):
     assert left.relative == ""
     left.go("sub")
     settle(left)
-    left.table.setCurrentCell(0, 0)
+    left.table.setCurrentCell(1, 0)
     press(left, Qt.Key.Key_Return)
     assert left.relative == ""
     right.go("")
-    assert right.path_text() == "/" and rows(right)[0] != "..", "none at /"
+    assert right.path_text() == "/" and rows(right)[:2] == [".", ".."], "at / too, .. greyed out"
+    assert not right.table.model().flags(right.table.model().index(1, 0)) & Qt.ItemFlag.ItemIsEnabled
 
 
 def test_the_columns_and_the_list_stay_put_when_the_folder_changes(setup, wait):
@@ -478,6 +525,17 @@ def test_the_context_menu_and_the_clipboard(setup, wait, monkeypatch):
     actions(page.menu(page.left))["Delete…"].trigger()
     finish(page, wait)
     assert not (ws / "made").exists()
+    # Review: the folder shown changed while the menu was open - its actions act on nothing there (they found their
+    # items by name in the folder shown when they ran: one of the same name elsewhere was deleted).
+    (ws / "sub" / "a.txt").write_text("the other a.txt")
+    settle(page.left)
+    select(page.left, "a.txt")
+    menu = page.menu(page.left)
+    page.left.go("sub")
+    settle(page.left)
+    actions(menu)["Delete…"].trigger()
+    assert "changed meanwhile" in page.message.text()
+    assert (ws / "sub" / "a.txt").exists() and (ws / "a.txt").exists()
 
 
 def test_the_menu_key_and_the_keys_of_the_list(setup, wait, monkeypatch):
@@ -522,13 +580,13 @@ def test_properties_show_and_change_what_may_be_changed(setup, wait):
     dialog.close()
     select(page.left, "sub", "a.txt")
     dialog = page.properties(page.left)
-    assert dialog.windowTitle() == "Properties of 2 items" and dialog.count_button.isVisible()
-    assert dialog.count() and wait(lambda: not dialog.counting)
-    assert "in 2 file(s) and 1 folder(s)" in dialog.size.text()
+    assert dialog.windowTitle() == "Properties of 2 items" and dialog.counting, "a folder's size: counted at once"
+    assert wait(lambda: not dialog.counting)
+    assert "in 2 file(s) and 1 folder(s)" in dialog.size.text() and not dialog.count_button.isVisible()
     dialog.close()
     page.left.table.clearSelection()
     dialog = page.properties(page.left)  # the folder shown: the sandbox's own folder is changed from above it
-    assert not dialog.changeable and dialog.count_button.isVisible()
+    assert not dialog.changeable and dialog.counting
     dialog.close()
     dialog = page.properties(page.right, [])  # a folder of the host: set-ID bits may be set there
     assert dialog.changeable and all(check.isEnabled() for _, check in dialog.specials)
@@ -562,6 +620,16 @@ def test_hex_view_moves_types_and_stays_read_only_when_asked(qapp):
     assert file_editor.split_text("a\r\nb") == ("a\nb", False, "\r\n") and file_editor.split_text("a\rb") is None
     assert file_editor.join_text("a\nb", True, "\r\n") == "\ufeffa\r\nb".encode()
     view.deleteLater()
+    # Review: Shift+Enter types a line separator (U+2028), shown as a line break and saved as E2 80 A8 - one long
+    # line in the file. Saved as a line break; a file that holds one is not opened as text.
+    from PySide6.QtWidgets import QPlainTextEdit
+    edit = QPlainTextEdit()
+    QTest.keyClicks(edit, "ab")
+    QTest.keyClick(edit, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    QTest.keyClicks(edit, "cd")
+    assert file_editor.editor_text(edit) == "ab\ncd"
+    assert file_editor.split_text("a\u2028b") is None
+    edit.deleteLater()
 
 
 def test_copy_names_for_a_copy_beside_the_original():
@@ -573,7 +641,7 @@ def test_nothing_happens_where_there_is_nothing_to_act_on(setup, wait):
     page, ws, host, _ = setup
     page.left.go("sub")
     settle(page.left)
-    page.left.table.selectRow(0)  # ".." alone
+    page.left.table.selectRow(0)  # "." alone (it cannot even be selected)
     assert page.left.chosen() == [] and page.delete_selected(page.left) is False
     assert page.copy_items(page.left) is False and "Select files" in page.message.text()
     page.clipboard = None

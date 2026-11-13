@@ -46,7 +46,7 @@ def test_a_clicked_navigation_button_is_neither_checked_nor_down(window, qapp):
     window.show_page("files")
     page = window.files
     buttons = [b for pane in (page.left, page.right) for b in pane.findChildren(QtWidgets.QPushButton)
-               if b.text() in ("Home", "Up", "Refresh")]
+               if b.accessibleName() in ("Home", "Up", "Refresh")]  # (icons: by their names)
     assert len(buttons) >= 4
     for widget in buttons:
         QTest.mouseClick(widget, Qt.MouseButton.LeftButton)

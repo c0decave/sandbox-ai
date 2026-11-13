@@ -4,6 +4,12 @@
   "id": "data-ml",
   "title": "Data and machine learning",
   "description": "PyPI and Hugging Face open, more memory; the GPU if you give one.",
+  "translations": {
+    "de": {
+      "title": "Daten und maschinelles Lernen",
+      "description": "PyPI und Hugging Face offen, mehr Speicher; die GPU, wenn Sie eine angeben."
+    }
+  },
   "category": "development",
   "agents": [
     "claude",

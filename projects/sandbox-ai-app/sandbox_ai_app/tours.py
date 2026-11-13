@@ -97,7 +97,7 @@ AREA_TOURS = {
              ("Press it once before your first start.", "Drücken Sie ihn einmal vor Ihrem ersten Start.")),
     ),
     "board": (
-        step(None, ("The board", "Die Tafel"),
+        step(None, ("The board", "Das Board"),
              ("One sandbox as parts you connect: the agent, its folders, the network, MCP servers, rules. It writes "
               "the project's .sandbox-ai.json.",
               "Eine Sandbox als Teile, die Sie verbinden: der Agent, seine Ordner, das Netzwerk, MCP-Server, Regeln. "
@@ -113,12 +113,12 @@ AREA_TOURS = {
         step("findings", ("What is wrong", "Was nicht stimmt"),
              ("The board checks itself after every change: a missing value, a part that is not connected, an "
               "option the policy refuses. Click a finding to see the part.",
-              "Die Tafel prüft sich nach jeder Änderung: ein fehlender Wert, ein nicht verbundenes Teil, eine "
+              "Das Board prüft sich nach jeder Änderung: ein fehlender Wert, ein nicht verbundenes Teil, eine "
               "Option, die die Richtlinie ablehnt. Klicken Sie einen Befund an, um das Teil zu sehen."),
              ("Make the list empty before you apply.", "Leeren Sie die Liste, bevor Sie übernehmen.")),
         step("dry_button", ("Ask the launcher", "Den Launcher fragen"),
              ("A dry run of what the board says, by the launcher itself: its verdict is the one a start would give.",
-              "Ein Probelauf dessen, was die Tafel sagt, durch den Launcher selbst: Sein Urteil ist das eines Starts."),
+              "Ein Probelauf dessen, was das Board sagt, durch den Launcher selbst: Sein Urteil ist das eines Starts."),
              ("Run it after each larger change.", "Starten Sie ihn nach jeder größeren Änderung.")),
         step("apply_button", ("Apply", "Übernehmen"),
              ("Shows the .sandbox-ai.json it will write, then writes and trusts it: the next start of the project "
@@ -361,7 +361,7 @@ AREA_TOURS = {
               "Geprüfte Server, per Digest festgelegt (Suche, Webseiten als Text, Analysewerkzeuge). Hinzufügen "
               "definiert ihn; ein Start nennt ihn mit --mcp."),
              ("Add a search server and connect it on the board.", "Fügen Sie einen Suchserver hinzu und verbinden "
-              "Sie ihn auf der Tafel.")),
+              "Sie ihn auf dem Board.")),
     ),
     "llm": (
         step("host_box", ("Whose servers", "Wessen Server"),
@@ -449,7 +449,7 @@ AREA_TOURS = {
              ("Keep this machine for now.", "Bleiben Sie vorerst bei diesem Rechner.")),
         step("table", ("The teams", "Die Teams"),
              ("Each team with its members and its workspace; select one to see its board.",
-              "Jedes Team mit seinen Mitgliedern und seinem Arbeitsordner; wählen Sie eines, um seine Tafel zu "
+              "Jedes Team mit seinen Mitgliedern und seinem Arbeitsordner; wählen Sie eines, um sein Board zu "
               "sehen."),
              ("Select a team.", "Wählen Sie ein Team.")),
         step("start_button", ("Start one", "Eines starten"),
@@ -458,7 +458,7 @@ AREA_TOURS = {
               "eigenen Sandbox."),
              ("Start Claude Code with Codex on the current project.", "Starten Sie Claude Code mit Codex auf dem "
               "aktuellen Projekt.")),
-        step("board", ("The board", "Die Tafel"),
+        step("board", ("The board", "Das Board"),
              ("The tasks between the members, and those you post: who for, their state, what they ask.",
               "Die Aufgaben zwischen den Mitgliedern und die, die Sie stellen: für wen, ihr Stand, was sie verlangen."),
              ("Post a task for a member and watch it change to done.", "Stellen Sie einem Mitglied eine Aufgabe und "
@@ -628,23 +628,23 @@ TASK_TOURS = {tour.id: tour for tour in (
                                    "Ein eigenes Konstrukt, als Vorlage gespeichert"),
              Text("Build a sandbox on the board part by part: add and connect parts, set network, folders and "
                   "devices, check it, apply it, save it as your own preset and start from it again.",
-                  "Bauen Sie eine Sandbox auf der Tafel Teil für Teil: Teile hinzufügen und verbinden, Netzwerk, "
+                  "Bauen Sie eine Sandbox auf dem Board Teil für Teil: Teile hinzufügen und verbinden, Netzwerk, "
                   "Ordner und Geräte einstellen, prüfen, übernehmen, als eigene Vorlage speichern und wieder davon "
                   "starten."), (
-        task("board", None, ("The board", "Die Tafel"),
+        task("board", None, ("The board", "Das Board"),
              ("The board starts with the agent, the connection proxy and the network: the parts every sandbox "
               "has. Open a project first: its folder becomes the first workspace.",
-              "Die Tafel beginnt mit Agent, Verbindungs-Proxy und Netzwerk: den Teilen, die jede Sandbox hat. Öffnen "
+              "Das Board beginnt mit Agent, Verbindungs-Proxy und Netzwerk: den Teilen, die jede Sandbox hat. Öffnen "
               "Sie zuerst ein Projekt: Sein Ordner wird der erste Arbeitsordner."),
              ("Open a project folder (File > Open project folder).", "Öffnen Sie einen Projektordner (Datei > "
               "Projektordner öffnen)."), "project"),
         task("board", "palette", ("Add a folder", "Einen Ordner hinzufügen"),
              ("Drag Mount from the parts onto the board: it lands where you drop it, and the guide asks for the "
               "host folder, the path in the sandbox and whether it may be written.",
-              "Ziehen Sie Einbindung aus den Teilen auf die Tafel: Sie landet, wo Sie sie ablegen, und der Guide "
+              "Ziehen Sie Einbindung aus den Teilen auf das Board: Sie landet, wo Sie sie ablegen, und der Guide "
               "fragt nach dem Ordner des Hosts, dem Pfad in der Sandbox und ob er beschreibbar sein darf."),
              ("Drag Mount onto the board (or select it and press Enter).",
-              "Ziehen Sie Einbindung auf die Tafel (oder wählen Sie sie und drücken Sie Enter)."), "board-has:mount"),
+              "Ziehen Sie Einbindung auf das Board (oder wählen Sie sie und drücken Sie Enter)."), "board-has:mount"),
         task("board", "view", ("Connect it", "Verbinden"),
              ("A folder counts only while it is connected to the agent. Drag from the mount's right port onto "
               "the agent; a dashed line follows and valid targets light up.",
@@ -675,12 +675,12 @@ TASK_TOURS = {tour.id: tour for tour in (
         task("board", "findings", ("Nothing wrong left", "Nichts Falsches mehr"),
              ("The board checks itself after every change. Errors (✘) stop Apply and Start; double-click one to "
               "select its part.",
-              "Die Tafel prüft sich nach jeder Änderung. Fehler (✘) verhindern Übernehmen und Starten; doppelklicken "
+              "Das Board prüft sich nach jeder Änderung. Fehler (✘) verhindern Übernehmen und Starten; doppelklicken "
               "Sie einen, um sein Teil zu wählen."),
              ("Fix every error.", "Beheben Sie jeden Fehler."), "board-no-errors"),
         task("board", "dry_button", ("Ask the launcher", "Den Launcher fragen"),
              ("A dry run of exactly this board; the verdict under the command line follows every change too.",
-              "Ein Probelauf genau dieser Tafel; das Urteil unter der Befehlszeile folgt auch jeder Änderung."),
+              "Ein Probelauf genau dieses Boards; das Urteil unter der Befehlszeile folgt auch jeder Änderung."),
              ("Press Dry run.", "Drücken Sie Probelauf.")),
         task("board", "apply_button", ("Apply", "Übernehmen"),
              ("Writes .sandbox-ai.json into the project after showing it, and trusts exactly that.",
@@ -689,17 +689,17 @@ TASK_TOURS = {tour.id: tour for tour in (
         task("board", "gallery_button", ("Save it as your preset", "Als Ihre Vorlage speichern"),
              ("New from preset… opens the gallery. Save the board as a preset… keeps this board under a title of "
               "yours, without workspaces and secrets, under My presets.",
-              "Neu aus Vorlage… öffnet die Galerie. Tafel als Vorlage speichern… bewahrt diese Tafel unter einem "
+              "Neu aus Vorlage… öffnet die Galerie. Board als Vorlage speichern… bewahrt dieses Board unter einem "
               "Titel Ihrer Wahl auf, ohne Arbeitsordner und Geheimnisse, unter Meine Vorlagen."),
-             ("Open the gallery and save the board as a preset.", "Öffnen Sie die Galerie und speichern Sie die Tafel"
+             ("Open the gallery and save the board as a preset.", "Öffnen Sie die Galerie und speichern Sie das Board"
                                                                   " als Vorlage."), "preset-mine"),
         task("board", "gallery_button", ("Start from your preset", "Von Ihrer Vorlage starten"),
              ("In any project, open the gallery, select your preset under My presets and press Create: the board "
               "is built from it. Then Start.",
               "Öffnen Sie in einem beliebigen Projekt die Galerie, wählen Sie Ihre Vorlage unter Meine Vorlagen und "
-              "drücken Sie Anlegen: Die Tafel wird daraus gebaut. Dann Start."),
-             ("Create a board from your preset and start it.", "Legen Sie eine Tafel aus Ihrer Vorlage an und starten"
-                                                               " Sie sie.")),
+              "drücken Sie Anlegen: Das Board wird daraus gebaut. Dann Start."),
+             ("Create a board from your preset and start it.", "Legen Sie ein Board aus Ihrer Vorlage an und starten"
+                                                               " Sie es.")),
     )),
     TaskTour("approvals-network", Text("Approvals and network: allow a host during a run",
                                        "Freigaben und Netzwerk: einen Host während eines Laufs erlauben"),
@@ -765,16 +765,16 @@ TASK_TOURS = {tour.id: tour for tour in (
               "You can also drop the file onto the board.",
               "Importieren… fügt eine Vorlage aus einer JSON-Datei zu Meine Vorlagen hinzu. Die Datei wird geprüft: "
               "Optionen vom Parser des Launchers, Server und Regeln von sandbox-ai; alles, was wie ein Geheimnis "
-              "aussieht, wird abgelehnt. Sie können die Datei auch auf die Tafel ziehen."),
+              "aussieht, wird abgelehnt. Sie können die Datei auch auf das Board ziehen."),
              ("Import a preset file someone gave you.",
               "Importieren Sie eine Vorlagen-Datei, die Sie bekommen haben."), "preset-mine"),
         task("board", "view", ("Edit", "Bearbeiten"),
              ("A preset is edited on the board: create a board from it, change it, then save the board as a preset "
               "under the same title. The new one replaces the old one.",
-              "Eine Vorlage wird auf der Tafel bearbeitet: Legen Sie daraus eine Tafel an, ändern Sie sie und "
-              "speichern Sie die Tafel unter demselben Titel als Vorlage. Die neue ersetzt die alte."),
+              "Eine Vorlage wird auf dem Board bearbeitet: Legen Sie daraus ein Board an, ändern Sie es und "
+              "speichern Sie das Board unter demselben Titel als Vorlage. Die neue ersetzt die alte."),
              ("Create a board from your preset, add a part, save it under the same title.",
-              "Legen Sie eine Tafel aus Ihrer Vorlage an, fügen Sie ein Teil hinzu, speichern Sie sie unter demselben"
+              "Legen Sie ein Board aus Ihrer Vorlage an, fügen Sie ein Teil hinzu, speichern Sie es unter demselben"
               " Titel.")),
         task("board", "gallery_button", ("Export", "Exportieren"),
              ("Export… writes the selected preset to a JSON file to pass on; it is checked once more so nothing "
@@ -801,10 +801,10 @@ TASK_TOURS = {tour.id: tour for tour in (
         task("board", "view", ("A (?) everywhere", "Überall ein (?)"),
              ("Each page, area and board part has a small (?). It says what the thing is, what it is for, what "
               "happens when you use it, and the command-line option behind it.",
-              "Jede Seite, jeder Bereich und jedes Teil der Tafel hat ein kleines (?). Es sagt, was das Ding ist, "
+              "Jede Seite, jeder Bereich und jedes Teil des Boards hat ein kleines (?). Es sagt, was das Ding ist, "
               "wozu es dient, was passiert, wenn Sie es benutzen, und welche Option der Befehlszeile dahintersteht."),
              ("Click the (?) in the corner of the board, or the one in a node's title band.",
-              "Klicken Sie das (?) in der Ecke der Tafel oder das im Titelband eines Knotens."), "tip-opened"),
+              "Klicken Sie das (?) in der Ecke des Boards oder das im Titelband eines Knotens."), "tip-opened"),
         task("help", "index", ("More in Help", "Mehr in der Hilfe"),
              ("More in Help in an explanation opens this page at the matching section.",
               "Mehr in der Hilfe in einer Erklärung öffnet diese Seite beim passenden Abschnitt."),

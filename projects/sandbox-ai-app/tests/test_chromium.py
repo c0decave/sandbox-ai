@@ -184,7 +184,7 @@ class FakeView(QWidget):
     exited = Signal(int)
     made = []
 
-    def __init__(self, argv, web, cwd, parent):
+    def __init__(self, argv, web, cwd, parent, env=None):  # (env: the tab tag of a start, make_tab)
         super().__init__(parent)
         self.argv, self.running, self.view = list(argv), True, self
         FakeView.made.append(self)

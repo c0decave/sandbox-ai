@@ -136,7 +136,7 @@ def test_a_right_click_on_the_canvas_opens_its_menu_and_moves_nothing(page, qapp
     assert len(page.menus) == 1
     menu = page.menus[0]
     assert texts(menu) == ["Add a part here", "Paste", "Select all", "Fit the board", "Zoom 100 %", "Arrange",
-                           "Discard the changes not applied", "Undo", "Redo", "What is this?"]
+                           "Save as preset…", "Discard the changes not applied", "Undo", "Redo", "What is this?"]
     assert not action(menu, "Undo").isEnabled()
     parts = action(menu, "Add a part here").menu()
     limits = next(a for a in parts.actions() if a.text() == "Limits")
@@ -169,7 +169,7 @@ def test_a_right_click_on_a_node_selects_it_and_offers_its_actions(page, qapp):
     qapp.processEvents()
     assert limits.isSelected() and not agent.isSelected(), "the node right-clicked is the selection"
     menu = page.menus[-1]
-    assert [t for t in texts(menu) if t != "Set up step by step…"] == ["Properties", "What is this?", "Cut", "Copy",
+    assert [t for t in texts(menu) if t != "Wizard…"] == ["Properties", "What is this?", "Cut", "Copy",
                                                                        "Paste", "Remove"]
     assert action(menu, "Remove").isEnabled() and action(menu, "Cut").isEnabled()
     assert page.undo.count() == undo
@@ -178,7 +178,7 @@ def test_a_right_click_on_a_node_selects_it_and_offers_its_actions(page, qapp):
     agent = page.items[page.board.first("agent").id]  # the board is drawn anew after a change
     QTest.mouseClick(page.view.viewport(), RIGHT, NONE, page.view.mapFromScene(agent.sceneBoundingRect().center()))
     menu = page.menus[-1]
-    assert "Set up step by step…" in texts(menu), "the guide's parts offer it"
+    assert "Wizard…" in texts(menu), "the guide's parts offer it"
     assert not action(menu, "Remove").isEnabled() and not action(menu, "Cut").isEnabled(), "the agent stays"
     assert "always on the board" in action(menu, "Remove").toolTip() and action(menu, "Copy").isEnabled()
 

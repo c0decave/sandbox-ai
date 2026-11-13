@@ -591,6 +591,57 @@ def test_kit_hooks_end_to_end_with_sandbox_ai(window, env):
         sai.kit_command("delete", "e2e-hooks", options=["--yes"])
 
 
+VENDORED = {"hallmark": "hallmark", "superpowers": "brainstorming", "playwright-skill": "playwright-skill",
+            "hyperframes": "hyperframes-cli", "security-audit": "security-audit", "design-system": "design-system",
+            "ffuf": "ffuf-web-fuzzing", "tdd": "tdd"}  # kit -> one of its skills
+
+
+def test_the_vendored_skill_kits_are_listed_and_switched_on_and_off(window, env, wait):
+    """The real `sandbox-ai kits list --json`: sandbox-ai's built-in kits of third-party skills are listed with their
+    skills for Claude, Codex and OpenCode; Use in the current project switches one on for the project (shown, written,
+    trusted), the Board's kits node switches it off again, for Codex too (unlike egm, which is Claude only)."""
+    sai = window.sai
+    if not sai.has_kits_command():
+        pytest.skip("this sandbox-ai has no kits command")
+    builtin = {k["name"]: k for k in sai.kits_inventory()["kits"] if k["kind"] == "builtin"}
+    if "hallmark" not in builtin:
+        pytest.skip("this sandbox-ai has no vendored skills (0.1.94)")
+    for kit, skill in VENDORED.items():
+        assert set(builtin[kit]["agents"]) == {"claude", "codex", "opencode"}, kit
+        assert all(skill in builtin[kit]["agents"][agent]["skills"] for agent in builtin[kit]["agents"]), kit
+    assert set(builtin["hallmark-hook"]["agents"]) == {"claude"}
+    page = window.kits
+    page.refresh()
+    assert wait(lambda: all(widgets.find_row(page.table, f"builtin:{kit}") >= 0 for kit in VENDORED), 60)
+    row = widgets.find_row(page.table, "builtin:hyperframes")
+    assert page.table.item(row, 2).text() == "claude, codex, opencode"
+    assert "hyperframes-cli" in page.table.item(row, 3).text() and "media-use" in page.table.item(row, 3).text()
+    # On: Use in the current project.
+    folder = project(env, "p")
+    (folder / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "options": []}))
+    window.set_project(folder)
+    select_kit(page, "builtin", "superpowers")
+    assert page.use_button.isEnabled()
+    page.use()
+    assert wait(lambda: "superpowers" in (folder / ".sandbox-ai.json").read_text(), 30)
+    options = json.loads((folder / ".sandbox-ai.json").read_text())["options"]
+    assert options[options.index("--kit") + 1] == "superpowers"
+    assert wait(lambda: sai.project_state(folder)[0] == "trusted" and page.project_kits == ["superpowers"], 20)
+    select_kit(page, "builtin", "superpowers")
+    assert not page.use_button.isEnabled() and "uses it already" in page.use_button.toolTip()
+    # Off: the Board's kits node, for Codex.
+    board = window.board
+    assert wait(lambda: board.board.first("kits") is not None, 20)
+    node = board.board.first("kits")
+    board.inspect(node)
+    boxes = {b.text(): b for b in board.inspector_holder.findChildren(QtWidgets.QCheckBox)}
+    assert boxes["superpowers (built-in)"].isChecked() and boxes["tdd (built-in)"].isEnabled()
+    assert not boxes["egm (built-in)"].isEnabled(), "egm stays Claude only"
+    boxes["superpowers (built-in)"].setChecked(False)
+    assert board.board.first("kits").props.get("--kit") in (None, [])
+    assert "--kit superpowers" not in board.preview.toPlainText()
+
+
 def test_several_kits_are_deleted_at_once_and_only_yours(fake, monkeypatch, wait):
     """Ctrl/Shift: several kits; Delete kit… (and the Delete key) deletes your own of them after one question naming
     them (sandbox-ai's own are left out, said); what acts on one kit waits."""

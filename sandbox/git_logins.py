@@ -5,6 +5,10 @@
   sandbox-ai git-logins list [--json]                         the logins (servers, users, secret names)
   sandbox-ai git-logins remove URL
   sandbox-ai git-logins check [URL]                           whether each login's secret is there
+  sandbox-ai git-logins give RUN URL (--secret NAME | --env VARIABLE | --file PATH) [--user USER] [--keep]
+                                                              a running sandbox gets a Git login now, until it ends
+  sandbox-ai git-logins revoke RUN URL                        take back a login given during the run
+  sandbox-ai git-logins list --run RUN [--json]               the logins a running sandbox was given during the run
 
 URL is http(s)://HOST[:PORT] (plain http only for this host's loopback, e.g. a local Gitea at
 https://git.example.org, http://localhost:3080). Keep the token first: sandbox-ai secrets set NAME (it is read from standard input).
@@ -16,6 +20,12 @@ no token ever enters its sandbox. The server must be reachable as usual: an HTTP
 preset (github.com: --allow-github), a server on this host's loopback by --allow-host-port PORT or, during the run,
 sandbox-ai net allow --allow-host-port PORT. A --git-token-* option for the same server wins for its start;
 --git-logins off starts without them.
+
+A sandbox that runs already gets a login with `give` (the run's id or its start's name as `sandbox-ai list` shows
+it): its Git logs in with it from now on, until the run ends; --keep also writes it into the project's trusted
+.sandbox-ai.json, as a reference (never the token). It is the same step as the older form `sandbox-ai net allow RUN
+--git-token-secret URL=NAME` (--git-token-env, --git-token-file), which keeps working; the server is allowed as at a
+start (github.com: its preset). `sandbox-ai net show RUN` lists them too.
 
 The list is ~/.config/sandbox-ai/git-logins.json (mode 0600): servers, users and secret names, no tokens.
 Standard library only.
@@ -63,6 +73,61 @@ def launcher():
                 spec.loader.exec_module(loaded)
                 _launcher = loaded
     return _launcher
+
+
+_net = None
+
+
+def net_module():
+    """net.py, which gives a running sandbox a login (`give` and `revoke` are its `net allow/revoke --git-token-*`:
+    one code path), with this module's launcher."""
+    global _net
+    if _net is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_net_for_git_logins", HERE / "net.py")
+        with LOADING:
+            if _net is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded._launcher_source = launcher
+                _net = loaded
+    return _net
+
+
+def with_user(url, user):
+    """URL with USER in it (http(s)://USER@HOST[:PORT]), as net allow --git-token-* takes it; a URL that names
+    another user already is refused."""
+    scheme, sep, rest = url.partition("://")
+    if not user:
+        return url
+    if not USER.fullmatch(user):
+        raise ValueError("--user is letters, digits, ._-")
+    if not sep:
+        return url  # (refused by the URL check, with its own message)
+    named, at, _host = rest.partition("@")
+    if at:
+        if named != user:
+            raise ValueError(f"the URL names the user {named}, --user {user}: give one of them")
+        return url
+    return f"{scheme}://{user}@{rest}"
+
+
+def given_main(args, out):
+    """give, revoke and list --run: net.py's allow, revoke and given credentials of the run."""
+    net = net_module()
+    if args.command == "list":
+        return net.list_given(args.run, "git", out, as_json=args.json, prog="git-logins")
+    try:
+        url = with_user(args.url, getattr(args, "user", None))
+    except ValueError as exc:
+        print(f"sandbox-ai git-logins: {exc}", file=sys.stderr)
+        return 1
+    if args.command == "give":
+        kind, ref = next((kind, value) for kind, value in (("secret", args.secret), ("env", args.env),
+                                                           ("file", args.file)) if value)
+        argv = ["allow", args.run, f"--git-token-{kind}", f"{url}={ref}", *(["--keep"] if args.keep else [])]
+    else:
+        argv = ["revoke", args.run, "--git-token-secret", f"{url}=X"]  # (the reference is not read by a revoke)
+    return net.main(argv, out=out, brief=True, prog="git-logins", command=f"git-logins {args.command}")
 
 
 def path():
@@ -130,7 +195,7 @@ def credentials(skip=(), entries=None, origin="git-logins"):
 def main(argv, out=print):
     p = argparse.ArgumentParser(prog="sandbox-ai git-logins", description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
-                                epilog="\n\n".join(__doc__.split("\n\n")[1:3]))
+                                epilog="\n\n".join(__doc__.split("\n\n")[1:5]))
     commands = p.add_subparsers(dest="command", required=True)
     added = commands.add_parser("add")
     added.add_argument("url")
@@ -142,7 +207,29 @@ def main(argv, out=print):
     removed.add_argument("url")
     checked = commands.add_parser("check")
     checked.add_argument("url", nargs="?")
+    listing.add_argument("--run", metavar="RUN",
+                         help="the logins the running sandbox RUN was given during the run (git-logins give)")
+    given = commands.add_parser("give", help="give a running sandbox a Git login now, until it ends",
+                                description="Give the running sandbox RUN (its run id or its start's name, as "
+                                            "sandbox-ai list shows it) a Git login for URL now: its Git logs in "
+                                            "with it from now on, until the run ends; the server is allowed as at a "
+                                            "start. The older form is sandbox-ai net allow RUN --git-token-*.")
+    given.add_argument("run")
+    given.add_argument("url", help="http(s)://[USER@]HOST[:PORT]")
+    source = given.add_mutually_exclusive_group(required=True)
+    source.add_argument("--secret", metavar="NAME", help="the token is the secret NAME of sandbox-ai secrets")
+    source.add_argument("--env", metavar="VARIABLE", help="the token is your variable VARIABLE")
+    source.add_argument("--file", metavar="PATH", help="the token is in the file PATH (yours, mode 0600)")
+    given.add_argument("--user", metavar="USER", help="the user Git logs in as (default: the URL's, else "
+                                                      "x-access-token)")
+    given.add_argument("--keep", action="store_true",
+                       help="also for the next starts: into the project's trusted .sandbox-ai.json, as a reference")
+    taken = commands.add_parser("revoke", help="take back a Git login given during the run")
+    taken.add_argument("run")
+    taken.add_argument("url")
     args = p.parse_args(argv)
+    if args.command in ("give", "revoke") or (args.command == "list" and args.run):
+        return given_main(args, out)
     try:
         with settings_lock(path()) if args.command in ("add", "remove") else contextlib.nullcontext():
             return run_command(args, out)

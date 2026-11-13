@@ -9,7 +9,8 @@ address echo and the kill-switch rules.
 The launcher writes one JSON line to stdin: the profile with its secrets, the names to resolve and the
 checks. Secrets arrive that way only, never as arguments, environment or files outside this container's
 private /run. Events go to stdout as JSON lines ({"event": "progress" | "login" | "ready" | "error" | "down"}).
-`serve` keeps the tunnel until stdin closes; `check` exits after the checks.
+`serve` keeps the tunnel until stdin closes; `check` exits after the checks. `killswitch` (podman exec in a serving
+container) says whether the kill switch is in place: MCP servers start in its namespace only when it is.
 
 Order: the endpoints are resolved first (the only lookups outside the tunnel), then the kill switch is
 loaded, and only then is the tunnel brought up: nothing leaves unencrypted while it is being set up, and a
@@ -28,6 +29,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import stat
 import secrets
 import select
 import shutil
@@ -353,7 +355,7 @@ def echo(urls, family, resolve, get=fetch, timeout=8.0):
     """What the first echo service that answers over IPv4 or IPv6 (FAMILY) sees: {"ip", "vpn", "url"}, or
     {"error", "kind"}: "blocked" (no route or refused locally), "no-address" (the service has no address of this
     family), "failed" (anything else)."""
-    errors, kinds = [], set()
+    errors, kinds, timeouts, refused = [], set(), 0, 0
     for url in urls:
         host = urllib.parse.urlsplit(url).hostname
         try:
@@ -375,7 +377,10 @@ def echo(urls, family, resolve, get=fetch, timeout=8.0):
                 raise ValueError(f"answered with {ip}")
             return {"ip": ip, "vpn": vpn, "url": url}
         except OSError as exc:
-            blocked = exc.errno in BLOCKED_ERRNOS or isinstance(exc, (socket.timeout, TimeoutError))
+            timed_out = isinstance(exc, (socket.timeout, TimeoutError))
+            blocked = exc.errno in BLOCKED_ERRNOS or timed_out
+            timeouts += 1 if timed_out and exc.errno not in BLOCKED_ERRNOS else 0
+            refused += 1 if exc.errno in BLOCKED_ERRNOS else 0
             kinds.add("blocked" if blocked else "failed")
             errors.append(f"{host}: {exc.strerror or exc}")
         except (ValueError, http.client.HTTPException) as exc:
@@ -383,7 +388,45 @@ def echo(urls, family, resolve, get=fetch, timeout=8.0):
             errors.append(f"{host}: {exc}")
     kind = "blocked" if kinds == {"blocked"} or kinds == {"blocked", "no-address"} else \
         "no-address" if kinds == {"no-address"} else "failed"
-    return {"error": "; ".join(errors) or "no echo service configured", "kind": kind}
+    # "timeout": nothing was refused here (EPERM, EACCES, no route: the kill switch, a missing route), only no answer
+    # came in time - a tunnel that just came up (echo_retried tries it again).
+    return {"error": "; ".join(errors) or "no echo service configured", "kind": kind,
+            **({"timeout": True} if timeouts and not refused else {})}
+
+
+# A connection through a tunnel that just came up (above all a Tor circuit after bootstrap: a slow or refusing exit,
+# a TLS connection closed at once) can fail once and work a few seconds later. The address check tries again before
+# it says "no connection" - only for an error, never past an answer (an address that is not the VPN's fails at once).
+ATTEMPTS, TOR_ATTEMPTS = 2, 4
+RETRY_DELAYS = (3, 6, 12)  # seconds before the 2nd, 3rd, 4th attempt (Tor: about 21 s in all, plus each attempt's own)
+
+
+def echo_retried(urls, family, resolve, get=fetch, timeout=8.0, tor=False, attempts=ATTEMPTS, sleep=time.sleep,
+                 deadline=None, clock=time.monotonic):
+    """echo(), tried up to ATTEMPTS times while it ends in an error: behind Tor any error (a new circuit may pick
+    another exit), else one that is "failed" or a timeout with nothing refused (echo's "timeout") - never what the
+    kill switch or a missing route refuses (EPERM, EACCES, ENETUNREACH, EHOSTUNREACH), nor "no-address". DEADLINE
+    (CLOCK's time): no attempt starts that could not end before it (TIMEOUT for each echo service); the answer says
+    "cut_short" then. The answer of the last attempt, with "attempts" when more than one was made."""
+    attempts = max(1, int(attempts))
+    per_attempt = float(timeout) * max(1, len(urls))
+    cut_short = False
+    for attempt in range(attempts):
+        result = echo(urls, family, resolve, get, timeout)
+        retry = "error" in result and (tor and result.get("kind") != "no-address" or result.get("kind") == "failed"
+                                       or bool(result.get("timeout")))
+        if not retry or attempt == attempts - 1:
+            break
+        delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+        if deadline is not None and clock() + delay + per_attempt > deadline:
+            cut_short = True  # the launcher would stop waiting before another one ended: the reason is this one
+            break
+        sleep(delay)
+    if attempt:
+        result = {**result, "attempts": attempt + 1}
+    if cut_short:
+        result = {**result, "cut_short": True}
+    return result
 
 
 # --- the kill switch -------------------------------------------------------------------------------------------
@@ -618,12 +661,49 @@ def tor_config(tor, bridges=()):
     return "\n".join(lines) + "\n"
 
 
-def tor_rules(uid=TOR_UID, bridges=()):
+# The networks a Tor start may reach past Tor (--vpn-bypass-tcp): the local network's, never one on the internet,
+# which would see your own address. Carrier-grade NAT (100.64.0.0/10) lies outside your network.
+BYPASS_NETWORKS = tuple(ipaddress.IPv4Network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                                                           "169.254.0.0/16"))
+
+
+METADATA_ADDRESSES = (ipaddress.IPv4Address("169.254.169.254"), ipaddress.IPv4Address("169.254.170.2"))
+
+
+def bypass_target(value):
+    """(address, port) of one --vpn-bypass-tcp value, an IPv4 ADDRESS:PORT in the local network."""
+    if isinstance(value, dict):
+        address, port = value.get("address"), value.get("port")
+    else:
+        address, sep, port = str(value).rpartition(":")
+        if not sep:
+            raise ValueError(f"--vpn-bypass-tcp {value}: give ADDRESS:PORT, e.g. 192.168.1.20:1234")
+    try:
+        ip = ipaddress.IPv4Address(str(address))
+        port = int(port)
+    except ValueError:
+        raise ValueError(f"--vpn-bypass-tcp {value}: give an IPv4 address and a port, e.g. 192.168.1.20:1234") from None
+    if not 0 < port < 65536:
+        raise ValueError(f"--vpn-bypass-tcp {value}: the port must lie between 1 and 65535")
+    if ip in METADATA_ADDRESSES:
+        raise ValueError(f"--vpn-bypass-tcp {value}: {ip} is a cloud's metadata service (instance credentials), "
+                         "never reached past Tor")
+    if not any(ip in network for network in BYPASS_NETWORKS):
+        raise ValueError(f"--vpn-bypass-tcp {value}: only an address of your local network (10.0.0.0/8, "
+                         "172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16) may be reached past Tor; one on the internet "
+                         "would see your own address")
+    return str(ip), port
+
+
+def tor_rules(uid=TOR_UID, bridges=(), bypass=()):
     """The kill switch for tor: only tor's own TCP over IPv4 leaves (to its bridges alone when it has some); every
     other TCP connection is redirected to its TransPort and every lookup on port 53 to its DNSPort, before the
     filter sees them; other UDP (QUIC included) and all IPv6 are dropped. The redirect runs after the agent's own
-    to its connection proxy (priority -100): what that one redirects reaches tor through the proxy."""
+    to its connection proxy (priority -100): what that one redirects reaches tor through the proxy. BYPASS
+    (--vpn-bypass-tcp): TCP to exactly these addresses and ports of the local network leaves directly, neither
+    redirected nor dropped; the agent reaches them through its connection proxy only, as everything else."""
     uid = int(uid)
+    targets = [bypass_target(value) for value in bypass]
     lines = [f"table inet {TABLE} {{",
              " chain output { type filter hook output priority -5; policy drop;",
              '  oifname "lo" accept',
@@ -634,12 +714,14 @@ def tor_rules(uid=TOR_UID, bridges=()):
                      f"{int(bridge['port'])} accept")
     if not bridges:
         lines.append(f"  meta skuid {uid} meta nfproto ipv4 meta l4proto tcp accept")
+    lines += [f"  ip daddr {address} tcp dport {port} accept" for address, port in targets]
     lines += ["  reject with icmpx type admin-prohibited", " }",
               " chain input { type filter hook input priority -5; policy drop;",
               '  iifname "lo" accept', "  ct state established,related accept", " }",
               " chain forward { type filter hook forward priority -5; policy drop; }",
               " chain divert { type nat hook output priority -90; policy accept;",
               f"  meta skuid {uid} return", "  ip daddr 127.0.0.0/8 return", "  meta nfproto ipv6 return",
+              *[f"  ip daddr {address} tcp dport {port} return" for address, port in targets],
               f"  udp dport 53 dnat ip to {TOR_DNS}:53", f"  meta l4proto tcp redirect to :{TOR_TRANS_PORT}", " }",
               "}", ""]
     return "\n".join(lines)
@@ -696,6 +778,20 @@ def tor_uid(name=TOR_USER):
         raise RuntimeError(f"the Tor image has no user {name}: rebuild it with sandbox-ai build tor") from None
 
 
+TOR_DATA = Path("/var/lib/tor")
+
+
+def own_data_directory(uid, path=None):
+    """Tor's data directory (the container's tmpfs, root's at first) becomes debian-tor's alone (0700), as tor wants
+    it once it has become that user; a link or anything but a directory there is refused."""
+    path = Path(path or TOR_DATA)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"{path} is no directory in the Tor container")
+    os.chmod(path, 0o700)  # first: once it is debian-tor's, root (no CAP_FOWNER here) may not change its mode
+    os.chown(path, uid, uid, follow_symlinks=False)
+
+
 def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
     """tor behind its kill switch: the rules first, then the torrc (private, with the bridges), then tor, which
     binds its ports as root and becomes debian-tor; ready once it has bootstrapped."""
@@ -707,7 +803,8 @@ def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
     if uid != TOR_UID:
         raise RuntimeError(f"{TOR_USER} has the uid {uid} in the Tor image, not {TOR_UID}: rebuild it with "
                            "sandbox-ai build tor")
-    load_killswitch(runner, tor_rules(uid, bridges))
+    load_killswitch(runner, tor_rules(uid, bridges, payload.get("bypass") or ()))
+    own_data_directory(uid)
     RUN.mkdir(mode=0o700, exist_ok=True)
     config, defaults = RUN / "torrc", RUN / "torrc-defaults"
     write_private(config, tor_config(tor, bridges))
@@ -778,6 +875,64 @@ class Runner:
 def load_killswitch(runner, rules):
     runner.run(["nft", "-f", "-"], data=rules)
     runner.run(["nft", "list", "table", "inet", TABLE])
+
+
+def killswitch_problem(listing):
+    """None when LISTING (`nft list table inet TABLE`) shows the kill switch in place - its output, input and forward
+    chains each drop what no rule accepts - else what is missing. What MCP servers are checked against before each
+    one starts in this namespace (vpn.mcp_guard, vpn.check_pod_vpn): a container whose tunnel is not up yet, or
+    whose table is gone, lets none start."""
+    if not isinstance(listing, str) or f"table inet {TABLE}" not in listing:
+        return f"the kill switch (nft table inet {TABLE}) is not loaded"
+    for hook in ("output", "input", "forward"):
+        if not re.search(rf"type filter hook {hook} priority [^;\n]*; policy drop;", listing):
+            return f"the kill switch's {hook} chain does not drop what it does not accept"
+    return None
+
+
+def killswitch_command(out, runner=None):
+    """`vpn_runtime.py killswitch`, run with podman exec in a running VPN container: {"ok": true} when the kill
+    switch is in place (killswitch_problem), else {"ok": false, "problem": ...}; exit status 0 or 1."""
+    try:
+        listing = (runner or Runner()).run(["nft", "list", "table", "inet", TABLE], check=False)
+        problem = killswitch_problem(listing.stdout if listing.returncode == 0 else "")
+    except (OSError, subprocess.SubprocessError) as exc:
+        problem = f"nft did not run: {exc}"
+    out.write(json.dumps({"ok": problem is None, **({"problem": problem} if problem else {})}) + "\n")
+    return 0 if problem is None else 1
+
+
+MCP_DNS_TABLE = "sandbox_ai_mcp_dns"
+
+
+def mcp_dns_resolver(tunnel):
+    """The resolver an MCP server's lookups go to (mcp_dns_rules): the tunnel's first IPv4 resolver, else the first
+    of FALLBACK_DNS (as gather_checks asks them), through the tunnel."""
+    for server in list(tunnel.get("dns") or []) + list(FALLBACK_DNS):
+        with contextlib.suppress(ValueError):
+            if ipaddress.ip_address(server).version == 4:
+                return str(ipaddress.ip_address(server))
+    return FALLBACK_DNS[0]
+
+
+def mcp_dns_rules(resolver, mark=CHECK_MARK):
+    """For the VPN container of an MCP image server (payload "mcp"): every lookup on port 53, whatever resolver the
+    server's /etc/resolv.conf names (the one Podman gave the VPN container: pasta's forwarder or the host's own),
+    goes to the VPN's RESOLVER, through the tunnel; one over IPv6 is refused. The runtime's own checks (MARK) keep
+    the resolvers they name. Without it a lookup never left past the tunnel either (the kill switch), but went to a
+    resolver of your own network through the tunnel, or nowhere."""
+    resolver = ipaddress.IPv4Address(resolver)
+    return "\n".join([
+        f"table inet {MCP_DNS_TABLE} {{",
+        " chain redirect { type nat hook output priority -90; policy accept;",
+        f"  meta mark {int(mark):#x} return",
+        f"  meta nfproto ipv4 udp dport 53 dnat ip to {resolver}:53",
+        f"  meta nfproto ipv4 tcp dport 53 dnat ip to {resolver}:53", " }",
+        " chain refuse { type filter hook output priority -6; policy accept;",
+        f"  meta mark {int(mark):#x} return",
+        "  meta nfproto ipv6 udp dport 53 reject with icmpx type admin-prohibited",
+        "  meta nfproto ipv6 tcp dport 53 reject with icmpx type admin-prohibited", " }",
+        "}", ""])
 
 
 # What became of the optional wireguard-go when the image was built (Containerfile.vpn writes it).
@@ -1043,18 +1198,39 @@ def route_device(address, runner):
     return match[1] if match else None
 
 
-def gather_checks(payload, tunnel, runner, get=fetch):
+READY_SLACK = 10  # seconds of the launcher's wait kept for what follows the checks (the names, the ready event)
+
+
+def check_deadline(checks, servers, tor, started):
+    """When the first address check must end (time.monotonic()): the launcher waits checks["ready_seconds"] from
+    about STARTED (vpn.ready_timeout), less what the checks after it take at most (IPv6, each resolver, the DNS and
+    onion probes) and READY_SLACK. None without both (a check during the run: nobody waits for it)."""
+    seconds = checks.get("ready_seconds")
+    if started is None or isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    timeout = float(checks.get("timeout", 8))
+    urls = len(checks.get("urls") or []) or 1
+    after = (timeout / 2 if tor else timeout * urls) + len(servers) * timeout / 2 + \
+        (timeout if checks.get("dns_probe") else 0) + (timeout if tor else 0)
+    return started + float(seconds) - after - READY_SLACK
+
+
+def gather_checks(payload, tunnel, runner, get=fetch, started=None):
     """The checks from inside: the address each echo service sees over IPv4 and IPv6, the way to each resolver,
     their answers, and the egress address of the resolver chain (whoami.akamai.net answers with the address of
-    the resolver that asked it)."""
+    the resolver that asked it). STARTED (or the payload's "started", main's for the first check): when the launcher
+    began to wait for this container - its retries end in time (check_deadline)."""
     checks = payload.get("checks") or {}
+    started = payload.get("started") if started is None else started
     servers = tunnel["dns"] or list(FALLBACK_DNS)
     resolve = resolver_for(servers)
     result = {"dns": {"servers": servers, "configured": bool(tunnel["dns"]), "routes": {}, "answers": {}}}
     timeout = float(checks.get("timeout", 8))
     tor = bool(tunnel.get("tor"))
     if checks.get("ip", True):
-        result["ipv4"] = echo(checks.get("urls") or [], 4, resolve, get, timeout)
+        result["ipv4"] = echo_retried(checks.get("urls") or [], 4, resolve, get, timeout, tor,
+                                      checks.get("attempts", TOR_ATTEMPTS if tor else ATTEMPTS),
+                                      deadline=check_deadline(checks, servers, tor, started))
         result["ipv6"] = probe_ipv6(timeout / 2) if tor else echo(checks.get("urls") or [], 6, resolve, get, timeout)
     probe_name = (checks.get("urls") or ["https://example.com"])[0]
     probe_name = urllib.parse.urlsplit(probe_name).hostname
@@ -1291,10 +1467,13 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
         return resolve_command(stdin, out)
     if argv[:1] == ["baseline"]:
         return baseline_command(stdin, out)
+    if argv[:1] == ["killswitch"]:
+        return killswitch_command(out)
     if argv[:1] not in (["serve"], ["check"]):
         print("sandbox-ai vpn runtime: internal entry point; use sandbox-ai vpn", file=sys.stderr)
         return 2
     payload = json.loads(stdin.readline())
+    started = time.monotonic()  # (the launcher waits from about now: vpn.ready_timeout)
     runner = runner or Runner()
     use_check_mark()  # the agent's firewall, loaded later in this namespace, lets the checks pass to the tunnel
     try:
@@ -1311,9 +1490,19 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
         else:
             raise ValueError(f"unknown VPN type {kind!r}")
         tailnet = kind == "tailscale" and not payload["profile"]["tailscale"].get("exit_node")
-        checks = gather_checks(payload, tunnel, runner) if not tailnet else \
-            gather_checks({**payload, "checks": {**(payload.get("checks") or {}), "ip": False}}, tunnel, runner)
+        first = {**payload, "started": started}  # (only the first check: the launcher waits for it)
+        checks = gather_checks(first, tunnel, runner) if not tailnet else \
+            gather_checks({**first, "checks": {**(payload.get("checks") or {}), "ip": False}}, tunnel, runner)
         hosts = resolve_hosts(payload.get("resolve") or [], tunnel, tailnet)
+        if payload.get("mcp") and kind != "tor":
+            # The container of an MCP image server (vpn.mcp_wrapper): its lookups go to the VPN's resolver. Tor's
+            # rules hand every lookup to its DNSPort already; a tailnet-only profile is refused before (vpn.py
+            # egress_problem) and here again.
+            if tailnet:
+                raise ValueError("a Tailscale profile without an exit node carries only the tailnet; it cannot be "
+                                 "an MCP server's way out")
+            tunnel["mcp_dns"] = mcp_dns_resolver(tunnel)
+            runner.run(["nft", "-f", "-"], data=mcp_dns_rules(tunnel["mcp_dns"]))
         emit("ready", out=out, tunnel=tunnel, checks=checks, hosts=hosts)
     except Exception as exc:  # noqa: BLE001 - everything ends as an event the launcher shows
         emit("error", out=out, message=redact(f"{exc}", secret_values(payload)))

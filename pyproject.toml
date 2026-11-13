@@ -43,6 +43,10 @@ sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signe
               "presets/*.json",
               "templates/*/*.md", "templates/*/*.json",
               "templates/*/skills/*/SKILL.md", "builtin/*/skills/*/SKILL.md", "builtin/kits/*/*/marketplaces.json",
+              # The vendored skills of the built-in kits, whole trees (docs/skills-review.md); globs skip dot files,
+              # so the agent folders' markers are named.
+              "builtin/kits/**/*", "builtin/kits/*/*/.shared-skills",
+              "recipes/*/*.json",
               "marketplace/.claude-plugin/*",
               "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
 

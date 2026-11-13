@@ -38,6 +38,7 @@ OPTION_LABELS = {
     "--subnet": ("Sandbox subnet (IPv4)", "Subnetz der Sandbox (IPv4)"),
     "--rules": ("Ruleset file", "Regelwerk-Datei"),
     "--llm": ("LLM server", "LLM-Server"),
+    "--llm-param": ("A model parameter for this start (KEY=VALUE)", "Ein Modell-Parameter für diesen Start (KEY=WERT)"),
     "--log-debug": ("Debug details in the logs", "Debug-Details in den Protokollen"),
     "--subnet6": ("Sandbox subnet (IPv6)", "Subnetz der Sandbox (IPv6)"),
     "--ip": ("Fixed IPv4 address", "Feste IPv4-Adresse"),
@@ -54,6 +55,10 @@ OPTION_LABELS = {
     "--git-credentials": ("Git logins from a credential file", "Git-Logins aus einer Credential-Datei"),
     "--dangerously-skip-permissions": ("Agent without approval prompts", "Agent ohne Rückfragen"),
     "--mcp": ("MCP servers", "MCP-Server"),
+    "--mcp-limits": ("Limits of an MCP server for this start", "Grenzen eines MCP-Servers für diesen Start"),
+    "--mcp-mount": ("A folder of an MCP server for this start (a memory per project)",
+                    "Ein Ordner eines MCP-Servers für diesen Start (ein Gedächtnis je Projekt)"),
+    "--service": ("Services beside the agent (containers)", "Services neben dem Agent (Container)"),
     "--kit": ("Additional kits", "Zusätzliche Kits"),
     "--kit-dir": ("Kit folders", "Kit-Verzeichnisse"),
     "--no-default-kit": ("Without the default kit", "Ohne das Standard-Kit"),
@@ -76,9 +81,11 @@ OPTION_LABELS = {
     "--memory": ("Memory limit", "Speicherlimit"),
     "--cpus": ("CPU limit", "CPU-Limit"),
     "--pids": ("Process limit", "Prozesslimit"),
+    "--tmp-size": ("Size of /tmp", "Größe von /tmp"),
     "--backend": ("Sandbox backend", "Sandbox-Backend"),
     "--image": ("Podman image", "Podman-Image"),
     "--image-variant": ("Image variant (sandbox-ai images)", "Image-Variante (sandbox-ai images)"),
+    "--nested-containers": ("Containers inside the sandbox (podman)", "Container in der Sandbox (podman)"),
     "--podman-url": ("Podman service URL", "URL des Podman-Dienstes"),
     "--binary": ("Agent program", "Agent-Programm"),
     "--runtime": ("Runtime folders (bwrap)", "Laufzeitverzeichnisse (bwrap)"),
@@ -102,6 +109,8 @@ OPTION_LABELS = {
     "--vpn-check": ("When a VPN check fails", "Wenn eine VPN-Prüfung fehlschlägt"),
     "--vpn-bypass-host-ports": ("Let host ports past the VPN (they leave from your address)",
                                 "Host-Ports am VPN vorbei (sie gehen von Ihrer Adresse aus)"),
+    "--vpn-bypass-tcp": ("Past Tor in your network (ADDRESS:PORT, e.g. a model server)",
+                         "Am Tor vorbei im eigenen Netz (ADRESSE:PORT, z. B. ein Modellserver)"),
     "--model": ("Model", "Modell"),
     "--effort": ("Effort", "Denkaufwand"),
     "--api-key": ("API keys kept out of the sandbox", "API-Schlüssel außerhalb der Sandbox"),
@@ -118,6 +127,7 @@ OPTION_LABELS = {
 }
 # Options that only widen or weaken the sandbox: shown with a warning colour when set.
 DANGEROUS = {"--dangerously-skip-permissions", "--egress-all-allow", "--no-proxy", "--gui-wayland", "--device",
+             "--nested-containers",
              "--no-inspect", "--no-canaries", "--copy-auth", "--git-credentials"}
 # Shown as one three-way choice instead of two check boxes.
 TMUX = ("--tmux", "--no-tmux")

@@ -176,14 +176,15 @@ def test_the_leads_read_only_workspace_mode_and_no_login_reach_the_helper(isolat
     a.workspaces, a.project_document, a.mode = [str(tmp_path)], {}, "low"
     sa.add_helpers(a)
     (name,) = a.helper_definitions
-    cmd = mcp.helper_command(name, a.helper_definitions[name], a, mcp.state_dir(name), sa.mcp_socket_dir(name), None)
+    cmd = mcp.helper_command(name, mcp.server_network(name, a.helper_definitions[name]), a, mcp.state_dir(name),
+                             sa.mcp_socket_dir(name), None)
     assert cmd[cmd.index("--mode") + 1] == "low" and "--workspace-ro" in cmd and "--no-auth" in cmd
     assert cmd[cmd.index("--telemetry") + 1] == "off", "the lead's telemetry level holds for its helper"
     strict = sa.parse_args(["claude", "--backend", "bwrap", "--helper", "opencode", "--telemetry", "strict"])
     strict.workspaces, strict.project_document = [str(tmp_path)], {}
     sa.add_helpers(strict)
-    cmd = mcp.helper_command(name, strict.helper_definitions[name], strict, mcp.state_dir(name),
-                             sa.mcp_socket_dir(name), None)
+    cmd = mcp.helper_command(name, mcp.server_network(name, strict.helper_definitions[name]), strict,
+                             mcp.state_dir(name), sa.mcp_socket_dir(name), None)
     assert cmd[cmd.index("--telemetry") + 1] == "strict"
 
 

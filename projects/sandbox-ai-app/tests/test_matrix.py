@@ -331,8 +331,10 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     # here the host has it all.)
     monkeypatch.setattr(page, "check_prerequisites", lambda then=None, why="start": False)
     assert page.start(embedded=True)
-    assert len(w.opened) == 1
-    argv, tab_title, cwd = w.opened[0]
+    # (A tab "Preparing the start" may come first: an image variant the preset needs is built there, step by step.)
+    starts = [opened for opened in w.opened if opened[1] != "Preparing the start"]
+    assert len(starts) == 1
+    argv, tab_title, cwd = starts[0]
     assert tab_title == runs and cwd == str(project)
     assert argv == sai.launch_argv(runs, B.launcher_argv(sai, page.board), agent_args)
     parsed_agent, parsed, parsed_args = launcher_args(sai, argv)
@@ -739,7 +741,7 @@ def test_files_in_and_out_of_a_sandbox(window, env, tmp_path, wait, where, repla
     assert titles[str(home)].startswith("Session work: HOME")
     page.roots.setCurrentIndex(page.roots.findData(str(root)))
     settle_files(page)
-    kinds = {page.table.item(r, 0).text(): page.table.item(r, 1).text() for r in range(page.table.rowCount())}
+    kinds = {page.table.item(r, 0).text(): page.table.item(r, 1).text() for r in range(2, page.table.rowCount())}
     assert kinds == {"src": "folder", "notes.txt": "file", "outside": "symbolic link", "planted": "symbolic link"}
     page.open_row(widgets.find_row(page.table, "planted"))
     assert "not followed" in page.message.text() and page.relative == ""
@@ -887,12 +889,13 @@ def all_texts(widget):
 def changed_settings(env):
     """A value other than the default for every setting the app knows."""
     return {"theme": "dark", "ui_font": "Inter", "mono_font": "Hack", "language": "de", "terminal": "window", "tray": False, "notify": False,
-            "notify_safeguards": False,
+            "notify_safeguards": False, "notifications": True, "reopen_terminals": False,
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
             "default_template": "research", "board_grid": 40, "board_confirm_remove": False, "auto_tabs": False, "guide_nodes": False,
             "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True,
-            "show_flags": True}
+            "show_flags": True, "login_links": "system", "copy_on_select": True, "paste_warn": False,
+            "terminal_osc52": "off"}
 
 
 def field_value(widget):
@@ -959,7 +962,7 @@ def test_every_setting_round_trips_through_a_restart(qapp, env, monkeypatch, age
     assert theme.apply(settings["theme"]) == "dark"
     w = make_window(qapp, monkeypatch, language=settings["language"])
     try:
-        assert w.nav.item(2).text() == "Tafel"
+        assert w.nav.item(2).text() == "Board"
         dialog = w.settings_dialog()
         assert {key: field_value(dialog.fields[key]) for key in values} == values
         assert {key: backend.setting(key) for key in values} == values

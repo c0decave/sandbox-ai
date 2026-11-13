@@ -475,7 +475,7 @@ def test_the_german_texts_keep_their_words():
 # "Veröffentlichungs-Login" are the app's compounds: they stay).
 GLOSSARY = [
     (r"\bWorkspaces?\b|Arbeitsbereich", "Arbeitsordner"),
-    (r"\bBoards?\b", "Tafel"),
+    (r"Tafel", "Board"),
     (r"\bPresets?\b|\bVorgabe", "Vorlage"),
     (r"\bMaschine|\bComputer", "Rechner"),
     (r"\bProvider", "Anbieter"),
@@ -525,3 +525,32 @@ def test_the_german_words_are_the_apps():
     differ = {key: pair for key, pair in shared.items() if pair[0] != pair[1]}
     # another meaning on the page
     assert set(differ) <= {"Change", "Start"}, differ
+
+
+GROUPS_END = r"""
+context.categories = [{ id: "development", title: { en: "Development", de: "Entwicklung" } },
+  { id: "security", title: { en: "Security analysis", de: "Sicherheitsanalyse" } }, { id: "other", title: { en: "Other", de: "Weitere" } }];
+context.presets = [{ id: "a", category: "development", title: "A", translations: { de: { title: "Ä" } } },
+  { id: "b", category: "analysis", title: "B" }, { id: "c", category: "cooking", title: "C" }, { id: "d", title: "D" }];
+console.log(JSON.stringify(vm.runInContext(`(() => { const g = presetGroups(categories, presets), old = presetGroups([], presets);
+  return { groups: g.groups, of: presets.map(g.of), old: old.groups.map(x => x[0]), oldOf: presets.map(old.of),
+           titles: presets.map(presetTitle) }; })()`, context)));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_start_forms_presets_by_the_hosts_categories(tmp_path):
+    """The new start's preset chooser groups by the categories the host says (`presets categories --json`: one list,
+    its order, the title in the page's language), an older category where the host lists it, an unknown one under
+    Other, each preset's title in German where it has one; a host without categories: the page's own list."""
+    driver = tmp_path / "groups.js"
+    driver.write_text(DRIVER.split("const settle")[0] + GROUPS_END)
+    run = subprocess.run(["node", str(driver), str(WEB / "app.js"), "de-DE"], capture_output=True, text=True,
+                         timeout=60)
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    assert result["groups"] == [["development", "Entwicklung"], ["security", "Sicherheitsanalyse"], ["other", "Weitere"]]
+    assert result["of"] == ["development", "security", "other", "other"]
+    assert result["titles"] == ["Ä", "B", "C", "D"]
+    assert result["old"][:3] == ["simple", "development", "llm"] and result["old"][-1] == "cooking"
+    assert result["oldOf"] == ["development", "analysis", "cooking", "simple"]

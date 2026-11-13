@@ -99,6 +99,26 @@ def test_an_archive_that_tries_to_leave_is_refused(data_home, members, why):
     assert not (data_home.parent / "escape").exists() and not (data_home / "escape").exists()
 
 
+def test_a_double_slash_root_stays_inside_the_tree(data_home, tmp_path):
+    """POSIX keeps a leading // as a root of its own: such a member, or a hard link to one, named the host's own
+    files (written over, or linked into the tree) before."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "secret").write_text("key")
+    (victim / "secret").chmod(0o600)
+    data_home.mkdir(parents=True, exist_ok=True)
+    data = archive((f"/{victim}/written", "file", b"x", 0o644), (f"///{victim}/also", "file", b"y", 0o644))
+    tree = r.unpack(data, data_home / "t")
+    assert not (victim / "written").exists() and not (victim / "also").exists()
+    assert (tree / str(victim).lstrip("/") / "written").read_bytes() == b"x"
+    with pytest.raises(ValueError, match="no file of it"):
+        r.unpack(archive(("stolen", "link", f"/{victim}/secret", 0o644)), data_home / "u")
+    assert (victim / "secret").stat().st_nlink == 1 and stat.S_IMODE((victim / "secret").stat().st_mode) == 0o600
+    assert r.safe_name("//etc/x") == r.PurePosixPath("etc/x") and r.safe_name("/") is None
+    with pytest.raises(ValueError, match="leaves the tree"):
+        r.directory_of(data_home, r.PurePosixPath("//etc/x"))
+
+
 def test_the_archive_must_match_the_signed_hash(data_home, tmp_path, monkeypatch):
     source = tmp_path / "rootfs.tar.gz"
     source.write_bytes(GOOD)

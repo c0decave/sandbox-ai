@@ -1,0 +1,772 @@
+{
+ "$comment": "Provenance of the files vendored into this built-in kit (sandbox-ai). Each file is the upstream file at the pinned commit, unchanged: its git blob id matches `git ls-tree -r COMMIT` upstream. The review: docs/skills-review.md.",
+ "name": "hallmark",
+ "agents": [
+  "claude",
+  "codex",
+  "opencode"
+ ],
+ "default": "off",
+ "upstream": {
+  "repository": "https://github.com/Nutlope/hallmark",
+  "commit": "8f6969f8922caabde9de1784959eae11ddf68073",
+  "committed": "2026-10-28T14:52:01+00:00",
+  "version": "2.0.0",
+  "license": "MIT"
+ },
+ "skills": {
+  "hallmark": "skills/hallmark"
+ },
+ "left_out": [
+  "skills/hallmark/references/themes/almanac.jpg",
+  "skills/hallmark/references/themes/arcade.jpg",
+  "skills/hallmark/references/themes/atelier.jpg",
+  "skills/hallmark/references/themes/bloom.jpg",
+  "skills/hallmark/references/themes/blueprint.jpg",
+  "skills/hallmark/references/themes/broadside.jpg",
+  "skills/hallmark/references/themes/brutal.jpg",
+  "skills/hallmark/references/themes/carnival.jpg",
+  "skills/hallmark/references/themes/cobalt.jpg",
+  "skills/hallmark/references/themes/console.jpg",
+  "skills/hallmark/references/themes/coral.jpg",
+  "skills/hallmark/references/themes/darkroom.jpg",
+  "skills/hallmark/references/themes/dose.jpg",
+  "skills/hallmark/references/themes/dusk.jpg",
+  "skills/hallmark/references/themes/editorial.jpg",
+  "skills/hallmark/references/themes/formwork.jpg",
+  "skills/hallmark/references/themes/furrow.jpg",
+  "skills/hallmark/references/themes/garden.jpg",
+  "skills/hallmark/references/themes/grid.jpg",
+  "skills/hallmark/references/themes/halftone.jpg",
+  "skills/hallmark/references/themes/hedgerow.jpg",
+  "skills/hallmark/references/themes/hum.jpg",
+  "skills/hallmark/references/themes/ink.jpg",
+  "skills/hallmark/references/themes/kiln.jpg",
+  "skills/hallmark/references/themes/loom.jpg",
+  "skills/hallmark/references/themes/lumen.jpg",
+  "skills/hallmark/references/themes/manifesto.jpg",
+  "skills/hallmark/references/themes/midnight.jpg",
+  "skills/hallmark/references/themes/newsprint.jpg",
+  "skills/hallmark/references/themes/overprint.jpg",
+  "skills/hallmark/references/themes/pasteup.jpg",
+  "skills/hallmark/references/themes/piste.jpg",
+  "skills/hallmark/references/themes/refract.jpg",
+  "skills/hallmark/references/themes/ribbon.jpg",
+  "skills/hallmark/references/themes/rim.jpg",
+  "skills/hallmark/references/themes/riso.jpg",
+  "skills/hallmark/references/themes/solstice.jpg",
+  "skills/hallmark/references/themes/specimen.jpg",
+  "skills/hallmark/references/themes/spore.jpg",
+  "skills/hallmark/references/themes/sport.jpg",
+  "skills/hallmark/references/themes/squeeze.jpg",
+  "skills/hallmark/references/themes/sticker.jpg",
+  "skills/hallmark/references/themes/studio.jpg",
+  "skills/hallmark/references/themes/terminal.jpg",
+  "skills/hallmark/references/themes/terrazzo.jpg",
+  "skills/hallmark/references/themes/ultraviolet.jpg",
+  "skills/hallmark/references/themes/vantage.jpg",
+  "skills/hallmark/references/themes/vellum.jpg",
+  "skills/hallmark/references/themes/wayfind.jpg",
+  "skills/hallmark/references/themes/werkstatt.jpg",
+  "skills/hallmark/scripts/fixtures/exemplars/atmospheric.html",
+  "skills/hallmark/scripts/fixtures/exemplars/editorial.html",
+  "skills/hallmark/scripts/fixtures/exemplars/modern-minimal.html",
+  "skills/hallmark/scripts/fixtures/exemplars/playful.html",
+  "skills/hallmark/scripts/fixtures/eyebrow-fail/index.html",
+  "skills/hallmark/scripts/fixtures/eyebrow-pass/index.html",
+  "skills/hallmark/scripts/fixtures/kept/after.html",
+  "skills/hallmark/scripts/fixtures/kept/before.html",
+  "skills/hallmark/scripts/fixtures/slopped.html",
+  "skills/hallmark/scripts/fixtures/tailwind-fail/Feature.vue",
+  "skills/hallmark/scripts/fixtures/tailwind-fail/Hero.tsx",
+  "skills/hallmark/scripts/fixtures/tailwind-fail/index.html",
+  "skills/hallmark/scripts/fixtures/tailwind-fail/style.css",
+  "skills/hallmark/scripts/fixtures/tailwind-pass/Hero.tsx",
+  "skills/hallmark/scripts/fixtures/tailwind-pass/index.html",
+  "skills/hallmark/scripts/fixtures/tailwind-pass/style.css",
+  "skills/hallmark/scripts/fixtures/waiver/index.html",
+  "skills/hallmark/scripts/install-hook.mjs",
+  "skills/hallmark/scripts/install.mjs",
+  "skills/hallmark/scripts/refcheck.mjs"
+ ],
+ "files": {
+  "skills/hallmark/LICENSE": {
+   "upstream": "skills/hallmark/LICENSE",
+   "sha256": "06088a8b94598626f27612dea42300154bf7be967c85d9d3eee4490cb056af7d",
+   "blob": "f4bfc53d8d773d3b10d95c2d58a5773dd4e2f3aa",
+   "mode": "100644"
+  },
+  "skills/hallmark/SKILL.md": {
+   "upstream": "skills/hallmark/SKILL.md",
+   "sha256": "25a1ff92d925b2389e8409f42fb8ad7e033fceca8b5d1f07ed4ca4c28da53dc3",
+   "blob": "d27771723e827baa5e2b34d01492783a42df9174",
+   "mode": "100644"
+  },
+  "skills/hallmark/agents/openai.yaml": {
+   "upstream": "skills/hallmark/agents/openai.yaml",
+   "sha256": "0bc6fa7d573c926e8d3fe04a5afc8191096e5aa7287598a59b6c7e6321b53298",
+   "blob": "559441fa41d60f33d67f7d5a78613ee72989bf30",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/anatomy.md": {
+   "upstream": "skills/hallmark/references/anatomy.md",
+   "sha256": "70f570279d42ac0bef4af809c80b522e550c6dacaaa0a93349a0fff0d5b93500",
+   "blob": "d9f7de0d901536456de4da736649bae2288fb3a9",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/brand-truth.md": {
+   "upstream": "skills/hallmark/references/brand-truth.md",
+   "sha256": "01c17c45d3b213f80ef28c93548d1b99aa2afad75ed8b236811ba56169c3f068",
+   "blob": "5f0f5dd0c40de9e599897fa08d052c7987fca502",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/comp.md": {
+   "upstream": "skills/hallmark/references/comp.md",
+   "sha256": "597f16de607e136f93ea5829c9d82663223a1c1c0423d581b55fa0b51c08f37f",
+   "blob": "cc4a77e61ecf505476af0e50b09f8a04786dc6cd",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/craft.md": {
+   "upstream": "skills/hallmark/references/craft.md",
+   "sha256": "1b7b40f81f0fe1c04dce133696182ca1229d16162f8f3203603f24a0f585c41c",
+   "blob": "8f7d1101b33845302b5a3b9015752166df1c54a2",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/dark-mode.md": {
+   "upstream": "skills/hallmark/references/dark-mode.md",
+   "sha256": "99e86439eed1caa9e898a31baa05e65c856c53918faf6fdcb5d71a8e0f1ef131",
+   "blob": "1391d8aacdbf4921650ed4a7c162e5f53e6f5ebe",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/data-viz.md": {
+   "upstream": "skills/hallmark/references/data-viz.md",
+   "sha256": "1a26f9e8e16ca065d7412d2db57200698459cdbda498e08e8eaf0ea7a82097dc",
+   "blob": "3149ce3de5f7872b4f79664ea6a154cd60458083",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/design-md.md": {
+   "upstream": "skills/hallmark/references/design-md.md",
+   "sha256": "839d4cd8d5b07007854e9c6de95491691725f2968a0922f9b8fcfdbe42e2784c",
+   "blob": "31491105043400ed1e6f8ca1c5473e6adc153473",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/direction.md": {
+   "upstream": "skills/hallmark/references/direction.md",
+   "sha256": "19e00099e95be52df2ae893881e29a23cd7a5ee5dc8434a87588376818851642",
+   "blob": "b7fc330d79b93fb35e63979da14438057b63da3e",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/export-formats.md": {
+   "upstream": "skills/hallmark/references/export-formats.md",
+   "sha256": "3078bcb08e6324904ee156b6871dc0f47aa170e5d4baf09d43a5c48c46ca7c6b",
+   "blob": "0e4957fb03d74aa6fd19e4cea705598a99d79831",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/flow.md": {
+   "upstream": "skills/hallmark/references/flow.md",
+   "sha256": "45565a78e3c7fdc33791c5074c8640199e2f711e62131cd4ef1cb337010b6e85",
+   "blob": "0a14a016856b8c3811eae77ff9d366b67a1a612f",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/fonts.md": {
+   "upstream": "skills/hallmark/references/fonts.md",
+   "sha256": "87d50b1b32b9c901d9df5376870cf6d8e39334f468fe9a582a2720d9da5586ec",
+   "blob": "7ba9a39552011bbe3eb25f9b6457ec4f6fb774e2",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/gates.md": {
+   "upstream": "skills/hallmark/references/gates.md",
+   "sha256": "63ad234a1acab5e081dfe8ecf2331518a43cbf42760dc5c6ababfb24d7b3e50c",
+   "blob": "774ce3540df48b5ed3f7c77bc447db0fb47736c8",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/genres/atmospheric.md": {
+   "upstream": "skills/hallmark/references/genres/atmospheric.md",
+   "sha256": "39c2ba5b282fcc934742aeb410d1bb4d6c65f1da1514b0f18a9600aa8f13f289",
+   "blob": "eb61071a2fc5504eb7349835fbfca87f9dab5b7a",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/genres/editorial.md": {
+   "upstream": "skills/hallmark/references/genres/editorial.md",
+   "sha256": "1d47311bfd4d3e4c02f88f25e4852d920d168eb838370fee77b917bcc6e3592c",
+   "blob": "1dc571fe90ba6aa40b78e27a5bd3c7fbcee39540",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/genres/modern-minimal.md": {
+   "upstream": "skills/hallmark/references/genres/modern-minimal.md",
+   "sha256": "5f84b3c056be101707c6f2d7ac929e879f5ab7b009ac8426156c11054193cd9b",
+   "blob": "05fd07ca05cc6162cf1917aeeccda0c3c3626e0f",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/genres/playful.md": {
+   "upstream": "skills/hallmark/references/genres/playful.md",
+   "sha256": "974e13a9ada8b49e2cfcc05efb8235be60103acef02e390d8f819cd8e2abd3a9",
+   "blob": "760acc09591d8e83ac5d93a79cc679817130daf7",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/imagery.md": {
+   "upstream": "skills/hallmark/references/imagery.md",
+   "sha256": "b5a4abaa3fd949ac2e2890c9aa37b2953587ed419fdd1b4ff343a4fc04838e7e",
+   "blob": "17a0ece00d175dbda53be29d148b5cac8b9c0e13",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/interaction-and-states.md": {
+   "upstream": "skills/hallmark/references/interaction-and-states.md",
+   "sha256": "08e232008734fce86b1ec6085db72342e90d2f855351eb84f20ea3799fe0808a",
+   "blob": "3dd5105c1c59093a26ea916794d7f02b6fa2cf67",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/layout.md": {
+   "upstream": "skills/hallmark/references/layout.md",
+   "sha256": "fa904b5b46f19ca08ee325c99deb1cf30c67acb00106e7b74945c30e428c7eab",
+   "blob": "be588beff9e5f610db86c4f5ca7ff4d60df897e6",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures.md": {
+   "upstream": "skills/hallmark/references/macrostructures.md",
+   "sha256": "3389dbc0434bd9a6161896a19b4ec6664859d49f1b0329cd0e8fae6f045e1c43",
+   "blob": "9e6a0b98e7bdb489a48ab525652428e45d5b43c1",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/01-bento-grid.md": {
+   "upstream": "skills/hallmark/references/macrostructures/01-bento-grid.md",
+   "sha256": "1efd7da3e1857d22da50307af0effa92200198b59c26f0e429b8ffcaa9cd96ae",
+   "blob": "3bfaa8a4d6ff5a0ba5832a6b1967bda973aecb36",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/02-long-document.md": {
+   "upstream": "skills/hallmark/references/macrostructures/02-long-document.md",
+   "sha256": "4d7524c16b764daef6fd8bc5e6757dcc4d886addf33f324b32f024c64bcbc573",
+   "blob": "8ea29c3ba11d00fa6b701777f162051686af7dae",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/03-marquee-hero.md": {
+   "upstream": "skills/hallmark/references/macrostructures/03-marquee-hero.md",
+   "sha256": "cb379a2eb56d8503265ab541ef9711e59bb2d51dadedfe3e47ccb697b3948e79",
+   "blob": "64a6b8ab5bbf1a4d78f7fbe1eb7d07c6c8db7b56",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/04-stat-led.md": {
+   "upstream": "skills/hallmark/references/macrostructures/04-stat-led.md",
+   "sha256": "2a065807340244d188de455fdb21c7ff8906bb95240873d0993f734c85c8f4a1",
+   "blob": "70caf79efabb1074d41657012629d87fa4ecf62a",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/05-workbench.md": {
+   "upstream": "skills/hallmark/references/macrostructures/05-workbench.md",
+   "sha256": "6bc0ccd0604afef8c749706189cf91b35078bcc52738eb29603840db0db151c6",
+   "blob": "fbcb0a9c262d7df6e1644e85d0ffa91b0742f9d5",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/06-conversational-faq.md": {
+   "upstream": "skills/hallmark/references/macrostructures/06-conversational-faq.md",
+   "sha256": "000a182731d543eaa9e2fda2be50fd4032ff25ed83a6befbbb0cd03567dbe15b",
+   "blob": "8a4cdc9858a9edb2fc588fd00d5a46feeabf8801",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/07-manifesto.md": {
+   "upstream": "skills/hallmark/references/macrostructures/07-manifesto.md",
+   "sha256": "3ac47d67fa8e0ee8db2fba2fd329c5ffcbf981a0b760e482748935f6e3411c46",
+   "blob": "3f98a39d97c743a76af0951b4bc2b2c777f18091",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/08-photographic.md": {
+   "upstream": "skills/hallmark/references/macrostructures/08-photographic.md",
+   "sha256": "d07d2508845277b68cb8cacc8f82d8fac84b69063277ec277d19a7f59fe43992",
+   "blob": "3bc446e2c8c57efaf79db683910fc5f7fdaea0ad",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/09-quote-led.md": {
+   "upstream": "skills/hallmark/references/macrostructures/09-quote-led.md",
+   "sha256": "1609ddc34d842c730e4d18bacc010b1b43cfa59892043c523b51bdffead0fb56",
+   "blob": "5cbac1b0043de3270ebfd9edab0139d8c6865e69",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/10-specimen.md": {
+   "upstream": "skills/hallmark/references/macrostructures/10-specimen.md",
+   "sha256": "18313a17c6512afda417c8c19f4e0bea1549ecd5fc43e87ba89fb4e526b56eea",
+   "blob": "faabe0ecb2141ebe31b3cc133a3f3eaf0c898bf3",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/11-catalogue.md": {
+   "upstream": "skills/hallmark/references/macrostructures/11-catalogue.md",
+   "sha256": "20708e7e61ed610506971f48d36eec88512423b77855f78cc8c65b75ba90e0ae",
+   "blob": "3784bbb2abf0b3e387b5cda01cfb8f89c7203f4b",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/12-letter.md": {
+   "upstream": "skills/hallmark/references/macrostructures/12-letter.md",
+   "sha256": "0d6779b5da3e3a44b573b3665daefe489fbd4857c1124ca4b8ff0fe6fc17a34f",
+   "blob": "c66278dd6f38712143d538b7f37fe2811e88e825",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/13-index-first.md": {
+   "upstream": "skills/hallmark/references/macrostructures/13-index-first.md",
+   "sha256": "ba7b085f91a8c2eb0baf376b88e4307b38250a2d4dd707fb22f2e5faeb32a7e2",
+   "blob": "66c9b96311c8873ab0220b04900d1834f8381786",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/14-narrative-workflow.md": {
+   "upstream": "skills/hallmark/references/macrostructures/14-narrative-workflow.md",
+   "sha256": "4e120a5cb04a54aa172a5d2b5e727c27603ccddf37a2f8c9a15756993a9337fc",
+   "blob": "ba64c554d77c0fb690656797f5aa5393fbfed237",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/15-split-studio.md": {
+   "upstream": "skills/hallmark/references/macrostructures/15-split-studio.md",
+   "sha256": "49c758082ce6d4a6e541bb8706412fe4eb92ffd9dd772208b6a21142aa4bf3c6",
+   "blob": "89135a7d427037750221fa39016b0f98e4c62aa1",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/16-feature-stack.md": {
+   "upstream": "skills/hallmark/references/macrostructures/16-feature-stack.md",
+   "sha256": "df26d2d4094b3059c0a35db94389524b0ba76f8fe64e89d4e6ba3def7eed1ece",
+   "blob": "4f07c72a9babec80d3c1f47cd06cbceb455602a1",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/17-type-specimen.md": {
+   "upstream": "skills/hallmark/references/macrostructures/17-type-specimen.md",
+   "sha256": "4ff06c001a10f973b9c70b1a0fa21ea1ce54ac0e3727cf8b5ec2e0a1b6bf568d",
+   "blob": "fe3298a1d09d9372addf25b75b2a1d68e6905e2b",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/18-portfolio-grid.md": {
+   "upstream": "skills/hallmark/references/macrostructures/18-portfolio-grid.md",
+   "sha256": "d035dee299e329efeea7dd3b4b897b11f0547f03ac4c2f0c62a3fd422d30f618",
+   "blob": "081f95bd5c96cb8b194e6c0893b077465691339d",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/19-map-diagram.md": {
+   "upstream": "skills/hallmark/references/macrostructures/19-map-diagram.md",
+   "sha256": "b8c0021c01fb8a970907caefa74a8c462cb573a2666fc4b223082812f9b19399",
+   "blob": "4ca56daa2664618b4a3cf8577f146a6d9f76d99f",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/20-ecosystem-index.md": {
+   "upstream": "skills/hallmark/references/macrostructures/20-ecosystem-index.md",
+   "sha256": "27b1909d028f553efbc112ecd5a8c843e191e97a286bf2bd258daad86bfa64c4",
+   "blob": "69817508497058c6f681b2a02825dffca336d487",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/macrostructures/21-component-playground.md": {
+   "upstream": "skills/hallmark/references/macrostructures/21-component-playground.md",
+   "sha256": "830b52f62bdb722f3bd954f4f9ce60fc8c6e521ba2cc1f173e6c0fc3b5611413",
+   "blob": "b2b99281268f95becbe6dac710e5ab3acefae39c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/microinteractions.md": {
+   "upstream": "skills/hallmark/references/microinteractions.md",
+   "sha256": "e7ec31f08e58edcdb8986fc57d276466c1f7b08445756f3a7cf6f46e8b5a8c8e",
+   "blob": "3f5e03ae0907e3cc3290decfbcf0ffe58c2a135c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/patterns.md": {
+   "upstream": "skills/hallmark/references/patterns.md",
+   "sha256": "bb15954cb04083c9a3b796dda5df5c33c9c05dddf2341d7befe2571e715f613b",
+   "blob": "c3dc3fb982b93699a9a2066200466194e0977a1b",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/redesign.md": {
+   "upstream": "skills/hallmark/references/redesign.md",
+   "sha256": "cd3fc1dd10af22bb0374b41340fbab8f2b3be997ea5b63716da3d44ba0bb0552",
+   "blob": "17f73ad18744e24173b3748fcfa0ca412202889f",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/responsive.md": {
+   "upstream": "skills/hallmark/references/responsive.md",
+   "sha256": "7ed0cd54fda3351be9e7b5514ebf4a5306a837cf3d893b31e96c7fd490b348ea",
+   "blob": "c23bfed559303730ff7f8ce9e375e16c1ae3d4e1",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/review-finish.md": {
+   "upstream": "skills/hallmark/references/review-finish.md",
+   "sha256": "9d00de59e71ee2516212140b0512d6d2e90a120d4a328eeba9cb12396ff38d64",
+   "blob": "00941b18b9d741c49edd530e20f87e37ed8ac296",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/review-hero.md": {
+   "upstream": "skills/hallmark/references/review-hero.md",
+   "sha256": "e84702982bcad34fc8ef4aaf032a5482356912992ce72d84b12e05cd4a519fb2",
+   "blob": "8b849c658e200cce055c729cd82c2d84172f3267",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/scroll-choreography.md": {
+   "upstream": "skills/hallmark/references/scroll-choreography.md",
+   "sha256": "809c0fc84011412766db10e3e14def2b3ce02f0452d7fb2e60adecfa85991393",
+   "blob": "91af31c920ba4d22d37dfd7c1e826f240f3bda00",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/texture.md": {
+   "upstream": "skills/hallmark/references/texture.md",
+   "sha256": "b5749c008fef0511188d491aec0c5556b19f6731b13539934ecc1cb584a2e756",
+   "blob": "f47bc76091fb32d6fa3669bf3c9db8ac1782422e",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/README.md": {
+   "upstream": "skills/hallmark/references/themes/README.md",
+   "sha256": "aece9d5f273ef6a4eb3e59833bc428c17232ad4ade1247637355636087d5264d",
+   "blob": "cceba054de9c3db835673c16bc3f0476add50cea",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/almanac.md": {
+   "upstream": "skills/hallmark/references/themes/almanac.md",
+   "sha256": "b5c85e7c96cda4f13af81dd42c020c7eae7c4f63b4530b7e9fcef09340d96efc",
+   "blob": "95a577829583345d0c9fcb3431747436d3a05cdc",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/arcade.md": {
+   "upstream": "skills/hallmark/references/themes/arcade.md",
+   "sha256": "a6e6d644412e9cbe0172fa784bc05a69767c792a642ab860e6da1af33ef861f9",
+   "blob": "467e32f19c51b781e9fdae1bb29efc7afca40463",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/atelier.md": {
+   "upstream": "skills/hallmark/references/themes/atelier.md",
+   "sha256": "8cffffd26a857adab803fd0e1c5eb49ade86cd486a8dc3c576728032a84a5ccf",
+   "blob": "8f198af3dd3874fd69fd158e8e0885e2476b6722",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/bloom.md": {
+   "upstream": "skills/hallmark/references/themes/bloom.md",
+   "sha256": "2965adfc995a5605078f45b4ca09a549f1587e6b960fa1986890850668543660",
+   "blob": "2484a9460ed7a371eae02eb14aa9441f1eb06132",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/blueprint.md": {
+   "upstream": "skills/hallmark/references/themes/blueprint.md",
+   "sha256": "9de09c493df045f8b3f720638248d21f857b076be264e7ee0262e9877a5040d6",
+   "blob": "6822eb54d04a3455fdbabf97676aeb993f5c2c6c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/broadside.md": {
+   "upstream": "skills/hallmark/references/themes/broadside.md",
+   "sha256": "9a4ebceef5ca462a0b7ade98250a07ad33cfa40f97f6e78434e638fa9e626222",
+   "blob": "24c416de7d1b4650fa6f961af972da57ccd8789f",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/brutal.md": {
+   "upstream": "skills/hallmark/references/themes/brutal.md",
+   "sha256": "4e087f62f815635cbf9c1a7f2a58db77c610ae97f31bef70acd777871859aa97",
+   "blob": "7ec6e2c650fb557e3dce8f7c31f79c3266c85664",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/carnival.md": {
+   "upstream": "skills/hallmark/references/themes/carnival.md",
+   "sha256": "fc8e876e5a1c23bda103719b61a7440e203ff91ff050ebded53f732108c43b82",
+   "blob": "538beda4549192f97dd481b19fa634fce84d099c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/cobalt.md": {
+   "upstream": "skills/hallmark/references/themes/cobalt.md",
+   "sha256": "d24a5609f0c42e6ff6a1976d5f7f0651ec40eed69db5d6c4680c1385a65f2007",
+   "blob": "bc2882dd824ab4b0b7c00327ea5d60f3717b2763",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/console.md": {
+   "upstream": "skills/hallmark/references/themes/console.md",
+   "sha256": "d52eda46d5480ab0123f78ab83ea1187813f4b26ddb02d0f4e61e2b511ae6309",
+   "blob": "4ee7fd86c22ddad7e25e5f6e943922066e2e2b11",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/coral.md": {
+   "upstream": "skills/hallmark/references/themes/coral.md",
+   "sha256": "f8444921b5e751b3b9be94d448aaee502e509729aa89411ff887087777bb1c28",
+   "blob": "5332c4d49f1bfac7e62025bab8bbafd11078ce4f",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/darkroom.md": {
+   "upstream": "skills/hallmark/references/themes/darkroom.md",
+   "sha256": "946e2233f310dde0304f970070408a7ff6581e3b442faaa14da80f39e31e9499",
+   "blob": "7267c24eb5cf813228e895c79a5caf824d0f16f7",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/dose.md": {
+   "upstream": "skills/hallmark/references/themes/dose.md",
+   "sha256": "780a5e57a813b3008ac6a8c7287affc5516a68e51310d77df890286f6d6369f5",
+   "blob": "eafeaef9dc5cc97d819bba89944117d5b7410bc4",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/dusk.md": {
+   "upstream": "skills/hallmark/references/themes/dusk.md",
+   "sha256": "47cf0ede99ba90b88cec14eb2ec80d5fd9e003e9ed3878708275553e2c52d4bf",
+   "blob": "9a59843d0a3b848843e7f197863ddbb186b6343c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/editorial.md": {
+   "upstream": "skills/hallmark/references/themes/editorial.md",
+   "sha256": "cafd967f2ac736c9927a749de1b8f4216183e3fa3adce95e638d124b2de5876f",
+   "blob": "643320eecc1a3bdde2c52ee6e65575641543bbaf",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/formwork.md": {
+   "upstream": "skills/hallmark/references/themes/formwork.md",
+   "sha256": "e2c0f88b2a83eec6ac076be536cd71cfd883bb21a234c268bba0ccd12e773416",
+   "blob": "e93ec6be1983cae35a73752b1bc669ba46731c0c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/furrow.md": {
+   "upstream": "skills/hallmark/references/themes/furrow.md",
+   "sha256": "16f9ffc0fe9588754d25a96a32d6ca25e4b5a918623e90a1ee0dc5006953fc89",
+   "blob": "41a5b4095703fe1a4e57a78af8ec53d1486876ff",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/garden.md": {
+   "upstream": "skills/hallmark/references/themes/garden.md",
+   "sha256": "2f2197da95ef795a10eeef1c60f9ae98e62ca110c34260035b9789c1f3486185",
+   "blob": "192c137d1d58ab388ae2e352f336a37bbfbaaef4",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/grid.md": {
+   "upstream": "skills/hallmark/references/themes/grid.md",
+   "sha256": "0f81c1efa45ec32ae3bd24b15eb96144edff8e018eec7a3d6a6a8bb25e42f520",
+   "blob": "9a6e36c7e91c942144e57d57bd481ec6252585e4",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/halftone.md": {
+   "upstream": "skills/hallmark/references/themes/halftone.md",
+   "sha256": "a19da44930e5c475cf9c285f939d959ab590da17faea21426387332a5d8ca682",
+   "blob": "023b3ff97079ef550e05f93b5c0f0955f53057bd",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/hedgerow.md": {
+   "upstream": "skills/hallmark/references/themes/hedgerow.md",
+   "sha256": "23371c7894032ccc4f51236539d535d9c47b201b3007a40949db234c19b84ddd",
+   "blob": "d6de4004f2ddb603956985e54020282fadc57793",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/hum.md": {
+   "upstream": "skills/hallmark/references/themes/hum.md",
+   "sha256": "180ef874894a544230f4e3a867a7120da3a79d5994d15737e806e0373e4cc5c7",
+   "blob": "db8759b79d622ade130c479870aae326300eeeab",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/index.json": {
+   "upstream": "skills/hallmark/references/themes/index.json",
+   "sha256": "df8299332a805b9c8504c10574258a98057fb9e63e87e85a7e8bbb76333fb403",
+   "blob": "e24a4e04625076b10635598bd6eb14d4248957f3",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/ink.md": {
+   "upstream": "skills/hallmark/references/themes/ink.md",
+   "sha256": "7dd419ccec59a33461c86d894856085edaeddd6139f8eb9eff22f22e45fbdf9f",
+   "blob": "c26adaf74125aef301bc2a70a5bd38da51f45545",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/kiln.md": {
+   "upstream": "skills/hallmark/references/themes/kiln.md",
+   "sha256": "94909cf878a89b88ba96d3a69dfccb64ce32968a3a4544a920a9c927d5a56fd4",
+   "blob": "6fc2bda6fb8cb44200764a2d803fd6e946691d02",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/loom.md": {
+   "upstream": "skills/hallmark/references/themes/loom.md",
+   "sha256": "835789caae2ef444b1db967411856f79ddcf844c8a988f75a62f3f5d4b53d819",
+   "blob": "5440247d75eca729bffaae5130bab16c45c67f88",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/lumen.md": {
+   "upstream": "skills/hallmark/references/themes/lumen.md",
+   "sha256": "8a202bde1d9eb9b4615b0f0e2279adeb5c95a82dedd003fdba1613c70b715450",
+   "blob": "9d2490710cad296e226dc45a3c4cb548ca1bb977",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/manifesto.md": {
+   "upstream": "skills/hallmark/references/themes/manifesto.md",
+   "sha256": "326c63f732128ed5cda8ff3187793ffe9bcb56936387367cc932b5a3e216b862",
+   "blob": "85c2e6a415f31214a40f7e25aded4cd7846b5975",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/midnight.md": {
+   "upstream": "skills/hallmark/references/themes/midnight.md",
+   "sha256": "cb29035685b63a56762c291dc4246c6a66c6ec6d8bc4559d6823ee2d2a80e40d",
+   "blob": "6f159b3a7995eeb75787a0641ff3fb56eec54db5",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/newsprint.md": {
+   "upstream": "skills/hallmark/references/themes/newsprint.md",
+   "sha256": "2fd477d10f9dde600993486a7dab5ff5f643c8821833cb3837f176005eafb5e0",
+   "blob": "86ef15b0269a3d26f50b3d8ea9694fc2b77fe689",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/overprint.md": {
+   "upstream": "skills/hallmark/references/themes/overprint.md",
+   "sha256": "79010c27e619fad842da18559658c83cec86172266b00bb5933871b3f7bf852b",
+   "blob": "41f5105616bda783a115e5b94ac31b92f2519833",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/pasteup.md": {
+   "upstream": "skills/hallmark/references/themes/pasteup.md",
+   "sha256": "7e8d5013bda81e945f27b401f967f08e41bbc7d10ddc14d1ef7dd91c25f95c3d",
+   "blob": "27c4dc5af15dcfa21e43f6eea3f183a01b9c01ba",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/piste.md": {
+   "upstream": "skills/hallmark/references/themes/piste.md",
+   "sha256": "79c1b4b7297467d9a0d057ad790d475f4b88a41af1867172dfd77b951cda803a",
+   "blob": "68826cf344e292981b7c8c0f1d492c722dda8372",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/refract.md": {
+   "upstream": "skills/hallmark/references/themes/refract.md",
+   "sha256": "74970c11c5759685610608fc569e18eb409f12ac479c3409c9156a8a352c5fdc",
+   "blob": "e01f97d624042eecdfb7e12e4a30bf9716dd7b51",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/ribbon.md": {
+   "upstream": "skills/hallmark/references/themes/ribbon.md",
+   "sha256": "0bcc8708d3ceec0cb246fa134a4fcf8e019fa8012af1f87646737cc1c8b324a1",
+   "blob": "871922497d85ecb6c214c8f05970966f9c72db6d",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/rim.md": {
+   "upstream": "skills/hallmark/references/themes/rim.md",
+   "sha256": "ac134e8ccbda501b660f4cd83ace56059f2b254b187f574a612460c7c796e49f",
+   "blob": "b0e7d64a9b696a8deaadd47d50ed81448446e7a8",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/riso.md": {
+   "upstream": "skills/hallmark/references/themes/riso.md",
+   "sha256": "333577e736f793c94161994dd8087c583ab53dd5af50a5dc63c3bfc5f4bf28ad",
+   "blob": "57a43a381d67c4b02f225221b84b2bf91b0fafe5",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/solstice.md": {
+   "upstream": "skills/hallmark/references/themes/solstice.md",
+   "sha256": "6813e8556faa9e34637ce52a2cefadbf74795e7956503f14cf1c672c3f92c5d1",
+   "blob": "4fbff7a0916178e5203f20e6cf67179e80e9c1a7",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/specimen.md": {
+   "upstream": "skills/hallmark/references/themes/specimen.md",
+   "sha256": "f9ed583e2adfe885eced94374fed3f697ff932705eee029a9c226d4db39667ed",
+   "blob": "84bca5870b8b047c1888a4a308884f1a563c8b04",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/spore.md": {
+   "upstream": "skills/hallmark/references/themes/spore.md",
+   "sha256": "2b4f30287f6779404104a98bddd2f2876f000abad2533228c9aa105b3c30ca7d",
+   "blob": "fe951acf75c426ce7306afce3cc9d7f47f9084ce",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/sport.md": {
+   "upstream": "skills/hallmark/references/themes/sport.md",
+   "sha256": "5714651df7c46925357d33876e498ac4ecaa3c8b3d50bee5ead3bf7ce54d863a",
+   "blob": "92c1b40c6b9775e2a7756ac3c163e74639fb1547",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/squeeze.md": {
+   "upstream": "skills/hallmark/references/themes/squeeze.md",
+   "sha256": "d007f2f09a6d8da5cf53a9fe98bc9cb3ead7f013d71569b605e65e7f295b2cb5",
+   "blob": "32a64887576e12c6b4e73527dcb7baa7567a660a",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/sticker.md": {
+   "upstream": "skills/hallmark/references/themes/sticker.md",
+   "sha256": "5c266f131f506d7ba2e51e12015141e8d1ac394523ce537504a6b21336f0f953",
+   "blob": "dc6ea866432e167fc2478d7e63e548431a12e30d",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/studio.md": {
+   "upstream": "skills/hallmark/references/themes/studio.md",
+   "sha256": "7e0352a5de3485bbc61043c412258490aa7750eab03a5534a422a717f44db194",
+   "blob": "0b2e82e96267b98c96f30318c137cb337900906c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/terminal.md": {
+   "upstream": "skills/hallmark/references/themes/terminal.md",
+   "sha256": "cb5104b31d31e2ece13cc736a2ee5819d9b80a3272ff5a905e0f772c2865f19e",
+   "blob": "c7ebe754d023cff87bf285bc635b49f6c364a5cb",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/terrazzo.md": {
+   "upstream": "skills/hallmark/references/themes/terrazzo.md",
+   "sha256": "9f2a03aa0670fe7caef3789e077eb917483034a38c756b45977ea9f27ee1dc02",
+   "blob": "769ab661dd2d322ba876d125b8ca8fa4f2c6ba6c",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/ultraviolet.md": {
+   "upstream": "skills/hallmark/references/themes/ultraviolet.md",
+   "sha256": "b706384370d51ad849faaa87f80c2beeff9d14ca2f253385d20e28ac09bc9569",
+   "blob": "7b44a71169f22eaeca89825d68962a523d743064",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/vantage.md": {
+   "upstream": "skills/hallmark/references/themes/vantage.md",
+   "sha256": "08405ead89e69270c2fa5946c6d3f7905168d10eb06a34502c5c129d262f96db",
+   "blob": "dfa1c3dfb16dbe59da604e1a87ae239cc74e0ec8",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/vellum.md": {
+   "upstream": "skills/hallmark/references/themes/vellum.md",
+   "sha256": "4914d9e6ca704d55b57fe6630ca2edc1ed49dea0fdd0912c97d437939fd3e893",
+   "blob": "68ec337fa89c69cdf15b8039b5ca504ca8d4a3ef",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/wayfind.md": {
+   "upstream": "skills/hallmark/references/themes/wayfind.md",
+   "sha256": "7849521b843f82a3956727e0d06a595d6ecec5f501f4c31f577bf4bd1bae9e2c",
+   "blob": "a77e14846f745b5a055804d52caddde038e68eb7",
+   "mode": "100644"
+  },
+  "skills/hallmark/references/themes/werkstatt.md": {
+   "upstream": "skills/hallmark/references/themes/werkstatt.md",
+   "sha256": "b3a31e2acb8a15ca46bbb194f23b9555ef19d9c70ceb1cf67d9fde3b55b7e08a",
+   "blob": "7258a1bea0efb96e9df345fb995d65d2b566ecf4",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/capture.mjs": {
+   "upstream": "skills/hallmark/scripts/capture.mjs",
+   "sha256": "17c36f7400c2633ac37d87b236894385f6e72c3026ab916deed27b5e17e1cc2a",
+   "blob": "bbdc77baf5d8873354b2e5556cba26a2b93299c3",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/imagegen.mjs": {
+   "upstream": "skills/hallmark/scripts/imagegen.mjs",
+   "sha256": "0e9e2dde64a0b1a7d45085b3d9ec51f49f2927e544400bfa33207fb2c9b579cc",
+   "blob": "25deab362e8de6e29da1c3fc106bd14d8f1717e6",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/lint-hook.mjs": {
+   "upstream": "skills/hallmark/scripts/lint-hook.mjs",
+   "sha256": "04fd40ab9dfaffb049da6b8b69811e306a5dee8c9acfc4d6817987d8a4671738",
+   "blob": "dff226020ea3401814c1ba9f83c628187c2e5573",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/photos.json": {
+   "upstream": "skills/hallmark/scripts/photos.json",
+   "sha256": "1ee6836583e8048400876351c0605bc3f08515fecfe68aca3712b9e75498bc65",
+   "blob": "b9406f915a83f210e8d439813cb0f435af925248",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/picture.mjs": {
+   "upstream": "skills/hallmark/scripts/picture.mjs",
+   "sha256": "21db01db66d393d58d2dd799e7614a6033d1a56891d9d9d8cae0c42ed42592c1",
+   "blob": "5ee04de24e8629b746030cc56735fa2b6ebcdaf1",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/sloplint-render.mjs": {
+   "upstream": "skills/hallmark/scripts/sloplint-render.mjs",
+   "sha256": "3af79afa100a9804f248ade24d5128cea4fde1ef6d1a279f1dd935bfe6dc41cd",
+   "blob": "0ecc64bc79aa34db1fadc7178617bcc53c47e064",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/sloplint.mjs": {
+   "upstream": "skills/hallmark/scripts/sloplint.mjs",
+   "sha256": "05b07befd4a0c24845a29fbd9d4b7c0e4b154eeefa8067e8b11a4f44c9f7ab36",
+   "blob": "72be1622abc12b8530e480254019420d56997648",
+   "mode": "100644"
+  },
+  "skills/hallmark/scripts/theme.mjs": {
+   "upstream": "skills/hallmark/scripts/theme.mjs",
+   "sha256": "2c7e23abdd86fc2e3cf918cc7438f7759d20bcdb5472120232fffbfecd9ee7db",
+   "blob": "1bdfbf10de321943d749ed209e900bc287765f49",
+   "mode": "100644"
+  },
+  "LICENSE": {
+   "upstream": "LICENSE",
+   "sha256": "06088a8b94598626f27612dea42300154bf7be967c85d9d3eee4490cb056af7d",
+   "blob": "f4bfc53d8d773d3b10d95c2d58a5773dd4e2f3aa",
+   "mode": "100644"
+  }
+ }
+}

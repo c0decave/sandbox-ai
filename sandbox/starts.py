@@ -37,7 +37,9 @@ its own. Colour on a terminal only (--no-color, NO_COLOR). --json writes the sam
 scripts and the desktop app; "attachable" says whether attach can bring a start's terminal here, and "attach_why"
 why not (mcp, damaged, stopped, foreground, paused; null when it can); "listed_under" the start a row is shown
 below, an MCP server's "serves" the starts that use it (the one it was started for first, "started_for";
-"owner_recorded": its mcp.json says whom it was started for), a team member's "lead" its lead's name.
+"owner_recorded": its mcp.json says whom it was started for), a team member's "lead" its lead's name, a running
+session's "app_tab" the desktop app's terminal tab it was started in (SANDBOX_AI_APP_TAB: the app attaches a tab
+for it again after a restart).
 
 Every start has a name: --name NAME, or a codename of three words such as brisk-otter-lantern (codenames.py),
 or with --name-style project or "name_style": "project" in defaults.json AGENT-PROJECT-xxxx (PROJECT:
@@ -421,7 +423,9 @@ def start_entries(prune=True):
                       "expired": bool(expires and state == "stopped" and expires < now()),
                       "workspace": text(data.get("workspace")), "project": text(data.get("project")),
                       "mcp": mcp_names(data["options"]), "llm": llm_choice(data["options"]),
-                      "directory": str(directory)}
+                      "directory": str(directory),
+                      # the app's terminal tab it was started in (sessions.launch): the app attaches it after a restart
+                      "app_tab": text(data.get("app_tab")) if state != "stopped" else None}
     return found
 
 
@@ -463,6 +467,31 @@ def record_mcp(record_):
     """The MCP servers a running sandbox records in its run.json (None for a version that did not record them)."""
     value = record_.get("mcp_servers") if isinstance(record_, dict) else None
     return [name for name in value if isinstance(name, str)] if isinstance(value, list) else None
+
+
+def record_services(record_):
+    """The services (--service) a running sandbox records in its run.json: [{name, image, reference, ports,
+    container, unchecked}], each checked (a damaged record leaves one out)."""
+    value = record_.get("services") if isinstance(record_, dict) else None
+    found = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or \
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,23}", item["name"]):
+            continue
+        ports = [p for p in item.get("ports") or [] if type(p) is int and 0 < p < 65536] \
+            if isinstance(item.get("ports"), list) else []
+        found.append({"name": item["name"], "image": text(item.get("image")), "reference": text(item.get("reference")),
+                      "ports": ports, "container": text(item.get("container")), "unchecked": True})
+    return found
+
+
+def services_text(entry):
+    """What the listing says of a start's services, or ""."""
+    services = entry.get("services") or []
+    if not services:
+        return ""
+    return "services: " + ", ".join(service["name"] + "".join(f":{port}" for port in service["ports"][:3])
+                                    for service in services) + " (unchecked images)"
 
 
 def mcp_entries(include_stopped=False):
@@ -656,6 +685,13 @@ def entries(include_all=False, prune=True):
     leads = {}
     for entry in found:
         entry.update(grouping(entry, records, leads))
+        # The kill switch of a running start (sandbox-ai net cut): its mode, and whether it has one (0.1.94 on).
+        record_ = records.get(entry.get("run")) if isinstance(entry.get("run"), str) else None
+        record_ = record_ if isinstance(record_, dict) else {}
+        cut = record_.get("cut") if isinstance(record_.get("cut"), str) else ""
+        entry["cut"] = cut if cut and all(part in ("remote", "local", "api", "all") for part in cut.split("+")) else None
+        entry["killswitch"] = bool(record_.get("net_cut"))
+        entry["services"] = record_services(record_)  # --service: the containers of your images beside the agent
     break_helper_cycles(found)
     # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach); the
     # start it was started for (its mcp.json says so) first, if it is one of them. That one is named in "started_for"
@@ -921,6 +957,8 @@ def pause_run(entry, record_, freeze):
         marker.touch()
     else:
         marker.unlink(missing_ok=True)
+        # The kill switch asked for while it was paused: set now, before this returns (sandbox-ai net cut).
+        module("net").apply_pending_cut(record_["directory"])
     record(entry["name"], "pause" if freeze else "resume", entry["id"], entry["run"])
     print(f"sandbox-ai: {shown} {'paused' if freeze else 'resumed'}", file=sys.stderr)
     return 0
@@ -1084,6 +1122,8 @@ def row(entry, colour, mark="", under=None):
         also = "also serves " + ", ".join(others) if others else ""
         where = entry.get("workspace") or also or "-"
         where = f"{where}  ({also})" if entry.get("workspace") and also else where
+    if services_text(entry):
+        where = f"{where}  [{services_text(entry)}]"
     return [t.style(mark, "muted", colour) + t.style(printable(entry["name"]), kind_style(entry), colour),
             t.style(entry["kind"], kind_style(entry), colour),
             printable(entry.get("agent") or "-"),

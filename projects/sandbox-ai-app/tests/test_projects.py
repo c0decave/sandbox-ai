@@ -119,7 +119,7 @@ def test_navigation_has_sections_shortcuts_and_a_glyph_per_page(window, qapp):
     from sandbox_ai_app.ui import PAGES, SECTIONS
     headers = [window.nav.item(r) for r in range(window.nav.count()) if window.nav.item(r).data(QtCore.Qt.ItemDataRole.UserRole)
                is None]
-    assert [h.text() for h in headers] == ["PROJECT", "RUNNING", "INSIGHT", "MANAGE", "SYSTEM"]
+    assert [h.text() for h in headers] == ["PROJECT", "RUNNING", "MANAGE", "INSIGHT", "SYSTEM"]
     assert all(not (h.flags() & QtCore.Qt.ItemFlag.ItemIsSelectable) for h in headers), "headers cannot be chosen"
     assert [key for _, pages in SECTIONS for key, _ in pages] == [key for key, _ in PAGES] == window.keys
     for key in window.keys:
@@ -127,10 +127,10 @@ def test_navigation_has_sections_shortcuts_and_a_glyph_per_page(window, qapp):
     # Ctrl+1 ... Ctrl+9: the first nine pages in the navigation's order.
     assert [s.shortcut().toString() for s in window.shortcuts] == [f"Ctrl+{n}" for n in range(1, 10)]
     window.shortcuts[5].trigger()
-    assert window.pages.currentWidget() is getattr(window, window.keys[5]) and window.current_page() == "connections"
-    assert "Ctrl+6" in window.nav_item("connections").toolTip()
+    assert window.pages.currentWidget() is getattr(window, window.keys[5]) and window.current_page() == "files"
+    assert "Ctrl+6" in window.nav_item("files").toolTip()
     window.nav.setCurrentRow(0)  # a header: the page stays
-    assert window.current_page() == "connections"
+    assert window.current_page() == "files"
     window.show_page("kits")
     assert window.pages.currentWidget() is window.kits
 

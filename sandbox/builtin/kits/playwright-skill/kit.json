@@ -1,0 +1,65 @@
+{
+ "$comment": "Provenance of the files vendored into this built-in kit (sandbox-ai). Each file is the upstream file at the pinned commit, unchanged: its git blob id matches `git ls-tree -r COMMIT` upstream. The review: docs/skills-review.md.",
+ "name": "playwright-skill",
+ "agents": [
+  "claude",
+  "codex",
+  "opencode"
+ ],
+ "default": "off",
+ "upstream": {
+  "repository": "https://github.com/lackeyjb/playwright-skill",
+  "commit": "dd47a6a023e249eb1b36e9e943eab89d0900865d",
+  "committed": "2026-08-14T09:51:33-04:00",
+  "version": "5.0.0",
+  "license": "MIT"
+ },
+ "skills": {
+  "playwright-skill": "skills/playwright-skill"
+ },
+ "left_out": [],
+ "files": {
+  "skills/playwright-skill/API_REFERENCE.md": {
+   "upstream": "skills/playwright-skill/API_REFERENCE.md",
+   "sha256": "948e778e15e24d453219be6e05889416f088b59469818875f728d97a4ad17603",
+   "blob": "6d4b74fb2b51bf1153cb9b02c1cd76659bafe3d0",
+   "mode": "100644"
+  },
+  "skills/playwright-skill/SKILL.md": {
+   "upstream": "skills/playwright-skill/SKILL.md",
+   "sha256": "6dc254f552392e1f5b8704434e982cd26375d04ebe815084d1b47af1ee2a971f",
+   "blob": "8e002881ae65ebfa13f61a99d50678622c0ae5bf",
+   "mode": "100644"
+  },
+  "skills/playwright-skill/lib/helpers.js": {
+   "upstream": "skills/playwright-skill/lib/helpers.js",
+   "sha256": "b837864b43126da1c0fc216b4d555b14a52c78bd78e0075af0c6acd1efa0e010",
+   "blob": "dadda5789af2e9cdf0e98c9564fe3018073d4767",
+   "mode": "100644"
+  },
+  "skills/playwright-skill/package-lock.json": {
+   "upstream": "skills/playwright-skill/package-lock.json",
+   "sha256": "a0502f20d5c475c9654b8a6faa69263d2eb7ab0c7898c3c0a2490ddc75316df3",
+   "blob": "394a373178a2c23f1b905186a1f9cb3e7c2efaa0",
+   "mode": "100644"
+  },
+  "skills/playwright-skill/package.json": {
+   "upstream": "skills/playwright-skill/package.json",
+   "sha256": "8f1870c8f1124cadae0bf493eccdbc8e2df48124f90d2eecaef0c43638906d8e",
+   "blob": "ca53adefa033247185059bec7b89a0449577a874",
+   "mode": "100644"
+  },
+  "skills/playwright-skill/run.js": {
+   "upstream": "skills/playwright-skill/run.js",
+   "sha256": "f2afe1a17379548abee60e91c9cee9a3907ff5ae9a2423d9190e45ace761399d",
+   "blob": "55ef973701fee172d3592fdcf4c7f6e90c0b5682",
+   "mode": "100755"
+  },
+  "LICENSE": {
+   "upstream": "LICENSE",
+   "sha256": "c9104b65859edbe0df0255c2adbad01b147b58a02fa2aff1c2e5736512e8a143",
+   "blob": "5d40ba0e4e8be1cf170fb43e41ab5991ad7012b2",
+   "mode": "100644"
+  }
+ }
+}

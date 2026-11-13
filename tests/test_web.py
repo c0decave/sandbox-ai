@@ -2629,6 +2629,27 @@ def test_the_canary_categories_are_the_hosts_own(logged_in):
     assert status == 400 and out["confirm"] == "defaults-lower" and "no home canary files" in out["error"], out
 
 
+def test_fewer_desktop_notifications_are_confirmed_first(logged_in):
+    """Before: desktop_notifications none (or alarms) was set without a question, like the start names - yet "none"
+    silences a canary's alarm on the desktop of a host whose app is closed. Now showing fewer than that host shows now
+    needs the same confirmation as every other lowering of a default; more, or the default again, does not."""
+    logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": {}}), "")  # all: the default
+    for value in ("none", "alarms"):
+        status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "desktop_notifications", "value": value})
+        assert status == 400 and out["confirm"] == "defaults-lower" and "canary" in out["error"], (value, out)
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "desktop_notifications", "value": "none",
+                                                                "confirm": True})
+    assert status == 200, out
+    del logged_in.runner.answers[("defaults", "show")]
+    logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": {"desktop_notifications": "alarms"}}),
+                                                      "")
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "desktop_notifications", "value": "none"})
+    assert status == 400 and out["confirm"] == "defaults-lower", out
+    for value in ("all", None, "alarms"):  # more, the default again, or the same: no question
+        status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "desktop_notifications", "value": value})
+        assert status == 200, (value, out)
+
+
 def test_the_secrets_of_a_host_are_their_names_and_stores_only(logged_in):
     logged_in.runner.answers[("secrets", "list")] = (0, "no secrets\n", "")
     assert logged_in("GET", "/api/hosts/ct1/secrets") == (200, [])
@@ -6653,3 +6674,20 @@ def test_the_heartbeat_ends_with_the_service(home):
     holder["server"].shutdown()
     thread.join(30)
     assert not approvals.watched()
+
+
+
+def test_the_loop_guard_is_a_default_checked_as_the_launcher_checks_it(logged_in):
+    """defaults.json "loop_guard" (the loop guard's layers for --llm starts, llm.check_loop): set and unset without a
+    question - it changes how a local model is kept from looping, no protection - and a value the launcher would
+    refuse (it would stop every start) is refused before it reaches a host."""
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "loop_guard", "value": {"steps": 60,
+                                                                                               "sampling": False}})
+    assert status == 200, out
+    assert logged_in.runner.calls == [("ct1", ["defaults", "set", "loop_guard", '{"steps": 60, "sampling": false}'])]
+    for wrong in ({"steps": 2}, {"nonsense": True}, {"sampling": "no"}, ["steps"], "on"):
+        status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "loop_guard", "value": wrong})
+        assert status == 400 and "loop_guard" in out["error"], (wrong, out)
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "loop_guard", "value": None})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["defaults", "unset", "loop_guard"])
+    assert len(logged_in.runner.calls) == 2

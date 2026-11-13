@@ -67,17 +67,19 @@ def fetch(url, sha256, read=None):
 
 def safe_name(name):
     """NAME of an archive member as a relative path inside the tree, or ValueError."""
-    path = PurePosixPath(name)
+    # Every root goes: POSIX keeps a leading "//" as a root of its own ("//etc/x" has the parts "//", "etc", "x"),
+    # which joined to the tree would name the host's /etc/x itself.
+    path = PurePosixPath(str(name).lstrip("/"))
     parts = [p for p in path.parts if p not in ("", ".")]
-    if path.is_absolute() and name not in ("/", "./"):
-        parts = [p for p in parts if p != "/"]
-    if any(p == ".." or "\0" in p for p in parts):
+    if path.is_absolute() or any(p == ".." or "\0" in p or p.startswith("/") for p in parts):
         raise ValueError(f"archive member {name!r} leaves the tree")
     return PurePosixPath(*parts) if parts else None
 
 
 def directory_of(root, relative):
     """ROOT/RELATIVE's parent, created as real directories: never through a link the archive made."""
+    if PurePosixPath(relative).is_absolute():  # safe_name gives none; joined, it would replace ROOT
+        raise ValueError(f"archive member {relative} leaves the tree")
     current = root
     for part in relative.parent.parts:
         current = current / part
@@ -225,12 +227,23 @@ def validated(rootfs, where):
 
 
 def limits_prefix(definition, launcher):
-    """systemd-run --user --scope with the memory and process limits, as the Bubblewrap agents get them, or []."""
+    """systemd-run --user --scope with the memory, CPU and process limits, as the Bubblewrap agents get them, or []. The
+    CPU limit only where the cpu controller is delegated to the user (as the launcher's limits_prefix)."""
     if not shutil.which("systemd-run") or not launcher.user_manager_running():
         return []
-    memory = definition.get("memory", "512m").upper()
+    memory = str(definition.get("memory", "512m")).upper()
+    cpus = definition.get("cpus")
+    cpus = float(cpus) if cpus is not None else max(1, (os.cpu_count() or 1) // 2)
+    controllers = launcher.delegated_controllers() if hasattr(launcher, "delegated_controllers") else None
+    quota = ["-p", f"CPUQuota={int(round(cpus * 100))}%"] if controllers is None or "cpu" in controllers else []
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", f"MemoryMax={memory}",
-            "-p", f"MemorySwapMax={memory}", "-p", f"TasksMax={definition.get('pids', 128)}", "--"]
+            "-p", f"MemorySwapMax={memory}", *quota, "-p", f"TasksMax={definition.get('pids', 128)}", "--"]
+
+
+def tmp_bytes(size):
+    """Bytes of the server's /tmp size ("64m", "1g"; mcp.py checked it): 64 MiB for anything else."""
+    match = re.fullmatch(r"([1-9][0-9]{0,5})([mg])", str(size).strip().lower())
+    return int(match[1]) << (30 if match[2] == "g" else 20) if match else 64 << 20
 
 
 def bwrap_args(definition, environ=None):
@@ -242,7 +255,8 @@ def bwrap_args(definition, environ=None):
     args = ["--die-with-parent", "--new-session", "--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-uts",
             "--unshare-cgroup-try", "--unshare-net", "--uid", user, "--gid", user,
             "--ro-bind", rootfs["path"], "/", "--proc", "/proc", "--dev", "/dev",
-            "--size", str(64 << 20), "--tmpfs", "/tmp", "--cap-drop", "ALL", "--clearenv"]
+            "--size", str(tmp_bytes(definition.get("tmp", "64m"))), "--tmpfs", "/tmp", "--cap-drop", "ALL",
+            "--clearenv"]
     if definition.get("network", "none") == "full":
         # The resolver slirp4netns answers at (10.0.2.3), as pasta gives the image servers theirs.
         args += ["--ro-bind", resolv_conf(), "/etc/resolv.conf"]

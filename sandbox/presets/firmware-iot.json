@@ -4,7 +4,13 @@
   "id": "firmware-iot",
   "title": "Firmware and IoT",
   "description": "Firmware images read-only, the agent reaches only its provider; binwalk for extraction, KVM for emulation if you give it.",
-  "category": "analysis",
+  "translations": {
+    "de": {
+      "title": "Firmware und IoT",
+      "description": "Firmware-Images nur lesend, der Agent erreicht nur seinen Anbieter; binwalk zum Entpacken, KVM zur Emulation, wenn Sie es angeben."
+    }
+  },
+  "category": "hardware",
   "agents": [
     "claude",
     "codex",

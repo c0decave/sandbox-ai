@@ -365,7 +365,7 @@ def test_mcp_servers_on_a_host_listed_started_and_added_from_its_catalog(ui, sai
     monkeypatch.setattr(ui.AddServerDialog, "exec", add)
     page.add()
     assert ran(sai, "ct1", "mcp", "add") == ("ct1", "mcp", "add", "--as=binwalk", "--mount=/data=/srv/fw:rw", "--network=none",
-                             "--memory=512m", "--pids=128", "--catalog=/srv/catalog.json", "--no-pull", "--unsigned",
+                             "--catalog=/srv/catalog.json", "--no-pull", "--unsigned",  # limits: the entry's
                              "hub:binwalk")
     assert [action for action, _ in ui.asked[-2:]] == ["mcp-unsigned", "mcp-writable-mount"]
 

@@ -471,6 +471,7 @@ const SAFEGUARD_TITLES = {
   taint: N_("held: the run is tainted"), device: N_("device refused"), memory: N_("process ended: memory nearly full"),
   "supervisor-memory": N_("the supervisor dropped its caches"), guard: N_("a safety check failed"), canary: N_("a canary went off"),
   oom: N_("out of memory: the kernel ended a process"),
+  "mcp-server": N_("an MCP server's process ended or failed"), loop: N_("loop guard intervened"),
 };
 const SAFEGUARD_GROUPED = {
   firewall: N_("{count} connections to {target} dropped by the firewall in the last minute"),
@@ -1810,9 +1811,32 @@ pages.starts = async (main) => {
   await drawStartForm(form, heading, target);
 };
 
-// The preset categories in the order sandbox-ai lists them (presets.CATEGORIES), in the page's words.
+// The preset categories of a sandbox-ai without `presets categories` (before 0.1.94), in the page's words. A newer
+// host says its own (presets.CATEGORY_INFO: the one list, with English and German titles): presetGroups.
 const PRESET_CATEGORIES = [["simple", N_("Simple")], ["development", N_("Development")], ["llm", N_("Local models")], ["analysis", N_("Analysis")],
   ["research", N_("Research")], ["media", N_("Media")], ["privacy", N_("Privacy")], ["testing", N_("Testing")], ["fun", N_("Fun")]];
+// The older categories a newer host still takes, and where it lists them (presets.LEGACY_CATEGORIES).
+const LEGACY_PRESET_CATEGORIES = { simple: "other", analysis: "security", media: "fun" };
+
+// [[key, label, category of a preset -> key]] of the host's categories (CATEGORIES: `presets categories --json` there,
+// in order, each title in the page's language), else the page's own list; a category no list names comes last.
+function presetGroups(categories, presets) {
+  if (Array.isArray(categories) && categories.length) {
+    const keys = categories.map(c => String(c.id));
+    const of = (p) => { const c = LEGACY_PRESET_CATEGORIES[p.category] || p.category || "other"; return keys.includes(c) ? c : "other"; };
+    return { of, groups: categories.map(c => [String(c.id), String((c.title && (c.title[LANGUAGE] || c.title.en)) || c.id)]) };
+  }
+  const known = new Set(PRESET_CATEGORIES.map(([key]) => key));
+  const of = (p) => p.category || "simple";
+  const extra = [...new Set(presets.map(of))].filter(c => !known.has(c)).map(c => [c, c]);
+  return { of, groups: [...PRESET_CATEGORIES.map(([key, label]) => [key, t(label)]), ...extra] };
+}
+
+// A preset's title in the page's language (its "translations"), else its own.
+function presetTitle(p) {
+  const own = p && p.translations && p.translations[LANGUAGE];
+  return String((own && own.title) || (p && p.title) || "");
+}
 
 // Whether a preset's VPN value must name a Tor profile (the tor preset's: its name or label says Tor).
 function torValue(key, spec) { return key === "tor" || /\bTor\b/.test(String((spec && spec.label) || "")); }
@@ -1845,7 +1869,7 @@ async function drawStartForm(card, heading, host) {
   const onlyServer = el("input", { type: "checkbox", id: "start-only-server", checked: true });
   const modelHint = el("span", { class: "hint" });
   const servers = [], profiles = [], mcpNames = new Set();
-  let presets = [], chosen = null, fields = [];
+  let presets = [], presetCategories = [], chosen = null, fields = [];
   const presetsLoaded = { done: false, error: null };
   const syncOnly = () => { onlyServer.disabled = !model.value || model.disabled; if (onlyServer.disabled && !model.value) onlyServer.title = t("only with a server of its own: the cloud is the agent's provider"); else onlyServer.removeAttribute("title"); };
   const drawModels = () => {
@@ -1888,10 +1912,10 @@ async function drawStartForm(card, heading, host) {
     const was = preset.value;
     clear(preset).append(el("option", { value: "" }, t("none")));
     const usable = presets.filter(p => !Array.isArray(p.agents) || p.agents.includes(agentOf()));
-    const known = new Set(PRESET_CATEGORIES.map(([key]) => key));
-    for (const [key, label] of [...PRESET_CATEGORIES, ...[...new Set(usable.map(p => p.category || "simple"))].filter(c => !known.has(c)).map(c => [c, c])]) {
-      const group = usable.filter(p => (p.category || "simple") === key).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-      if (group.length) preset.append(el("optgroup", { label: known.has(key) ? t(label) : label }, group.map(p => el("option", { value: p.id }, `${p.id}: ${p.title || ""}`))));
+    const { of, groups } = presetGroups(presetCategories, usable);
+    for (const [key, label] of groups) {
+      const group = usable.filter(p => of(p) === key).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      if (group.length) preset.append(el("optgroup", { label }, group.map(p => el("option", { value: p.id }, `${p.id}: ${presetTitle(p)}`))));
     }
     const still = usable.some(p => p.id === was);
     preset.value = still ? was : "";
@@ -1975,6 +1999,9 @@ async function drawStartForm(card, heading, host) {
     }).catch(() => {}),
     api("GET", hostPath("/presets", host)).then((list) => { presets = (Array.isArray(list) ? list : []).filter(p => p && typeof p.id === "string"); })
       .catch((e) => { presetsLoaded.error = e; }),
+    // its categories (an older sandbox-ai has none: the page's own list)
+    api("GET", hostPath("/preset-categories", host)).then((list) => { presetCategories = (Array.isArray(list) ? list : []).filter(c => c && typeof c.id === "string"); })
+      .catch(() => {}),
     api("GET", hostPath("/vpn", host)).then((list) => { for (const p of (Array.isArray(list) ? list : []).filter(x => x && typeof x.profile === "string")) profiles.push(p); }).catch(() => {}),
     api("GET", hostPath("/mcp", host)).then((list) => { for (const x of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) mcpNames.add(x.name); }).catch(() => {}),
   ];
@@ -5396,7 +5423,7 @@ pages.presets = async (main) => {
   };
   if (list instanceof Error) main.append(errorNotice(list));
   else main.append(table([t("Preset"), t("Title"), t("Origin"), ""], (Array.isArray(list) ? list : []).filter(p => p && p.id).map(p =>
-    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, p.title || ""), el("td", {}, p.origin || ""), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
+    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, presetTitle(p)), el("td", {}, p.origin || ""), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
   // the extra preset directories (defaults.json preset_dirs)
   const dirsBox = el("div");
   main.append(el("h2", {}, t("Preset directories")), dirsBox);

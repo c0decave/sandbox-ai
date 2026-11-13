@@ -4,6 +4,12 @@
   "id": "development",
   "title": "Development",
   "description": "Python and JavaScript projects with GitHub: PyPI, npm, GitHub and DuckDuckGo open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Entwicklung",
+      "description": "Python- und JavaScript-Projekte mit GitHub: PyPI, npm, GitHub und DuckDuckGo offen, alles andere zu."
+    }
+  },
   "category": "development",
   "agents": [
     "claude",

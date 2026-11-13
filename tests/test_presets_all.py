@@ -46,6 +46,17 @@ SERVERS = (("ollama", "ollama", "http://127.0.0.1:11434", ["--model", "qwen3-cod
 ANTHROPIC = {"ollama", "lmstudio", "llamacpp", "vllm", "gateway", "gpu"}
 # The LLM presets and the server each is tried with first (its own kind; for Claude the raw API's Anthropic one).
 LLM_PRESETS = {"local-api": "api", "ollama": "ollama", "lm-studio": "lmstudio", "llama-cpp": "llamacpp", "vllm": "vllm"}
+# The catalog servers that need a folder of their own (sandbox-ai-mcp's catalog: engram and memory at /data).
+CATALOG_FOLDERS = {"engram": ["/data"], "memory": ["/data"]}
+# The entries of the two MCP catalogs (sandbox-ai-mcp: "mcp", axross-mcp-hub: "hub") a preset may name; checked against
+# the catalogs themselves where a checkout has them (test_the_mcp_servers_the_presets_name_are_in_the_catalogs).
+CATALOG_ENTRIES = {
+    "mcp": {"binwalk", "brave-search", "capa", "duckduckgo", "engram", "gowitness", "memory", "openosint", "osint-mcp",
+            "playwright", "radare2", "searxng", "signal", "telegram", "telegram-user", "web-fetch", "whatsapp",
+            "whatweb"},
+    "hub": {"binwalk", "capa", "crtsh", "dnstwist", "exiftool", "ffuf", "floss", "gitleaks", "john", "mcpcap", "nmap",
+            "nuclei", "radare2", "sleuthkit", "sqlmap", "tshark", "yara"},
+}
 WG_PEER = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg="
 # What each VPN profile registered below opens besides the tunnel: addresses allowed in the sandbox and the resolvers
 # it gets with --dns (a full WireGuard tunnel: the profile's DNS; Tor: its DNSPort and the .onion range; Tailscale:
@@ -99,12 +110,35 @@ def host(tmp_path_factory):
         assert vpn.main(args, out=lambda line: None) == 0, args
     for name, kind, url, extra in SERVERS:
         assert llm.main(["add", name, "--kind", kind, "--url", url, *extra], out=lambda line: None) == 0, name
-    # The catalog servers the presets name, as stand-ins without network (sandbox-ai mcp add needs Podman).
+    # The catalog servers the presets name (in "mcp", and by default in an --mcp option), as stand-ins without network
+    # (sandbox-ai mcp add needs Podman); those with a folder of their own (engram, memory) as image servers with it, as
+    # `sandbox-ai mcp add NAME --mount /data=DIR:rw` writes them, so that a preset's --mcp-mount can change it.
     names = {server.split(":", 1)[-1] for preset in PRESETS.values() for server in preset.get("mcp", [])}
+    for preset in PRESETS.values():
+        defaults = {name: str(spec["default"]) for name, spec in preset.get("values", {}).items() if "default" in spec}
+        names |= {value for value, _ in P.option_values(preset, defaults, "--mcp")}
     (root / "config/sandbox-ai").mkdir(parents=True, exist_ok=True)
-    (root / "config/sandbox-ai/mcp.json").write_text(json.dumps(
-        {name: {"command": ["python3", "-c", "pass"], "options": ["--offline"], "description": f"stand-in for {name}"}
-         for name in sorted(names)}))
+    servers = {}
+    for name in sorted(names):
+        if name in CATALOG_FOLDERS:
+            default = root / "brains" / name
+            default.mkdir(parents=True, exist_ok=True)
+            servers[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64, "network": "none",
+                             "mounts": [{"target": target, "host": str(default), "mode": "rw"}
+                                        for target in CATALOG_FOLDERS[name]],
+                             "description": f"stand-in for {name}"}
+        else:
+            servers[name] = {"command": ["python3", "-c", "pass"], "options": ["--offline"],
+                             "description": f"stand-in for {name}"}
+    (root / "config/sandbox-ai/mcp.json").write_text(json.dumps(servers))
+    # The images the presets' services name (--service NAME:image=...), as `sandbox-ai images pull --as NAME` records
+    # them (pulled, pinned by digest, unchecked).
+    images = {}
+    for index, (name, user) in enumerate((("postgres", "999:999"), ("redis", "999:1000"))):
+        images[name] = {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + str(index) * 64,
+                        "id": "sha256:" + str(index + 5) * 64, "digest": "sha256:" + str(index) * 64, "user": user,
+                        "ports": [], "os": {}}
+    (root / "config/sandbox-ai/user-images.json").write_text(json.dumps({"version": 1, "images": images}))
     work = root / "work"
     work.mkdir()
     yield root, dev, work
@@ -136,6 +170,10 @@ def sample_values(preset, root, dev, agent, full):
             values[name] = "dri"
         elif "default" in spec:
             values[name] = spec["default"]
+        elif kind == "host":
+            values[name] = "192.0.2.44"
+        elif kind == "port":
+            values[name] = "8443"
         else:
             values[name] = "a task for the test"
     return values
@@ -236,8 +274,11 @@ def test_every_preset_with_every_agent(host, capsys, name, agent, full):
     plan = dry_run(capsys, work, agent, name, values)
     assert plan["agent"] == agent
     assert_network(plan, network_of(preset, values, agent))
-    assert [entry["name"] for entry in plan.get("mcp", [])] == [server.split(":", 1)[-1]
-                                                                for server in preset.get("mcp", [])]
+    filled = {**{key: str(spec["default"]) for key, spec in preset.get("values", {}).items() if "default" in spec},
+              **values}
+    assert [entry["name"] for entry in plan.get("mcp", [])] == [
+        *[value for value, _ in P.option_values(preset, filled, "--mcp")],
+        *[server.split(":", 1)[-1] for server in preset.get("mcp", [])]]
     if values.get("llm"):
         assert plan["llm"]["name"] == values["llm"].split(":", 1)[0], plan.get("llm")
     vpn = values.get("tor") or values.get("vpn")
@@ -274,6 +315,85 @@ def test_the_llm_presets_with_every_kind_of_server(host, capsys, name, server, a
         assert_network(plan, network_of(preset, {"llm": value}, agent))
         if server == "gpu":  # registered with --vpn ts: the start goes behind it
             assert plan["vpn"]["profile"] == "ts"
+
+
+# --- what the presets name: categories, catalog servers, rulesets -------------------------------------------------
+
+def test_every_preset_is_in_a_category_of_the_one_list():
+    """The categories are defined once (presets.CATEGORY_INFO, with English and German titles and descriptions);
+    every built-in preset names one of them (no older one, no fallback), and each category but the fallback has a
+    preset."""
+    assert set(P.CATEGORIES) == set(P.CATEGORY_INFO) and P.DEFAULT_CATEGORY in P.CATEGORIES
+    for key, info in P.CATEGORY_INFO.items():
+        for field in ("title", "description"):
+            assert set(info[field]) == {"en", "de"} and all(text.strip() for text in info[field].values()), key
+    used = {}
+    for name, preset in PRESETS.items():
+        assert preset["category"] in P.CATEGORIES and preset["category"] != P.DEFAULT_CATEGORY, name
+        used.setdefault(preset["category"], []).append(name)
+    assert set(used) == set(P.CATEGORIES) - {P.DEFAULT_CATEGORY}, set(P.CATEGORIES) - set(used)
+    assert set(P.LEGACY_CATEGORIES.values()) <= set(P.CATEGORIES)
+
+
+def test_the_mcp_servers_the_presets_name_are_in_the_catalogs():
+    """Every catalog server a preset names (hub:capa, mcp:engram; one by default in an --mcp option) is an entry of
+    that catalog: `sandbox-ai mcp add` the note names finds it. Checked against the catalogs themselves where this
+    checkout has them (projects/sandbox-ai-mcp, projects/axross-mcp-hub)."""
+    for prefix, folder in (("mcp", "sandbox-ai-mcp"), ("hub", "axross-mcp-hub")):
+        path = ROOT / "projects" / folder / "catalog.json"
+        if path.is_file():
+            assert {entry["name"] for entry in json.loads(path.read_text())["entries"]} >= CATALOG_ENTRIES[prefix]
+    named = []
+    for name, preset in PRESETS.items():
+        for server in preset.get("mcp", []):
+            prefix, _, entry = server.partition(":")
+            assert prefix in CATALOG_ENTRIES and entry in CATALOG_ENTRIES[prefix], (name, server)
+            named.append(entry)
+        defaults = {key: str(spec["default"]) for key, spec in preset.get("values", {}).items() if "default" in spec}
+        for value, _ in P.option_values(preset, defaults, "--mcp"):
+            assert value in CATALOG_ENTRIES["mcp"] | CATALOG_ENTRIES["hub"], (name, value)
+        for value, _ in P.option_values(preset, {key: "/x" for key in preset.get("values", {})}, "--mcp-mount"):
+            server, _, target = value.partition(":")
+            assert server in CATALOG_FOLDERS and target.split("=", 1)[0] in CATALOG_FOLDERS[server], (name, value)
+            assert any(entry.endswith(":" + server) for entry in preset.get("mcp", [])), (name, server)
+    assert {"engram", "memory", "duckduckgo", "web-fetch"} <= set(named)
+
+
+def test_every_ruleset_beside_a_preset_is_valid():
+    """A preset's "rules" file is a ruleset the launcher takes (RUNTIME.Ruleset.validated, as --rules reads it), and
+    every ruleset file in the folder belongs to a preset."""
+    folder = ROOT / "sandbox" / "presets"
+    named = {preset["rules"] for preset in PRESETS.values() if preset.get("rules")}
+    assert named == {path.name for path in folder.glob("*.rules.json")}
+    for name in named:
+        checked = s.RUNTIME.Ruleset.validated(json.loads((folder / name).read_text()), name)
+        assert checked["untrusted"] or checked["mcp"] or checked["http"], name
+
+
+@pytest.mark.parametrize("name,server", [("coding-memory", "engram"), ("research-memory", "memory")])
+def test_a_memory_preset_asks_for_its_folder_and_gives_it_to_its_server(host, capsys, name, server, tmp_path):
+    """The memory presets: the brain folder is a value of kind folder without a default (asked for, never guessed);
+    a folder that is not there yet is fine (the start makes it, a dry run makes nothing); one inside the workspace is
+    refused; `presets check` names the exact `mcp add` with the folder for a server not added yet; the agent works
+    without questions (-D) on its workspace only."""
+    _, _, work = host
+    preset = PRESETS[name]
+    folder_value = next(key for key, spec in preset["values"].items() if spec.get("kind") == "folder")
+    assert "default" not in preset["values"][folder_value] and not preset["values"][folder_value].get("optional")
+    assert any(f"--preset-value {folder_value}=" in line for line in P.missing(preset, {}, "claude"))
+    values = {key: "the question" for key in preset["values"] if key != folder_value}
+    brain = tmp_path / "brains" / "project"
+    notes = []
+    assert P.missing(preset, {**values, folder_value: str(brain)}, "codex", notes=notes) == []
+    assert any("the start creates it for its MCP server" in note for note in notes), notes
+    plan = dry_run(capsys, work, "claude", name, {**values, folder_value: str(brain)})
+    entry = next(e for e in plan["mcp"] if e["name"] == server)
+    assert entry["own_mounts"] == [{"target": "/data", "host": str(brain), "mode": "rw"}] and not brain.exists()
+    assert plan["dangerously_skip_permissions"] and plan["workspace_mode"] == "rw"
+    with pytest.raises(ValueError, match="which the agent can write"):
+        dry_run(capsys, work, "claude", name, {**values, folder_value: str(work / ".brain")})
+    found = P.missing(preset, {**values, folder_value: "/srv/brains/app"}, "codex", mcp_names=set())
+    assert f"sandbox-ai mcp add mcp:{server} --mount /data=/srv/brains/app:rw" in "\n".join(found)
 
 
 def test_what_presets_check_says_before_a_start(host):
@@ -368,15 +488,15 @@ def loopback_llm(values):
 @pytest.mark.parametrize("name", sorted(PRESETS))
 def test_every_preset_with_bubblewrap(host, capsys, name, agent):
     """Every preset with --backend bwrap: a plan with the same network as with Podman; or, for a preset that needs the
-    host's loopback (--allow-host-port, an LLM server on 127.0.0.1) or a VPN, which only Podman gives, a refusal that
-    names the Podman backend; its notes say so ("Podman only")."""
+    host's loopback (--allow-host-port, an LLM server on 127.0.0.1), a VPN or a service (--service), which only Podman
+    gives, a refusal that names the Podman backend; its notes say so ("Podman only")."""
     root, dev, work = host
     preset = PRESETS[name]
     if agent not in preset.get("agents", AGENTS):
         return
     values = sample_values(preset, root, dev, agent, True)
     options = P.expand(preset, values, extras=False)
-    if "--allow-host-port" in options or "--vpn" in options or loopback_llm(values):
+    if "--allow-host-port" in options or "--vpn" in options or "--service" in options or loopback_llm(values):
         assert any("Podman only" in note or "only with Podman" in note for note in preset.get("notes", [])), name
         with pytest.raises(ValueError, match="Podman backend"):
             dry_run(capsys, work, agent, name, values, "--backend", "bwrap")
@@ -440,6 +560,21 @@ def test_every_plan_keeps_what_the_preset_promises(host, capsys, name, agent):
             assert value in [entry["path"] for entry in plan["devices"]], plan["devices"]
         elif flag == "--gpu":
             assert plan["gpu"] == value
+        elif flag == "--mcp-mount":  # the server's folder of this start, in an instance of its own
+            server, _, rest = value.partition(":")
+            target, _, host_folder = rest.partition("=")
+            entry = next(e for e in plan["mcp"] if e["name"] == server)
+            assert entry["instance"].startswith(server + ".") and entry["own_mounts"] == [
+                {"target": target, "host": host_folder.rsplit(":", 1)[0], "mode": host_folder.rsplit(":", 1)[1]}]
+        elif flag == "--dangerously-skip-permissions":
+            assert plan["dangerously_skip_permissions"] is True
+        elif flag == "--service":
+            assert value.split(":", 1)[0] in [service["name"] for service in plan["services"]], plan["services"]
+    # A preset that turns the agent's questions off keeps it to its workspace: no folder of this computer but the
+    # workspace is writable (no writable --mount), and the workspace itself is not read-only by surprise.
+    if "--dangerously-skip-permissions" in P.expand(preset, values, extras=False):
+        assert not [m for m in plan["mounts"] if not str(m).endswith(":ro")], plan["mounts"]
+        assert plan["workspace_mode"] == "rw"
     text = preset.get("prompt")
     if text:
         args = plan["agent_args"]

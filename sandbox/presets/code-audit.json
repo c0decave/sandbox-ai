@@ -4,7 +4,13 @@
   "id": "code-audit",
   "title": "Code audit",
   "description": "Read-only review of the workspace in the security mode high; gitleaks finds committed secrets.",
-  "category": "development",
+  "translations": {
+    "de": {
+      "title": "Code-Audit",
+      "description": "Nur lesende Prüfung des Arbeitsordners im Sicherheitsmodus high; gitleaks findet eingecheckte Geheimnisse."
+    }
+  },
+  "category": "security",
   "agents": [
     "claude",
     "codex",

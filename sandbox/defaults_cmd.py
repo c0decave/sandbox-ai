@@ -8,7 +8,11 @@
 The keys are the launcher's: telemetry (off, strict, on), mode (lax ... paranoid), canaries (false or a list of
 categories), keep_days, subnet, subnet6, preset_dirs (extra preset directories; `sandbox-ai presets dirs add DIR`
 checks where each lies), safeguard_mute (kinds of safeguard warnings never announced: `sandbox-ai safeguards kinds`),
-name_style (codename: new starts are named like brisk-otter-lantern, the default; project: AGENT-PROJECT-xxxx).
+name_style (codename: new starts are named like brisk-otter-lantern, the default; project: AGENT-PROJECT-xxxx),
+desktop_notifications (all, the default: the launchers' desktop notifications - questions, safeguards, limits,
+alarms - while neither the app nor the web interface watches; alarms: only a canary's alarm; none: nothing),
+loop_guard (the loop guard's layers for starts with --llm, an object such as {"warn": 4, "steps": 60,
+"instructions": false}; `sandbox-ai llm set NAME --loop-guard` changes one server's).
 A value is checked by the launcher itself before the file is replaced
 (atomically, mode 0600); the other keys stay as they are. An option given at a start wins over the file.
 The web interface and the desktop app change other hosts' defaults through this command.
@@ -121,9 +125,21 @@ def describe():
     return {"keys": keys(), "telemetry_levels": list(getattr(L, "TELEMETRY_LEVELS", ())),
             "modes": list(L.MODES.NAMES), "canary_categories": list(canary.CATEGORIES),
             "canary_default": list(canary.DEFAULT_CATEGORIES), "name_styles": list(L.NAME_STYLES),
+            "desktop_notifications": list(getattr(L, "DESKTOP_NOTIFICATIONS", ())),
+            **loop_layers(L),
             **({"safeguard_kinds": [{"kind": k, "level": v[0], "title": v[1]}
                                     for k, v in L.load_safeguards_module().KINDS.items()]}
                if hasattr(L, "load_safeguards_module") else {})}
+
+
+def loop_layers(L):
+    """The loop guard's layers with sandbox-ai's own values and the ranges of the counts (for the front ends)."""
+    try:
+        llm = L.load_llm_module()
+        return {"loop_guard_layers": dict(llm.LOOP_DEFAULTS),
+                "loop_guard_ranges": {key: list(value) for key, value in llm.LOOP_RANGES.items()}}
+    except (AttributeError, OSError, ImportError):
+        return {}
 
 
 def cli(argv, out=print):

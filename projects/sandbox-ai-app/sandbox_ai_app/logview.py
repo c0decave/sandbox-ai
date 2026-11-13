@@ -30,27 +30,42 @@ DEFAULT_LEVEL = "INFO"
 
 
 class LogHub(QObject):
-    """Every entry of applog, kept (the last MAX_ENTRIES) and announced in the GUI thread (added)."""
-    added = Signal(dict)
-    _from_thread = Signal(dict)
+    """Every entry of applog, kept (the last MAX_ENTRIES) and announced in the GUI thread (added: the entries that
+    arrived together, in their order)."""
+    added = Signal(object)
+    _from_thread = Signal()
 
     def __init__(self):
         super().__init__()
         self.entries = deque(maxlen=MAX_ENTRIES)
         self.lock = threading.Lock()
+        # The entries logged since the event loop last handed them on: a burst (a page reporting a lot, Debug) goes
+        # to the panels together - one insertion and one scroll per panel, not one each (2,000 entries held the
+        # window 0.3 s per panel).
+        self.pending = []
         # Queued: an entry logged in a worker thread reaches the panel in the GUI thread.
         self._from_thread.connect(self._arrived, Qt.ConnectionType.QueuedConnection)
         applog.add_listener(self.receive)
 
     def receive(self, entry):
         """Always through the event loop, also from the GUI thread: an entry may come from inside Qt (its message
-        handler during a layout or a paint, an exception hook) - changing a widget right there could re-enter Qt."""
-        self._from_thread.emit(entry)
-
-    def _arrived(self, entry):
+        handler during a layout or a paint, an exception hook) - changing a widget right there could re-enter Qt.
+        One event for the entries that come before it is handled."""
         with self.lock:
-            self.entries.append(entry)
-        self.added.emit(entry)
+            self.pending.append(entry)
+            first = len(self.pending) == 1
+        if first:
+            self._from_thread.emit()
+
+    def _arrived(self, entry=None):
+        """The entries pending (and ENTRY), kept and announced."""
+        with self.lock:
+            batch, self.pending = self.pending, []
+            if entry is not None:
+                batch.append(entry)
+            self.entries.extend(batch)
+        if batch:
+            self.added.emit(batch)
 
     def snapshot(self):
         with self.lock:
@@ -59,6 +74,7 @@ class LogHub(QObject):
     def clear(self):
         with self.lock:
             self.entries.clear()
+            self.pending.clear()
 
 
 _hub = None
@@ -207,37 +223,49 @@ class LogPanel(QWidget):
         self.text.setUpdatesEnabled(False)
         try:
             self.text.clear()
-            # The entries of one level that follow each other go in as one text, in one edit: one insertion per entry
-            # took half a second for the MAX_ENTRIES at Debug - at every new theme and every key typed into the filter.
-            cursor = self.text.textCursor()
-            cursor.beginEditBlock()
-            lines, level, shows = [], None, self.shown_by()
-            for entry in self.hub.snapshot():
-                if not shows(entry):
-                    continue
-                if lines and entry.get("level") != level:
-                    self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
-                    lines = []
-                level = entry.get("level")
-                lines.append(line_of(entry))
-            if lines:
-                self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
-            cursor.endEditBlock()
+            shows = self.shown_by()
+            self.insert_entries([entry for entry in self.hub.snapshot() if shows(entry)], formats)
         finally:
             self.text.setUpdatesEnabled(True)
         self.text.moveCursor(QTextCursor.MoveOperation.End)
 
-    def add(self, entry):
-        if not self.shows(entry):
+    def insert_entries(self, entries, formats):
+        """ENTRIES at the end. The entries of one level that follow each other go in as one text, in one edit: one
+        insertion per entry took half a second for the MAX_ENTRIES at Debug - at every new theme and every key typed
+        into the filter."""
+        cursor = self.text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.beginEditBlock()
+        lines, level = [], None
+        for entry in entries:
+            if lines and entry.get("level") != level:
+                self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
+                lines = []
+            level = entry.get("level")
+            lines.append(line_of(entry))
+        if lines:
+            self.insert_lines(cursor, lines, formats.get(level, QTextCharFormat()))
+        cursor.endEditBlock()
+
+    def add(self, entries):
+        """New ENTRIES (LogHub.added: a list; one entry alone also does)."""
+        shows = self.shown_by()
+        shown = [entry for entry in ([entries] if isinstance(entries, dict) else entries) if shows(entry)]
+        if not shown:
             return
         bar = self.text.verticalScrollBar()
         at_end = bar.value() >= bar.maximum() - 2
-        self.append(entry, self.formats())
+        if len(shown) == 1:
+            self.append(shown[0], self.formats())
+        else:
+            self.insert_entries(shown, self.formats())
         if at_end:  # following the end; someone reading further up keeps their place
             bar.setValue(bar.maximum())
-        if not self.watching and RANK.get(entry.get("level"), 1) >= RANK["WARNING"]:
-            self.unread_count += 1
-            self.unread.emit(self.unread_count)
+        if not self.watching:
+            for entry in shown:
+                if RANK.get(entry.get("level"), 1) >= RANK["WARNING"]:
+                    self.unread_count += 1
+                    self.unread.emit(self.unread_count)
 
     def changeEvent(self, event):  # noqa: N802
         """A new theme (or the system's colours): the levels' colours made again, the entries drawn in them."""
@@ -267,6 +295,8 @@ class LogWindow(QWidget):
 
     def __init__(self, level=DEFAULT_LEVEL):
         super().__init__(None, Qt.WindowType.Window)
+        from .widgets import close_controls
+        close_controls(self)  # an [x] at its top right, Esc closes it
         self.setObjectName("logWindow")
         self.setWindowTitle(tr("sandbox-ai: log"))
         layout = QVBoxLayout(self)

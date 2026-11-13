@@ -1148,21 +1148,38 @@ def test_mcp_wrapper_runs_the_bridge_behind_a_checked_tunnel(home, monkeypatch):
                     "checks": {"ipv4": {"ip": "185.65.134.10", "vpn": None, "url": "https://x.example/"},
                                "dns": {"configured": True, "routes": {"10.66.0.1": "wg0"}, "answers": {"10.66.0.1": True}}}}
 
-        def follow(self, on_event):
+        def follow(self, on_event, on_end=None):
             pass
 
         def close(self):
             closed.append(True)
+    vpn_id = "d" * 64
+
+    def podman(command, **kw):
+        calls.append(("podman", command))
+        if command[1:3] == ["container", "inspect"] and "{{json .Config.Labels}}" in command:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="no such container")  # none of that name
+        if command[1:3] == ["container", "inspect"]:  # the VPN container once it is up (check_vpn_container)
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="|".join(
+                [vpn_id, "true", "2026-11-12 10:00:00 +0000 UTC", "pasta", "corp"]) + "\n")
+        if command[1] == "exec" and command[-4:-1] == ["list", "table", "inet"]:
+            return types.SimpleNamespace(returncode=0, stderr="", stdout=(
+                "table inet sandbox_ai_vpn {\n" + "".join(f" chain {h} {{ type filter hook {h} priority -5; policy drop;\n }}\n"
+                                                        for h in ("output", "input", "forward")) + "}\n"))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(v, "Tunnel", Tunnel)
     monkeypatch.setattr(v, "host_baseline", lambda settings: {"ipv4": "198.18.0.5"})
-    monkeypatch.setattr(v, "podman_run", lambda command, **kw: calls.append(("podman", command))
-                        or types.SimpleNamespace(returncode=1, stdout="", stderr=""))
-    code = v.mcp_wrapper("corp", "sandbox-ai-vpn-mcp-ddg", "/owner", [sys.executable, "-c", "raise SystemExit(3)"])
+    monkeypatch.setattr(v, "podman_run", podman)
+    # The bridge gets the VPN container's ID (its connections' containers join exactly that one).
+    bridge = [sys.executable, "-c", f"import os; raise SystemExit(3 if os.environ['{v.MCP_VPN_ID}'] == '{vpn_id}' else 9)"]
+    code = v.mcp_wrapper("corp", "sandbox-ai-vpn-mcp-ddg", "/owner", bridge)
     assert code == 3 and closed == [True]
     container = calls[1][1]
     assert container[container.index("--network") + 1] == s.POD_NETWORK
     assert "sandbox-ai.vpn-owner=/owner" in container and PRIVATE not in " ".join(container)
     assert calls[-1][1][1:3] == ["rm", "--force"]
+    # Checked once it is up: running, of its profile, its kill switch in place.
+    assert any(c[1][1] == "exec" and c[1][2] == vpn_id and c[1][3] == "nft" for c in calls if c[0] == "podman")
     # A failed check: the bridge never starts.
     monkeypatch.setattr(v, "host_baseline", lambda settings: {"ipv4": "185.65.134.10"})
     with pytest.raises(ValueError, match="checks failed"):

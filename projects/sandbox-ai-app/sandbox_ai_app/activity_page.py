@@ -256,7 +256,8 @@ class ActivityPage(QWidget):
         outer.addWidget(self.hosts)
         self.poll = QTimer(self)
         self.poll.setInterval(REMOTE_POLL)
-        self.poll.timeout.connect(lambda: self.isVisible() and self.look_again())  # not while the page is hidden
+        # not while the page is hidden, nor while the window is minimised (an SSH look every REMOTE_POLL for nobody)
+        self.poll.timeout.connect(lambda: widgets.on_screen(self) and self.look_again())
         self.refilter = QTimer(self)  # a host's timeline is filtered by the command: asked again once typing stops
         self.refilter.setSingleShot(True)
         self.refilter.setInterval(700)
@@ -344,7 +345,7 @@ class ActivityPage(QWidget):
         self.connections_button.clicked.connect(self.show_connections)
         self.files_button = QPushButton(tr("Show in Files"))
         self.files_button.clicked.connect(self.show_file)
-        self.status = plain_label()  # wraps: a long status never widens the window
+        self.status = plain_label(selectable=True)  # wraps: a long status never widens the window
         self.status.setAccessibleName(tr("Status"))
         bottom.addWidget(self.connections_button)
         bottom.addWidget(self.files_button)

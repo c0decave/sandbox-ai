@@ -37,7 +37,7 @@ def test_the_tour_walks_every_page_in_the_windows_order():
     assert guide.tour_step(-3) is guide.TOUR[0] and guide.tour_step(99) is guide.TOUR[-1]
 
 
-OWN = {"workspace": {"path", "readonly"}, "mount": {"source", "dest", "mode"}, "mcp": {"name"},
+OWN = {"workspace": {"path", "readonly"}, "mount": {"source", "dest", "mode"}, "mcp": {"name"}, "service": {"name", "image"},
        "agent": {"agent", "model", "effort"}, "proxy": {"enabled"}, "home": {"login"}, "session": {"tmux"}}
 
 
@@ -66,7 +66,7 @@ SAMPLES = {"path": "/home/u/src/app", "source": "/home/u/data", "dest": "/mnt/da
            "--no-inspect": ["pinned.example.org"], "--git-token-env": ["https://github.com=GH_TOKEN"],
            "name": "demo", "--llm": "local", "--allow-host": ["api.example.org"], "--vpn": "work",
            "--device": ["/dev/kvm"], "--memory": "4g", "--cpus": "2", "--pids": "1024", "--gui-vnc": "/home/u/vnc",
-           "--log-dir": "/home/u/logs", "--image-variant": "gpu"}
+           "--log-dir": "/home/u/logs", "--image-variant": "gpu", "image": "redis"}
 
 
 def sample(question):

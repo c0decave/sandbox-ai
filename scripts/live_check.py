@@ -197,11 +197,16 @@ def main(argv=None):
                    *(["--live-vpn-profile", args.vpn_profile] if args.vpn_profile else []), *suites]
         print(f"  ...   the live suites with {backend} (this takes a while)", flush=True)
         begin = datetime.datetime.now()
+        # A report of an earlier check in the same --out folder is never read as this one's (pytest killed by the
+        # timeout writes none).
+        junit.unlink(missing_ok=True)
         status, out, err = run(command, timeout=7200, cwd=ROOT)
         (directory / f"pytest-{backend}.txt").write_text(out + err)
         results = junit_results(junit)
-        if not results:
-            report.add(f"pytest ({backend})", "error", (out + err)[-3000:],
+        if not results or status != 0 and not any(outcome in ("failed", "error") for _, outcome, _, _ in results):
+            # Nothing reported, or pytest failed without a failing test (an internal error, a crash at the end):
+            # never a passing check.
+            report.add(f"pytest ({backend})", "error", f"exit status {status}\n" + (out + err)[-3000:],
                        (datetime.datetime.now() - begin).total_seconds())
         for name, outcome, detail, seconds in results:
             report.add(f"{backend}: {name}", outcome, detail if outcome != "passed" else "", seconds)

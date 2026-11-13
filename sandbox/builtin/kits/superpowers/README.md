@@ -1,0 +1,7 @@
+Superpowers (Jesse Vincent, MIT) 7.0.1: skills for disciplined work - brainstorming, writing and executing plans, test-driven development, systematic debugging, code review, git worktrees, subagent-driven development - for Claude Code, Codex and OpenCode.
+
+Built-in kit `superpowers` of sandbox-ai, off unless a start names it: `sandbox-ai claude --kit superpowers` (or codex, opencode), `"options": ["--kit", "superpowers"]` in a project's .sandbox-ai.json, or the app's Kits & plugins page (Use in the current project). Skills: brainstorming, dispatching-parallel-agents, executing-plans, finishing-a-development-branch, receiving-code-review, requesting-code-review, subagent-driven-development, systematic-debugging, test-driven-development, using-git-worktrees, using-superpowers, verification-before-completion, writing-plans, writing-skills.
+
+Vendored as plain skills: no SessionStart hook (upstream's hook only adds the using-superpowers skill to every session; the skill is here and loads by its description). Left out: diagnosing-superpowers (it reads session transcripts and files issues on GitHub). The Claude plugin superpowers@sandbox-ai with its hook stays in sandbox-ai's marketplace for whoever wants it.
+
+Upstream: https://github.com/obra/superpowers at 2ce8aa15d05bd57213e6f746f953aafb7ded7a8b (2026-10-21T14:00:49-07:00), licence MIT. The files are unchanged; kit.json lists each with its SHA-256 and git blob id. Review: docs/skills-review.md.

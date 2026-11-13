@@ -4,7 +4,13 @@
   "id": "network-analysis",
   "title": "Network analysis",
   "description": "Packet captures in a read-only folder, the agent reaches only its provider; TShark and mcpcap as MCP servers.",
-  "category": "analysis",
+  "translations": {
+    "de": {
+      "title": "Netzwerkanalyse",
+      "description": "Paketmitschnitte in einem nur lesbaren Ordner, der Agent erreicht nur seinen Anbieter; TShark und mcpcap als MCP-Server."
+    }
+  },
+  "category": "network",
   "agents": [
     "claude",
     "codex",

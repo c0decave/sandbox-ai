@@ -4,6 +4,12 @@
   "id": "pixel-art-factory",
   "title": "Pixel art factory",
   "description": "A logo for the project, drawn with code (Pillow, SVG, shaders) on a virtual screen, only the provider; the GPU if given.",
+  "translations": {
+    "de": {
+      "title": "Pixel-Art-Fabrik",
+      "description": "Ein Logo für das Projekt, mit Code gezeichnet (Pillow, SVG, Shader) auf einem virtuellen Bildschirm, nur der Anbieter; die GPU, wenn angegeben."
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

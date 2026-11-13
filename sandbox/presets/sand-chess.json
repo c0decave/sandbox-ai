@@ -4,6 +4,12 @@
   "id": "sand-chess",
   "title": "Chess in the sand",
   "description": "The agent plays chess against Codex in the same sandbox, on a board in a file; no engines, only the provider.",
+  "translations": {
+    "de": {
+      "title": "Schach im Sand",
+      "description": "Der Agent spielt Schach gegen Codex in derselben Sandbox, auf einem Brett in einer Datei; keine Engines, nur der Anbieter."
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

@@ -1,0 +1,35 @@
+{
+ "$comment": "Provenance of the files vendored into this built-in kit (sandbox-ai). Each file is the upstream file at the pinned commit, unchanged: its git blob id matches `git ls-tree -r COMMIT` upstream. The review: docs/skills-review.md.",
+ "name": "design-system",
+ "agents": [
+  "claude",
+  "codex",
+  "opencode"
+ ],
+ "default": "off",
+ "upstream": {
+  "repository": "https://github.com/anthropics/knowledge-work-plugins",
+  "commit": "2574e29377c7173d0cecffef29a6ecbd7f8ccb5d",
+  "committed": "2026-10-27T17:13:08-07:00",
+  "version": "1.2.0",
+  "license": "Apache-2.0"
+ },
+ "skills": {
+  "design-system": "design/skills/design-system"
+ },
+ "left_out": [],
+ "files": {
+  "skills/design-system/SKILL.md": {
+   "upstream": "design/skills/design-system/SKILL.md",
+   "sha256": "fb31bd0144c43955106f01927126ae9fd2d4148be44c8d5887b3391f40c31445",
+   "blob": "0346fc13900d4cd8dbf79461a4ad6d7500fb3858",
+   "mode": "100644"
+  },
+  "LICENSE": {
+   "upstream": "LICENSE",
+   "sha256": "a6946284993aeec75c7d75906064b66210c46051e562077efb30eb6dcfe72e26",
+   "blob": "f53c679acba79cbb292961fd9fb9e87ca20eab22",
+   "mode": "100644"
+  }
+ }
+}

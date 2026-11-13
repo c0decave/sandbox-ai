@@ -78,7 +78,7 @@ def test_the_inspector_offers_the_guide_for_a_part(window, monkeypatch):  # noqa
     node = board.board.first("network")
     board.inspect(node)
     button = next(b for b in board.inspector_holder.findChildren(QtWidgets.QPushButton)
-                  if b.text() == "Set up step by step…")
+                  if b.text() == "Wizard")
     button.click()
     assert opened == ["network"]
 
@@ -286,3 +286,37 @@ def test_a_read_that_failed_is_read_again_and_a_build_for_another_board_starts_n
         QtWidgets.QApplication.processEvents()
         time.sleep(0.01)
     assert ran == [] and started == []
+
+
+def test_a_preset_that_needs_only_what_is_made_elsewhere_prepares_nothing(window, monkeypatch):  # noqa: F811
+    """Review: a preset needing only what the app cannot make here (an image variant without a recipe) said
+    "Preparing what the start needs: ." and promised a notification that never came."""
+    board = window.board
+    notices, warned, ran = [], [], []
+    monkeypatch.setattr(board, "prerequisite_notice", lambda text, role="", toast=False: notices.append(text))
+    monkeypatch.setattr("sandbox_ai_app.prerequisites.warn", lambda parent, title, text: warned.append(text))
+    monkeypatch.setattr(board.sai, "host_run", lambda host, *a, **k: ran.append(a) or (0, "", ""))
+    board.provide({"--image-variant": ["no-such-recipe"]}, [], "local", None, None, "preset",
+                  context=("local", 1, ""), agent="claude")
+    assert warned and "no-such-recipe" in warned[-1]
+    assert not any("Preparing what the start needs" in text for text in notices), notices
+    assert not board.__dict__.get("preparing_contexts") and ran == []
+
+
+def test_the_guide_offers_the_mcp_servers_to_choose_from(window, monkeypatch):  # noqa: F811
+    """Adding an MCP server through the guide: a drop-down of the servers there are (defined here, the project's
+    own), the one chosen taken by its name; a name typed that it does not list is taken as typed."""
+    board = window.board
+    monkeypatch.setattr(board, "mcp_names", lambda: ["demo", "playwright"])
+    board.mcp_catalog_names = ["searxng"]
+    node = board.board.add("mcp", name="")
+    dialog = guide_view.NodeGuide(node, [], board)
+    _question, widget = dialog.inputs["name"]
+    assert isinstance(widget, QtWidgets.QComboBox) and widget.isEditable()
+    names = [widget.itemData(i) for i in range(widget.count())]
+    assert names[:2] == ["demo", "playwright"] and "searxng" in names
+    widget.setCurrentIndex(1)
+    assert dialog.answers()["name"] == "playwright"
+    widget.setEditText("other-host-server")
+    assert dialog.answers()["name"] == "other-host-server"
+    dialog.reject()

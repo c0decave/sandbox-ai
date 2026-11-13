@@ -435,6 +435,7 @@ class SandboxTests(unittest.TestCase):
         stop.seen, stop.threads = {"seen"}, [Mock(), Mock()]
         with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), \
                 patch.object(s.RUNTIME, "SESSION_CONFIG", Path(logs) / "absent.json"), \
+                patch.object(s.RUNTIME, "CONTROL_DIR", Path(logs) / "absent-control"), \
                 patch.object(s.os, "getpid", return_value=1), patch.object(s.RUNTIME.ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))), \
                 patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "namespace_state", return_value={}), \
                 patch.object(sr, "firejail_command", return_value=["fj"]), patch.object(sr, "wait_child", return_value=7), \
@@ -654,6 +655,7 @@ class SandboxTests(unittest.TestCase):
             processes = [Mock(), Mock()]
             with patch.object(sr, "GUI_CONFIG", config), patch.object(sr, "LOG_DIR", Path(d) / "absent"), \
                     patch.object(s.RUNTIME, "SESSION_CONFIG", Path(d) / "absent.json"), \
+                    patch.object(s.RUNTIME, "CONTROL_DIR", Path(d) / "absent-control"), \
                     patch.object(s.os, "getpid", return_value=1), patch.object(s.RUNTIME.ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))), \
                     patch.object(s.subprocess, "run"), patch.object(s.subprocess, "Popen"), patch.object(sr, "namespace_state", return_value={}), \
                     patch.object(sr, "firejail_command", return_value=["fj"]), patch.object(sr, "wait_child", return_value=3), \

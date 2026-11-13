@@ -45,17 +45,7 @@ TOUR = (
          N_("The terminals of builds, logins and sandboxes started in the app, and every running start to attach "
             "to, however it was started."),
          N_("Ctrl-b d detaches from a session; it keeps running.")),
-    Step("connections", N_("Connections"),
-         N_("Every connection the proxy saw: allowed, asked, refused, with the request and the rule that "
-            "decided."),
-         N_("Filter by host to see what an agent reached.")),
-    Step("activity", N_("Activity"),
-         N_("What happened in a run, in order: starts, tool calls, questions, connections, the taint."),
-         N_("Pick a run to follow it from start to end.")),
-    Step("statistics", N_("Statistics"),
-         N_("Tokens, requests and tool calls per run and per agent."),
-         N_("Compare two runs of the same project.")),
-    Step("files", N_("Files"),
+    Step("files", N_("File manager"),
          N_("The files of a sandbox's HOME and workspaces, to look into and to copy in or out."),
          N_("Copy a file into a running sandbox without giving it a mount.")),
     Step("kits", N_("Kits & plugins"),
@@ -82,6 +72,16 @@ TOUR = (
          N_("Teams of agents on one workspace, on this machine or a host: one sandbox per agent, the lead hands the "
             "others tasks on the team's board."),
          N_("Start a team of Claude Code and Codex on the current project, then talk to the lead.")),
+    Step("connections", N_("Connections"),
+         N_("Every connection the proxy saw: allowed, asked, refused, with the request and the rule that "
+            "decided."),
+         N_("Filter by host to see what an agent reached.")),
+    Step("activity", N_("Activity"),
+         N_("What happened in a run, in order: starts, tool calls, questions, connections, the taint."),
+         N_("Pick a run to follow it from start to end.")),
+    Step("statistics", N_("Statistics"),
+         N_("Tokens, requests and tool calls per run and per agent."),
+         N_("Compare two runs of the same project.")),
     Step("system", N_("System"),
          N_("What sandbox-ai needs on this computer, and whether it is there: Podman, Bubblewrap, the image, the "
             "network."),
@@ -192,6 +192,12 @@ NODE_QUESTIONS = {
                  placeholder="https://github.com=GH_TOKEN"),
         Question("--token-proxy", N_("Token proxy"), N_("The proxy adds the token to each push: the agent never "
                                                         "sees it."), "flag"),
+    ),
+    "service": (
+        Question("name", N_("Name"), N_("The service's name: the agent finds it in SANDBOX_AI_SERVICES, its logs are "
+                                         "named after it."), "text", placeholder="db", needed=True),
+        Question("image", N_("Image"), N_("One of your images (sandbox-ai images pull|build-image, the Images page): "
+                                           "pinned by digest, unchecked."), "text", placeholder="redis"),
     ),
     "mcp": (
         Question("name", N_("Server"), N_("The MCP server by name (the MCP servers page lists them); it runs in a "

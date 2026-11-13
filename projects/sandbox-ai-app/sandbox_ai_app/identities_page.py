@@ -7,11 +7,12 @@ from __future__ import annotations
 import re
 
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
 from .backend import SandboxAI
+from .credential_tab import CredentialTab
 from .files import printable
 from .i18n import tr
 from .host_choice import on_host
@@ -32,20 +33,18 @@ def summary(identity):
             ", ".join(e["kind"] for e in identity.get("publish", [])) or "—"]
 
 
-class IdentitiesBox(QGroupBox):
-    """The identities with Add, Edit and Remove."""
+class IdentitiesBox(CredentialTab):
+    """The identities with Add, Edit and Remove (laid out as every tab of the Credentials page)."""
 
     def __init__(self, sai):
         super().__init__(tr("Identities (sandbox-ai identities)"))
         self.sai, self.known, self.secret_names, self.host, self.token = sai, {}, [], LOCAL, 0
         self.on_change = None  # the Credentials page's overview
-        layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("Who a sandbox works as: commit name and address, Git and publish logins under "
-                                        "one name; a start uses one with --identity NAME. Without it: default (your "
-                                        "git-logins and publish-logins)."), role="secondary"))
-        self.list = table([tr("Identity"), tr("Commits as"), tr("Git servers"), tr("Publishes to")], stretch=2)
-        layout.addWidget(self.list)
-        row = QHBoxLayout()
+        self.add_about(tr("Who a sandbox works as: commit name and address, Git and publish logins under one name; a "
+                          "start uses one with --identity NAME. Without it: default (your git-logins and "
+                          "publish-logins)."))
+        self.list = self.set_list(table([tr("Identity"), tr("Commits as"), tr("Git servers"), tr("Publishes to")],
+                                        stretch=2))
         self.add_button, self.edit_button, self.remove_button = \
             QPushButton(tr("Add…")), QPushButton(tr("Edit…")), QPushButton(tr("Remove…"))
         self.check_button = QPushButton(tr("Check"))
@@ -55,13 +54,7 @@ class IdentitiesBox(QGroupBox):
         self.edit_button.clicked.connect(lambda: self.edit(selected(self.list)))
         self.remove_button.clicked.connect(self.remove)
         self.check_button.clicked.connect(lambda _=False: self.check())
-        for widget in (self.add_button, self.edit_button, self.remove_button, self.check_button):
-            row.addWidget(widget)
-        row.addStretch()
-        layout.addLayout(row)
-        self.message = plain_label()
-        self.message.setWordWrap(True)
-        layout.addWidget(self.message)
+        self.add_buttons(self.add_button, self.edit_button, self.remove_button, self.check_button)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Edit… one
         multi_select(self.list)
         delete_key(self.list, self.remove)

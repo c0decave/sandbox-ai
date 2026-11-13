@@ -1,0 +1,5 @@
+This kit of sandbox-ai contains files of https://github.com/lackeyjb/playwright-skill
+at commit dd47a6a023e249eb1b36e9e943eab89d0900865d (2026-08-14T09:51:33-04:00), unchanged.
+Licence: MIT, the upstream licence text in LICENSE.
+sandbox-ai chose which files to include (kit.json: "files", "left_out") and added README.md, NOTICE,
+kit.json and the agent folders' markers. Security review: docs/skills-review.md.

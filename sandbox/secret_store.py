@@ -5,11 +5,22 @@
   sandbox-ai secrets set NAME              read the value from stdin (or --from-env VARIABLE)
   sandbox-ai secrets delete NAME
   sandbox-ai secrets backend               keyring, keychain (macOS) or file
+  sandbox-ai secrets give RUN NAME --api-key HOST [--as VARIABLE] [--keep]
+                                           a running sandbox gets the secret NAME as an API key for HOST, now
+  sandbox-ai secrets revoke RUN NAME       take back a key given during the run (NAME: the secret or its variable)
+  sandbox-ai secrets list --run RUN [--json]   the API keys a running sandbox was given during the run
 
 Secrets go to the Secret Service (GNOME Keyring, KWallet, KeePassXC; through secret-tool) when it is there, on macOS
 to the login Keychain (through security), else to private files (0600) in ~/.local/share/sandbox-ai/secrets.
 Sandboxes get them only when named: --secret-env NAME (an environment variable for the agent), --git-token-secret
 URL=NAME, or an MCP server's variable (sandbox-ai mcp add ... --env NAME). Values are never printed.
+
+A sandbox that runs already gets a secret as an API key with `give` (RUN: its run id or its start's name, as
+`sandbox-ai list` shows it): its connection proxy puts the key in on the wire for HTTPS requests to HOST - in a
+credential header, also as the password of a Basic login (git over HTTPS) - where the agent sends the placeholder
+that `export VARIABLE=...` (said by give) stands for; the agent never sees the key, and HOST is allowed too. It is
+the same step as the older form `sandbox-ai net allow RUN --api-key HOST=VARIABLE=NAME`, which keeps working. For
+`git push` to a Git server, a Git login is meant: sandbox-ai git-logins give RUN URL --secret NAME.
 
 Standard library only.
 """
@@ -196,18 +207,85 @@ def get(name):
     return None
 
 
+_net = None
+
+
+def net_module():
+    """net.py, which gives a running sandbox a key (`give` and `revoke` are its `net allow/revoke --api-key`: one
+    code path). Loaded only for those: the other commands stay standard library alone."""
+    global _net
+    if _net is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sandbox_ai_net_for_secrets", Path(__file__).resolve().parent
+                                                      / "net.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _net = loaded
+    return _net
+
+
+def given_main(args, out):
+    """give, revoke and list --run: net.py's allow, revoke and given credentials of the run."""
+    net = net_module()
+    if args.command == "list":
+        return net.list_given(args.run, "api_keys", out, as_json=args.json, prog="secrets")
+    try:
+        check_name(args.name)
+        if args.command == "give":
+            variable = args.variable or args.name
+            check_name(variable)
+            argv = ["allow", args.run, "--api-key", f"{args.host}={variable}={args.name}",
+                    *(["--keep"] if args.keep else [])]
+        else:
+            # NAME: the variable a key was given as, or the secret it came from (each key given of that secret)
+            record = net.choose(net.running(), args.run, command="secrets revoke")
+            given = net.given_credentials(record)["api_keys"]
+            names = [e["name"] for e in given if e["name"] == args.name] or \
+                [e["name"] for e in given if e.get("secret") == args.name]
+            if not names:
+                raise ValueError(f"no API key {args.name} was given during this run (sandbox-ai secrets list --run "
+                                 f"{args.run})")
+            argv = ["revoke", args.run, *[token for name in names for token in ("--api-key", name)]]
+    except ValueError as exc:
+        print(f"sandbox-ai secrets: {exc}", file=sys.stderr)
+        return 1
+    return net.main(argv, out=out, brief=True, prog="secrets", command=f"secrets {args.command}")
+
+
 def main(argv, stdin=sys.stdin, out=print):
     parser = argparse.ArgumentParser(prog="sandbox-ai secrets", description=__doc__.split("\n\n")[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     epilog="\n\n".join(__doc__.split("\n\n")[1:3]))
+                                     epilog="\n\n".join(__doc__.split("\n\n")[1:4]))
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("list")
+    listing = commands.add_parser("list")
     commands.add_parser("backend")
     setting = commands.add_parser("set")
     setting.add_argument("name")
     setting.add_argument("-e", "--from-env", metavar="VARIABLE", help="take the value from this variable")
     commands.add_parser("delete", aliases=["remove"]).add_argument("name")  # remove: as vpn, llm and hosts say
+    listing.add_argument("--run", metavar="RUN",
+                         help="the API keys the running sandbox RUN was given during the run (secrets give)")
+    listing.add_argument("--json", action="store_true", help="with --run: as JSON, for scripts")
+    given = commands.add_parser("give", help="give a running sandbox the secret NAME as an API key, now",
+                                description="Give the running sandbox RUN the secret NAME as an API key for HTTPS "
+                                            "requests to HOST: its connection proxy puts the key in on the wire where "
+                                            "the agent sends the placeholder (export VARIABLE=..., said here); the "
+                                            "agent never sees it. The older form is sandbox-ai net allow RUN "
+                                            "--api-key HOST=VARIABLE=NAME.")
+    given.add_argument("run")
+    given.add_argument("name", help="the secret")
+    given.add_argument("--api-key", required=True, metavar="HOST", dest="host",
+                       help="the HTTPS server the key is for (a host name); the sandbox may reach it from now on")
+    given.add_argument("--as", metavar="VARIABLE", dest="variable",
+                       help="the variable whose placeholder the agent sends (default: NAME)")
+    given.add_argument("--keep", action="store_true",
+                       help="also for the next starts: into the project's trusted .sandbox-ai.json, as a reference")
+    taken = commands.add_parser("revoke", help="take back an API key given during the run")
+    taken.add_argument("run")
+    taken.add_argument("name", help="the secret, or the variable it was given as")
     args = parser.parse_args(argv)
+    if args.command in ("give", "revoke") or (args.command == "list" and args.run):
+        return given_main(args, out)
     try:
         backend = store()
         if args.command == "backend":

@@ -41,6 +41,10 @@ BUILTIN_LABEL = "built-in"
 # Named kits shipped with sandbox-ai (--kit NAME), in BUILTIN_KITS/NAME/AGENT. A kit NAME of the user's
 # for the same agent replaces it. Their plugins are installed only on request (plugins claude --kit NAME).
 BUILTIN_KITS = BUILTIN / "kits"
+# A built-in kit's skills/ beside its agent folders, shared by each agent folder of that kit that holds this marker:
+# third-party skills vendored once for Claude Code, Codex and OpenCode (their provenance in the kit's kit.json, their
+# review in docs/skills-review.md). Only sandbox-ai's own kits have it; in a kit of yours the marker means nothing.
+SHARED_SKILLS_MARKER = ".shared-skills"
 # sandbox-ai's own Claude plugin marketplace, mounted read-only at the same place in every Claude sandbox.
 MARKETPLACE = HERE / "marketplace"
 MARKETPLACE_TARGET = "/sandbox/marketplace"
@@ -156,6 +160,16 @@ def sources(a):
     return result
 
 
+def shared_skills(root):
+    """The skills/ folder ROOT (an agent folder of a built-in kit, BUILTIN_KITS/NAME/AGENT) shares with the kit's
+    other agent folders, or None: only a built-in kit's agent folder with the SHARED_SKILLS_MARKER file has one."""
+    root = Path(root)
+    if root.parent.parent != BUILTIN_KITS or not (root / SHARED_SKILLS_MARKER).is_file():
+        return None
+    folder = root.parent / "skills"
+    return folder if folder.is_dir() and not folder.is_symlink() else None
+
+
 def scan(agent, kit_sources):
     """What the kits hold for AGENT: {"entries": {kind: {name: (label, path)}}, "memory": (label, path)
     or None, "plugins": [(label, path)], "notes": [...]}. A name in two kits is a ValueError."""
@@ -164,11 +178,13 @@ def scan(agent, kit_sources):
     memory_name = MEMORY_FILE[agent][0]
     for label, root in kit_sources:
         try:
-            children = sorted(os.scandir(root), key=lambda e: e.name)
+            children = [(child.name, Path(child.path)) for child in sorted(os.scandir(root), key=lambda e: e.name)]
         except OSError as exc:
             raise ValueError(f"{label}: cannot read {root}: {exc.strerror}") from None
-        for child in children:
-            name, path = child.name, Path(child.path)
+        shared = shared_skills(root)
+        if shared is not None and "skills" in entries:
+            children.append(("skills", shared))
+        for name, path in children:
             if name.startswith("."):
                 continue
             if name in entries:

@@ -7,13 +7,15 @@ filled in on the board. The user's own presets (the current board saved under a 
 """
 from __future__ import annotations
 
+import json
 import os
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGraphicsScene, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGraphicsScene, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout,
+    QWidget,
 )
 
 from . import board as B
@@ -23,7 +25,7 @@ from . import wizard_llm as WL
 from .board_view import NODE_H, NODE_W, PathEdit, elide
 from .files import printable
 from .model_combo import searchable
-from .i18n import tr
+from .i18n import language as i18n_language, tr
 from .state import choose_file
 from .widgets import MONO, FlowLayout, ask_first, background, inform, plain_label, safe_tooltip, warn
 
@@ -71,9 +73,26 @@ def select_preset(combo, catalogue, wanted):
     return index >= 0
 
 
+THUMBS_KEPT = 300  # pictures of boards kept (about 120 KB each at a ratio of 2): the gallery's, in two themes and more
+_thumbs = {}  # {(the look, the board): QPixmap} - see thumbnail()
+
+
 def thumbnail(board, size=THUMB, ratio=1.0):
     """A small picture of BOARD in the current theme's colours: the canvas, the nodes as cards with their
-    title band (a part with a placeholder outlined in the warning colour), the edges."""
+    title band (a part with a placeholder outlined in the warning colour), the edges. Drawn once for each look
+    (the theme's colours, the language, size and ratio) and board (its state): every opening of the gallery drew
+    every preset's anew (48 scenes, a third of the time it takes to open)."""
+    key = (json.dumps([theme.colors(), theme.data().get("radius"), i18n_language(), size.width(), size.height(),
+                       ratio], sort_keys=True, default=str), json.dumps(board.state(), sort_keys=True, default=str))
+    pixmap = _thumbs.get(key)
+    if pixmap is None:
+        if len(_thumbs) >= THUMBS_KEPT:
+            _thumbs.clear()
+        pixmap = _thumbs[key] = draw_thumbnail(board, size, ratio)
+    return pixmap
+
+
+def draw_thumbnail(board, size, ratio):
     colors, data = theme.colors(), theme.data()
     radius = float(min(data["radius"], 12)) * 1.6
     scene = QGraphicsScene()
@@ -208,13 +227,20 @@ class PresetGallery(QDialog):
         search_row.addWidget(self.search, 1)
         search_row.addWidget(help_view.HelpButton("gallery.cards"))
         layout.addLayout(search_row)
+        # On the left: the categories (a click shows that section of the cards: no scrolling down to find it), then
+        # the chosen preset's description; on the right the cards.
         split = QSplitter(Qt.Orientation.Horizontal)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        split.addWidget(self.scroll)
         details = QWidget()
         side = QVBoxLayout(details)
-        side.setContentsMargins(8, 0, 0, 0)
+        side.setContentsMargins(0, 0, 8, 0)
+        side.addWidget(plain_label(tr("Categories"), role="section"))
+        self.categories = QListWidget()
+        self.categories.setAccessibleName(tr("Categories"))
+        self.categories.itemClicked.connect(self.show_category)
+        self.categories.itemActivated.connect(self.show_category)
+        side.addWidget(self.categories)
         self.title = plain_label(role="title")
         self.description = plain_label()
         self.meta = plain_label(role="secondary")
@@ -233,7 +259,7 @@ class PresetGallery(QDialog):
                                        "practises on (port 4000), on the host the board starts on"))
         self.demo_button.clicked.connect(lambda _=False: self.start_demo_device())
         self.demo_button.hide()
-        self.demo_status = plain_label(role="secondary")
+        self.demo_status = plain_label(role="secondary", selectable=True)
         self.demo_status.hide()
         side.addWidget(self.demo_button)
         side.addWidget(self.demo_status)
@@ -241,14 +267,16 @@ class PresetGallery(QDialog):
         side.addWidget(self.command)
         side.addStretch()
         split.addWidget(details)
-        split.setSizes([840, 340])
+        split.addWidget(self.scroll)
+        split.setSizes([360, 820])
         layout.addWidget(split, 1)
-        self.problem = plain_label(role="notice-warn")
+        self.problem = plain_label(role="notice-warn", selectable=True)
         self.problem.hide()
         layout.addWidget(self.problem)
         row = QHBoxLayout()
         save = QPushButton(tr("Save the board as a preset…"))
-        save.setToolTip(tr("Keep the board shown now as a preset of your own (no workspaces, no secrets)"))
+        save.setToolTip(tr("Keep the board shown now as a preset of your own, with its values and folders if you "
+                           "like (never a secret)"))
         save.clicked.connect(lambda: self.save_board())
         save.setEnabled(board is not None)
         load = QPushButton(tr("Import…"))
@@ -257,10 +285,13 @@ class PresetGallery(QDialog):
         self.export_button = QPushButton(tr("Export…"))
         self.export_button.setToolTip(tr("Write the selected preset to a JSON file to pass on"))
         self.export_button.clicked.connect(lambda: self.export_preset())
+        self.rename_button = QPushButton(tr("Rename…"))
+        self.rename_button.setToolTip(tr("Change the name, description, category and notes of your preset"))
+        self.rename_button.clicked.connect(lambda: self.rename_preset())
         self.delete_button = QPushButton(tr("Delete"))
         self.delete_button.setProperty("role", "danger")
         self.delete_button.clicked.connect(lambda: self.delete_preset())
-        for widget in (save, load, self.export_button, self.delete_button):
+        for widget in (save, load, self.export_button, self.rename_button, self.delete_button):
             row.addWidget(widget)
         row.addWidget(help_view.HelpButton("gallery.mine"))
         row.addStretch()
@@ -317,10 +348,15 @@ class PresetGallery(QDialog):
         holder = QWidget()
         column = QVBoxLayout(holder)
         self.cards, self.sections, self.selected = [], [], None  # the cards shown until now go
+        self.section_notes = {}  # {section key: the label under its heading (sandbox-ai's category's description)}
         for key, title, presets in self.presets():
             if key == PR.SAI_CATEGORY and not presets:
                 continue  # a sandbox-ai without presets of its own: no empty section
             heading = plain_label(tr(title), role="section")
+            described = self.catalogue.description(key)
+            if described:
+                heading.setToolTip(safe_tooltip(described))
+                self.section_notes[key] = plain_label(described, role="secondary")
             box = QWidget()
             flow = FlowLayout(box, spacing=10)
             cards = []
@@ -336,11 +372,21 @@ class PresetGallery(QDialog):
                                     role="secondary")
                 flow.addWidget(empty)
             column.addWidget(heading)
+            if key in self.section_notes:
+                column.addWidget(self.section_notes[key])
             column.addWidget(box)
             self.sections.append((heading, box, cards, key))
             self.cards += cards
         column.addStretch()
         self.scroll.setWidget(holder)
+        self.categories.clear()
+        for heading, _box, cards, key in self.sections:
+            item = QListWidgetItem(f"{heading.text()} ({len(cards)})")
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            if key in self.section_notes:
+                item.setToolTip(safe_tooltip(self.section_notes[key].text()))
+            self.categories.addItem(item)
+        self.fit_categories()
         wanted = next((c for c in self.cards if select in (c.preset.key, c.preset.id)), None) or \
             (self.cards[0] if self.cards else None)
         if wanted is not None:
@@ -360,14 +406,36 @@ class PresetGallery(QDialog):
         for heading, box, cards, key in self.sections:
             shown = 0
             for card_ in cards:
-                card_.setVisible(PR.matches(card_.preset, text))
+                card_.setVisible(PR.matches(card_.preset, text, self.catalogue))
                 shown += not card_.isHidden()
             visible = bool(shown) or (key == "mine" and not text.strip())
             heading.setVisible(visible)
             box.setVisible(visible)
+            if key in self.section_notes:
+                self.section_notes[key].setVisible(visible)
+            for row in range(self.categories.count()):
+                item = self.categories.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == key:
+                    item.setHidden(not visible)
+                    item.setText(f"{heading.text()} ({shown})")
+        self.fit_categories()
         if self.selected is None or self.selected.isHidden():
             visible = self.visible_cards()
             self.choose(visible[0] if visible else None)
+
+    def fit_categories(self):
+        """The category list as tall as its rows (at most ten): the description stays right below it."""
+        rows = sum(not self.categories.item(row).isHidden() for row in range(self.categories.count()))
+        height = self.categories.sizeHintForRow(0) if self.categories.count() else 20
+        self.categories.setFixedHeight(max(1, min(rows, 10)) * max(height, 18) + 2 * self.categories.frameWidth() + 4)
+
+    def show_category(self, item):
+        """Scroll the cards to the section of the category clicked."""
+        key = item.data(Qt.ItemDataRole.UserRole)
+        for heading, _box, _cards, section in self.sections:
+            if section == key and not heading.isHidden():
+                self.scroll.verticalScrollBar().setValue(heading.y())
+                return
 
     def choose(self, card_):
         if self.selected is not None and self.selected is not card_:
@@ -376,6 +444,7 @@ class PresetGallery(QDialog):
         self.create_button.setEnabled(card_ is not None)
         self.export_button.setEnabled(card_ is not None)
         self.delete_button.setEnabled(card_ is not None and card_.preset.source == "mine")
+        self.rename_button.setEnabled(card_ is not None and card_.preset.source == "mine")
         if card_ is None:
             self.title.setText(tr("No preset matches"))
             for widget in (self.description, self.meta, self.notes, self.fill_in):
@@ -386,10 +455,11 @@ class PresetGallery(QDialog):
         preset = card_.preset
         board = self.build(preset)
         score = B.badges(board, self.policy)[0]
-        category = dict(PR.CATEGORIES).get(preset.category, preset.category)
+        category = self.catalogue.category_label(preset) if self.catalogue is not None else \
+            tr(dict(PR.CATEGORIES).get(preset.category, preset.category))
         self.title.setText(preset.text(preset.title))
         self.description.setText(preset.text(preset.description))
-        self.meta.setText(" · ".join([tr(category), tr(PR.DIFFICULTIES.get(preset.difficulty, preset.difficulty)),
+        self.meta.setText(" · ".join([category, tr(PR.DIFFICULTIES.get(preset.difficulty, preset.difficulty)),
                                       tr("Security score: {score} of 100", score=score)]))
         lines = [f"{p.marker}: {preset.text(p.label)}" + (" " + tr("(optional)") if p.optional else "")
                  for p in preset.placeholders]
@@ -458,22 +528,43 @@ class PresetGallery(QDialog):
 
     # -- the user's own --
 
-    def save_board(self, title=None, description="", category="simple"):
+    def save_board(self, title=None, description="", category="simple", notes=(), keep=False):
+        """The board shown now as a preset of yours: TITLE and the rest given, else asked for (SavePresetDialog, which
+        keeps the folders and values by default)."""
         if self.current_board is None:
             return None
         if title is None:
-            dialog = SavePresetDialog(self)
+            dialog = SavePresetDialog(self, self.sai)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return None
-            title, description, category = dialog.values()
+            choices = dialog.choices()
+        else:
+            choices = {"title": title.strip(), "description": description.strip(), "category": category,
+                       "notes": list(notes), "keep": keep}
+        preset = save_board_preset(self, self.sai, self.current_board, choices)
+        if preset is not None:
+            self.populate(select=preset.key)
+        return preset
+
+    def rename_preset(self, choices=None):
+        """Change the name, description, category and notes of the selected preset of yours (asked for unless
+        CHOICES); its id, options and positions stay."""
+        if self.selected is None or self.selected.preset.source != "mine":
+            return None
+        preset = self.selected.preset
+        if choices is None:
+            dialog = SavePresetDialog(self, self.sai, preset, edit=True)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            choices = dialog.choices()
         try:
-            preset = PR.from_board(self.sai, self.current_board, title.strip(), description.strip(), category)
-            PR.add_mine(self.sai, preset)
+            changed = changed_preset(self.sai, preset, choices)
+            PR.add_mine(self.sai, changed)
         except (OSError, ValueError) as exc:
             warn(self, tr("Not saved"), printable(exc))
             return None
-        self.populate(select=preset.key)
-        return preset
+        self.populate(select=changed.key)
+        return changed
 
     def import_preset(self, path=None):
         path = path or choose_file(self, tr("Import a preset"), "preset")
@@ -719,23 +810,64 @@ class PlaceholderForm(QDialog):
         self.accept()
 
 
+def preset_categories(sai):
+    """[(key, title)] a preset of yours can be filed under: sandbox-ai's categories (development, research, llm ...) in
+    the app's language where this sandbox-ai has them, else the app's own."""
+    found = [(key, PR.category_text(info, "title") or key) for key, info in PR.sai_categories(sai)] if sai else []
+    return found or [(key, tr(title)) for key, title in PR.CATEGORIES if key != PR.SAI_CATEGORY]
+
+
 class SavePresetDialog(QDialog):
-    def __init__(self, parent=None):
+    """Save the board as a preset of yours (or, with EDIT, change the name, description, category and notes of one):
+    a name, a description of several lines, its category, notes (one per line), whether the folders and the values
+    filled in are kept (offered as defaults at the next use), and - for a board made from a preset of yours (PRESET) -
+    whether it replaces that one."""
+
+    def __init__(self, parent=None, sai=None, preset=None, edit=False):
         super().__init__(parent)
-        self.setWindowTitle(tr("Save the board as a preset"))
+        self.edit = edit
+        self.setWindowTitle(tr("Change the preset") if edit else tr("Save the board as a preset"))
+        self.resize(560, 420)
         form = QFormLayout(self)
         self.name = QLineEdit()
         self.name.setMaxLength(80)
-        self.description = QLineEdit()
-        self.description.setMaxLength(400)
+        self.description = QPlainTextEdit()
+        self.description.setPlaceholderText(tr("What it is for, what it opens and what it needs (several lines)"))
+        self.description.setMaximumHeight(110)
         self.category = QComboBox()
-        for key, title in PR.CATEGORIES:
-            self.category.addItem(tr(title), key)
+        for key, title in preset_categories(sai):
+            self.category.addItem(title, key)
+        self.notes = QPlainTextEdit()
+        self.notes.setPlaceholderText(tr("Notes, one per line (shown with the preset)"))
+        self.notes.setMaximumHeight(90)
+        self.keep = QCheckBox(tr("Keep the folders (workspaces, mounts) and the values filled in"))
+        self.keep.setChecked(True)
+        self.keep.setToolTip(tr("Kept: at the next use each folder is offered with its path of now, to change. Not "
+                                "kept: no workspaces, every folder asked for anew. Secrets are never kept."))
+        self.replace = QCheckBox()
+        self.replacing = False  # a preset of yours the board came from: it is replaced unless unticked
+        if preset is not None:
+            self.name.setText(preset.text(preset.title))
+            self.description.setPlainText(preset.text(preset.description))
+            index = self.category.findData(preset.category)
+            if index >= 0:
+                self.category.setCurrentIndex(index)
+            self.notes.setPlainText("\n".join(preset.text(n) for n in preset.notes))
+            if not edit:  # the board came from this preset of yours: it is replaced unless unticked
+                self.replace.setText(tr("Replace my preset “{name}” (the board came from it)",
+                                        name=printable(preset.text(preset.title))))
+                self.replace.setChecked(True)
+                self.replacing = True
         form.addRow(tr("Name"), self.name)
         form.addRow(tr("Description"), self.description)
         form.addRow(tr("Category"), self.category)
-        form.addRow(plain_label(tr("The workspaces are not kept (a preset is for any project); secrets never are: "
-                                   "a board with one is not saved."), role="secondary"))
+        form.addRow(tr("Notes"), self.notes)
+        if not edit:
+            form.addRow("", self.keep)
+            form.addRow("", self.replace)
+            self.replace.setVisible(self.replacing)
+            form.addRow(plain_label(tr("Secrets are never kept: a board with one is not saved. Paths of this "
+                                       "computer are named in a note of the preset."), role="secondary"))
         buttons = QDialogButtonBox()
         buttons.addButton(tr("Save"), QDialogButtonBox.ButtonRole.AcceptRole).setDefault(True)
         buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
@@ -743,5 +875,42 @@ class SavePresetDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def choices(self):
+        """{title, description, category, notes, keep, replace} as filled in."""
+        return {"title": self.name.text().strip(), "description": self.description.toPlainText().strip(),
+                "category": self.category.currentData(),
+                "notes": [line.strip() for line in self.notes.toPlainText().splitlines() if line.strip()],
+                "keep": self.keep.isChecked(), "replace": self.replacing and self.replace.isChecked()}
+
     def values(self):
-        return self.name.text(), self.description.text(), self.category.currentData()
+        return self.name.text(), self.description.toPlainText(), self.category.currentData()
+
+
+def save_board_preset(parent, sai, board, choices, replacing=None):
+    """Keep BOARD as a preset of yours with CHOICES (SavePresetDialog.choices: title, description, category, notes,
+    keep); REPLACING (a preset of yours) is replaced after asking, keeping its id. The preset, or None (said: refused,
+    or not replaced)."""
+    ident = None
+    if replacing is not None and choices.get("replace"):
+        if not ask_first(parent, "preset-replace", tr("Replace the preset"),
+                         tr("Replace your preset {name} with the board shown now?",
+                            name=printable(replacing.text(replacing.title))), tr("Replace")):
+            return None
+        ident = replacing.id
+    try:
+        preset = PR.from_board(sai, board, choices["title"], choices.get("description", ""),
+                               choices.get("category") or "simple", ident=ident, keep=choices.get("keep", True),
+                               notes=choices.get("notes", ()))
+        PR.add_mine(sai, preset)
+    except (OSError, ValueError) as exc:
+        warn(parent, tr("Not saved"), printable(exc))
+        return None
+    return preset
+
+
+def changed_preset(sai, preset, choices):
+    """PRESET (one of yours) with the name, description, category and notes of CHOICES, checked as a stored one."""
+    document = {**PR.to_document(preset), "title": choices["title"], "description": choices.get("description", ""),
+                "category": choices.get("category") or preset.category,
+                "notes": [str(n)[:1000] for n in choices.get("notes", [])]}
+    return PR.from_document(sai, document)

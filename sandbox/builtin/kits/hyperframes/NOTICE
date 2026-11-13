@@ -1,0 +1,5 @@
+This kit of sandbox-ai contains files of https://github.com/heygen-com/hyperframes
+at commit cfa653af4d0f95d751286fb25c8d38bdb56ef663 (2026-10-28T23:27:27+00:00), unchanged.
+Licence: Apache-2.0, the upstream licence text in LICENSE.
+sandbox-ai chose which files to include (kit.json: "files", "left_out") and added README.md, NOTICE,
+kit.json and the agent folders' markers. Security review: docs/skills-review.md.

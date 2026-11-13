@@ -64,3 +64,16 @@ def test_missing_version_line(tmp_path):
 
 def test_repository_version_is_plain_semver():
     bump.parse(bump.LINE.search((ROOT / "sandbox/agent_sandbox.py").read_text())[1])
+
+
+def test_the_app_version_follows(tmp_path, monkeypatch):
+    """Regression (0.1.94 was tagged with the app still saying 0.1.93): the bump raises the app's __version__ too."""
+    source = tmp_path / "agent_sandbox.py"
+    source.write_text('x = 1\n__version__ = "0.1.93"\n')
+    app = tmp_path / "__init__.py"
+    app.write_text('"""app"""\n__version__ = "0.1.93"  # the version of sandbox-ai it is released with\n')
+    monkeypatch.setattr(bump, "SOURCE", source)
+    monkeypatch.setattr(bump, "APP", app)
+    assert bump.main(["--file", str(source)]) == 0
+    assert '__version__ = "0.1.94"' in source.read_text()
+    assert '__version__ = "0.1.94"  # the version of sandbox-ai it is released with' in app.read_text()

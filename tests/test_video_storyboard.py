@@ -242,3 +242,191 @@ def test_the_timing_fits_a_course_of_twelve_to_twenty_minutes():
     german = make.build(make._PlanCanvas(), "de", {}, None)
     assert [round(s.duration, 3) for s in german] == [round(s.duration, 3) for s in scenes], \
         "both languages share one timing, so either subtitle file fits either video"
+
+
+# -- the series: one video per page of the desktop app, spoken in German --------------------------------------
+
+NARRATE = load("narrate")
+CAPTURE = load("capture_app")
+PRON = NARRATE.pronunciation
+
+
+def series_texts():
+    series = SB.SERIES["pages"]
+    for key in ("title", "part", "next", "last"):
+        yield "series", series[key]
+    for value in series["outro_bullets"] + series["outro_captions"]:
+        yield "series", value
+    for video in SB.series_videos():
+        for value in video["topics"] + video["intro"]:
+            yield video["id"], value
+        for index, scene in enumerate(video["scenes"]):
+            for value in SB.texts_of(scene):
+                yield f"{video['id']}/{index}", value
+
+
+def english_texts():
+    return [SB.text(v, "en") for _, v in every_text()] + [SB.text(v, "en") for _, v in series_texts()]
+
+
+def app_sections():
+    """The page keys of the app's navigation, read from ui.py's SECTIONS (no Qt needed)."""
+    source = (ROOT / "projects" / "sandbox-ai-app" / "sandbox_ai_app" / "ui.py").read_text()
+    block = source[source.index("SECTIONS = ("):source.index("PAGES = tuple(")]
+    return re.findall(r'\("([a-z]+)", N_\(', block)
+
+
+def test_every_page_of_the_app_has_a_video_of_its_own():
+    pages = app_sections()
+    assert pages and list(SB.APP_PAGES) == pages, "APP_NAV follows the app's navigation (ui.py SECTIONS)"
+    assert CAPTURE.PAGES == pages, "capture_app.py takes a picture of every page"
+    videos = SB.series_videos()
+    assert [v["page"] for v in videos] == pages, "one video per page, in the app's order"
+    assert len({v["id"] for v in videos}) == len(videos)
+    for video in videos:
+        assert len(video["topics"]) == 3 and video["intro"] and 2 <= len(video["scenes"]) <= 6, video["id"]
+        assert any(s["kind"] == "app" and s["page"] == video["page"] for s in video["scenes"]), \
+            f"{video['id']}: the video shows its page"
+
+
+def test_the_series_has_every_text_in_english_and_german():
+    for where, value in series_texts():
+        if isinstance(value, str):
+            assert value.strip(), where
+            continue
+        assert set(value) == {"en", "de"}, (where, value)
+        assert value["en"].strip() and value["de"].strip(), (where, value)
+        assert value["en"].count("`") % 2 == 0 and value["de"].count("`") % 2 == 0, (where, value)
+    for where, text in SB.narration("de"):
+        assert len(text) <= 240, f"{where}: a cue too long to read"
+    english, german = SB.narration("en"), SB.narration("de")
+    assert len(english) == len(german)
+    for (where, en), (_, de) in zip(english, german):
+        assert en != de, f"{where}: the German narration is not translated"
+
+
+def test_series_scenes_refer_to_what_exists():
+    for video, index, scene in SB.iter_series_scenes():
+        where = f"{video['id']}/{index}"
+        assert scene["kind"] in ("bullets", "table", "compare", "terminal", "diagram", "app"), where
+        assert scene.get("heading") and scene.get("captions"), where
+        if scene["kind"] == "diagram":
+            assert scene["diagram"] in SB.DIAGRAMS, where
+        if scene["kind"] == "app":
+            assert scene["page"] in SB.APP_PAGES, where
+            if "shot" in scene:
+                assert CAPTURE.STATES.get(scene["shot"]) == scene["page"], f"{where}: capture_app.py takes no {scene['shot']}"
+            for key in ("zoom", "focus"):
+                if key in scene:
+                    x0, y0, x1, y1 = scene[key]
+                    assert 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1, (where, key)
+            assert not ("zoom" in scene and "focus" in scene), where
+        assert not any(step.get("live") for step in scene.get("steps", [])), f"{where}: no live commands in a series"
+    for state, page in CAPTURE.STATES.items():
+        assert page in SB.APP_PAGES and state.startswith(page + "-"), state
+
+
+def test_the_board_is_called_board_in_german_too():
+    source = (VIDEO / "storyboard.py").read_text()
+    assert "Tafel" not in source, "the German app says Board, not Tafel"
+    assert SB.APP_PAGES["board"]["de"] == "Board"
+
+
+def test_the_spoken_narration_holds_nothing_unspeakable():
+    for where, text in SB.narration("de"):
+        for mark in ("`", "/", "--", "~", "_", "(", "[", "{", "<", "=", "$"):
+            assert mark not in text, f"{where}: {mark!r} in the spoken narration: {text}"
+
+
+def test_every_english_it_term_of_the_german_narration_is_said_in_english():
+    problems = NARRATE.coverage_problems(SB.narration("de"), NARRATE.english_words(english_texts()))
+    assert not problems, "\n".join(f"{where}: {word}: {why}" for where, word, why in problems)
+
+
+def test_the_coverage_check_finds_a_missing_term():
+    english = NARRATE.english_words(["the sandbox and the gateway", "SSO"])
+    problems = NARRATE.coverage_problems([("x", "Der Gateway der Sandbox, mit SSO und Sandboxwelt.")], english)
+    assert {word for _, word, _ in problems} == {"Gateway", "SSO", "Sandboxwelt"}
+
+
+def test_the_lexicon_is_well_formed():
+    assert PRON.LEXICON and not set(PRON.LEXICON) & PRON.GERMAN
+    for term, value in PRON.LEXICON.items():
+        assert term == term.strip() and value == value.strip() and value, term
+        assert "/" not in value or (value.startswith("/") and value.endswith("/") and value.count("/") == 2), \
+            f"{term}: either an English spelling or /IPA/"
+    for word in ("Sandbox", "Sandboxen", "Workspace", "Proxy", "Session", "Board", "Preset", "Plugin", "Hook",
+                 "Container", "Token", "Prompt", "Approval", "Kill-Switch", "Tor", "VPN", "MCP", "Podman",
+                 "Firejail", "Bubblewrap", "Secrets", "Host", "Image", "Update", "Server"):
+        assert word in PRON.LEXICON, f"{word} is said in English"
+
+
+def fake_native(text):
+    """espeak-ng's answer, made up: each clause upper-cased, with its terminator."""
+    found = []
+    for clause, mark in re.findall(r"([^,.;:?!]*)([,.;:?!]?)", text):
+        if clause.strip() or mark:
+            found.append((clause.strip().upper(), mark, mark in ".?!" and bool(mark)))
+    return found
+
+
+def fake_english(text):
+    return "<" + text.replace(" ", "_") + ">"
+
+
+def test_english_terms_are_spliced_into_the_german_phonemes():
+    def say(text):
+        return NARRATE.phoneme_sentences(NARRATE.spoken(text), fake_native, fake_english)
+
+    assert say("Die Sandbox startet, und der Proxy prüft. Fertig!") == \
+        ["DIE <sandbox> STARTET, UND DER <proxy> PRÜFT.", "FERTIG!"]
+    assert say("Der MCP-Server und das Tor-Profil.") == ["DER <M_C_P> <server> UND DAS <tor> PROFIL."]
+    assert say("Kits & Plugins: der Kill-Switch, sofort.") == ["<kits> UND <plugins>: DER <kill_switch>, SOFORT."]
+    assert say("Ein Workspace") == ["EIN <workspace>"]
+    assert say("Mit Podman.") == ["MIT pˈɒdmən."]  # the lexicon's own phonemes go in as they are
+    assert say("Die Sandbox.") == say("Die Sandbox.")  # the same text, the same phonemes: the audio cache relies on it
+
+
+def test_scenes_last_as_long_as_their_speech(tmp_path):
+    import wave
+    make = load("make_video")
+    voice = tmp_path / "cue.wav"
+    with wave.open(str(voice), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(1000)
+        f.writeframes(b"\x01\x00" * 1000)
+
+    class Speaker:
+        def say(self, text):
+            return voice, len(text) / 14.0
+
+    video = SB.series_videos()[0]
+    scenes = make.build_series(make._PlanCanvas(), "de", None, video, speaker=Speaker())
+    for scene in scenes:
+        spoken = [len(SB.text(c, "de")) / 14.0 for c in scene.captions]
+        assert len(scene.cues) == len(spoken) == len(scene.sounds)
+        for (a, b, _), (at, _), seconds in zip(scene.cues, scene.sounds, spoken):
+            assert at == a and b - a >= seconds, scene.ident  # a cue is shown while it is said
+        speech = make.VOICE_LEAD + sum(s + make.VOICE_PAUSE for s in spoken) + make.VOICE_TAIL
+        assert abs(scene.duration - max(scene.content_seconds, speech)) < 1e-6, scene.ident
+    for one, two in zip(scenes, scenes[1:]):
+        assert abs(one.start + one.duration - two.start) < 1e-6
+    track = make.soundtrack(scenes, tmp_path / "all.wav")
+    with wave.open(str(track), "rb") as f:
+        total = scenes[-1].start + scenes[-1].duration
+        assert abs(f.getnframes() / f.getframerate() - total) < 0.01
+        data = f.readframes(f.getnframes())
+    first = scenes[0].start + scenes[0].sounds[0][0]
+    offset = int(first * 1000) * 2
+    assert data[offset - 2:offset] == b"\x00\x00" and data[offset:offset + 2] == b"\x01\x00"
+
+
+def test_series_videos_last_one_to_three_minutes():
+    make = load("make_video")
+    for video in SB.series_videos():
+        for lang in SB.LANGUAGES:
+            scenes = make.build_series(make._PlanCanvas(), lang, None, video)
+            total = scenes[-1].start + scenes[-1].duration
+            assert 55 <= total <= 180, (video["id"], lang, total)
+        assert make.series_file(video, "de").startswith("sandbox-ai-app-")

@@ -4,6 +4,12 @@
   "id": "memory-hog",
   "title": "Memory hog",
   "description": "A sandbox with 2 GiB and a task that eats memory: the memory watch must warn, then end the hog, and the sandbox must survive.",
+  "translations": {
+    "de": {
+      "title": "Speicherfresser",
+      "description": "Eine Sandbox mit 2 GiB und eine Aufgabe, die Speicher frisst: Die Speicherüberwachung muss warnen, dann den Fresser beenden, und die Sandbox muss überleben."
+    }
+  },
   "category": "testing",
   "agents": [
     "claude",

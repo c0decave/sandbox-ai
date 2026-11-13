@@ -717,9 +717,9 @@ def check_settings(profile):
             configured = json.loads(read_private(path, 64 << 10))
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from None
-        if not isinstance(configured, dict) or set(configured) - {"urls", "dns_probe", "timeout", "recheck"}:
+        if not isinstance(configured, dict) or set(configured) - {"urls", "dns_probe", "timeout", "recheck", "attempts"}:
             raise ValueError(f"{path}: expected {{\"urls\": [...], \"dns_probe\": NAME or null, \"timeout\": SECONDS, "
-                             "\"recheck\": SECONDS}")
+                             "\"recheck\": SECONDS, \"attempts\": N}")
     own = profile.get("checks") or {}
     tor = profile.get("type") == "tor"
     # Tor: the Tor Project's own check, which says whether the address is a Tor exit; over Tor more time.
@@ -736,13 +736,21 @@ def check_settings(profile):
     recheck = own.get("recheck", configured.get("recheck", runtime().RECHECK))
     if isinstance(recheck, bool) or not isinstance(recheck, (int, float)) or not (recheck == 0 or 60 <= recheck <= 86400):
         raise ValueError("checks: recheck is 0 (never) or 60-86400 seconds")
+    # How often the address check tries before it says "no connection" (vpn_runtime.echo_retried).
+    attempts = own.get("attempts", configured.get("attempts", runtime().TOR_ATTEMPTS if tor else runtime().ATTEMPTS))
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or not 1 <= attempts <= 6:
+        raise ValueError("checks: attempts is 1-6")
+    # How long the launcher waits for the container to be ready: its first check keeps its retries within it
+    # (vpn_runtime.check_deadline), so that a failed check says why instead of "did not come up in time".
+    ready = ready_timeout(profile)
     if not tor:
-        return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck}
+        return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck, "attempts": attempts,
+                "ready_seconds": ready}
     # Tor: never only at the start (0 counts as the default), and the first check during the run soon after it, with
     # the agent's firewall in place.
     recheck = recheck or runtime().RECHECK
-    return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck,
-            "first_recheck": min(recheck, runtime().FIRST_RECHECK)}
+    return {"urls": list(urls), "dns_probe": probe, "timeout": timeout, "recheck": recheck, "attempts": attempts,
+            "ready_seconds": ready, "first_recheck": min(recheck, runtime().FIRST_RECHECK)}
 
 
 def check_url(url):
@@ -806,6 +814,10 @@ def evaluate(profile, tunnel, inside, host):
                 elif tor and got.get("vpn") is not True:
                     failures.append(f"{label}: {seen} did not confirm that {got['ip']} is a Tor exit (no "
                                     '"IsTor": true)')
+                    # Behind Tor only a confirmed exit counts: an answer without it (an echo service of the
+                    # profile's that says no IsTor, while this host's own address is not asked during the run) is
+                    # treated as traffic past Tor, so a check during the run stops the run for it as well.
+                    leaks.append(failures[-1])
                 else:
                     confirmed = " (a Tor exit, says the Tor Project)" if tor else \
                         " (the provider confirms the VPN)" if got.get("vpn") else ""
@@ -816,7 +828,11 @@ def evaluate(profile, tunnel, inside, host):
             elif got:
                 error, kind = got.get("error", "no answer"), got.get("kind")
                 if carries and full:
-                    (failures if version == 4 else warnings).append(f"{label}: no connection through the VPN ({error})")
+                    said = ([f"{got['attempts']} attempts"] if got.get("attempts") else []) + \
+                        (["no time for another before the VPN's start would time out"] if got.get("cut_short") else [])
+                    tries = (", " + ", ".join(said)) if said else ""
+                    (failures if version == 4 else warnings).append(
+                        f"{label}: no connection through the VPN ({error}{tries})")
                 elif kind == "blocked":
                     notes.append(f"{label}: blocked ({'the VPN carries none' if not carries else 'the echo services lie outside the tunnel'})")
                 else:
@@ -932,8 +948,9 @@ def describe(profile):
 
 # --- the VPN container ------------------------------------------------------------------------------------------
 
-def payload(profile, action, names=()):
-    """The VPN container's standard input: the profile, its secrets, the names to resolve, the checks."""
+def payload(profile, action, names=(), bypass=()):
+    """The VPN container's standard input: the profile, its secrets, the names to resolve, the checks; BYPASS (a Tor
+    profile's --vpn-bypass-tcp targets, "ADDRESS:PORT") for the kill switch."""
     store, kind, values = secret_store(), profile["type"], {}
 
     def secret(name, what):
@@ -966,7 +983,9 @@ def payload(profile, action, names=()):
             values["tailscale_auth_key"] = secret(profile["tailscale"]["auth_key_secret"], "the auth key")
     public = {key: value for key, value in profile.items() if key not in ("created",)}
     return {"version": 1, "action": action, "profile": public, "secrets": values, "resolve": list(names),
-            "checks": check_settings(profile)}
+            "checks": check_settings(profile),
+            **({"bypass": [dict(zip(("address", "port"), runtime().bypass_target(value))) for value in bypass]}
+               if bypass else {})}
 
 
 def image(profile):
@@ -991,9 +1010,10 @@ def container_command(podman, name, profile, action="serve", pod=None, network=N
                "--security-opt=no-new-privileges",
                "--log-driver=none", "--tmpfs=/run:rw,nosuid,nodev,mode=0755", "--tmpfs=/tmp:rw,nosuid,nodev"]
     if tor:
-        uid = runtime().TOR_UID
-        command += ["--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=NET_BIND_SERVICE",
-                    f"--tmpfs=/var/lib/tor:rw,nosuid,nodev,mode=0700,uid={uid},gid={uid}"]
+        # The data directory: a tmpfs of its own that the runtime gives to debian-tor (CHOWN) before tor starts -
+        # Podman's --tmpfs takes no uid= or gid= option ("unknown mount option").
+        command += ["--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=NET_BIND_SERVICE", "--cap-add=CHOWN",
+                    "--tmpfs=/var/lib/tor:rw,nosuid,nodev,noexec,mode=0700"]
     if profile["type"] == "tailscale":
         command.append("--cap-add=NET_RAW")
         if profile["tailscale"].get("ephemeral"):
@@ -1120,12 +1140,18 @@ class Tunnel:
             if on_event:
                 on_event(event)
 
-    def follow(self, on_event):
-        """Report what the container says after it was ready (a tunnel that went down)."""
+    def follow(self, on_event, on_end=None):
+        """Report what the container says after it was ready (a tunnel that went down); ON_END once it has ended
+        (its output closed: the container is gone)."""
         def read():
             while True:
-                event = self.next_event(time.monotonic() + 10 ** 9)
+                try:
+                    event = self.next_event(time.monotonic() + 10 ** 9)
+                except (OSError, ValueError):
+                    event = None
                 if event is None:
+                    if on_end:
+                        on_end()
                     return
                 on_event(event)
         threading.Thread(target=read, daemon=True).start()
@@ -1208,6 +1234,19 @@ def ready_timeout(profile):
     return READY_TIMEOUT + (runtime().BOOTSTRAP_TIMEOUT if profile["type"] == "tor" else 0)
 
 
+TOR_ENV = "SANDBOX_AI_TOR"
+TOR_NETWORK_ENV = "SANDBOX_AI_TOR_VIRTUAL_NETWORK"
+
+
+def tor_environment():
+    """The environment of whatever runs behind a Tor profile (the agent and a command server: agent_sandbox's
+    agent_environment; an image server's container: mcp.image_command): SANDBOX_AI_TOR=1 and the network tor maps
+    .onion names into (the torrc's VirtualAddrNetworkIPv4). A fetcher that refuses private addresses takes exactly
+    that network behind Tor - an .onion name resolves there - and can say why it refuses another. Never set without
+    Tor."""
+    return {TOR_ENV: "1", TOR_NETWORK_ENV: str(runtime().TOR_VIRTUAL_NET)}
+
+
 def tor_agent_rules(dns_open, proxy_uid):
     """Lines for the top of the agent's output chain (before loopback is accepted) with a Tor profile: tor's
     TransPort takes only what tor's redirect handed it from the connection proxy (whose connections the proxy
@@ -1220,10 +1259,15 @@ def tor_agent_rules(dns_open, proxy_uid):
     return rules
 
 
-def bring_up(profile, command, names, say, action="serve", log_dir=None, run=None, warn_only=False, podman=None):
+def bring_up(profile, command, names, say, action="serve", log_dir=None, run=None, warn_only=False, podman=None,
+             bypass=(), mcp=False):
     """Start the container, wait for the tunnel, run the checks: (tunnel, ready event, verdict). Raises when a
-    check fails, unless WARN_ONLY. PODMAN: the engine's command (a remote one: its own address is the baseline)."""
-    data = payload(profile, action, names)
+    check fails, unless WARN_ONLY. PODMAN: the engine's command (a remote one: its own address is the baseline).
+    BYPASS: the addresses of the local network a Tor start reaches past Tor (--vpn-bypass-tcp). MCP: the container
+    of an MCP image server (its lookups go to the VPN's resolver, vpn_runtime.mcp_dns_rules)."""
+    data = payload(profile, action, names, bypass)
+    if mcp:
+        data["mcp"] = True
     tailnet = profile["type"] == "tailscale" and not profile["tailscale"].get("exit_node")
     baseline = in_background(lambda: {} if tailnet else baseline_of(data["checks"], podman))
     tunnel = Tunnel(command, data, say)
@@ -1285,6 +1329,8 @@ def validate(a):
     if not getattr(a, "vpn", None):
         if getattr(a, "vpn_bypass_host_ports", False):
             raise ValueError("--vpn-bypass-host-ports goes with --vpn (a Tor profile)")
+        if getattr(a, "vpn_bypass_tcp", None):
+            raise ValueError("--vpn-bypass-tcp goes with --vpn (a Tor profile)")
         return
     check_name(a.vpn)
     # An LLM endpoint's VPN (llm.apply_vpn) is named with where it came from.
@@ -1308,6 +1354,8 @@ def validate(a):
     if profile["type"] == "tor":
         validate_tor(a, profile, option, l)
         return
+    if getattr(a, "vpn_bypass_tcp", None):
+        raise ValueError(f"--vpn-bypass-tcp goes with a Tor profile; {option} {a.vpn} is a {profile['type']} profile")
     a.vpn_dns = list(profile.get("dns") or ([runtime().QUAD100] if profile["type"] == "tailscale" else []))
     if a.dns or a.egress_all_allow:
         for server in a.vpn_dns:
@@ -1334,6 +1382,7 @@ def validate_tor(a, profile, option, l):
     for port in sorted(ports & set(l.host_ports(a))):
         raise ValueError(f"--allow-host-port {port}: Tor listens there in the sandbox ({option} {a.vpn})")
     check_tor_host_ports(a, option, l.host_ports(a))
+    check_tor_bypass(a, l)
     check_tor_llm(a, option, l)
     a.vpn_dns = [rt.TOR_DNS]  # on loopback, inside the sandbox: no network to hold against the policy
     a.vpn_firewall = tor_agent_rules(bool(a.dns or a.egress_all_allow), l.PROXY_UID)
@@ -1357,6 +1406,35 @@ def check_tor_host_ports(a, option, ports):
         raise ValueError(host_ports_past_tor(ports, option, a.vpn))
 
 
+def bypass_targets(a):
+    """The --vpn-bypass-tcp values of A as "ADDRESS:PORT", checked and without repeats."""
+    rt, found = runtime(), []
+    for value in getattr(a, "vpn_bypass_tcp", None) or []:
+        target = "%s:%d" % rt.bypass_target(value)
+        if target not in found:
+            found.append(target)
+    return found
+
+
+def check_tor_bypass(a, l):
+    """--vpn-bypass-tcp: addresses of the local network reached past Tor, each opened as --allow-tcp (the connection
+    proxy still checks and logs every connection), within the administrator's policy."""
+    a.vpn_bypass_tcp = bypass_targets(a)
+    # It opens what --allow-tcp opens: a policy that forbids that forbids this too (the policy's check ran before).
+    forbidden = (getattr(a, "policy", None) or {}).get("forbid", [])
+    if a.vpn_bypass_tcp and "--allow-tcp" in forbidden:
+        raise ValueError("--vpn-bypass-tcp opens TCP ports as --allow-tcp does, which the administrator's policy "
+                         "forbids")
+    for target in a.vpn_bypass_tcp:
+        if f"--allow-tcp={target}" in forbidden:
+            raise ValueError(f"--vpn-bypass-tcp {target}: the administrator's policy forbids --allow-tcp={target}")
+        address = target.rpartition(":")[0]
+        if not l.within_ceiling(a, network=address):
+            raise ValueError(f"--vpn-bypass-tcp {target} lies outside the networks the administrator's policy allows")
+        if target not in a.allow_tcp:
+            a.allow_tcp.append(target)
+
+
 def check_tor_llm(a, option, l):
     """An --llm server at an address of your local network cannot be reached from a Tor start: Tor's exits refuse
     private addresses, and nothing else leaves the sandbox. Said before the start, not as a failing agent."""
@@ -1369,10 +1447,19 @@ def check_tor_llm(a, option, l):
         return  # llm.validate says why
     parsed = found["parsed"]
     if parsed["address"] and not parsed["loopback"] and llm.address_kind(parsed["address"]) == "local":
+        target = f"{parsed['address']}:{parsed['port']}"
+        if target in (getattr(a, "vpn_bypass_tcp", None) or []):
+            return
+        try:
+            runtime().bypass_target(target)
+            past = (f"Reach exactly this server past Tor with --vpn-bypass-tcp {target} (the rest of your network "
+                    "stays closed; whatever listens there could reach the internet from your own address), use ")
+        except ValueError:  # IPv6 or carrier-grade NAT: not past Tor
+            past = "Use "
         raise ValueError(f"--llm {found['name']}: {found['url']} lies in your local network, which a Tor start "
-                         f"cannot reach ({option} {a.vpn}: everything leaves through Tor, and Tor's exits refuse "
-                         "private addresses). Use a server on this host's loopback with --vpn-bypass-host-ports, one "
-                         "on the internet, or start without Tor")
+                         f"cannot reach through Tor ({option} {a.vpn}: everything leaves through Tor, and Tor's exits "
+                         f"refuse private addresses). {past}a server on this host's loopback with "
+                         "--vpn-bypass-host-ports, one on the internet, or start without Tor")
 
 
 def check_policy(a, policy, where=""):
@@ -1409,7 +1496,10 @@ def plan(a):
                 "kill_switch": f"only tor's own connections leave (user {rt.TOR_USER}, meta skuid {rt.TOR_UID}), over "
                                "IPv4 TCP" + (" to its bridges" if profile["tor"].get("bridges") else "") +
                                "; every other TCP connection goes to its TransPort, port 53 to its DNSPort; other "
-                               "UDP and all IPv6 are dropped",
+                               "UDP and all IPv6 are dropped" + (
+                                   "; past Tor, from your own address, only TCP to " +
+                                   ", ".join(a.vpn_bypass_tcp) + " (--vpn-bypass-tcp)"
+                                   if getattr(a, "vpn_bypass_tcp", None) else ""),
                 "checks": {"on_failure": a.vpn_check, "ip_echo": settings["urls"],
                            "tor": f"bootstrapped to 100% within {rt.BOOTSTRAP_TIMEOUT} s; the address seen outside "
                                   'is a Tor exit ("IsTor": true)',
@@ -1447,17 +1537,37 @@ def agent_up(a, session, home, names, cleanup):
     cleanup.callback(remove_pod)
     command = container_command(podman, container_name(a.vpn_pod), profile, pod=a.vpn_pod)
     tunnel, ready, _ = bring_up(profile, command, names, say, log_dir=a.log_dir, run=getattr(a, "run_id", None),
-                                warn_only=a.vpn_check == "warn", podman=podman)
+                                warn_only=a.vpn_check == "warn", podman=podman,
+                                bypass=getattr(a, "vpn_bypass_tcp", None) or ())
     cleanup.callback(tunnel.close)  # before the pod goes (callbacks run last in, first out)
+    ending = []
+    cleanup.callback(ending.append, True)  # (runs before tunnel.close: the run's own end is no lost tunnel)
 
     def follow(event):
         if event.get("event") == "down":
             say(f"the tunnel went down: {event.get('message')}")
             log_record(a.log_dir, profile, {"tunnel": ready.get("tunnel")}, {}, {"failures": [str(event.get("message"))],
-                                                                                 "warnings": [], "notes": []})
+                                                                                 "warnings": [], "notes": [],
+                                                                                 "event": "down"},
+                       getattr(a, "run_id", None))
         elif event.get("event") == "recheck":
             rechecked(a, profile, ready, event, say, baseline=lambda settings: baseline_of(settings, podman))
-    tunnel.follow(follow)
+
+    def ended():
+        # The VPN container is gone during the run (killed, out of memory, its runtime failed). Its kill switch is a
+        # table of the pod's network namespace, which the pod's infra container holds: it stays, and with nothing
+        # behind tor's ports (or the tunnel) every connection of the pod is refused - nothing restarts it, nothing
+        # falls back. Said and logged, so that the lost network has its reason.
+        if ending:
+            return
+        message = ("the VPN container ended during the run; its kill switch stays in the pod's network namespace, so "
+                   "the sandbox has no network now (nothing leaves past " + ("Tor" if profile["type"] == "tor" else
+                                                                            "the VPN") + "); restart the start for a new one")
+        say(message)
+        log_record(a.log_dir, profile, {"tunnel": ready.get("tunnel")}, {}, {"failures": [message], "warnings": [],
+                                                                             "notes": [], "event": "ended"},
+                   getattr(a, "run_id", None))
+    tunnel.follow(follow, on_end=ended)
     dns = (ready.get("tunnel") or {}).get("dns")
     if dns:
         a.vpn_dns = [str(ipaddress.ip_address(server)) for server in dns]
@@ -1562,11 +1672,229 @@ def mcp_container(server):
     return f"sandbox-ai-vpn-mcp-{server}"
 
 
+# How an MCP server's network is proven, not only asked for (mcp.server_network decides it):
+#   - an image server's VPN container is checked when it is up (bring_up), its ID is handed to the bridge
+#     (MCP_VPN_ID), and each connection's container is created by mcp_guard: the VPN container (by that ID) must run
+#     with its kill switch in place, the server's container is created - not started - and must name exactly that ID
+#     as its network namespace (podman inspect: HostConfig.NetworkMode), else it is removed unstarted; after its start
+#     the VPN container is checked once more (the same start, the kill switch), else the server's container is
+#     removed. The VPN container's end stops the whole server (mcp_wrapper).
+#   - a command server or helper runs in a pod of its own with the VPN container in it (agent_up): after its start
+#     check_pod_vpn proves that the VPN container and the server's container share the pod's network namespace
+#     (both container:INFRA-ID) and that the kill switch is in place, else the server is stopped (mcp.py).
+MCP_VPN_ID = "SANDBOX_AI_MCP_VPN_ID"  # the bridge's environment: the full ID of its VPN container
+GUARD_WAIT = 15  # seconds mcp_guard waits for a server's container to run before it checks the VPN container again
+CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+# Options of `podman run|create` that choose or widen a container's network; an MCP server's run line has only its
+# one --network=container:ID (mcp_guard refuses any other).
+NETWORK_OPTIONS = ("--network", "--net", "--pod", "--pod-id-file", "--publish", "-p", "--publish-all", "-P", "--dns",
+                   "--dns-option", "--dns-search", "--add-host", "--http-proxy", "--expose", "--network-alias",
+                   "--mac-address", "--ip", "--ip6")
+
+
+def egress_problem(profile, server=None):
+    """Why the VPN profile PROFILE cannot be the way out of an MCP server that reaches the network (or None): a
+    Tailscale profile without an exit node carries only the tailnet, and everything else would leave from your own
+    address (it has no kill switch)."""
+    if profile.get("type") == "tailscale" and not (profile.get("tailscale") or {}).get("exit_node"):
+        return (f"the VPN profile {profile.get('name')} (Tailscale without an exit node) carries only the tailnet: "
+                + (f"MCP server {server}" if server else "an MCP server") + " would reach everything else from your "
+                "own address. Give it an exit node (sandbox-ai vpn add ... --tailscale --exit-node HOST)")
+    return None
+
+
+def inspect_fields(podman, refs, fields, run=None):
+    """[{field: value}] of the containers REFS (IDs or names), as `podman container inspect` says them; ValueError
+    when one is not there."""
+    template = "|".join("{{" + field + "}}" for field in fields.values())
+    done = (run or podman_run)([*podman, "container", "inspect", "--format", template, *refs], capture_output=True,
+                               text=True, timeout=60)
+    lines = (done.stdout or "").strip().splitlines()
+    if done.returncode != 0 or len(lines) != len(refs):
+        raise ValueError(f"podman cannot inspect {' '.join(refs)}: {(done.stderr or '').strip()[-300:] or 'no answer'}")
+    found = []
+    for line in lines:
+        values = line.split("|")
+        if len(values) != len(fields):
+            raise ValueError(f"podman's answer for {' '.join(refs)} is not understood")
+        found.append(dict(zip(fields, values)))
+    return found
+
+
+VPN_FIELDS = {"id": ".Id", "running": ".State.Running", "started": ".State.StartedAt", "network": ".HostConfig.NetworkMode",
+              "profile": 'index .Config.Labels "sandbox-ai.vpn-profile"'}
+
+
+def check_vpn_container(podman, ref, profile_name=None, run=None, killswitch=True):
+    """The VPN container REF (its ID, or its name) as an MCP server may join it: running, of the profile
+    PROFILE_NAME where given, with its kill switch in place (vpn_runtime.py killswitch, run in it). Returns its
+    inspect fields (VPN_FIELDS: id, started, network, ...); ValueError for anything else - nothing may start in it.
+    KILLSWITCH false (a service in an agent's pod behind a Tailscale profile without an exit node, which loads none:
+    only the tailnet goes through it) leaves the kill switch unchecked; every MCP path checks it."""
+    try:
+        state = inspect_fields(podman, [ref], VPN_FIELDS, run)[0]
+    except ValueError as exc:
+        raise ValueError(f"the VPN container {ref} is not there ({exc})") from None
+    if not CONTAINER_ID.fullmatch(state["id"]) or (CONTAINER_ID.fullmatch(ref) and state["id"] != ref):
+        raise ValueError(f"the VPN container {ref} is not the one checked (its ID is {state['id'][:12]})")
+    if state["running"] != "true":
+        raise ValueError(f"the VPN container {ref} does not run")
+    if profile_name is not None and state["profile"] != profile_name:
+        raise ValueError(f"the container {ref} is not the VPN of the profile {profile_name} (it says "
+                         f"{state['profile'] or 'no profile'})")
+    if not killswitch:
+        return state
+    # The table is listed with the container's nft and judged HERE (runtime().killswitch_problem, this version's
+    # rules): the runtime file a running container has mounted can be an older one (a bind-mounted file keeps the
+    # inode it had when the container started; an update replaces it), which knew no "killswitch" command - every
+    # check of such a container failed and restarted its servers again and again.
+    done = (run or podman_run)([*podman, "exec", state["id"], "nft", "list", "table", "inet", runtime().TABLE],
+                               capture_output=True, text=True, timeout=60)
+    problem = runtime().killswitch_problem(done.stdout if done.returncode == 0 else "")
+    if problem is not None:
+        detail = (done.stderr or "").strip()[-300:] if done.returncode != 0 else ""
+        raise ValueError(f"the kill switch of the VPN container {ref} is not in place: {problem}"
+                         + (f" ({detail})" if detail else ""))
+    return state
+
+
+def check_pod_vpn(podman, pod, profile_name=None, run=None, member=None, killswitch=True, member_running=True):
+    """A command server's (or helper's) pod POD as its launcher made it with --vpn (agent_up): its VPN container
+    POD-vpn runs, of PROFILE_NAME, with its kill switch in place, and the server's container POD-agent runs in the
+    same network namespace - both name the pod's infra container (container:INFRA-ID). ValueError otherwise.
+    MEMBER: another container of the pod to prove so (a service container beside the agent), for POD-agent.
+    KILLSWITCH: see check_vpn_container (false only for a service behind a profile that has none). MEMBER_RUNNING
+    false: the member is proven before its start (created and initialised: it must not run yet)."""
+    done = (run or podman_run)([*podman, "pod", "inspect", "--format", "{{.InfraContainerID}}", pod],
+                               capture_output=True, text=True, timeout=60)
+    infra = (done.stdout or "").strip()
+    if done.returncode != 0 or not CONTAINER_ID.fullmatch(infra):
+        raise ValueError(f"the pod {pod} is not there or has no infra container: "
+                         f"{(done.stderr or '').strip()[-300:] or infra or 'no answer'}")
+    vpn = check_vpn_container(podman, container_name(pod), profile_name, run, killswitch)
+    member = member or f"{pod}-agent"
+    server = inspect_fields(podman, [member], VPN_FIELDS, run)[0]
+    if server["running"] != ("true" if member_running else "false"):
+        raise ValueError(f"the container {member} does not run" if member_running else
+                         f"the container {member} runs already, before it was checked")
+    expected = f"container:{infra}"
+    for what, state in (("VPN container", vpn), ("server's container", server)):
+        if state["network"] != expected:
+            raise ValueError(f"the {what} of {pod} is not in the pod's network namespace (its network is "
+                             f"{state['network'] or 'none said'}, not {expected})")
+    return {"infra": infra, "vpn": vpn["id"], "server": server["id"]}
+
+
+def guarded_options(command, name):
+    """The options of an MCP server's podman run line COMMAND ([podman, run, OPTION..., IMAGE]) with its one network
+    option: exactly --network=container:NAME, and nothing else that chooses or widens a network (NETWORK_OPTIONS).
+    Returns (podman, options, image, index of that option); ValueError otherwise."""
+    try:
+        at = command.index("run")
+    except ValueError:
+        raise ValueError("an MCP server's command must be a podman run line") from None
+    podman, options, image = command[:at], command[at + 1:-1], command[-1:]
+    if not podman or Path(podman[0]).name != "podman" or not image or image[0].startswith("-"):
+        raise ValueError("an MCP server's command must be a podman run line ending in its image")
+    wanted = f"--network=container:{name}"
+    indexes = []
+    for index, token in enumerate(options):
+        if not token.startswith("-"):
+            raise ValueError(f"an MCP server's run line takes every option as --NAME=VALUE ({token!r})")
+        option = token.split("=", 1)[0]
+        if option in NETWORK_OPTIONS:
+            if token != wanted:
+                raise ValueError(f"an MCP server behind a VPN runs with exactly {wanted}, not {token}")
+            indexes.append(index)
+    if len(indexes) != 1:
+        raise ValueError(f"an MCP server behind a VPN runs with exactly one {wanted}")
+    return podman, options, image[0], indexes[0]
+
+
+def mcp_guard(name, command, environ=None, run=None, popen=None, say=None):
+    """--internal-mcp-guard NAME -- COMMAND: one connection's container of an MCP image server behind the VPN
+    container NAME, fail-closed (see MCP_VPN_ID above). COMMAND is its podman run line with --network=container:NAME
+    (guarded_options). Returns the server's exit status; ValueError when anything is not as checked (no container
+    of it is left behind then)."""
+    environ = os.environ if environ is None else environ
+    run = run or podman_run
+    say = say or (lambda text: print(f"sandbox-mcp: vpn: {text}", file=sys.stderr, flush=True))
+    vpn_id = environ.get(MCP_VPN_ID, "")
+    if not CONTAINER_ID.fullmatch(vpn_id):
+        raise ValueError(f"no VPN container was handed to this MCP server ({MCP_VPN_ID}): nothing starts")
+    podman, options, image, at = guarded_options(command, name)
+
+    def leave(signum, _frame):  # stopped before the server runs: the finally below removes what was created
+        raise SystemExit(128 + signum)
+    signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    previous = {sig: signal.getsignal(sig) for sig in signals}
+    with contextlib.suppress(ValueError):  # (not the main thread: tests)
+        for sig in signals:
+            signal.signal(sig, leave)
+    try:
+        return guarded_start(podman, options, image, at, vpn_id, run, popen, say)
+    finally:
+        with contextlib.suppress(ValueError, TypeError):
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
+def guarded_start(podman, options, image, at, vpn_id, run, popen, say):
+    """mcp_guard once the run line is checked: the VPN container checked, the server's container created in its
+    namespace, inspected, started, the VPN container checked again; removed at the end, whatever happened."""
+    before = check_vpn_container(podman, vpn_id, run=run)
+    options = [*options[:at], f"--network=container:{vpn_id}", *options[at + 1:]]
+    created = run([*podman, "create", *options, image], capture_output=True, text=True, timeout=120)
+    server = ((created.stdout or "").strip().splitlines() or [""])[-1]
+    if created.returncode != 0 or not CONTAINER_ID.fullmatch(server):
+        raise ValueError(f"podman create failed: {(created.stderr or '').strip()[-300:] or server or 'no answer'}")
+    process = None
+
+    def remove():
+        run([*podman, "rm", "--force", "--time", "0", server], capture_output=True, timeout=60)
+    try:
+        network = inspect_fields(podman, [server], {"network": ".HostConfig.NetworkMode"}, run)[0]["network"]
+        if network != f"container:{vpn_id}":
+            raise ValueError(f"the server's container would run in the network {network!r}, not in its VPN "
+                             f"container's (container:{vpn_id[:12]}): removed unstarted")
+        process = (popen or subprocess.Popen)([*podman, "start", "--attach", "--interactive", server])
+        forward = lambda signum, _frame: process.send_signal(signum)  # noqa: E731  (podman proxies it on)
+        with contextlib.suppress(ValueError):  # (not the main thread: tests)
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, forward)
+        # Once it runs (or within a few seconds), its VPN container again: the same start, the kill switch in place.
+        deadline = time.monotonic() + GUARD_WAIT
+        while process.poll() is None and time.monotonic() < deadline:
+            with contextlib.suppress(ValueError):
+                if inspect_fields(podman, [server], {"running": ".State.Running"}, run)[0]["running"] == "true":
+                    break
+            time.sleep(0.1)
+        after = check_vpn_container(podman, vpn_id, run=run)
+        if after["started"] != before["started"]:
+            raise ValueError(f"the VPN container {vpn_id[:12]} was started again meanwhile (a namespace without "
+                             "its tunnel): the server is stopped")
+        return process.wait()
+    except BaseException as exc:
+        if process is not None and process.poll() is None:
+            process.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=10)
+        if isinstance(exc, ValueError):
+            say(f"MCP server refused: {exc}")
+        raise
+    finally:
+        remove()
+
+
 def mcp_wrapper(profile_name, container, owner, command):
     """--internal-mcp-vpn: the VPN container of an MCP image server (its own network namespace), checked, then the
-    server's bridge, whose containers join that namespace (--network container:CONTAINER). The tunnel lives as
-    long as the bridge; a failed check stops the server."""
+    server's bridge, whose connections' containers join that namespace (mcp_guard: by the container's ID, checked).
+    The tunnel lives as long as the bridge; a failed check stops the server, and so does the end of the VPN
+    container."""
     profile = load_profile(profile_name)
+    problem = egress_problem(profile)
+    if problem:
+        raise ValueError(problem)
     podman = ["podman"]
     # One line per message: the log reader (mcp.py --internal-log) takes lines that start with the relay's
     # markers as its records, and a message can carry what the VPN's server sent.
@@ -1586,21 +1914,31 @@ def mcp_wrapper(profile_name, container, owner, command):
     with profile_lock(profile):
         network = launcher().POD_NETWORK
         tunnel, ready, _ = bring_up(profile, container_command(podman, container, profile, network=network,
-                                                               labels=[f"sandbox-ai.vpn-owner={owner}"]), (), say)
+                                                               labels=[f"sandbox-ai.vpn-owner={owner}"]), (), say,
+                                    mcp=True)
         child = None
         try:
-            child = subprocess.Popen(command)
+            # Its ID, checked as each connection checks it: the bridge's containers join this container, not
+            # whatever has its name later.
+            checked = check_vpn_container(podman, container, profile["name"])
+            child = subprocess.Popen(command, env={**os.environ, MCP_VPN_ID: checked["id"]})
             stop = lambda signum, _frame: child.send_signal(signum)  # noqa: E731
             for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                 signal.signal(sig, stop)
             server = argparse.Namespace(log_dir=None, run_id=None, vpn_check=None)  # a leak stops the server
 
+            def end(why):
+                if child.poll() is None:  # (not when the server ended first and the tunnel follows it)
+                    say(f"{why}: MCP server stopped")
+                    child.terminate()
+
             def follow(event):
                 if event.get("event") == "down":
-                    say(f"the tunnel went down: {event.get('message')}")
+                    # The kill switch keeps everything in; the server has no way out left: it ends.
+                    end(f"the tunnel went down ({event.get('message')})")
                 elif event.get("event") == "recheck":
                     rechecked(server, profile, ready, event, say, stop=child.terminate)
-            tunnel.follow(follow)
+            tunnel.follow(follow, on_end=lambda: end("the VPN container ended"))
             return child.wait()
         finally:
             if child and child.poll() is None:
@@ -2050,6 +2388,8 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) > 5 and sys.argv[1] == "--internal-mcp-vpn" and sys.argv[5] == "--":
             sys.exit(mcp_wrapper(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[6:]))
+        if len(sys.argv) > 4 and sys.argv[1] == "--internal-mcp-guard" and sys.argv[3] == "--":
+            sys.exit(mcp_guard(sys.argv[2], sys.argv[4:]))
         sys.exit(main(sys.argv[1:]))
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"sandbox-ai vpn: {exc}", file=sys.stderr)

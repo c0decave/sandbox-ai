@@ -4,7 +4,13 @@
   "id": "docs-lie-detector",
   "title": "Docs lie detector",
   "description": "Every claim of the README checked against the code and a real run; only the provider.",
-  "category": "testing",
+  "translations": {
+    "de": {
+      "title": "Lügendetektor für Dokumentation",
+      "description": "Jede Aussage der README gegen den Code und einen echten Lauf geprüft; nur der Anbieter."
+    }
+  },
+  "category": "writing",
   "agents": [
     "claude",
     "codex",

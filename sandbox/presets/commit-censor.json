@@ -4,6 +4,12 @@
   "id": "commit-censor",
   "title": "Commit censor",
   "description": "Every push is checked for private data (always, not only to public remotes): practise what passes.",
+  "translations": {
+    "de": {
+      "title": "Commit-Zensor",
+      "description": "Jeder Push wird auf private Daten geprüft (immer, nicht nur zu öffentlichen Remotes): üben, was durchgeht."
+    }
+  },
   "category": "testing",
   "agents": [
     "claude",

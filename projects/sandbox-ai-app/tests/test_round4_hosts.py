@@ -398,7 +398,8 @@ def test_files_keys_are_refused_during_a_copy_and_folders_are_listed_in_a_thread
     assert wait_until(qapp, lambda: page.left.table.rowCount() and page.left.listing is None
                       and page.right.listing is None, 30)
     assert threads and not any(threads), "every folder is listed off the GUI thread"
-    assert sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount())) == ["a.txt"]
+    assert sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount())) == \
+        [".", "..", "a.txt"]
     monkeypatch.setattr(type(page.task), "running", property(lambda self: True))
     asked = []
     monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: asked.append(a) or ("x", True))
@@ -418,10 +419,11 @@ def test_files_keys_are_refused_during_a_copy_and_folders_are_listed_in_a_thread
     assert page.left.list() is True
     (late_work, late_done), (work, done) = pending
     done(work(), None)
-    assert sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount())) == ["a.txt", "b.txt"]
+    listed = lambda: sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount()))  # noqa: E731
+    assert listed() == [".", "..", "a.txt", "b.txt"]
     (ws / "c.txt").write_text("c")
     late_done(late_work(), None)  # began first, came back last: dropped
-    assert sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount())) == ["a.txt", "b.txt"]
+    assert listed() == [".", "..", "a.txt", "b.txt"]
     assert os.path.isdir(ws)
 
 

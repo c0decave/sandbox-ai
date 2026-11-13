@@ -119,9 +119,9 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 
 def test_pages_and_preview(window, env):
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
-        "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "INSIGHT",
-        "Connections", "Activity", "Statistics", "Files", "MANAGE", "Kits & plugins", "MCP servers", "LLM servers", "Images",
-        "Credentials", "Teams",
+        "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "MANAGE",
+        "File manager", "Kits & plugins", "MCP servers", "LLM servers", "Images", "Credentials", "Teams", "INSIGHT",
+        "Connections", "Activity", "Statistics",
         "SYSTEM", "System", "Hosts", "Help"]
     launch = window.launch
     launch.agent.setCurrentText("codex")
@@ -598,7 +598,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     assert any(t.startswith(("Current project", "Folder the app was started in")) for t in titles)
     left.roots.setCurrentIndex(0)
     settle_files(page)
-    names = {left.table.item(r, 0).text(): left.table.item(r, 1).text() for r in range(left.table.rowCount())}
+    names = {left.table.item(r, 0).text(): left.table.item(r, 1).text() for r in range(2, left.table.rowCount())}
     assert names == {"src": "folder", "notes.txt": "file", "outside": "symbolic link"}
     link_row = row_of(left.table, "outside")
     assert left.table.item(link_row, 4).text() == "→ /etc"
@@ -606,7 +606,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     assert "not followed" in page.message.text() and left.relative == ""
     left.open_row(row_of(left.table, "src"))
     settle_files(page)
-    assert left.relative == "src" and [left.table.item(r, 0).text() for r in range(2)] == ["..", "main.py"]
+    assert left.relative == "src" and [left.table.item(r, 0).text() for r in range(3)] == [".", "..", "main.py"]
     left.up()
     settle_files(page)
     assert left.relative == ""
@@ -628,7 +628,7 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     report = copy(page, wait, lambda: page.copy_selected(left))
     assert (host / "src" / "main.py").read_text() == "print(1)\n" and (host / "notes.txt").read_text() == "hello"
     assert not (host / "outside").exists() and any("symbolic link" in line for line in report)
-    assert {right.table.item(r, 0).text() for r in range(right.table.rowCount())} == {"..", "src", "notes.txt"}
+    assert {right.table.item(r, 0).text() for r in range(right.table.rowCount())} == {".", "..", "src", "notes.txt"}
     # Into the sandbox: a host file into the folder shown on the left.
     outbox = tmp_path / "outbox"
     outbox.mkdir()
@@ -656,10 +656,10 @@ def test_files_page_browses_copies_and_never_follows_links(window, env, tmp_path
     left.go("")
     settle_files(page)
     left.table.sortByColumn(0, Qt.SortOrder.DescendingOrder)
-    assert [left.table.item(r, 0).text() for r in range(3)] == ["src", "outside", "notes.txt"]
+    assert [left.table.item(r, 0).text() for r in range(5)] == [".", "..", "src", "outside", "notes.txt"]
     assert [e.name for e in left.entries][1] == "notes.txt"
     page.message.clear()
-    left.open_row(1)
+    left.open_row(3)  # ("outside", after "." and "..")
     assert "not followed" in page.message.text() and left.relative == ""
     left.table.clearSelection()
     left.table.selectRow(row_of(left.table, "notes.txt"))
@@ -1206,13 +1206,13 @@ def test_closing_while_work_runs_asks_and_stops_copies(window, monkeypatch, wait
             time.sleep(0.01)
         stopped.append(True)
     window.files.task.thread(copy, lambda *r: None, "copy", cancellable=True)
-    assert window.running_work() == ["Files", "System"]
+    assert window.running_work() == ["File manager", "System"]
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # "Keep working"
     event = QCloseEvent()
     window.closeEvent(event)
     assert not event.isAccepted() and window.files.task.running
     title, text, _ = widgets.SHOWN[-1]
-    assert title == "Quit" and "Files, System" in text
+    assert title == "Quit" and "File manager, System" in text
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)  # "Stop and quit"
     monkeypatch.setattr("sandbox_ai_app.ui.QUIT_WAIT", 1)
     release.set()
@@ -1489,6 +1489,8 @@ class FakeTray:
 
 def test_closing_hides_to_the_tray_and_answering_goes_on(window, env, monkeypatch, wait):
     from PySide6.QtGui import QCloseEvent
+    monkeypatch.setattr(backend, "setting", lambda key, *a: True if key == "notifications" else
+                        backend.app_settings().get(key, backend.SETTINGS.get(key)))
     window.tray = FakeTray()
     window.show()
     event = QCloseEvent()
@@ -1646,6 +1648,7 @@ def test_notification_bodies_are_escaped(window):
     from PySide6.QtWidgets import QSystemTrayIcon
     shown = []
     window.tray = type("Tray", (), {"showMessage": lambda self, *a: shown.append(a), "hide": lambda self: None})()
+    window.sai.save_setting("notifications", True)
     window.sai.save_setting("notify_style", "system")  # the desktop's notifications
     try:
         window.notify("sandbox-ai asks: <b>x</b>\x1b", "open <a href='https://evil.example'>here</a> & more")
@@ -1745,8 +1748,8 @@ def test_the_window_in_german(qapp, env, monkeypatch):
     w = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=0)
     try:
         assert [w.nav.item(i).text() for i in range(w.nav.count())][:7] == [
-            "PROJEKT", "Start", "Tafel", "LAUFEND", "Sandboxen & Sitzungen", "Freigaben", "Terminals"]
-        assert w.approvals.allow_button.text() == "Erlauben"
+            "PROJEKT", "Start", "Board", "LAUFEND", "Sandboxen & Sitzungen", "Freigaben", "Terminals"]
+        assert w.approvals.allow_button.text() == "Einmal erlauben"
         assert w.launch.form.tabText(1) == "Netzwerk"
     finally:
         w.shutdown()
@@ -1955,17 +1958,17 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
     assert not nav.isRowHidden(rows["hosts"]) and window.current_page() == "hosts"
     window.fold_all(False)
     assert window.collapsed == set() and not nav.isRowHidden(rows["connections"])
-    window.toggle_section("Insight", True)
+    window.toggle_section("Manage", True)  # (the File manager is under Manage)
     window.set_compact_nav(True)
     margins = nav.contentsMargins()
     assert nav.width() == ui.COMPACT_NAV_WIDTH + margins.left() + margins.right()
     assert not window.brand.isVisibleTo(window)
-    assert nav.item(rows["files"]).text() == "" and nav.item(rows["files"]).toolTip().split("\n")[0] == "Files"
+    assert nav.item(rows["files"]).text() == "" and nav.item(rows["files"]).toolTip().split("\n")[0] == "File manager"
     assert not nav.isRowHidden(rows["files"])  # the strip shows every page, folded or not
     assert all(nav.isRowHidden(header) for header, _ in window.section_rows.values())
     assert window.actions["nav-compact"].isChecked() and window.state.get("nav_compact") is True
     window.set_compact_nav(False)
-    assert ui.NAV_WIDTH <= nav.width() <= ui.NAV_MAX_WIDTH and nav.item(rows["files"]).text() == "Files"
+    assert ui.NAV_WIDTH <= nav.width() <= ui.NAV_MAX_WIDTH and nav.item(rows["files"]).text() == "File manager"
     assert nav.isRowHidden(rows["files"])  # its section is still folded
     assert nav.item(rows["launch"]).toolTip().split("\n")[0] == "Start (Ctrl+1)"  # then what the page is for
 
@@ -2539,7 +2542,7 @@ def test_the_question_count_in_the_strip_of_icons(window):
     window.questions_changed(3, [])
     assert item.text() == "", "still a strip of icons"
     assert "3 open questions" in item.data(Qt.ItemDataRole.AccessibleTextRole)
-    assert window.nav.item(rows["files"]).data(Qt.ItemDataRole.AccessibleTextRole) == "Files"
+    assert window.nav.item(rows["files"]).data(Qt.ItemDataRole.AccessibleTextRole) == "File manager"
     window.set_compact_nav(False)
     assert item.text() == "Approvals  (3)" and item.toolTip().startswith("Approvals (Ctrl+")
     window.questions_changed(0, [])
@@ -2714,7 +2717,7 @@ def test_allow_on_a_question_s_toast_is_the_answer_no_second_question(window, en
     """User report: Allow clicked on the themed notification, and the app asked "Allow this request?" once more. The
     toast's Allow and Block are the answer; nothing asks again, and the question is settled everywhere: its toast
     goes, the Questions window never offers it, the page's buttons are off while the answer is on its way."""
-    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notify_style": "themed"}.get(
+    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notifications": True, "notify_style": "themed"}.get(
         key, backend.SETTINGS.get(key)))
     run = fake_run(env)
     ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
@@ -2746,7 +2749,7 @@ def test_allow_on_a_question_s_toast_is_the_answer_no_second_question(window, en
 def test_allow_always_on_a_toast_asks_once_and_that_is_the_answer(window, env, wait, qapp, monkeypatch):
     """"Always" outlives the run: its one confirmation is where it is answered (the button says "…"), and nothing
     asks after it."""
-    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notify_style": "themed"}.get(
+    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notifications": True, "notify_style": "themed"}.get(
         key, backend.SETTINGS.get(key)))
     run = fake_run(env)
     ask(run, "1700000000-1-3", kind="connect", destination="192.0.2.8:443", address="192.0.2.8", port=443)
@@ -2762,7 +2765,7 @@ def test_allow_always_on_a_toast_asks_once_and_that_is_the_answer(window, env, w
 
 
 def test_a_question_answered_elsewhere_closes_its_toast(window, env, wait, qapp, monkeypatch):
-    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notify_style": "themed"}.get(
+    monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notifications": True, "notify_style": "themed"}.get(
         key, backend.SETTINGS.get(key)))
     run = fake_run(env)
     ask(run, "1700000000-1-4", kind="dns", name="c.example")
@@ -3223,8 +3226,9 @@ def test_the_version_shows_at_the_bottom_right(window):
 
 def test_a_git_login_is_given_to_a_running_sandbox(window, env, wait, monkeypatch):
     """Credentials: a Git login given to a sandbox that runs (started before the login was added) - its row's menu or
-    the button, a sandbox chosen, asked first, then `sandbox-ai net allow RUN --git-token-secret URL=SECRET`
-    (--keep: for its project's later starts too). The token never enters the sandbox: its proxy uses it."""
+    the button, a sandbox chosen, asked first, then `sandbox-ai git-logins give RUN URL --secret SECRET --user USER`
+    (--keep: for its project's later starts too; the older form was net allow --git-token-secret). The message names
+    the run id and the start's name."""
     from sandbox_ai_app import credentials_page as C
     from sandbox_ai_app.backend import Instance
     page = window.credentials
@@ -3241,9 +3245,11 @@ def test_a_git_login_is_given_to_a_running_sandbox(window, env, wait, monkeypatc
     monkeypatch.setattr(C.GiveDialog, "exec", lambda self: (self.keep.setChecked(True), QtWidgets.QDialog.DialogCode.Accepted)[1])
     box.give()
     assert wait(lambda: sent, 10)
-    assert sent[-1] == ("local", "net", "allow", "claude-1", "--git-token-secret", "https://me@git.example=GIT_TOKEN",
-                        "--keep")
-    assert wait(lambda: "has the login now" in box.message.text(), 10)
+    assert sent[-1] == ("local", "git-logins", "give", "--secret", "GIT_TOKEN", "--user", "me", "--keep", "--",
+                        "claude-1", "https://git.example")
+    assert wait(lambda: "claude-1 (brisk-otter) has the Git login for https://git.example (user me) now"
+                in box.message.text(), 10)
+    assert "To check: sandbox-ai net show claude-1" in box.message.text()
     box.entries[0]["secret"] = ""
     box.give()
     assert "names no secret" in box.message.text()
@@ -3251,8 +3257,9 @@ def test_a_git_login_is_given_to_a_running_sandbox(window, env, wait, monkeypatc
 
 def test_a_secret_is_given_to_a_running_sandbox_as_an_api_key(window, env, wait, monkeypatch):
     """Credentials, Secrets: a secret given to a sandbox that runs as an API key - its row's menu or the button, the
-    sandbox, the server and the variable chosen, asked first, then `sandbox-ai net allow RUN --api-key
-    HOST=NAME=SECRET`. The key stays with the sandbox's proxy; the message says the placeholder line."""
+    sandbox, the server and the variable chosen, asked first, then `sandbox-ai secrets give RUN SECRET --api-key HOST
+    --as NAME` (the older form was net allow --api-key HOST=NAME=SECRET). The key stays with the sandbox's proxy; the
+    message names the run id and the start's name and says the placeholder line."""
     from sandbox_ai_app import credentials_page as C
     from sandbox_ai_app.backend import Instance
     page = window.credentials
@@ -3272,9 +3279,11 @@ def test_a_secret_is_given_to_a_running_sandbox_as_an_api_key(window, env, wait,
     monkeypatch.setattr(C.GiveDialog, "exec", accept)
     page.give_secret()
     assert wait(lambda: sent, 10)
-    assert sent[-1] == ("local", "net", "allow", "claude-1", "--api-key", "openrouter.ai=OPENROUTER_API_KEY=OPENROUTER")
-    assert wait(lambda: "export OPENROUTER_API_KEY=sandbox-ai-api-key-placeholder-OPENROUTER_API_KEY"
-                in page.message.text(), 10)
+    assert sent[-1] == ("local", "secrets", "give", "claude-1", "OPENROUTER", "--api-key", "openrouter.ai", "--as",
+                        "OPENROUTER_API_KEY")
+    assert wait(lambda: "claude-1 (brisk-otter) has the key OPENROUTER_API_KEY now, for HTTPS requests to "
+                "openrouter.ai only: in the sandbox, export "
+                "OPENROUTER_API_KEY=sandbox-ai-api-key-placeholder-OPENROUTER_API_KEY" in page.message.text(), 10)
     # What the dialog refuses: an address or URL as the server, a variable that is no name.
     dialog = C.GiveDialog(page, [running], secret="OPENROUTER")
     assert dialog.variable.text() == "OPENROUTER"
@@ -3286,3 +3295,64 @@ def test_a_secret_is_given_to_a_running_sandbox_as_an_api_key(window, env, wait,
     page.secrets.clearSelection()
     page.give_secret()
     assert "Choose a secret in the list first" in page.message.text()
+
+
+def test_a_secret_given_to_a_git_servers_host_is_offered_as_a_git_login(window, env, wait, monkeypatch):
+    """A secret given to github.com (a forge) or to a configured Git login's server is offered explicitly as a Git
+    login (for git push), chosen first - never silently made an API key; the API key stays one click away. The login
+    goes out as `sandbox-ai git-logins give RUN https://HOST --secret NAME --user USER`."""
+    from sandbox_ai_app import credentials_page as C
+    from sandbox_ai_app.backend import Instance
+    page = window.credentials
+    page.state["git"] = [{"url": "https://git.example.org", "user": "me", "secret": "GITEA"}]
+    assert {"github.com", "gitlab.com", "git.example.org"} <= page.git_hosts()
+    running = Instance("run", "run:claude-1", "brisk-otter", run="claude-1", agent="claude", state="running")
+    dialog = C.GiveDialog(page, [running], secret="GH_PUSH", git_hosts=page.git_hosts())
+    dialog.show()
+    dialog.host.setText("api.example.com")
+    assert not dialog.kinds.isVisibleTo(dialog) and not dialog.as_git_login() and dialog.variable.isVisibleTo(dialog)
+    dialog.host.setText("GitHub.com")
+    assert dialog.kinds.isVisibleTo(dialog) and dialog.as_git_login() and dialog.user.isVisibleTo(dialog)
+    assert not dialog.variable.isVisibleTo(dialog) and dialog.problem() is None
+    dialog.as_key.setChecked(True)  # the API key, chosen by hand, stays chosen
+    dialog.host.setText("gitlab.com")
+    assert not dialog.as_git_login() and dialog.variable.isVisibleTo(dialog)
+    dialog.close()
+    dialog.deleteLater()
+    widgets.fill(page.secrets, [["GH_PUSH", "keyring", ""]])
+    page.secrets.selectRow(0)
+    monkeypatch.setattr(window.sai, "instances", lambda: ([running], []))
+    sent = []
+    monkeypatch.setattr(window.sai, "host_run", lambda host, *args, timeout=None: sent.append((host, *args)) or (0, "", ""))
+
+    def accept(dialog):
+        dialog.host.setText("git.example.org")
+        dialog.user.setText("me")
+        assert dialog.as_git_login()
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(C.GiveDialog, "exec", accept)
+    page.give_secret()
+    assert wait(lambda: sent, 10)
+    assert sent[-1] == ("local", "git-logins", "give", "--secret", "GH_PUSH", "--user", "me", "--", "claude-1",
+                        "https://git.example.org")
+    assert wait(lambda: "claude-1 (brisk-otter) has the Git login for https://git.example.org (user me) now"
+                in page.message.text(), 10)
+
+
+def test_notifications_are_off_by_default_and_go_to_the_log(window, monkeypatch):
+    """The setting notifications is off by default: nothing pops up, the notification is logged with its level,
+    and the app still tells the launchers that it shows the questions (they wait on the Approvals page)."""
+    from sandbox_ai_app import applog
+    assert backend.SETTINGS["notifications"] is False
+    logged = []
+    monkeypatch.setattr(applog, "log", lambda level, area, text, *a, **k: logged.append((level, area, text)))
+    before = len(window.notifier.toasts)
+    window.sai.save_setting("notifications", False)
+    assert window.notify("sandbox-ai asks: x", "y", level="error") is None
+    assert len(window.notifier.toasts) == before
+    assert ("ERROR", "notifications", "sandbox-ai asks: x: y") in logged
+    window.sai.save_setting("notifications", True)
+    try:
+        assert window.notify("t", "u", level="info") is not None
+    finally:
+        window.sai.save_setting("notifications", False)

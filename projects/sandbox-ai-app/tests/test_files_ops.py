@@ -93,6 +93,35 @@ def test_copy_into_the_sandbox_keeps_exec_bits_but_never_set_id_bits(places, tmp
     assert [path for path, _ in result.skipped] == ["folder/link"]
 
 
+def test_a_private_file_or_folder_stays_private_in_its_copy(places):
+    """Review: every copy was made 0o666/0o777 less the umask - a key of 0600 in a folder of 0700 became 0644 in
+    0755, readable by everyone on the machine. A copy keeps the permission bits (the umask on top), its owner may
+    read and write it, and what comes out of a sandbox is never executable."""
+    sandbox, machine, ws, host, _ = places
+    old = os.umask(0o022)
+    try:
+        keys = host / "keys"
+        keys.mkdir(mode=0o700)
+        (keys / "id").write_text("secret")
+        (keys / "id").chmod(0o600)
+        (keys / "id.pub").write_text("public")
+        (keys / "id.pub").chmod(0o444)
+        target = host / "elsewhere"
+        target.mkdir()
+        files.copy_entry(machine, rel(keys), machine, rel(target))  # from one host folder to another
+        files.copy_entry(machine, rel(keys), sandbox, "")  # into the sandbox
+        for copied in (target / "keys", ws / "keys"):
+            assert stat.S_IMODE(copied.stat().st_mode) == 0o700
+            assert stat.S_IMODE((copied / "id").stat().st_mode) == 0o600
+            assert stat.S_IMODE((copied / "id.pub").stat().st_mode) == 0o644
+        (ws / "private").write_text("the agent's")
+        (ws / "private").chmod(0o700)
+        files.copy_entry(sandbox, "private", machine, rel(host))  # out of the sandbox: never executable
+        assert stat.S_IMODE((host / "private").stat().st_mode) == 0o600
+    finally:
+        os.umask(old)
+
+
 def test_a_copy_within_one_root_under_another_name(places):
     sandbox, _, ws, _, _ = places
     files.copy_entry(sandbox, "sub", sandbox, "", name="sub-copy")
@@ -375,6 +404,22 @@ def test_rename_and_new_folder(places):
         sandbox.make_folder("", "planted")  # a link there is not replaced (nor followed)
 
 
+def test_a_rename_of_only_the_letter_case_without_renameat2(places, monkeypatch):
+    """Review: without renameat2 (macOS) the new name was checked first - on a file system that ignores the case it
+    "exists" (the file itself), and a.txt -> A.txt was refused. Shown here with a hard link of another case (the same
+    file under both names, as such a file system sees it); any other existing name is still refused."""
+    import ctypes
+    sandbox, _, ws, _, _ = places
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: (_ for _ in ()).throw(OSError("no libc here")))
+    os.link(ws / "a.txt", ws / "A.txt")
+    sandbox.rename_entry("a.txt", "A.txt")
+    assert (ws / "A.txt").read_text() == "alpha"
+    (ws / "other.txt").write_text("other")
+    with pytest.raises(Refused, match="already exists"):
+        sandbox.rename_entry("A.txt", "other.txt")
+    assert (ws / "other.txt").read_text() == "other"
+
+
 # -- chmod, chown --
 
 def test_chmod(places):
@@ -405,6 +450,21 @@ def test_no_setuid_setgid_or_sticky_bit_below_a_sandbox_root(places, bit):
         machine.chmod_entry(rel(host / "tool"), 0o755 | bit)  # on the host only when asked for
     machine.chmod_entry(rel(host / "tool"), 0o755 | bit, special=True)
     assert (host / "tool").stat().st_mode & bit
+
+
+def test_a_set_group_id_bit_a_sandbox_folder_has_may_stay_or_go(places):
+    """Review: a folder below a set-group-ID one inherits the bit; the Properties dialog keeps it (its box greyed
+    out) and every change of such a folder in a sandbox was refused."""
+    sandbox, _, ws, _, _ = places
+    (ws / "sub").chmod(0o2775)
+    if not (ws / "sub").stat().st_mode & stat.S_ISGID:
+        pytest.skip("the set-group-ID bit is not kept here (a group of another)")
+    sandbox.chmod_entry("sub", 0o2750)
+    assert stat.S_IMODE((ws / "sub").stat().st_mode) == 0o2750
+    with pytest.raises(Refused, match="never below a sandbox"):
+        sandbox.chmod_entry("sub", 0o2750 | stat.S_ISVTX)  # a bit it has not: never added
+    sandbox.chmod_entry("sub", 0o750)
+    assert stat.S_IMODE((ws / "sub").stat().st_mode) == 0o750
 
 
 def test_chown_only_to_oneself_and_ones_own_groups(places):

@@ -1,0 +1,50 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "database-services",
+  "title": "Database work",
+  "description": "A PostgreSQL and a Redis of their own beside the agent, at localhost:5432 and localhost:6379, gone with the run; PyPI, npm and GitHub open.",
+  "translations": {
+    "de": {
+      "title": "Datenbankarbeit",
+      "description": "Ein eigenes PostgreSQL und ein eigenes Redis neben dem Agenten, unter localhost:5432 und localhost:6379, mit dem Lauf wieder weg; PyPI, npm und GitHub offen."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github",
+    "--service",
+    "db:image={postgres},port=5432,user=999:999,env=POSTGRES_USER=dev,env=POSTGRES_PASSWORD=dev,env=POSTGRES_DB=dev,env=PGDATA=/var/lib/postgresql/data/pgdata,data=/var/lib/postgresql/data,data=/var/run/postgresql,memory=1g",
+    "--service",
+    "cache:image={redis},port=6379,user=999:1000,data=/data"
+  ],
+  "values": {
+    "postgres": {
+      "label": "Your PostgreSQL image (sandbox-ai images list)",
+      "kind": "text",
+      "default": "postgres",
+      "hint": "once: sandbox-ai images pull docker.io/library/postgres:17-bookworm --as postgres"
+    },
+    "redis": {
+      "label": "Your Redis image (sandbox-ai images list); empty: no Redis",
+      "kind": "text",
+      "default": "redis",
+      "optional": true,
+      "hint": "once: sandbox-ai images pull docker.io/library/redis:7-alpine --as redis"
+    }
+  },
+  "notes": [
+    "Pull the images once (pinned by digest, marked UNCHECKED: nobody reviewed them): sandbox-ai images pull docker.io/library/postgres:17-bookworm --as postgres, sandbox-ai images pull docker.io/library/redis:7-alpine --as redis.",
+    "The services share the sandbox's network: whatever they send meets its firewall, connection proxy and approvals. They run without capabilities, with a read-only root and their data in memory (gone with the run; keep=yes in the --service value keeps it with the start). The agent connects with postgresql://dev:dev@localhost:5432/dev (the password is a development one, never a secret of yours) and redis://localhost:6379.",
+    "user=999:999 is the postgres user of the official Debian image (the Alpine one has 70), 999:1000 Redis's: the image's own entry point cannot change its user without capabilities.",
+    "Podman only (a service is a container in the sandbox's pod); refused behind Tor and in the security mode paranoid.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

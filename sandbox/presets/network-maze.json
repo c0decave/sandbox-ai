@@ -4,6 +4,12 @@
   "id": "network-maze",
   "title": "Network maze",
   "description": "A sandbox network of its own, real DNS, one TCP target and optionally a VPN, all at once: does everything work together?",
+  "translations": {
+    "de": {
+      "title": "Netzwerk-Labyrinth",
+      "description": "Ein eigenes Sandbox-Netz, echtes DNS, ein TCP-Ziel und wahlweise ein VPN, alles zugleich: Funktioniert alles zusammen?"
+    }
+  },
   "category": "testing",
   "agents": [
     "claude",

@@ -11,7 +11,7 @@
 | `sandbox-ai claude\|codex\|opencode` | Start an agent in the sandbox |
 | `sandbox-ai list`, `rename`, `attach\|pause\|resume\|stop\|delete NAME`, `gc` | Every start by its name: what runs and what is kept, detach and come back, rebirth of a kept start |
 | `sandbox-ai build` | Build the agent images from the newest releases, their extensions, the team image and the VPN container |
-| `sandbox-ai images` | The agent images, their packages, extensions, recipes and variants |
+| `sandbox-ai images` | The agent images, their packages, extensions, recipes and variants; your own images from registries and Containerfiles (services, bases of variants) |
 | `sandbox-ai wizard` | Create, edit and trust project configurations; list local LLM models |
 | `sandbox-ai presets`, `sandbox-ai demo-device` | Ready setups for `--preset`; an emulated serial device to practise on |
 | `sandbox-ai net`, `devices`, `limits` | Change what a running sandbox may reach, its devices and limits; take back its taint; end it |
@@ -42,15 +42,16 @@
 | `sandbox/net.py`, `sandbox/devices.py`, `sandbox/workspaces.py`, `sandbox/approvals.py` | Changes to a running sandbox (network, taint, stop; devices and limits; workspaces added and taken back); questions and their answers |
 | `sandbox/privacy.py`, `sandbox/canary.py` | The privacy check of commits and pushes; decoy files with tokens made for each run |
 | `sandbox/secret_store.py`, `sandbox/git_logins.py`, `sandbox/publish_logins.py`, `sandbox/identities.py` | Secrets in the keyring or private files; logins the connection proxy adds on the wire; identities |
-| `sandbox/mcp.py`, `sandbox/mcp_rootfs.py`, `sandbox/mcp_demo.py`, `sandbox/agent_mcp.py` | MCP server sandboxes; catalog servers under Bubblewrap; built-in test server; an agent as another agent's helper |
+| `sandbox/mcp.py`, `sandbox/mcp_rootfs.py`, `sandbox/mcp_demo.py`, `sandbox/agent_mcp.py` | MCP server sandboxes (each server's network decided in one place, `server_network`, and proven after its start, `verify_network`); catalog servers under Bubblewrap; built-in test server; an agent as another agent's helper |
 | `sandbox/team.py`, `sandbox/team_board.py` | Teams of agents and their task board (an MCP server) |
-| `sandbox/vpn.py`, `sandbox/vpn_runtime.py` | VPN profiles, checks and the VPN container's runtime |
+| `sandbox/vpn.py`, `sandbox/vpn_runtime.py` | VPN profiles, checks and the VPN container's runtime; the guard of an MCP server behind a VPN (`--internal-mcp-guard`: its container created in the VPN container's namespace by ID, inspected, started only then) and the proofs of a VPN container and a pod (`check_vpn_container`, `check_pod_vpn`, the runtime's `killswitch`) |
 | `sandbox/wizard.py`, `sandbox/presets.py`, `sandbox/presets/` | Project wizard and local LLM discovery; presets and the built-in ones |
 | `sandbox/llm.py` | LLM endpoints: store, URL rules, model listing and `llm check`, the agents' configuration for `--llm`, the proxy's key entry |
 | `sandbox/main.py`, `sandbox/doctor.py`, `sandbox/logs.py`, `sandbox/activity.py`, `sandbox/login.py` | `sandbox-ai` dispatcher, host check, log summary, the agents' timeline, login store |
 | `sandbox/kits.py`, `sandbox/kitctl.py`, `sandbox/plugins.py` | Kits (read-only skills, agents, commands, prompts, hooks), project memory, plugin declarations and store; `sandbox-ai kits` |
-| `sandbox/images.py`, `sandbox/build_image.sh`, `sandbox/Containerfile.*` | Image extensions, recipes and variants; image builder; the images |
+| `sandbox/images.py`, `sandbox/services.py`, `sandbox/build_image.sh`, `sandbox/Containerfile.*` | Image extensions, recipes and variants; your own images (pinned by digest, unchecked) and the services beside the agent (`--service`); image builder; the images |
 | `sandbox/hosts.py`, `sandbox/webui.py`, `sandbox/web/`, `sandbox/defaults_cmd.py` | Other hosts over SSH; the web interface; `sandbox-ai defaults` |
-| `sandbox/demo_device.py`, `sandbox/completion.py`, `sandbox/release_keys.py`, `sandbox/textout.py` | The emulated serial device; tab completion; release signing keys; tables for list and show commands |
-| `sandbox/templates/`, `sandbox/marketplace/`, `sandbox/builtin/` | Default kit per agent (example skill, memory template); sandbox-ai's own Claude marketplace with the demo plugin; the built-in skill `sandbox-ai` and built-in kits |
+| `sandbox/demo_device.py`, `sandbox/completion.py`, `sandbox/release_keys.py`, `sandbox/textout.py`, `sandbox/progress.py` | The emulated serial device; tab completion; release signing keys; tables for list and show commands; what a start and a build say while they prepare (podman's output bounded, secrets masked) |
+| `sandbox/templates/`, `sandbox/marketplace/`, `sandbox/builtin/` | Default kit per agent (example skill, memory template); sandbox-ai's own Claude marketplace with the demo plugin; the built-in skill `sandbox-ai` and built-in kits (the vendored third-party skills in `builtin/kits/NAME/skills`, shared by the kit's agent folders; provenance in `kit.json`, review in `docs/skills-review.md`) |
+| `sandbox/recipes/` | The npm lockfiles the image recipes `hyperframes` and `playwright` install from (`npm ci --ignore-scripts`) |
 | `sandbox/cli.py`, `scripts/dist_boot.py` | Entry points of the PyPI package; the start of the ready-made packages |

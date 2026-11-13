@@ -80,6 +80,8 @@ def value_for(preset, placeholder, root, agent):
         return "" if placeholder.optional else "demo"
     if kind == "gpu":
         return "dri"
+    if name == "target":  # pentest-lab: the lab machine's address
+        return "192.0.2.44"
     return "" if placeholder.optional else "a task for the test"
 
 
@@ -93,11 +95,26 @@ def registered_servers(root, board):
     own = set(B.project_servers(board))
     for node in board.included():
         name = node.props.get("name") if node.kind == "mcp" else None
-        if name and name not in own and name not in document and name != "demo":
+        if name and name not in own and name not in document and name in FOLDERS:
+            # A catalog server with a folder of its own (engram, memory): an image server, as `mcp add NAME --mount
+            # /data=DIR:rw` writes it, so that a preset's --mcp-mount can give it the start's folder.
+            folder = root / f"brain-{name}"
+            folder.mkdir(exist_ok=True)
+            document[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64,
+                              "network": "none", "mounts": [{"target": "/data", "host": str(folder), "mode": "rw"}]}
+        elif name and name not in own and name not in document and name != "demo":
             document[name] = {"command": ["python3", "-I", "-c", "pass"], "options": ["--offline"],
                               "description": "stand-in of a registered server (tests)"}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_json.dumps(document))
+    # The images a preset's services name, as `sandbox-ai images pull REFERENCE --as NAME` records them (unchecked).
+    images = {name: {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + digit * 64,
+                     "id": "sha256:" + digit * 64, "user": user}
+              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"))}
+    (path.parent / "user-images.json").write_text(_json.dumps({"version": 1, "images": images}))
+
+
+FOLDERS = ("engram", "memory")  # sandbox-ai-mcp's servers that need a folder of their own (/data)
 
 
 @pytest.mark.parametrize("agent", AGENTS)

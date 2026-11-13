@@ -22,7 +22,7 @@ import re
 
 from . import backend
 from . import board as B
-from .i18n import N_, tr
+from .i18n import N_, language as i18n_language, tr
 
 CATEGORIES = (("simple", N_("Simple")), ("development", N_("Development")), ("research", N_("Research")),
               ("llm", N_("Local & remote LLM")), ("privacy", N_("Privacy & VPN")), ("teams", N_("Teams & policy")),
@@ -32,6 +32,7 @@ DIFFICULTIES = {"easy": N_("easy"), "medium": N_("medium"), "advanced": N_("adva
 BROWSER_SERVERS = ("browser", "playwright", "chrome", "chromium", "puppeteer")
 FORMAT = "sandbox-ai-app preset"
 LIMIT = 256 << 10  # bytes of a preset file
+DESCRIPTION_LIMIT = 2000  # characters of a description (the save dialog's has several lines)
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 # Options a preset may not carry: they copy a login in (a preset is meant to be passed on), or select what
 # only a start decides.
@@ -78,12 +79,24 @@ class Preset:
     name: str = ""  # sandbox-ai's presets: its id there (sandbox-ai AGENT --preset NAME); else the id
     value_names: tuple = ()  # sandbox-ai's presets: (marker, its value's name for --preset-value NAME=VALUE)
     host: str = "local"  # sandbox-ai's presets: the host whose sandbox-ai has it
+    # sandbox-ai's presets: the category it is listed under there (its presets.CATEGORY_INFO: development, llm ...),
+    # and its title and description in other languages ({"de": {"title", "description"}}).
+    group: str = ""
+    translations: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.name:
             object.__setattr__(self, "name", self.id)
 
     def text(self, value):
+        """VALUE (one of the preset's texts) in the app's language: sandbox-ai's title and description from its
+        translations; the user's own (and the rest of sandbox-ai's) as they are; the app's through tr()."""
+        if self.translations:
+            for key in ("title", "description"):
+                if value and value == getattr(self, key):
+                    translated = (self.translations.get(i18n_language()) or {}).get(key)
+                    if isinstance(translated, str) and translated.strip():
+                        return translated
         return value if self.user else tr(value)
 
     @property
@@ -339,6 +352,9 @@ class Catalogue:
     problems: list = field(default_factory=list)
     replaced: tuple = ()  # ids of the app's own presets the host's sandbox-ai has too
     complete: bool = True  # False: the host's sandbox-ai presets were not read (yet)
+    # sandbox-ai's categories ([(id, {title, description: {en, de}})], its presets.CATEGORY_INFO in its order); empty
+    # for a sandbox-ai without them: its presets in one section then, as before.
+    categories: list = field(default_factory=list)
 
     def find(self, key):
         """The preset of KEY ((source, id), "SOURCE:ID" or an id: the app's, then sandbox-ai's - as ID or sai-ID,
@@ -357,15 +373,70 @@ class Catalogue:
         return [p for p in self.presets if p.source == "mine"]
 
     def groups(self):
-        """[(category key, title, [Preset])] by category, sandbox-ai's then the user's own last (MINE)."""
+        """[(category key, title, [Preset])] by category: the app's own, then sandbox-ai's by its categories (in their
+        order: SAI_CATEGORY:ID, e.g. sandbox-ai:development, titled "sandbox-ai: Development"), then the user's own
+        last (MINE). Without sandbox-ai's categories its presets are one section (SAI_CATEGORY)."""
         found = []
         for key, title in CATEGORIES:
-            if key == SAI_CATEGORY:
+            if key != SAI_CATEGORY:
+                found.append((key, title, [p for p in self.presets if p.source == "app" and p.category == key]))
+            elif not self.categories:
                 title = title if self.host == "local" else tr("sandbox-ai's presets on {host}", host=self.host)
                 found.append((key, title, self.own()))
             else:
-                found.append((key, title, [p for p in self.presets if p.source == "app" and p.category == key]))
+                known = {ident for ident, _ in self.categories}
+                for ident, _info in self.categories:
+                    presets = [p for p in self.own() if (p.group if p.group in known else OTHER) == ident]
+                    if presets:
+                        found.append((f"{SAI_CATEGORY}:{ident}", self.group_title(ident), presets))
         return found + [("mine", MINE, self.mine())]
+
+    def info(self, ident):
+        return dict(self.categories).get(ident) or {}
+
+    def group_title(self, ident):
+        """The heading of sandbox-ai's category IDENT in the app's language: "sandbox-ai: Development" (on another host:
+        "sandbox-ai on HOST: Development")."""
+        name = category_text(self.info(ident), "title") or ident
+        return tr("sandbox-ai: {category}", category=name) if self.host == "local" else \
+            tr("sandbox-ai on {host}: {category}", host=self.host, category=name)
+
+    def description(self, key):
+        """The short description of the section KEY (one of sandbox-ai's categories), in the app's language; ""."""
+        if isinstance(key, str) and key.startswith(SAI_CATEGORY + ":"):
+            return category_text(self.info(key.split(":", 1)[1]), "description")
+        return ""
+
+    def category_label(self, preset):
+        """The category PRESET is shown under, in the app's language: sandbox-ai's own for its presets."""
+        if preset.source == "sandbox-ai" and self.categories:
+            return category_text(self.info(preset.group if preset.group in dict(self.categories) else OTHER),
+                                 "title") or preset.group
+        if preset.category in dict(self.categories) and preset.category not in dict(CATEGORIES):
+            return category_text(self.info(preset.category), "title")  # one of yours in a sandbox-ai category
+        return tr(dict(CATEGORIES).get(preset.category, preset.category))
+
+
+OTHER = "other"  # sandbox-ai's category for a preset that names none it knows
+
+
+def category_text(info, key="title"):
+    """INFO's KEY (title, description: {en, de}) in the app's language, else English; "" without it."""
+    texts = info.get(key) if isinstance(info, dict) else None
+    if not isinstance(texts, dict):
+        return ""
+    text = texts.get(i18n_language()) or texts.get("en")
+    return text if isinstance(text, str) else ""
+
+
+def sai_categories(sai):
+    """sandbox-ai's categories of presets ([(id, {title, description})], its presets.CATEGORY_INFO in order); [] for a
+    sandbox-ai without them (or none at all)."""
+    try:
+        info = getattr(sai.module("presets"), "CATEGORY_INFO", None)
+    except Exception:  # noqa: BLE001 - an older sandbox-ai: no presets, no categories
+        return []
+    return [(key, value) for key, value in info.items() if isinstance(value, dict)] if isinstance(info, dict) else []
 
 
 def catalogue(sai, host="local", documents=None, problems=(), mine=None):
@@ -392,7 +463,7 @@ def catalogue(sai, host="local", documents=None, problems=(), mine=None):
     names = {preset.name for preset in own}
     replaced = tuple(p.id for p in PRESETS if p.id in names)
     app = [p for p in PRESETS if p.id not in names]
-    return Catalogue(host, own + app + list(mine), problems, replaced, complete)
+    return Catalogue(host, own + app + list(mine), problems, replaced, complete, sai_categories(sai))
 
 
 HOST_DOCUMENTS = {}  # {host: (documents, problems)}: what `presets list --json` there said last
@@ -437,6 +508,12 @@ def role_keys(board):
     return keys
 
 
+def names_workspaces(preset):
+    """True when PRESET names its workspaces itself (a saved board's: --workspace <folder:workspace>): the project the
+    gallery is opened for is not added to them then: their form offers the folders saved with them, to change."""
+    return any(option == "--workspace" or option.startswith("--workspace=") for option in preset.options)
+
+
 def fitted_options(options, cpus=None):
     """OPTIONS with --cpus no higher than this machine has (CPUS, default os.cpu_count()): a preset written for a
     big machine would otherwise be refused by the launcher on a smaller one."""
@@ -461,7 +538,7 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
         agent = preset.agents[0]  # the preset is not for the agent of the settings: its first one
     task = (["--prompt", preset.prompt] if agent == "opencode" else [preset.prompt]) if preset.prompt else []
     board = B.from_argv(sai, agent, fitted_options(preset.options), list(preset.agent_args) + task,
-                        [str(directory)] if directory else [])
+                        [str(directory)] if directory and not names_workspaces(preset) else [])
     for name in preset.mcp:
         if not any(n.props.get("name") == name for n in board.of_kind("mcp")):
             board.add("mcp", name=name)
@@ -491,12 +568,14 @@ def score(sai, preset, policy=None):
     return B.badges(build(sai, preset), policy)[0]
 
 
-def matches(preset, text):
-    """True if every word of TEXT is in the preset's title, description, category or notes."""
+def matches(preset, text, catalogue=None):
+    """True if every word of TEXT is in the preset's title (also in English), description, category (CATALOGUE's
+    label for it: sandbox-ai's own category), notes or options."""
     words = str(text or "").lower().split()
-    category = dict(CATEGORIES).get(preset.category, preset.category)
-    haystack = " ".join([preset.text(preset.title), preset.text(preset.description), tr(category), preset.id,
-                         *[preset.text(n) for n in preset.notes], *preset.options]).lower()
+    category = catalogue.category_label(preset) if catalogue is not None else \
+        tr(dict(CATEGORIES).get(preset.category, preset.category))
+    haystack = " ".join([preset.text(preset.title), preset.title, preset.text(preset.description), category,
+                         preset.group, preset.id, *[preset.text(n) for n in preset.notes], *preset.options]).lower()
     return all(word in haystack for word in words)
 
 
@@ -555,9 +634,10 @@ def from_document(sai, document):
     _check(isinstance(title, str) and 0 < len(title.strip()) <= 80,
            N_("A preset needs a title (at most 80 characters)."))
     description = document.get("description", "")
-    _check(isinstance(description, str) and len(description) <= 400, N_("The description is too long."))
+    _check(isinstance(description, str) and len(description) <= DESCRIPTION_LIMIT, N_("The description is too long."))
     category = document.get("category", "simple")
-    _check(category in dict(CATEGORIES), N_("Unknown category {name}."), name=str(category)[:40])
+    _check(category in dict(CATEGORIES) or category in dict(sai_categories(sai)), N_("Unknown category {name}."),
+           name=str(category)[:40])
     difficulty = document.get("difficulty", "medium")
     _check(difficulty in DIFFICULTIES, N_("Unknown difficulty {name}."), name=str(difficulty)[:40])
     agent = document.get("agent")
@@ -580,7 +660,9 @@ def from_document(sai, document):
                                                backend.canonical_of(sai))
     _check(not unknown, N_("Options this sandbox-ai does not know: {options}."),
            options=" ".join(map(str, unknown))[:200])
-    refused = [o for o in REFUSED if values.get(o)]
+    # A workspace only as a folder to fill in at the use (a placeholder: never a path wired in), as a saved board names it.
+    refused = [o for o in REFUSED if values.get(o) and not (o == "--workspace" and all(
+        B.PLACEHOLDER.fullmatch(str(v).strip()) for v in (values[o] if isinstance(values[o], list) else [values[o]])))]
     _check(not refused, N_("A preset may not carry {options}: it copies a login in or belongs to one start."),
            options=", ".join(refused))
     for name in lists["mcp"]:
@@ -621,27 +703,116 @@ def from_document(sai, document):
                   name=ident)
 
 
-def from_board(sai, board, title, description="", category="simple", ident=None):
-    """The current BOARD as a preset of the user's own: its options without the workspaces (a preset is
-    for any project), its MCP servers and ruleset, the placeholders it still has, the positions. ValueError
-    if it holds what looks like a secret or options a preset may not carry."""
+def from_board(sai, board, title, description="", category="simple", ident=None, keep=False, notes=()):
+    """The current BOARD as a preset of the user's own: its options (the project file's own settings on the board too:
+    mode, canaries ...), its MCP servers and ruleset, its services, MCP limits and folders, LLM parameters, the agent's
+    arguments, the placeholders it still has (with the labels and hints of the preset it came from), NOTES and the
+    positions. The folders (workspaces, mounts' sources, MCP servers' folders) become placeholders to fill in at the
+    next use: with KEEP the board's workspaces are kept too and each folder is offered with its current path as the
+    default (a note says the preset holds paths of this computer); without, the workspaces are left out (a preset for
+    any project) and the folders asked for anew. ValueError if it holds what looks like a secret or options a preset
+    may not carry."""
     agent, _, agent_args = B.values(board)
-    options = B.to_argv(sai, board, workspaces=False)
+    options = [*B.document_argv(board), *B.to_argv(sai, board, workspaces=keep)]
+    options, folders = folder_placeholders(options, keep)
     # The project's own servers are kept with their definitions; --mcp names them in the options.
     servers = {n.props["name"]: n.props["definition"] for n in board.included() if n.kind == "mcp"
                and n.props.get("project") and n.props.get("name") and isinstance(n.props.get("definition"), dict)}
     approvals = board.first("approvals")
     rules = approvals.props.get("rules") if approvals is not None and isinstance(approvals.props.get("rules"),
                                                                                  dict) else None
-    marks = [{"marker": marker, "label": tr(B.PLACEHOLDER_KINDS[B.PLACEHOLDER.fullmatch(marker)[1]]),
-              "hint": "", "optional": False, "follows": ""} for marker, _ in B.placeholders(board)]
+
+    def label(marker):  # the label (and hint) the preset gave it, else what kind of value it is
+        given = board.labels.get(marker) or []
+        return (given[0] if given and given[0] else tr(B.PLACEHOLDER_KINDS[B.PLACEHOLDER.fullmatch(marker)[1]]),
+                given[1] if len(given) > 1 and given[1] else "")
+    marks = [{"marker": marker, "label": label(marker)[0][:120], "hint": label(marker)[1][:200], "optional": False,
+              "follows": ""} for marker, _ in B.placeholders(board)]
+    marks += [{"marker": marker, "label": text[:120], "hint": "", "optional": False, "follows": "",
+               **({"default": path[:200]} if keep else {})} for marker, text, path in folders]
+    notes = [str(note).strip()[:1000] for note in notes if str(note).strip()]
+    here = machine_specific(options, [path for _, _, path in folders] if keep else [])
+    if here:
+        notes.append(here[:1000])
     keys = role_keys(board)
-    ident = ident or "my-" + (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:56] or "preset")
+    ident = ident or free_id("my-" + (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:56] or "preset"))
     document = {"format": FORMAT, "version": 1, "id": ident, "title": title, "description": description,
                 "category": category, "difficulty": "medium", "agent": agent, "options": options,
                 "agent_args": agent_args, "mcp": [], "mcp_servers": servers, "rules": rules, "placeholders": marks,
-                "notes": [], "positions": {keys[n.id]: [round(n.x, 1), round(n.y, 1)] for n in board.nodes}}
+                "notes": notes, "positions": {keys[n.id]: [round(n.x, 1), round(n.y, 1)] for n in board.nodes}}
     return from_document(sai, document)
+
+
+def folder_placeholders(options, keep):
+    """(OPTIONS with every folder of this computer replaced by a placeholder, [(marker, label, path)]): the workspaces
+    (<folder:workspace>, <folder:workspace-2> ...), the sources of the mounts (<folder:mount> ...) and the folders of
+    the MCP servers (--mcp-mount NAME:TARGET=HOST: <folder:NAME-TARGET>). A value that is a placeholder already stays.
+    KEEP only names the labels: what each path was is returned either way."""
+    out, found = [], []
+    # (a placeholder the board still has keeps its name: a new one never takes it)
+    seen = {match[2] for token in options for match in B.PLACEHOLDER.finditer(str(token)) if match[1] == "folder"}
+
+    def marker(base):
+        base = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")[:24] or "folder"
+        name, number = base, 2
+        while name in seen:
+            name, number = f"{base}-{number}", number + 1
+        seen.add(name)
+        return f"<folder:{name}>"
+    index = 0
+    while index < len(options):
+        token = options[index]
+        option, equals, attached = token.partition("=")
+        if option not in ("--workspace", "--mount", "--mcp-mount"):
+            out.append(token)
+            index += 1
+            continue
+        value = attached if equals else (options[index + 1] if index + 1 < len(options) else "")
+        index += 1 if equals else 2
+        if B.PLACEHOLDER.search(value):
+            replaced = value
+        elif option == "--workspace":
+            mark = marker("workspace")
+            found.append((mark, tr("Workspace"), value))
+            replaced = mark
+        elif option == "--mount":
+            source, _, rest = value.partition(":")
+            mark = marker("mount")
+            found.append((mark, tr("Folder mounted at {target}", target=rest.split(":", 1)[0] or "?"), source))
+            replaced = f"{mark}:{rest}" if rest else mark
+        else:
+            server, _, rest = value.partition(":")
+            target, _, host = rest.partition("=")
+            path, colon, mode = host.rpartition(":") if host.endswith((":ro", ":rw")) else (host, "", "")
+            mark = marker(f"{server}-{target}")
+            found.append((mark, tr("Folder of the MCP server {name} ({target})", name=server, target=target), path))
+            replaced = f"{server}:{target}={mark}" + (f":{mode}" if colon else "")
+        out += [option, replaced]
+    return out, found
+
+
+def machine_specific(options, paths):
+    """The note of a preset that holds what belongs to this computer: the folders PATHS (offered as defaults at the
+    next use), devices, and what is registered here by name (VPN profiles, LLM servers, identities, image variants,
+    MCP servers, images of services); "" for none."""
+    named = {"--device": [], "--vpn": [], "--llm": [], "--identity": [], "--image-variant": []}
+    for index, token in enumerate(options):
+        option, equals, value = token.partition("=")
+        if option in named:
+            value = value if equals else (options[index + 1] if index + 1 < len(options) else "")
+            if value and not B.PLACEHOLDER.search(value):
+                named[option].append(value)
+    parts = []
+    if paths:
+        parts.append(tr("This preset holds paths of this computer ({paths}): at its next use each is offered as the "
+                        "default, to change for another project or computer.", paths=", ".join(paths)))
+    if named["--device"]:
+        parts.append(tr("Devices of this computer: {devices}.", devices=", ".join(named["--device"])))
+    registered = [*named["--vpn"], *named["--llm"], *named["--identity"], *named["--image-variant"]]
+    if registered:
+        parts.append(tr("Registered on this computer by name (another one needs them too): {names}.",
+                        names=", ".join(dict.fromkeys(registered))))
+    return " ".join(parts)
 
 
 SAI_KINDS = {"folder": "folder", "vpn": "vpn", "llm": "llm"}  # sandbox-ai's value kinds the board knows; the rest: text
@@ -715,7 +886,32 @@ def from_sandbox_ai(sai, document, host="local"):
     return dataclasses.replace(checked, agent_args=(), prompt=checked.agent_args[0] if checked.agent_args else "",
                                agents=tuple(a for a in agents if a in tuple(getattr(sai, "agents", B.AGENTS))),
                                source="sandbox-ai", name=str(document.get("id", ""))[:60], host=host,
-                               value_names=tuple((markers[name], name) for name in values))
+                               value_names=tuple((markers[name], name) for name in values),
+                               group=sai_group(document), translations=sai_translations(document))
+
+
+# sandbox-ai's categories of earlier versions, and where they are listed now (its presets.LEGACY_CATEGORIES).
+SAI_LEGACY = {"simple": OTHER, "analysis": "security", "media": "fun"}
+
+
+def sai_group(document):
+    """The category of sandbox-ai's preset DOCUMENT (one of its presets.CATEGORY_INFO ids; an older one where it went;
+    OTHER without one)."""
+    category = document.get("category") if isinstance(document.get("category"), str) else OTHER
+    return SAI_LEGACY.get(category, category)[:40]
+
+
+def sai_translations(document):
+    """{language: {title, description}} of sandbox-ai's preset DOCUMENT (its "translations"), only texts kept."""
+    found = {}
+    given = document.get("translations")
+    for language, texts in (given.items() if isinstance(given, dict) else []):
+        if isinstance(language, str) and isinstance(texts, dict):
+            kept = {key: str(texts[key])[:400 if key == "description" else 80] for key in ("title", "description")
+                    if isinstance(texts.get(key), str) and texts[key].strip()}
+            if kept:
+                found[language[:8]] = kept
+    return found
 
 
 def sandbox_ai_presets(sai, host="local", documents=None):
@@ -776,6 +972,26 @@ def add_mine(sai, preset):
     change_mine(preset.id, preset)
 
 
+def free_id(ident):
+    """IDENT, or IDENT-2, IDENT-3 ... when one of the user's own presets has it (also one this version refuses): the id
+    of a new preset, which never replaces one unasked (an id comes from the title, and titles that read the same - or
+    are of non-Latin letters only - give the same)."""
+    try:
+        taken = {d.get("id") for d in stored_mine()["presets"] if isinstance(d, dict)}
+    except (OSError, ValueError):
+        taken = set()
+    taken |= set(BUILTIN)
+    if ident not in taken:
+        return ident
+    number = 2
+    while True:
+        suffix = f"-{number}"
+        candidate = ident[:64 - len(suffix)].rstrip("-") + suffix
+        if candidate not in taken:
+            return candidate
+        number += 1
+
+
 def remove_mine(sai, ident):
     change_mine(ident)
 
@@ -792,7 +1008,7 @@ def export(sai, preset, path):
 
 def import_file(sai, path):
     """The preset in the JSON file PATH (untrusted: size limited, every value checked), as one of the user's
-    own (its id prefixed with my- when it would shadow a built-in one)."""
+    own (its id prefixed with my- when it would shadow a built-in one, numbered when one of yours has it: free_id)."""
     with open(path, "rb") as stream:
         data = stream.read(LIMIT + 1)
     _check(len(data) <= LIMIT, N_("The file is larger than {size} KiB."), size=LIMIT >> 10)
@@ -801,6 +1017,9 @@ def import_file(sai, path):
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise ValueError(tr("Not a JSON file.")) from None
     preset = from_document(sai, document)
-    if preset.id in BUILTIN:
-        preset = from_document(sai, {**document, "id": ("my-" + preset.id)[:64]})
+    # (never in place of a built-in one, nor of one of yours: one of the same id - yours, sent on and changed by
+    # someone, or another's - is kept beside it)
+    wanted = free_id(("my-" + preset.id)[:64] if preset.id in BUILTIN else preset.id)
+    if wanted != preset.id:
+        preset = from_document(sai, {**document, "id": wanted})
     return preset

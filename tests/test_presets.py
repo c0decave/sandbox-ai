@@ -29,7 +29,8 @@ def minimal(**fields):
 
 
 def test_every_builtin_preset_is_valid_and_named_by_its_file():
-    files = sorted((ROOT / "sandbox" / "presets").glob("*.json"))
+    files = sorted(path for path in (ROOT / "sandbox" / "presets").glob("*.json")
+                   if not path.name.endswith(".rules.json"))  # (a preset's ruleset beside it)
     assert len(files) >= 24
     for path in files:
         document = json.loads(path.read_text())
@@ -50,6 +51,60 @@ def test_the_presets_the_user_asked_for_are_there():
              "canary-course", "network-maze", "memory-hog", "archivist-1995", "radio-sandbox-ai", "agent-race",
              "pixel-art-factory", "sand-chess"}
     assert asked <= ids, asked - ids
+    # 2026-11-12: Claude and Codex without questions on their workspace, with a brain; and the typical ones missing.
+    asked = {"coding-memory": "development", "research-memory": "research", "rust": "development",
+             "go": "development", "jvm": "development", "dotnet": "development", "database-services": "development",
+             "web-frontend": "development", "infrastructure": "development", "dependency-upgrade": "development",
+             "pentest-lab": "security", "paranoid": "privacy"}
+    presets = p.catalog()
+    assert {ident: presets[ident]["category"] for ident in asked if ident in presets} == asked
+    for ident in ("coding-memory", "research-memory"):
+        assert "--dangerously-skip-permissions" in presets[ident]["options"]
+        assert {"claude", "codex"} <= set(presets[ident]["agents"])
+        assert any(option.startswith(("engram:/data={", "memory:/data={")) for option in presets[ident]["options"])
+
+
+def test_every_builtin_preset_has_its_title_and_description_in_german_too():
+    """"translations": {"de": {"title", "description"}} - the app shows them in German; a preset without them (yours)
+    is shown as it is. Anything else in it is refused."""
+    for ident, preset in p.catalog().items():
+        de = preset["translations"]["de"]
+        assert set(de) == {"title", "description"} and de["title"].strip() and de["description"].strip(), ident
+        assert p.translated(preset, "title", "de") == de["title"] and p.translated(preset, "title") == preset["title"]
+    assert p.translated(minimal(), "title", "de") == "Mine"
+    assert p.problems(minimal(translations={"de": {"title": "Meins"}})) == []
+    for bad in ({"fr": {"title": "x"}}, {"de": {"title": ""}}, {"de": {"notes": "x"}}, {"de": {}}, {"de": "x"}, []):
+        assert any("translations is" in x for x in p.problems(minimal(translations=bad))), bad
+
+
+def test_the_categories_are_defined_once_and_older_ones_still_taken(own_config, capsys):
+    """CATEGORY_INFO is the one list (its order is the order of `presets list`, the app's gallery and the web
+    interface); a preset of yours with a category of an earlier version (simple, analysis, media) is still valid and
+    listed where that one went; one without a category under Other; an unknown one is refused."""
+    assert p.CATEGORIES[0] == "development" and p.CATEGORIES[-1] == p.DEFAULT_CATEGORY == "other"
+    assert p.category_text("forensics", language="de") == "Forensik & Reverse Engineering"
+    assert p.category_text("analysis") == "Security analysis" and p.category_text("nope") == "Other"
+    assert p.category_text("llm", "description", "fr") == p.CATEGORY_INFO["llm"]["description"]["en"]
+    assert [p.category_of(d) for d in (minimal(category="analysis"), minimal(category="simple"), minimal(),
+                                       minimal(category="media"), minimal(category="llm"))] == \
+        ["security", "other", "other", "fun", "llm"]
+    assert p.problems(minimal(category="analysis")) == [] and p.problems(minimal(category="simple")) == []
+    assert any("category is one of development, research" in x for x in p.problems(minimal(category="cooking")))
+    assert any("category is one of" in x for x in p.problems(minimal(category=["llm"])))
+    own_config.mkdir(parents=True)
+    (own_config / "old.json").write_text(json.dumps(minimal(id="old", title="Old one", category="analysis")))
+    (own_config / "plain.json").write_text(json.dumps(minimal(id="plain", title="Plain one")))
+    assert p.main(["list"]) == 0
+    text = capsys.readouterr().out
+    security = text.index("Security analysis (security):")
+    assert security < text.index("  old ") < text.index("Forensics & reverse engineering (forensics):")
+    assert text.index("Other (other):") < text.index("  plain ")
+    assert p.main(["show", "old"]) == 0 and "(Security analysis, yours)" in capsys.readouterr().out
+    assert p.main(["categories", "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert [entry["id"] for entry in listed] == list(p.CATEGORIES)
+    assert listed[0] == {"id": "development", **p.CATEGORY_INFO["development"]}
+    assert p.main(["categories"]) == 0 and "security     Security analysis: " in capsys.readouterr().out
 
 
 def test_problems_name_what_is_wrong():
@@ -61,7 +116,7 @@ def test_problems_name_what_is_wrong():
                            (minimal(values={"x": {"kind": "weird"}}), "value 'x'"),
                            (minimal(rules="../escape.json"), "rules names a JSON file"),
                            (minimal(agents=["gpt"]), "agents is a list"), (minimal(extra=1), "unknown keys"),
-                           (minimal(category="other"), "category"), ("[]", "not a JSON object")):
+                           (minimal(category="cooking"), "category"), ("[]", "not a JSON object")):
         assert any(text in problem for problem in p.problems(document)), (document, p.problems(document))
 
 
@@ -112,6 +167,23 @@ def test_apply_puts_the_preset_first_and_the_task_last(own_config):
                        (["claude", "--preset", "absent"], "no preset 'absent'")):
         with pytest.raises(ValueError, match=text):
             p.apply(argv)
+
+
+def test_a_preset_may_not_copy_a_login_in_with_copy(own_config):
+    """Bug hunt: --copy-auth was refused in a preset, a --copy of the login files themselves was not."""
+    spec = importlib.util.spec_from_file_location("agent_sandbox_for_preset_tests", ROOT / "sandbox/agent_sandbox.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    own_config.mkdir(parents=True)
+    for value in ("~/.claude/.credentials.json:.claude/.credentials.json", "~/.codex/auth.json:.codex/auth.json",
+                  "/tmp/innocent:.claude/.credentials.json"):
+        (own_config / "mine.json").write_text(json.dumps(minimal(options=["--copy", value])))
+        for argv in (["claude", "--preset", "mine"], ["claude", "--preset=mine"]):
+            with pytest.raises(ValueError, match="copies a login in"):
+                p.apply(argv, canonical=launcher.canonical_options, credential=launcher.copies_credential)
+    (own_config / "mine.json").write_text(json.dumps(minimal(options=["--copy=/tmp/notes.txt:notes.txt"])))
+    assert p.apply(["claude", "--preset", "mine"], canonical=launcher.canonical_options,
+                   credential=launcher.copies_credential)[1:2] == ["--copy=/tmp/notes.txt:notes.txt"]
 
 
 def test_yours_win_and_damaged_ones_are_skipped(own_config):
@@ -253,7 +325,8 @@ def test_missing_names_what_to_add():
 def test_the_cli(capsys, own_config):
     assert p.main(["list"]) == 0
     text = capsys.readouterr().out
-    assert "analysis:" in text and "software-analysis" in text and "fun:" in text
+    assert "Forensics & reverse engineering (forensics):" in text and "software-analysis" in text
+    assert "Learning, games & demos (fun):" in text and "Other (other):" not in text, "no empty category"
     assert p.main(["list", "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert {entry["origin"] for entry in listed} == {"built-in"} and all("_path" not in entry for entry in listed)

@@ -1,0 +1,5 @@
+This kit of sandbox-ai contains files of https://github.com/jthack/ffuf_claude_skill
+at commit 50fd4af4d8bd60cfc48fd84eda1720fbd718857d (2025-10-16T15:39:14-04:00), unchanged.
+The upstream repository states "MIT License - See LICENSE file for details" in its README (kept here as UPSTREAM-README.md) but has no LICENSE file; the files are redistributed on the strength of that statement, under the MIT License.
+sandbox-ai chose which files to include (kit.json: "files", "left_out") and added README.md, NOTICE,
+kit.json and the agent folders' markers. Security review: docs/skills-review.md.

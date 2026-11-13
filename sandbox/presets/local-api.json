@@ -4,6 +4,12 @@
   "id": "local-api",
   "title": "Local OpenAI-compatible API (raw)",
   "description": "Any server with the OpenAI API (/v1/chat/completions, /v1/responses): a LiteLLM gateway, LocalAI, text-generation-webui, your own; only its address is opened, nothing else.",
+  "translations": {
+    "de": {
+      "title": "Lokale OpenAI-kompatible API (roh)",
+      "description": "Jeder Server mit der OpenAI-API (/v1/chat/completions, /v1/responses): ein LiteLLM-Gateway, LocalAI, text-generation-webui, Ihr eigener; nur seine Adresse ist offen, sonst nichts."
+    }
+  },
   "category": "llm",
   "agents": [
     "claude",

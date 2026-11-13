@@ -4,7 +4,13 @@
   "id": "software-analysis",
   "title": "Software analysis",
   "description": "Binaries in a read-only folder, the agent reaches only its provider; capa, FLOSS, radare2, YARA and binwalk as MCP servers in containers of their own.",
-  "category": "analysis",
+  "translations": {
+    "de": {
+      "title": "Software-Analyse",
+      "description": "Binärdateien in einem nur lesbaren Ordner, der Agent erreicht nur seinen Anbieter; capa, FLOSS, radare2, YARA und binwalk als MCP-Server in eigenen Containern."
+    }
+  },
+  "category": "forensics",
   "agents": [
     "claude",
     "codex",

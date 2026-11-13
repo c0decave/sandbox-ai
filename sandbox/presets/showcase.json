@@ -1,0 +1,74 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "showcase",
+  "title": "Showcase: folders, ports and remote hosts",
+  "description": "Shows what one start can combine: the project (writable) plus three folders of yours (read-only), a service on a local port of this computer, one exact address and port in your network or on a remote machine, and one extra web host; everything else stays closed.",
+  "translations": {
+    "de": {
+      "title": "Schaufenster: Ordner, Ports und entfernte Hosts",
+      "description": "Zeigt, was ein Start verbinden kann: das Projekt (beschreibbar) und drei Ordner von Ihnen (nur lesbar), einen Dienst an einem lokalen Port dieses Rechners, genau eine Adresse mit Port in Ihrem Netz oder auf einem entfernten Rechner und einen zusätzlichen Web-Host; alles andere bleibt zu."
+    }
+  },
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--mount",
+    "{data}:/mnt/data:ro",
+    "--mount",
+    "{reference}:/mnt/reference:ro",
+    "--mount",
+    "{docs}:/mnt/docs:ro",
+    "--allow-host-port",
+    "{port}",
+    "--allow-tcp",
+    "{remote}",
+    "--allow-host",
+    "{web}"
+  ],
+  "values": {
+    "data": {
+      "label": "Folder with input to read (/mnt/data, read-only)",
+      "kind": "folder",
+      "hint": "e.g. ~/datasets; the agent reads it, never changes it"
+    },
+    "reference": {
+      "label": "A second folder to read (/mnt/reference, read-only)",
+      "kind": "folder",
+      "hint": "e.g. another project to compare with"
+    },
+    "docs": {
+      "label": "A third folder to read (/mnt/docs, read-only)",
+      "kind": "folder",
+      "hint": "e.g. documentation or specifications"
+    },
+    "port": {
+      "label": "Port of a service on this computer (reached at 127.0.0.1:PORT inside)",
+      "kind": "port",
+      "default": "8080",
+      "hint": "e.g. python3 -m http.server 8080 --bind 127.0.0.1 in a folder of your choice"
+    },
+    "remote": {
+      "label": "Exactly one address and TCP port in your network or on a remote machine (IP:PORT)",
+      "kind": "text",
+      "default": "192.168.1.10:22",
+      "hint": "an SSH server, a database, a printer's web page; only this address and port open, nothing else of that network"
+    },
+    "web": {
+      "label": "One extra web host (HTTPS)",
+      "kind": "host",
+      "default": "example.org",
+      "hint": "every name besides it stays closed unless you allow it during the run"
+    }
+  },
+  "prompt": "This start shows what a sandbox can be given. Check each of them and write a short report to /work/showcase.md: (1) the project in /work - list it (it is writable); (2) /mnt/data, /mnt/reference and /mnt/docs - read each, and show that writing there is refused; (3) the service on 127.0.0.1:{port} - fetch it; (4) {remote} - open a TCP connection (nc -vz or a short Python socket) and say whether it answers; (5) https://{web}/ - fetch its title; (6) one host that was NOT allowed (e.g. https://wikipedia.org/) - show that it is refused and quote the refusal. Change nothing else.",
+  "notes": [
+    "Podman only (pasta forwards the local port).",
+    "The project is the start's own workspace (/work, writable); the three folders are mounts and stay read-only, as in every built-in preset. Writable extra folders: add them on the Board as workspaces, or in a preset of your own (--workspace DIR), which may name them.",
+    "--allow-tcp opens exactly that address and port; --allow-host opens HTTPS (443) to that one name. During the run, more is allowed with sandbox-ai net allow RUN ... or by answering the questions."
+  ]
+}

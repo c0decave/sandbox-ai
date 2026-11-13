@@ -65,6 +65,35 @@ def stat_mode(path):
     return os.stat(path).st_mode & 0o777
 
 
+def test_what_needs_notifications_follows_their_switch(qapp, env):
+    """With notifications off (the default) "Desktop notification for each new question" stayed ticked and could be
+    changed, and nothing it says happened: the switch above it holds every popup back. It, how long they stay and how
+    they are shown can be changed only while notifications are on."""
+    from sandbox_ai_app.settings import SettingsDialog
+    sai = backend.SandboxAI()
+    dialog = SettingsDialog(sai)
+    try:
+        switch = dialog.fields["notifications"]
+        following = [dialog.fields[key] for key in ("notify", "notify_seconds", "notify_style")]
+        assert not switch.isChecked() and not any(widget.isEnabled() for widget in following)
+        switch.setChecked(True)
+        assert all(widget.isEnabled() for widget in following) and sai.settings()["notifications"] is True
+        switch.setChecked(False)
+        assert not any(widget.isEnabled() for widget in following)
+    finally:
+        dialog.deleteLater()
+
+
+def test_preparing_a_start_promises_a_notification_only_when_there_is_one(qapp, env, monkeypatch):
+    """"A notification says when it is done": with notifications off (the default) none came - the page's notes say
+    it then."""
+    from sandbox_ai_app import prerequisites
+    sai = backend.SandboxAI()
+    assert prerequisites.done_said() == "The notes here say when it is done."
+    sai.save_setting("notifications", True)
+    assert prerequisites.done_said() == "A notification says when it is done."
+
+
 def test_fonts_are_chosen_installed_or_marked_with_how_to_get_them(qapp, env, monkeypatch):
     """Appearance: the theme's font or one of the list; one that is not installed is marked so, says how to get it
     (its tooltip, and under the box once chosen) and the theme's font stays; an installed one applies at once."""

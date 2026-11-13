@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import wave
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -86,6 +87,9 @@ READ_CPS = 15.0  # characters per second a viewer reads comfortably
 TYPE_CPS = 32.0
 LINES_PER_SECOND = 45.0
 FADE = 0.35
+VOICE_LEAD = 0.5  # seconds before the first spoken cue of a scene
+VOICE_PAUSE = 0.55  # after each spoken cue
+VOICE_TAIL = 0.4  # after the last one
 
 
 def version():
@@ -332,14 +336,17 @@ class Scene:
     content_seconds = 6.0
     header = True
 
-    def __init__(self, cv, lang, chapter_index, captions, label, ident):
+    def __init__(self, cv, lang, chapter_index, captions, label, ident, track=None):
         self.cv, self.lang = cv, lang
         self.chapter_index = chapter_index  # 0-based, or None for the course cards
+        self.track = track  # a video of a series: (0-based index, number of videos, its title) for the header
         self.captions = captions
         self.label = label
         self.ident = ident
         self.duration = 0.0
         self.cues = []
+        self.voice = None  # spoken narration: [(WAV path, seconds)], one per caption (narrate.py)
+        self.sounds = []  # (start in the scene, WAV path) of each spoken cue
         self._base = None
 
     # timing
@@ -347,6 +354,8 @@ class Scene:
         return sum(cue_seconds(c) for c in self.captions)
 
     def plan(self):
+        if self.voice:
+            return self.plan_spoken()
         need = self.caption_seconds() + (0.8 if self.captions else 0)
         self.duration = max(self.content_seconds, need)
         total = self.caption_seconds() or 1
@@ -356,6 +365,19 @@ class Scene:
             length = span * cue_seconds(caption) / total
             self.cues.append((start, start + length, caption))
             start += length
+
+    def plan_spoken(self):
+        """The timing of the spoken narration: each cue as long as its audio and a pause; the scene at least as
+        long as its content needs."""
+        start = VOICE_LEAD
+        for caption, (path, seconds) in zip(self.captions, self.voice):
+            self.cues.append((start, start + seconds + VOICE_PAUSE, caption))
+            self.sounds.append((start, path))
+            start += seconds + VOICE_PAUSE
+        self.duration = max(self.content_seconds, start + VOICE_TAIL)
+        if self.cues:  # the last cue stays until the scene ends
+            a, _b, caption = self.cues[-1]
+            self.cues[-1] = (a, self.duration - 0.2, caption)
 
     def cue_at(self, t):
         for index, (a, b, _) in enumerate(self.cues):
@@ -381,6 +403,8 @@ class Scene:
         cv = self.cv
         draw.rectangle((0, 0, cv.w, cv.s(84)), fill=C["nav"])
         draw.text((cv.s(48), cv.s(26)), "sandbox-ai", font=cv.font("bold", 26), fill=C["title"])
+        if self.track is not None:
+            return self.draw_track(draw)
         if self.chapter_index is not None:
             number = self.chapter_index + 1
             title = self.t(SB.CHAPTERS[self.chapter_index]["title"])
@@ -400,6 +424,19 @@ class Scene:
                 colour = C["accent"]
             else:
                 colour = C["dim"]
+            draw.rounded_rectangle((a, y, a + seg, y + cv.s(8)), radius=cv.s(4), fill=colour)
+
+    def draw_track(self, draw):
+        """The header of a series video: its number and title, and one segment per video of the series."""
+        cv = self.cv
+        index, count, title = self.track
+        draw.text((cv.s(230), cv.s(28)), f"{index + 1:02d}  {title}", font=cv.font("sans", 24), fill=C["secondary"])
+        x0, x1, y = cv.s(1180), cv.s(1872), cv.s(38)
+        gap = cv.s(6)
+        seg = (x1 - x0 - gap * (count - 1)) / count
+        for i in range(count):
+            a = x0 + i * (seg + gap)
+            colour = C["accent"] if i == index else mix(C["nav"], C["accent"], 0.45) if i < index else C["dim"]
             draw.rounded_rectangle((a, y, a + seg, y + cv.s(8)), radius=cv.s(4), fill=colour)
 
     def draw_heading(self, draw, text, y=118):
@@ -981,6 +1018,10 @@ class Diagram(Scene):
 
 
 class AppPage(Scene):
+    """A page of the app: its screenshot (or a schematic) and the bullets beside it. "shot" names a state captured
+    by capture_app.py; "zoom" [x0, y0, x1, y1] (fractions) shows only that part of it, larger; "focus" frames a
+    part of it. Without bullets the picture takes the whole width."""
+
     def __init__(self, *args, scene, shots, **kwargs):
         super().__init__(*args, **kwargs)
         self.scene = scene
@@ -988,10 +1029,19 @@ class AppPage(Scene):
         self.content_seconds = 2 + 0.8 * len(self.items) + 4
         self.shot = None
         if shots:
-            for name in (f"{scene['page']}-{self.lang}.png", f"{scene['page']}.png"):
+            names = [f"{scene['shot']}-{self.lang}.png"] if scene.get("shot") else []
+            names += [f"{scene['page']}-{self.lang}.png", f"{scene['page']}.png"]
+            for name in names:
                 if (Path(shots) / name).is_file():
                     self.shot = Path(shots) / name
                     break
+            # a state not captured shows the page itself, without the frame or zoom meant for the state
+            self.region = scene.get("zoom") if self.shot and self.shot.name.startswith(scene.get("shot") or
+                                                                                         scene["page"]) else None
+            self.focus = scene.get("focus") if self.region is None and self.shot and self.shot.name.startswith(
+                scene.get("shot") or scene["page"]) else None
+        else:
+            self.region = self.focus = None
 
     def reveal(self, i):
         return 1.0 + i * 0.8
@@ -999,26 +1049,58 @@ class AppPage(Scene):
     def dynamic_key(self, t):
         return sum(1 for i in range(len(self.items)) if t >= self.reveal(i))
 
+    def box(self):
+        cv = self.cv
+        if self.items:
+            return (cv.s(80), cv.s(205), cv.s(1310), cv.s(205 + 700))
+        return (cv.s(80), cv.s(195), cv.s(1840), cv.s(195 + 715))
+
     def draw_static(self, img, draw):
         cv = self.cv
         self.draw_heading(draw, self.t(self.scene["heading"]))
-        box = (cv.s(80), cv.s(210), cv.s(1310), cv.s(210 + 692))
+        box = self.box()
         if self.shot:
             shot = Image.open(self.shot).convert("RGB")
-            shot.thumbnail((box[2] - box[0], box[3] - box[1]), Image.LANCZOS)
-            x = box[0] + (box[2] - box[0] - shot.width) // 2
+            frame = None
+            if self.region:
+                x0, y0, x1, y1 = self.region
+                shot = shot.crop((int(x0 * shot.width), int(y0 * shot.height), int(x1 * shot.width),
+                                  int(y1 * shot.height)))
+            elif self.focus:
+                frame = self.focus
+            width, height = box[2] - box[0], box[3] - box[1]
+            scale = min(width / shot.width, height / shot.height)
+            shot = shot.resize((max(1, int(shot.width * scale)), max(1, int(shot.height * scale))), Image.LANCZOS)
+            x = box[0] + (width - shot.width) // 2
             y = box[1]
+            if frame:
+                shot = self.framed(shot, frame)
             img.paste(shot, (x, y))
             draw.rectangle((x - 1, y - 1, x + shot.width, y + shot.height), outline=C["dim"], width=cv.s(2))
             bottom = y + shot.height
             badge = "screenshot"
+            left = x
         else:
             self.draw_schematic(draw, box)
             bottom = box[3]
             badge = "schematic"
+            left = box[0]
         label = self.t(SB.COURSE["badges"][badge])
         colour = C["ok"] if badge == "screenshot" else C["warn"]
-        draw.text((box[0], bottom + cv.s(10)), "● " + label, font=cv.font("sans", 20), fill=colour)
+        draw.text((left, bottom + cv.s(8)), "● " + label, font=cv.font("sans", 20), fill=colour)
+
+    def framed(self, shot, frame):
+        """SHOT with the part FRAME (fractions) framed in the accent colour and the rest a little darker."""
+        cv = self.cv
+        x0, y0, x1, y1 = (int(frame[0] * shot.width), int(frame[1] * shot.height), int(frame[2] * shot.width),
+                          int(frame[3] * shot.height))
+        dim = Image.blend(shot, Image.new("RGB", shot.size, (0, 0, 0)), 0.45)
+        dim.paste(shot.crop((x0, y0, x1, y1)), (x0, y0))
+        draw = ImageDraw.Draw(dim)
+        pad = cv.s(4)
+        draw.rounded_rectangle((x0 - pad, y0 - pad, x1 + pad, y1 + pad), radius=cv.s(8), outline=C["accent"],
+                               width=cv.s(4))
+        return dim
 
     def draw_schematic(self, draw, box):
         cv = self.cv
@@ -1049,13 +1131,53 @@ class AppPage(Scene):
 
     def draw_dynamic(self, img, draw, t):
         cv = self.cv
-        y = cv.s(230)
+        y = cv.s(225)
         for i, item in enumerate(self.items):
             if t < self.reveal(i):
                 break
             draw.rounded_rectangle((cv.s(1350), y + cv.s(14), cv.s(1364), y + cv.s(28)), radius=cv.s(4), fill=C["accent"])
-            lines = layout(cv, self.t(item), 30, cv.s(440))
-            y = draw_lines(draw, lines, cv.s(1385), y, cv.s(42), C["text"], C["accent"]) + cv.s(28)
+            lines = layout(cv, self.t(item), 30, cv.s(460))
+            y = draw_lines(draw, lines, cv.s(1385), y, cv.s(41), C["text"], C["accent"]) + cv.s(24)
+
+
+class SeriesTitle(Scene):
+    """The title card of a series video: the series, the part, the page's name and place, its topics."""
+    header = False
+    content_seconds = 5.0
+
+    def __init__(self, *args, series, video, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.series, self.video = series, video
+
+    def draw_static(self, img, draw):
+        cv = self.cv
+        index, count, title = self.track
+        x = cv.s(180)
+        label = f"{self.t(self.series['title'])}  ·  {self.t(self.series['part'])} {index + 1} {self.t(SB.COURSE['of'])} {count}"
+        draw.text((x, cv.s(200)), label.upper(), font=cv.font("bold", 28), fill=C["secondary"])
+        draw.text((x - cv.s(8), cv.s(240)), f"{index + 1:02d}", font=cv.font("bold", 170), fill=C["accent"])
+        draw.text((x, cv.s(450)), title, font=cv.font("bold", 84), fill=C["title"])
+        section = next(self.t(name) for name, pages in SB.APP_NAV if any(k == self.video["page"] for k, _ in pages))
+        draw.text((x, cv.s(560)), f"sandbox-ai-app  ›  {section}  ›  {title}", font=cv.font("sans", 30),
+                  fill=C["accent"])
+        y = cv.s(640)
+        for topic in self.video["topics"]:
+            draw.ellipse((x, y + cv.s(13), x + cv.s(12), y + cv.s(25)), fill=C["accent"])
+            draw_lines(draw, layout(cv, self.t(topic), 34, cv.s(1500)), x + cv.s(32), y, cv.s(46), C["text"], C["accent"])
+            y += cv.s(54)
+        line = f"sandbox-ai {version()}"
+        f = cv.font("mono", 24)
+        draw.text((cv.w - cv.s(180) - f.getlength(line), cv.s(210)), line, font=f, fill=C["secondary"])
+
+
+class SeriesOutro(Bullets):
+    """The closing card of a series video: what comes next, and where to read more."""
+
+    def __init__(self, *args, series, following, **kwargs):
+        heading = (f"{SB.text(series['next'], args[1])}: {following}" if following
+                   else SB.text(series["last"], args[1]))
+        super().__init__(*args, scene={"heading": heading, "bullets": series["outro_bullets"]}, **kwargs)
+        self.content_seconds = 1.5 + 0.8 * len(self.items) + 2.5
 
 
 class Outro(Bullets):
@@ -1067,36 +1189,73 @@ class Outro(Bullets):
 # --- the timeline ------------------------------------------------------------------------------------------
 
 
-def build(cv, lang, live, shots):
-    scenes = [CourseTitle(cv, lang, None, SB.COURSE["intro_captions"], "intro", "intro"),
-              Contents(cv, lang, None, SB.COURSE["contents_captions"], "contents", "contents")]
-    for ci, chapter in enumerate(SB.CHAPTERS):
-        scenes.append(ChapterTitle(cv, lang, ci, [], chapter["id"], f"{chapter['id']}/title"))
-        for index, scene in enumerate(chapter["scenes"]):
-            ident = SB.scene_id(chapter, index)
-            args = (cv, lang, ci, scene.get("captions", []), chapter["id"], ident)
-            kind = scene["kind"]
-            if kind == "bullets":
-                scenes.append(Bullets(*args, scene=scene))
-            elif kind == "table":
-                scenes.append(Table(*args, scene=scene))
-            elif kind == "compare":
-                scenes.append(Compare(*args, scene=scene))
-            elif kind == "terminal":
-                scenes.append(Terminal(*args, scene=scene, live=live))
-            elif kind == "diagram":
-                scenes.append(Diagram(*args, scene=scene))
-            elif kind == "app":
-                scenes.append(AppPage(*args, scene=scene, shots=shots))
-            else:
-                raise SystemExit(f"make_video: unknown scene kind {kind!r} in {ident}")
-    scenes.append(Outro(cv, lang, None, SB.COURSE["outro"]["captions"], "outro", "outro"))
+def make_scene(args, scene, live, shots, ident, track=None):
+    kind = scene["kind"]
+    kwargs = {"track": track} if track else {}
+    if kind == "bullets":
+        return Bullets(*args, scene=scene, **kwargs)
+    if kind == "table":
+        return Table(*args, scene=scene, **kwargs)
+    if kind == "compare":
+        return Compare(*args, scene=scene, **kwargs)
+    if kind == "terminal":
+        return Terminal(*args, scene=scene, live=live, **kwargs)
+    if kind == "diagram":
+        return Diagram(*args, scene=scene, **kwargs)
+    if kind == "app":
+        return AppPage(*args, scene=scene, shots=shots, **kwargs)
+    raise SystemExit(f"make_video: unknown scene kind {kind!r} in {ident}")
+
+
+def timeline(scenes, speaker=None):
+    """Plan SCENES one after the other; with SPEAKER (narrate.Speaker) their narration is spoken and sets the time."""
+    if speaker is not None:
+        for scene in scenes:
+            scene.voice = [speaker.say(SB.text(caption, scene.lang)) for caption in scene.captions]
     start = 0.0
     for scene in scenes:
         scene.plan()
         scene.start = start
         start += scene.duration
     return scenes
+
+
+def build(cv, lang, live, shots, speaker=None):
+    scenes = [CourseTitle(cv, lang, None, SB.COURSE["intro_captions"], "intro", "intro"),
+              Contents(cv, lang, None, SB.COURSE["contents_captions"], "contents", "contents")]
+    for ci, chapter in enumerate(SB.CHAPTERS):
+        scenes.append(ChapterTitle(cv, lang, ci, [], chapter["id"], f"{chapter['id']}/title"))
+        for index, scene in enumerate(chapter["scenes"]):
+            ident = SB.scene_id(chapter, index)
+            scenes.append(make_scene((cv, lang, ci, scene.get("captions", []), chapter["id"], ident), scene, live,
+                                     shots, ident))
+    scenes.append(Outro(cv, lang, None, SB.COURSE["outro"]["captions"], "outro", "outro"))
+    return timeline(scenes, speaker)
+
+
+def build_series(cv, lang, shots, video, name="pages", speaker=None):
+    """The scenes of one VIDEO of series NAME: its title card, its scenes, the closing card."""
+    series = SB.SERIES[name]
+    videos = SB.series_videos(name)
+    index = videos.index(video)
+    title = SB.text(SB.APP_PAGES[video["page"]], lang)
+    track = (index, len(videos), title)
+    following = SB.text(SB.APP_PAGES[videos[index + 1]["page"]], lang) if index + 1 < len(videos) else None
+    scenes = [SeriesTitle(cv, lang, None, video["intro"], video["id"], f"{video['id']}/title", track=track,
+                          series=series, video=video)]
+    for number, scene in enumerate(video["scenes"]):
+        ident = f"{video['id']}/{number}"
+        scenes.append(make_scene((cv, lang, None, scene.get("captions", []), video["id"], ident), scene, {}, shots,
+                                 ident, track))
+    scenes.append(SeriesOutro(cv, lang, None, series["outro_captions"], video["id"], f"{video['id']}/outro",
+                              track=track, series=series, following=following))
+    return timeline(scenes, speaker)
+
+
+def series_file(video, lang, name="pages"):
+    """The base name of a series video's files: sandbox-ai-app-NN-PAGE-LANG."""
+    number = SB.series_videos(name).index(video) + 1
+    return f"sandbox-ai-app-{number:02d}-{video['id']}-{lang}"
 
 
 def timestamp(seconds):
@@ -1145,17 +1304,48 @@ def find_ffmpeg(explicit):
                      "or pass --ffmpeg PATH")
 
 
-def render(scenes, cv, lang, out, ffmpeg, fps, captions, crf, stills, preset):
-    path = Path(out) / f"sandbox-ai-course-{lang}.mp4"
+def soundtrack(scenes, path):
+    """One WAV file with every spoken cue of SCENES at its time (silence between them); None without narration."""
+    sounds = [(scene.start + at, wav) for scene in scenes for at, wav in scene.sounds]
+    if not sounds:
+        return None
+    with wave.open(str(sounds[0][1]), "rb") as first:
+        rate, width, channels = first.getframerate(), first.getsampwidth(), first.getnchannels()
+    total = scenes[-1].start + scenes[-1].duration
+    data = bytearray(int(total * rate + 1) * width * channels)
+    for at, wav in sounds:
+        with wave.open(str(wav), "rb") as f:
+            if (f.getframerate(), f.getsampwidth(), f.getnchannels()) != (rate, width, channels):
+                raise SystemExit(f"make_video: {wav} differs in format from the other narration")
+            frames = f.readframes(f.getnframes())
+        offset = int(at * rate) * width * channels
+        frames = frames[:max(0, len(data) - offset)]
+        data[offset:offset + len(frames)] = frames
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(channels)
+        out.setsampwidth(width)
+        out.setframerate(rate)
+        out.writeframes(bytes(data))
+    return path
+
+
+def render(scenes, cv, lang, out, ffmpeg, fps, captions, crf, stills, preset, name=None, title=None):
+    name = name or f"sandbox-ai-course-{lang}"
+    path = Path(out) / f"{name}.mp4"
     total = scenes[-1].start + scenes[-1].duration
     frames = int(round(total * fps))
+    audio = soundtrack(scenes, Path(out) / f".{name}.narration.wav")
     command = [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{cv.w}x{cv.h}",
-               "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", preset, "-tune", "stillimage", "-crf", str(crf),
-               # mostly still pictures: a short lookahead keeps ffmpeg's memory small, few threads suffice
-               "-x264-params", "rc-lookahead=10", "-threads", "4",
-               "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-               "-metadata", f"title=sandbox-ai {version()}: {SB.text(SB.COURSE['subtitle'], lang)}",
-               "-metadata:s:v:0", f"language={'eng' if lang == 'en' else 'deu'}", str(path)]
+               "-r", str(fps), "-i", "-"]
+    if audio:
+        command += ["-i", str(audio), "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "128k",
+                    "-metadata:s:a:0", f"language={'eng' if lang == 'en' else 'deu'}"]
+    command += ["-c:v", "libx264", "-preset", preset, "-tune", "stillimage", "-crf", str(crf),
+                # mostly still pictures: a short lookahead keeps ffmpeg's memory small, few threads suffice
+                "-x264-params", "rc-lookahead=10", "-threads", "4",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                "-metadata", f"title=sandbox-ai {version()}: {title or SB.text(SB.COURSE['subtitle'], lang)}",
+                "-metadata:s:v:0", f"language={'eng' if lang == 'en' else 'deu'}", str(path)]
     process = subprocess.Popen(command, stdin=subprocess.PIPE)
     wanted = {}
     for ident in stills or []:
@@ -1186,7 +1376,10 @@ def render(scenes, cv, lang, out, ffmpeg, fps, captions, crf, stills, preset):
         process.stdin.close()
     except BrokenPipeError:
         pass
-    if process.wait() != 0:
+    status = process.wait()
+    if audio:
+        audio.unlink()
+    if status != 0:
         raise SystemExit(f"make_video: ffmpeg failed for {path}")
     return path, frames, total
 
@@ -1222,14 +1415,54 @@ def main(argv=None):
     parser.add_argument("--plan", action="store_true", help="print the timing and exit (needs no Pillow, runs nothing)")
     parser.add_argument("--ffmpeg", help="ffmpeg executable")
     parser.add_argument("--font-dir", help="a folder with DejaVuSans.ttf, DejaVuSans-Bold.ttf, DejaVuSansMono.ttf ...")
-    parser.add_argument("--jobs", type=int, default=2, help="render the languages in parallel (default 2)")
+    parser.add_argument("--jobs", type=int, default=2, help="render the languages (and the videos of a series) in "
+                        "parallel (default 2)")
+    parser.add_argument("--series", choices=sorted(SB.SERIES), help="render a series of short videos instead of the "
+                        "course: pages = one video per page of the desktop app")
+    parser.add_argument("--only", help="with --series: only these videos (ids, comma-separated, e.g. files,board)")
+    parser.add_argument("--voice", action="append", default=[], metavar="VOICE.onnx",
+                        help="speak the narration with this Piper voice (its .onnx.json beside it); the voice's "
+                             "language decides which video it speaks; repeatable. The scenes then last as long as "
+                             "their speech (see narrate.py)")
+    parser.add_argument("--narration-cache", help="where the spoken cues are kept (default: OUT/.narration-cache)")
+    parser.add_argument("--tts-threads", type=int, default=4, help="threads of the speech synthesis (default 4)")
+    parser.add_argument("--speech-pace", type=float, default=1.08, help="Piper's length scale: above 1 speaks more slowly "
+                        "(default 1.08, a calm pace for a tutorial)")
     args = parser.parse_args(argv)
     width, height = (int(v) for v in args.size.lower().split("x"))
     if abs(width / height - 16 / 9) > 0.01:
         parser.error("--size must be 16:9")
+    langs = ["en", "de"] if args.lang == "both" else [args.lang]
+    speakers = {}
+    if args.voice:
+        import narrate
+        cache = Path(args.narration_cache or Path(args.out) / ".narration-cache")
+        for voice in args.voice:
+            speaker = narrate.Speaker(voice, cache, length_scale=args.speech_pace, threads=args.tts_threads)
+            speakers[speaker.language] = speaker
+    videos = None
+    if args.series:
+        videos = SB.series_videos(args.series)
+        if args.only:
+            wanted = args.only.split(",")
+            unknown = set(wanted) - {v["id"] for v in videos}
+            if unknown:
+                parser.error(f"--only: no video {', '.join(sorted(unknown))} in the series {args.series}")
+            videos = [v for v in videos if v["id"] in wanted]
     if args.plan:
-        scenes = build(_PlanCanvas(), "en", {}, None)
-        plan_report(scenes)
+        if videos is None:
+            plan_report(build(_PlanCanvas(), langs[0] if speakers else "en", {}, None, speakers.get(langs[0])))
+            return 0
+        whole = 0.0
+        for lang in langs:
+            for video in videos:
+                scenes = build_series(_PlanCanvas(), lang, None, video, args.series, speakers.get(lang))
+                length = scenes[-1].start + scenes[-1].duration
+                whole += length
+                spoken = "spoken" if lang in speakers else "read"
+                print(f"{series_file(video, lang, args.series):40s} {length / 60:4.1f} min ({length:5.1f} s, "
+                      f"{len(scenes)} scenes, {spoken})")
+        print(f"total {whole / 60:.1f} min")
         return 0
     if Image is None:
         raise SystemExit("make_video: Pillow is missing: python3 -m venv /tmp/video-venv && "
@@ -1238,7 +1471,8 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     ffmpeg = find_ffmpeg(args.ffmpeg)
     shots = args.app_shots or (out / "app-shots" if (out / "app-shots").is_dir() else None)
-    langs = ["en", "de"] if args.lang == "both" else [args.lang]
+    if videos is not None:
+        return render_series(args, langs, videos, speakers, shots, ffmpeg, out, width, height)
 
     live, live_file = {}, None
     if args.live_from:
@@ -1263,11 +1497,7 @@ def main(argv=None):
                 child = [sys.executable, str(Path(__file__).resolve()), "--out", str(out), "--lang", lang,
                          "--size", args.size, "--fps", str(args.fps), "--crf", str(args.crf), "--preset", args.preset,
                          "--captions", args.captions, "--live-from", live_file]
-                for flag, value in (("--app-shots", shots), ("--ffmpeg", ffmpeg), ("--font-dir", args.font_dir)):
-                    if value:
-                        child += [flag, str(value)]
-                if args.stills:
-                    child.append("--stills")
+                child += child_flags(args, shots, ffmpeg)
                 children.append(subprocess.Popen(child))
             codes = [c.wait() for c in children]
         finally:
@@ -1276,13 +1506,65 @@ def main(argv=None):
 
     cv = Canvas(width, height, args.font_dir)
     for lang in langs:
-        scenes = build(cv, lang, live, shots)
+        scenes = build(cv, lang, live, shots, speakers.get(lang))
         print(f"make_video: rendering {lang} ({width}x{height}, {args.fps} fps) …", flush=True)
         path, frames, total = render(scenes, cv, lang, out, ffmpeg, args.fps, args.captions == "burn", args.crf,
                                      SB.STILLS if args.stills else None, args.preset)
         write_vtt(out / f"sandbox-ai-course-{lang}.vtt", scenes, lang)
         write_chapters(out / f"sandbox-ai-course-chapters-{lang}.vtt", scenes, lang)
         print(f"make_video: {path} ({total / 60:.1f} min, {frames} frames, {path.stat().st_size / 1e6:.1f} MB)")
+    return 0
+
+
+def child_flags(args, shots, ffmpeg):
+    """The options a child process renders with besides its language (and video)."""
+    flags = []
+    for flag, value in (("--app-shots", shots), ("--ffmpeg", ffmpeg), ("--font-dir", args.font_dir),
+                        ("--narration-cache", args.narration_cache), ("--tts-threads", args.tts_threads),
+                        ("--speech-pace", args.speech_pace)):
+        if value:
+            flags += [flag, str(value)]
+    for voice in args.voice:
+        flags += ["--voice", voice]
+    if args.stills:
+        flags.append("--stills")
+    return flags
+
+
+def render_series(args, langs, videos, speakers, shots, ffmpeg, out, width, height):
+    """Every video of the series in every language: each an MP4 and its .vtt. The narration is spoken first (here,
+    once), then the videos are rendered, --jobs at a time."""
+    jobs = [(lang, video) for lang in langs for video in videos]
+    for lang in langs:
+        if lang in speakers:
+            print(f"make_video: speaking the {lang} narration of {len(videos)} videos …", flush=True)
+            for video in videos:
+                build_series(_PlanCanvas(), lang, None, video, args.series, speakers[lang])
+    if len(jobs) > 1 and args.jobs > 1:
+        waiting, running, codes = list(jobs), [], []
+        while waiting or running:
+            while waiting and len(running) < args.jobs:
+                lang, video = waiting.pop(0)
+                child = [sys.executable, str(Path(__file__).resolve()), "--out", str(out), "--lang", lang,
+                         "--size", args.size, "--fps", str(args.fps), "--crf", str(args.crf), "--preset", args.preset,
+                         "--captions", args.captions, "--series", args.series, "--only", video["id"], "--jobs", "1"]
+                running.append(subprocess.Popen(child + child_flags(args, shots, ffmpeg)))
+            time.sleep(0.5)
+            for child in [c for c in running if c.poll() is not None]:
+                codes.append(child.returncode)
+                running.remove(child)
+        return max(codes)
+    cv = Canvas(width, height, args.font_dir)
+    for lang, video in jobs:
+        scenes = build_series(cv, lang, shots, video, args.series, speakers.get(lang))
+        name = series_file(video, lang, args.series)
+        title = f"{SB.text(SB.SERIES[args.series]['title'], lang)}: {SB.text(SB.APP_PAGES[video['page']], lang)}"
+        stills = [scene.ident for scene in scenes] if args.stills else None
+        path, frames, total = render(scenes, cv, lang, out, ffmpeg, args.fps, args.captions == "burn", args.crf,
+                                     stills, args.preset, name=name, title=title)
+        write_vtt(out / f"{name}.vtt", scenes, lang)
+        spoken = ", spoken" if lang in speakers else ""
+        print(f"make_video: {path} ({total / 60:.1f} min{spoken}, {path.stat().st_size / 1e6:.1f} MB)", flush=True)
     return 0
 
 

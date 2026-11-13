@@ -69,3 +69,31 @@ def test_a_host_without_podman_and_bubblewrap(monkeypatch, tmp_path):
         "podman installed": "failed", "bwrap installed": "failed"}
     assert data["facts"]["sandbox-ai"] == "sandbox-ai 0.1.92"
     assert not any("pytest" in " ".join(command) for command in ran)
+
+
+PASSING = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="1">
+<testcase classname="tests.test_live_check" name="test_live_a_canary_read_is_seen[podman]" time="1"/>
+</testsuite></testsuites>"""
+
+
+@pytest.mark.parametrize("status", [124, 3])
+def test_a_stale_report_or_a_failing_pytest_never_passes(monkeypatch, tmp_path, status):
+    """pytest killed by the timeout (124) writes no junit file: one of an earlier check in the same --out folder is
+    not read as this one's. pytest failing without a failing test (3: an internal error) is an error."""
+    monkeypatch.setattr(lc, "inside_a_container", lambda: False)
+    monkeypatch.setattr(lc.shutil, "which", lambda name: "/usr/bin/" + name)
+    (tmp_path / "live-podman.xml").write_text(PASSING)  # an earlier check's
+
+    def fake_run(command, timeout=600, **kwargs):
+        if "pytest" in command and status != 124:
+            (tmp_path / "live-podman.xml").write_text(PASSING)
+            return status, "INTERNALERROR", ""
+        if "pytest" in command:
+            return 124, "", "timed out"
+        return 0, "ok\n", ""
+    monkeypatch.setattr(lc, "run", fake_run)
+    monkeypatch.setattr(lc, "pytest_python", lambda directory: sys.executable)
+    assert lc.main(["--out", str(tmp_path), "--backend", "podman", "--image", "x"]) == 1
+    checks = {c["check"]: c["outcome"] for c in json.loads((tmp_path / "report.json").read_text())["checks"]}
+    assert checks["pytest (podman)"] == "error"

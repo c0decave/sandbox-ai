@@ -1,0 +1,17 @@
+{
+  "description": "Hallmark's edit-time lint (Nutlope/hallmark, MIT; the vendored skill of the built-in kit hallmark): after each Write, Edit or MultiEdit, sloplint checks the written file if it is a Hallmark page (.html, .css; .jsx, .tsx, .vue, .svelte, .astro in a project with a .hallmark folder) and adds its Floor failures as context. Local only: it reads the file and runs node, nothing else. Without the kit hallmark it prints {} and does nothing.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=/root/.claude/skills/hallmark/scripts/lint-hook.mjs; if [ -f \"$f\" ]; then exec node \"$f\"; else echo '{}'; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

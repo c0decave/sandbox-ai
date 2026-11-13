@@ -30,6 +30,7 @@ import shlex
 import weakref
 
 from . import backend
+from . import llm_params as LP
 from .files import printable
 from .i18n import N_, tr
 
@@ -83,6 +84,10 @@ KINDS = {kind.key: kind for kind in (
          help=N_("Commit identity and push tokens (with the token proxy the agent never sees them)")),
     Kind("mcp", N_("MCP server"), single=False, column=2,
          help=N_("A local MCP server in its own sandbox, with its own network and folders")),
+    Kind("service", N_("Service (container)"), single=False, column=2,
+         help=N_("A container of one of your images (a database, a cache, a search engine, a test target) beside the "
+                 "agent, in the sandbox's pod: reached at localhost:PORT, behind the same firewall and proxy. Its image "
+                 "is unchecked: nobody reviewed it")),
     Kind("llm", N_("LLM server"), ("--llm",), column=2,
          help=N_("A model on your own server (sandbox-ai llm): only its address is opened, its key stays with "
                  "the proxy")),
@@ -91,20 +96,21 @@ KINDS = {kind.key: kind for kind in (
                                     "--nameserver", "--offline", "--egress-all-allow", "--network", "--ip", "--ip6",
                                     "--subnet", "--subnet6"),
          required=True, column=3, help=N_("Where connections may go: hosts, presets, addresses, ports, DNS")),
-    Kind("vpn", N_("VPN"), ("--vpn", "--vpn-check", "--vpn-bypass-host-ports"), column=2,
+    Kind("vpn", N_("VPN"), ("--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp"), column=2,
          help=N_("A VPN profile in front (sandbox-ai vpn): everything leaves through the tunnel, a kill switch "
                  "blocks the rest, addresses and DNS are checked before the start")),
     Kind("devices", N_("Devices and GPU"), ("--device", "--gpu"), column=0,
          help=N_("Host devices handed to the agent (weakens the isolation)")),
-    Kind("limits", N_("Limits"), ("--memory", "--cpus", "--pids"), column=0,
-         help=N_("Memory, CPUs and processes")),
+    Kind("limits", N_("Limits"), ("--memory", "--cpus", "--pids", "--tmp-size"), column=0,
+         help=N_("Memory, CPUs, processes and the size of /tmp")),
     Kind("display", N_("Display"), ("--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"), column=0,
          help=N_("A virtual display for GUI programs and browsers")),
     Kind("session", N_("Session and tmux"), ("--tmux", "--no-tmux"), column=0,
          help=N_("tmux inside the sandbox (sessions are started from the Start page)")),
     Kind("logs", N_("Logs"), ("--log-dir", "--log-debug"), column=1,
          help=N_("Where the logs go (hidden from the agent), and how much of what is refused they keep")),
-    Kind("engine", N_("Engine"), ("--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime"),
+    Kind("engine", N_("Engine"), ("--backend", "--image", "--image-variant", "--nested-containers", "--podman-url",
+                                  "--binary", "--runtime"),
          column=0,
          help=N_("Podman or Bubblewrap, the image and the agent's executable")),
 )}
@@ -112,13 +118,14 @@ KINDS = {kind.key: kind for kind in (
 EDGES = {("workspace", "agent"), ("mount", "agent"), ("home", "agent"), ("kits", "agent"), ("agent", "proxy"),
          ("proxy", "network"), ("agent", "mcp"), ("approvals", "proxy"), ("git", "proxy"), ("devices", "agent"),
          ("limits", "agent"), ("display", "agent"), ("session", "agent"), ("logs", "proxy"), ("engine", "agent"),
-         ("vpn", "network"), ("agent", "llm")}
-CONNECTED_ONLY = {"workspace", "mount", "mcp"}
+         ("vpn", "network"), ("agent", "llm"), ("agent", "service"), ("service", "proxy")}
+CONNECTED_ONLY = {"workspace", "mount", "mcp", "service"}
 OWNER = {option: kind.key for kind in KINDS.values() for option in kind.options}
 # Options shown as a property of their own: proxy "enabled" (--no-proxy), workspace "readonly" (--workspace-ro),
 # the workspace, mount and MCP nodes themselves.
 OWNER.update({"--no-proxy": "proxy", "--workspace-ro": "workspace", "--workspace": "workspace", "--mount": "mount",
-              "--mcp": "mcp"})
+              "--mcp": "mcp", "--mcp-limits": "mcp", "--service": "service", "--llm-param": "llm"})
+LIMIT_KEYS = ("memory", "cpus", "pids", "tmp")  # an MCP node's own limits (props "limits"), --mcp-limits NAME:KEY=VALUE,...
 
 
 @dataclass
@@ -133,13 +140,13 @@ class Node:
         """What the node shows: its kind and what tells it apart (a path, a server name)."""
         name = tr(KINDS[self.kind].title)
         detail = {"workspace": self.props.get("path"), "mount": self.props.get("source"),
-                  "mcp": self.props.get("name"), "agent": self.props.get("agent"),
+                  "mcp": self.props.get("name"), "service": self.props.get("name"), "agent": self.props.get("agent"),
                   "llm": self.props.get("--llm")}.get(self.kind)
         return f"{name}: {printable(detail)}" if detail else name
 
     def key(self):
         """A stable name for the layout file (positions survive a reload of the options)."""
-        detail = {"workspace": "path", "mount": "source", "mcp": "name"}.get(self.kind)
+        detail = {"workspace": "path", "mount": "source", "mcp": "name", "service": "name"}.get(self.kind)
         return f"{self.kind}:{self.props.get(detail, '')}" if detail else self.kind
 
 
@@ -289,7 +296,7 @@ class Board:
     # The columns of layout(), by role: what configures the agent, the agent and what configures the proxy,
     # the proxy and what the agent talks to, the network. In each column, top to bottom, in this order.
     FLOW = (("workspace", "mount", "home", "kits", "engine", "devices", "limits", "display", "session"),
-            ("agent", "approvals", "git", "logs"), ("mcp", "llm", "proxy", "vpn"), ("network",))
+            ("agent", "approvals", "git", "logs"), ("mcp", "llm", "service", "proxy", "vpn"), ("network",))
 
     def layout(self, grid=0):
         """Left to right as the connections flow: the agent's files and settings, the agent, the proxy with the
@@ -391,6 +398,17 @@ def from_argv(sai, agent, argv, agent_args=(), workspaces=()):
         board.add("mount", source=source, dest=dest, mode=mode)
     for name in values.pop("--mcp", []) or []:
         board.add("mcp", name=name)
+    for value in values.pop("--mcp-limits", []) or []:
+        name, limits = parse_mcp_limits(value)
+        node = next((n for n in board.of_kind("mcp") if n.props.get("name") == name), None) if limits else None
+        if node is None:
+            board.extra += ["--mcp-limits", str(value)]  # (for a server the board does not use: kept as it was)
+        else:
+            node.props["limits"] = {**node.props.get("limits", {}), **limits}
+    for spec in values.pop("--service", []) or []:
+        board.add("service", **service_props(sai, spec))
+    # The LLM node's own parameters for this board's starts (--llm-param KEY=VALUE): props "params" {key: text}.
+    llm_params, other_params = LP.parse_start(values.pop("--llm-param", []) or [])
     proxy_on = not values.pop("--no-proxy", False)
     grouped = {}
     for option, value in values.items():
@@ -401,13 +419,18 @@ def from_argv(sai, agent, argv, agent_args=(), workspaces=()):
         if options[option].tokens(value):  # only what differs from the default
             grouped.setdefault(kind, {})[option] = value
     for kind in KINDS.values():
-        if kind.key in ("agent", "workspace", "mount", "mcp"):
+        if kind.key in ("agent", "workspace", "mount", "mcp", "service"):
             continue
         props = grouped.get(kind.key)
         if props or kind.required:
             board.add(kind.key, **(props or {}))
     board.first("proxy").props["enabled"] = proxy_on
     board.first("agent").props.update(grouped.get("agent", {}))
+    llm = board.first("llm")
+    if llm is not None and llm_params:
+        llm.props["params"] = llm_params
+    for value in other_params + ([f"{k}={v}" for k, v in llm_params.items()] if llm is None else []):
+        board.extra += ["--llm-param", value]  # (without an LLM server node: kept as it was)
     board.extra += unknown
     board.layout()
     return board
@@ -438,6 +461,141 @@ def from_project(sai, document, directory):
         node.props.update(definition=definition, project=True)
     board.layout()
     return board
+
+
+def parse_mcp_limits(value):
+    """(server name, {memory, cpus, pids} as text) of one --mcp-limits NAME:KEY=VALUE[,KEY=VALUE...]; (name, {}) for
+    one that is not of that form (the launcher's check says what is wrong with it)."""
+    name, colon, rest = str(value).partition(":")
+    limits = {}
+    for part in rest.split(",") if colon else []:
+        key, equals, number = part.strip().partition("=")
+        if not equals or key not in LIMIT_KEYS or not number.strip():
+            return name, {}
+        limits[key] = number.strip()
+    return name, limits
+
+
+def mcp_limits_value(name, limits):
+    """--mcp-limits' value of server NAME with LIMITS ({memory, cpus, pids}; those not set left out), or None."""
+    given = [f"{key}={limits[key]}" for key in LIMIT_KEYS if str(limits.get(key, "")).strip()]
+    return f"{name}:{','.join(given)}" if given else None
+
+# -- services (--service NAME[:KEY=VALUE,...]): sandbox-ai's services.py reads them; the board keeps the same keys --
+
+SERVICE_DEFAULTS = {"memory": "512m", "cpus": "1", "pids": 256, "ready_timeout": 60}
+SERVICE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
+
+
+def default_service(name):
+    """A service's properties with every default (as sandbox-ai's services.default_service)."""
+    return {"name": name, "image": name, "ports": [], "ready": None, "ready_timeout": SERVICE_DEFAULTS["ready_timeout"],
+            "env": [], "secrets": [], "data": [], "keep": False, "user": None, "read_only": True,
+            "memory": SERVICE_DEFAULTS["memory"], "cpus": SERVICE_DEFAULTS["cpus"], "pids": SERVICE_DEFAULTS["pids"]}
+
+
+def services_module(sai):
+    """sandbox-ai's services.py (its parser and checks), or None for a sandbox-ai without services."""
+    try:
+        module = sai.module("services") if sai is not None else None
+    except Exception:  # noqa: BLE001 - an older or unreadable installation: the board keeps the text as it is
+        return None
+    return module if module is not None and hasattr(module, "parse_spec") and hasattr(module, "spec_text") else None
+
+
+def service_props(sai, spec):
+    """The node properties of the --service value SPEC: what sandbox-ai's parser reads, or (when it refuses it, or
+    cannot be asked) the name and the text as given ("raw"), so that nothing of it is lost and it is shown as a
+    problem."""
+    module = services_module(sai)
+    name = str(spec).partition(":")[0]
+    if module is not None:
+        try:
+            return dict(module.parse_spec(str(spec)))
+        except ValueError as exc:
+            return {"name": name, "raw": str(spec), "error": printable(str(exc))}
+    return {"name": name, "raw": str(spec)}
+
+
+def service_spec(props):
+    """The --service value of a service node: only what differs from the defaults, in a fixed order (the same text
+    as sandbox-ai's services.spec_text), or the text as it was given when it could not be read."""
+    if props.get("raw"):
+        return str(props["raw"])
+    items = []
+    name = str(props.get("name", ""))
+    if props.get("image") and props["image"] != name:
+        items.append(f"image={props['image']}")
+    ports = [int(p) for p in props.get("ports") or [] if str(p).isdigit()]
+    items += [f"port={port}" for port in ports]
+    ready = props.get("ready")
+    if ready not in (None, "") and not (ports and str(ready) == str(ports[0])):
+        items.append(f"ready={ready}")
+    if str(props.get("ready_timeout", SERVICE_DEFAULTS["ready_timeout"])) != str(SERVICE_DEFAULTS["ready_timeout"]):
+        items.append(f"ready-timeout={props['ready_timeout']}")
+    for entry in props.get("env") or []:
+        items.append(f"env={entry['name']}" + ("" if entry.get("from_host") else f"={entry.get('value', '')}"))
+    for entry in props.get("secrets") or []:
+        secret = entry.get("secret") or entry["name"]
+        items.append(f"secret={entry['name']}" + ("" if secret == entry["name"] else f"={secret}"))
+    items += [f"data={path}" for path in props.get("data") or []]
+    if props.get("keep"):
+        items.append("keep=yes")
+    if props.get("user"):
+        items.append(f"user={props['user']}")
+    if props.get("read_only") is False:
+        items.append("read-only=no")
+    for key in ("memory", "cpus", "pids"):
+        if key in props and str(props[key]) != str(SERVICE_DEFAULTS[key]):
+            items.append(f"{key}={props[key]}")
+    return name + (":" + ",".join(items) if items else "")
+
+
+def service_problems(sai, board, user_images=None):
+    """[Problem] of the service nodes: one that cannot be read, what sandbox-ai's parser refuses, an image that is
+    none of yours (USER_IMAGES: their names, when known), two with one name or port, and the backends that have no
+    pod for them. The launcher's dry run has the last word (it also refuses them behind Tor)."""
+    found, names, ports = [], {}, {}
+    nodes = [n for n in board.included() if n.kind == "service"]
+    if not nodes:
+        return found
+    module = services_module(sai)
+    _, values_, _ = values(board)
+
+    def add(text, node, level="error"):
+        found.append(Problem(level, text, node.id))
+    for node in nodes:
+        props = node.props
+        if props.get("raw"):
+            add(tr("The service {name} cannot be read: {error}", name=printable(props.get("name") or "?"),
+                   error=props.get("error") or tr("this sandbox-ai has no services (sandbox-ai update)")), node)
+            continue
+        if not SERVICE_NAME.fullmatch(str(props.get("name", ""))):
+            add(tr("A service's name is lower-case letters, digits and '-' (up to 24)."), node)
+            continue
+        if module is not None:
+            try:
+                module.parse_spec(service_spec(props))
+            except ValueError as exc:
+                add(printable(str(exc)), node)
+                continue
+        if user_images is not None and props.get("image") not in user_images:
+            add(tr("{image} is none of your images: add it (Images page, Your images), or choose another.",
+                   image=printable(props.get("image") or "?")), node)
+        if props["name"] in names:
+            add(tr("Two services are named {name}.", name=printable(props["name"])), node)
+        names[props["name"]] = node
+        for port in props.get("ports") or []:
+            if port in ports:
+                add(tr("Port {port} is taken by the service {name} already.", port=port, name=printable(ports[port])),
+                    node)
+            ports.setdefault(port, props["name"])
+    engine = board.first("engine") or nodes[0]
+    if values_.get("--backend", "podman") != "podman":
+        add(tr("Services need the Podman backend: they are containers in the sandbox's pod."), engine)
+    if values_.get("--podman-url"):
+        add(tr("Services run on this machine's Podman, where your images are pinned: not with --podman-url."), engine)
+    return found
 
 
 def launcher_knows(sai, option):
@@ -477,6 +635,20 @@ def values(board, sai=None):
     servers = [n.props["name"] for n in board.included() if n.kind == "mcp" and n.props.get("name")]
     if servers:
         found["--mcp"] = servers
+    # An MCP node's own limits (this board's; the server's own are the default): --mcp-limits NAME:memory=...
+    limits = [mcp_limits_value(n.props["name"], n.props["limits"]) for n in board.included()
+              if n.kind == "mcp" and n.props.get("name") and isinstance(n.props.get("limits"), dict)]
+    if any(limits):
+        found["--mcp-limits"] = [value for value in limits if value]
+    services = [service_spec(n.props) for n in board.included() if n.kind == "service" and n.props.get("name")]
+    if services:
+        found["--service"] = services
+    # The LLM node's own parameters (this board's; the server's are the default): --llm-param KEY=VALUE
+    llm = next((n for n in board.included() if n.kind == "llm" and n.props.get("--llm")), None)
+    params = LP.start_argv(llm.props.get("params")) if llm is not None and isinstance(llm.props.get("params"), dict) \
+        else []
+    if params:
+        found["--llm-param"] = params
     proxy = board.first("proxy")
     if proxy is not None and proxy.props.get("enabled", True) is False:
         found["--no-proxy"] = True
@@ -561,10 +733,11 @@ def check_argv(sai, board, local=True):
     own, argv, result, index = set(project_servers(board)), launcher_argv(sai, board, local), [], 0
     while index < len(argv):
         item = argv[index]
-        if item == "--mcp" and index + 1 < len(argv) and argv[index + 1] in own:
+        if item in ("--mcp", "--mcp-limits") and index + 1 < len(argv) and \
+                (argv[index + 1] if item == "--mcp" else argv[index + 1].partition(":")[0]) in own:
             index += 2
             continue
-        if item.startswith("--mcp=") and item[len("--mcp="):] in own:
+        if item.startswith(("--mcp=", "--mcp-limits=")) and item.partition("=")[2].partition(":")[0] in own:
             index += 1
             continue
         result.append(item)
@@ -787,10 +960,10 @@ def _host_matches(host, pattern):
     return host == pattern
 
 
-def problems(sai, board, policy=None):
+def problems(sai, board, policy=None, user_images=None):
     """What the launcher or the administrator's POLICY would refuse ("error"), and what has no effect or
     contradicts itself ("warning"). The launcher's dry run has the last word; this is what can be said at
-    once, node by node."""
+    once, node by node. USER_IMAGES: the names of your images (sandbox-ai images list), when known."""
     found = []
     agent_node = board.first("agent")
     agent, values_, _ = values(board)
@@ -903,8 +1076,55 @@ def problems(sai, board, policy=None):
         if node.props.get("project") and isinstance(definition, dict) and node.props.get("name"):
             found += _checked(lambda: sai.module("mcp").validated({node.props["name"]: definition},
                                                                    tr("MCP server")), node)
+        found += mcp_limit_problems(sai, node)
+    found += llm_param_problems(sai, board)
+    found += service_problems(sai, board, user_images)
     found += policy_problems(board, values_, policy or {})
     return found
+
+
+def mcp_limit_problems(sai, node):
+    """[Problem] of an MCP node's own limits (props "limits"): each checked by sandbox-ai's own rules (mcp.py's
+    checked_limits, the rules of `mcp set` and --mcp-limits); a sandbox-ai without --mcp-limits runs the server with
+    its own limits (said)."""
+    limits = node.props.get("limits")
+    if not isinstance(limits, dict) or not any(str(v).strip() for v in limits.values()):
+        return []
+    if sai is not None and not launcher_knows(sai, "--mcp-limits"):
+        return [Problem("warning", tr("This sandbox-ai has no --mcp-limits: the server runs with its own limits."),
+                        node.id)]
+    found = []
+    for key in LIMIT_KEYS:
+        if str(limits.get(key, "")).strip():
+            found += _checked(lambda key=key: sai.module("mcp").checked_limits({key: limits[key]}, tr("MCP server")),
+                              node) if sai is not None else []
+    given = {key: limits[key] for key in ("memory", "tmp") if str(limits.get(key, "")).strip()}
+    if not found and "tmp" in given and sai is not None:  # /tmp at most the memory (the server's own where not given)
+        defaults = mcp_defaults(sai, (sai.mcp_definitions() if hasattr(sai, "mcp_definitions") else {}).get(
+            node.props.get("name"))) if "memory" not in given else None
+        memory = given.get("memory") or (defaults or {}).get("memory")
+        if memory:
+            found += _checked(lambda: sai.module("mcp").check_tmp_fits({"tmp": str(given["tmp"]).lower(),
+                                                                       "memory": str(memory).lower()},
+                                                                      tr("MCP server")), node)
+    return found
+
+
+def llm_param_problems(sai, board):
+    """[Problem] of the LLM node's own parameters (props "params"): each checked against this sandbox-ai's catalogue
+    (llm.params_catalogue: the names, types and ranges; whether the server's kind takes one is the launcher's check);
+    a sandbox-ai without --llm-param starts with the server's own parameters (said)."""
+    node = board.first("llm")
+    params = node.props.get("params") if node is not None else None
+    if not isinstance(params, dict) or not any(str(v).strip() for v in params.values()):
+        return []
+    if sai is not None and not launcher_knows(sai, "--llm-param"):
+        return [Problem("warning", tr("This sandbox-ai has no --llm-param: the server's own parameters hold."),
+                        node.id)]
+    catalogue = LP.local_catalogue(sai) if sai is not None else None
+    spec = LP.loop_spec(sai) if sai is not None else None
+    return [Problem("error", tr("Model parameter {name}: {why}", name=printable(key), why=why), node.id)
+            for key, why in LP.board_problems(params, catalogue, spec)]
 
 
 def _checked(function, node):
@@ -1052,19 +1272,29 @@ class Capability:
     cost: int = 0
 
 
-def capabilities(board, launcher=None, definitions=None):
+def capabilities(board, launcher=None, definitions=None, bases=None):
     """What the agent of BOARD can READ and WRITE on the host, REACH on the network, which SECRETS it holds and
     which CODE from outside it runs - each with a level and the points it costs the score. DEFINITIONS:
-    {name: MCP server definition} for servers defined outside the board (mcp.json)."""
+    {name: MCP server definition} for servers defined outside the board (mcp.json). BASES: {variant: your image it is
+    built on} of the image variants (when known)."""
     agent, values_, _ = values(board)
     found = []
 
     def add(area, level, text, node=None, cost=0):
         found.append(Capability(area, level, text, node.id if node is not None else None, cost))
 
+    verdicts = {}  # {path: sensitive()} of this look: a writable folder is judged once for READ and WRITE (each
+    # judgement resolves the path on disk, every step of the board: a few lstat calls per folder)
+
+    def verdict_of(path):
+        key = str(path)
+        if key not in verdicts:
+            verdicts[key] = sensitive(path, launcher)
+        return verdicts[key]
+
     def folder(area, path, writable, node, how):
         """One entry per area; a writable folder costs its points once, in the WRITE area."""
-        verdict = sensitive(path, launcher)
+        verdict = verdict_of(path)
         mode = tr("writable") if writable else tr("read-only")
         label = tr("{how}: {path} ({mode})", how=how, path=printable(path), mode=mode)
         counted = area == "write" or not writable
@@ -1089,7 +1319,7 @@ def capabilities(board, launcher=None, definitions=None):
         folder("write", values_["--state-dir"], True, home, tr("HOME kept in"))
     for value in values_.get("--copy", []):
         source = str(value).rsplit(":", 1)[0]
-        level = "bad" if sensitive(source, launcher) else "warn"
+        level = "bad" if verdict_of(source) else "warn"
         add("secrets", level, tr("File copied into HOME: {path}", path=printable(source)), home, 8)
     kits = board.first("kits")
     for value in values_.get("--kit-dir", []):
@@ -1197,14 +1427,26 @@ def capabilities(board, launcher=None, definitions=None):
         add("code", "bad", tr("Image {image}: everything in the sandbox comes from it", image=printable(image)),
             engine, 15)
     if values_.get("--image-variant"):
-        add("code", "warn", tr("Image variant {name}: built from your extension of the image",
-                               name=printable(values_["--image-variant"])), engine, 5)
+        base = (bases or {}).get(values_["--image-variant"])
+        if base:
+            # The sandbox's own supervisor (firewall, proxy, approvals) runs from that image's programs.
+            add("code", "bad", tr("Image variant {name} is built on your image {base}, UNCHECKED: the sandbox's own "
+                                  "firewall, proxy and approvals run from that image's programs",
+                                  name=printable(values_["--image-variant"]), base=printable(base)), engine, 20)
+        else:
+            add("code", "warn", tr("Image variant {name}: built from your extension of the image",
+                                   name=printable(values_["--image-variant"])), engine, 5)
     if values_.get("--binary"):
-        verdict = sensitive(values_["--binary"], launcher)
+        verdict = verdict_of(values_["--binary"])
         add("code", "bad", tr("Agent program {path}{why}", path=printable(values_["--binary"]),
                               why=f" - {verdict[1]}" if verdict else ""), engine, 15)
     for value in values_.get("--runtime", []):
         add("code", "warn", tr("Runtime folder {path} (read-only, runs inside)", path=printable(value)), engine, 8)
+    if values_.get("--nested-containers"):
+        # Its network stays the sandbox's (the containers' connections pass the firewall and the proxy); what weakens
+        # is the kernel within reach: user namespaces of its own, mounts and more system calls.
+        add("code", "warn", tr("Nested containers: the agent is root of a user namespace of its own and runs "
+                               "containers (more of your host's kernel within reach)"), engine, 10)
     if values_.get("--podman-url"):
         add("code", "warn", tr("Another Podman service: {url}", url=printable(values_["--podman-url"])), engine, 10)
     display = board.first("display")
@@ -1221,6 +1463,20 @@ def capabilities(board, launcher=None, definitions=None):
     if values_.get("--dangerously-skip-permissions"):
         add("code", "info", tr("The agent runs without its own approval prompts (the sandbox stays in force)"),
             agent_node, 3)
+    # Services: containers of images nobody reviewed, beside the agent (on its network, behind its firewall)
+    for node in board.included():
+        if node.kind != "service" or not node.props.get("name"):
+            continue
+        add("code", "warn", tr("Service {name}: the image {image} is UNCHECKED (nobody reviewed it); it runs beside the "
+                               "agent, behind the sandbox's firewall and proxy",
+                               name=printable(node.props["name"]), image=printable(node.props.get("image") or "?")),
+            node, 5)
+        if node.props.get("read_only") is False:
+            add("code", "warn", tr("Service {name}: a writable root file system", name=printable(node.props["name"])),
+                node, 2)
+        for entry in node.props.get("secrets") or []:
+            add("secrets", "warn", tr("Secret {secret} given to the service {name}", secret=printable(
+                entry.get("secret") or entry.get("name")), name=printable(node.props["name"])), node, 2)
     # MCP servers: their folders and network count for the agent that uses them
     for node in board.included():
         if node.kind != "mcp":
@@ -1249,10 +1505,10 @@ def capabilities(board, launcher=None, definitions=None):
     return found
 
 
-def badges(board, policy=None, launcher=None, definitions=None):
+def badges(board, policy=None, launcher=None, definitions=None, bases=None):
     """(score 0..100, [Badge]) from capabilities() (what weakens the sandbox and what keeps it tight) and the
-    administrator's policy."""
-    found = [Badge(c.level, c.text, c.node, c.cost) for c in capabilities(board, launcher, definitions)]
+    administrator's policy. BASES: see capabilities()."""
+    found = [Badge(c.level, c.text, c.node, c.cost) for c in capabilities(board, launcher, definitions, bases)]
     _, values_, _ = values(board)
     for problem in policy_problems(board, values_, policy or {}):
         found.append(Badge("bad", problem.text, problem.node, 0))
@@ -1260,10 +1516,10 @@ def badges(board, policy=None, launcher=None, definitions=None):
     return score, found
 
 
-def panels(board, launcher=None, definitions=None):
+def panels(board, launcher=None, definitions=None, bases=None):
     """{area: [Capability]} for the panels beside the graph: READ, WRITE, REACH, SECRETS, CODE."""
     found = {area: [] for area in CAPABILITIES}
-    for item in capabilities(board, launcher, definitions):
+    for item in capabilities(board, launcher, definitions, bases):
         found[item.area].append(item)
     return found
 
@@ -1312,6 +1568,17 @@ def mcp_summary(definition):
         rows.append((tr("Hosts"), printable(", ".join(map(str, definition["hosts"])))))
     rows.append((tr("Folders"), printable("; ".join(mounts)) if mounts else tr("none")))
     return rows
+
+
+def mcp_defaults(sai, definition):
+    """{memory, cpus, pids} server DEFINITION runs with unless a board asks for others (sandbox-ai's own
+    mcp.default_limits), or None (not defined here, a helper, or a sandbox-ai that cannot say)."""
+    if not isinstance(definition, dict) or sai is None:
+        return None
+    try:
+        return sai.module("mcp").default_limits(definition)
+    except Exception:  # noqa: BLE001 - an older sandbox-ai without limits per server
+        return None
 
 
 def with_backend(board, name):

@@ -116,6 +116,8 @@ class Matrix:
             seen.device_rules = json.loads((a.control_dir / "device-rules.json").read_text())
             seen.env = seen.config["env"]
             seen.files = {p.name: p.read_text() for p in session.iterdir() if p.is_file()}
+            # --nested-containers: the engines' configuration inside (session/containers).
+            seen.containers = {p.name: p.read_text() for p in (session / "containers").glob("*")}
             seen.firewall = seen.files["firewall.nft"]
             proxy_dir = getattr(a, "proxy_dir", None)
             seen.proxy = json.loads((proxy_dir / "proxy.json").read_text()) if proxy_dir else None
@@ -204,7 +206,7 @@ class Matrix:
                 return {"event": "ready", "tunnel": facts, "checks": seen,
                         "hosts": {name: [vpn_address(name)] for name in self.data["resolve"]}}
 
-            def follow(self, on_event):
+            def follow(self, on_event, on_end=None):
                 record.follow = on_event
 
             def close(self):
@@ -295,6 +297,25 @@ def defaults(m):
     assert "redirect to :" in run.firewall  # every TCP connection passes the proxy
     if m.backend == "podman":
         assert run.create[run.create.index("--network") + 1] == s.POD_NETWORK
+
+
+@network
+def killswitch_knows_the_model_api_and_has_its_chain(m):
+    """What sandbox-ai net cut needs during the run: the provider's hosts with the addresses the start pinned, the
+    host's ports, the cut chain in the firewall, jumped to before anything of the output chain."""
+    run = m.run("--allow-pypi")
+    killswitch = run.config["killswitch"]
+    assert killswitch["api"]["names"] == provider(m) and "pypi.org" not in killswitch["api"]["names"]
+    assert killswitch["api"]["https"] == sorted({address(host) for host in provider(m)})
+    assert killswitch["api"]["tcp"] == killswitch["api"]["loopback"] == [] and killswitch["host_ports"] == []
+    assert killswitch["tor"] is False and killswitch["bypass"] == [] and killswitch["machine_host"] is None
+    settings = s.RUNTIME.cut_settings(killswitch)  # as the supervisor takes it
+    assert settings["api"]["https"] == killswitch["api"]["https"]
+    assert " chain cut {\n }" in run.firewall
+    output = run.firewall[run.firewall.index(" chain output {"):]
+    assert output.splitlines()[1] == "  jump cut"
+    # Without the provider's defaults there is no model API to keep: "api" keeps nothing then.
+    assert m.run("--no-provider-defaults").config["killswitch"]["api"]["https"] == []
 
 
 @network
@@ -1420,7 +1441,10 @@ MCP, mcp = scenarios()
 @mcp
 def mcp_demo(m):
     plan = m.plan("--mcp", "demo")
-    assert plan["mcp"] == [{"name": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock")}]
+    assert [{key: entry[key] for key in ("name", "instance", "socket", "own_limits")} for entry in plan["mcp"]] == \
+        [{"name": "demo", "instance": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock"),
+          "own_limits": False}]
+    assert plan["mcp"][0]["limits"]["memory"] == "8g" and plan["mcp"][0]["limits"]["pids"] == 4096
     run = m.run("--mcp", "demo", "--mcp", "demo")
     assert m.mcp_started == ["demo"]
     assert (f"src={s.mcp_socket_dir('demo')},dst={s.MCP_UPSTREAM_DIR}/demo" if m.backend == "podman"
@@ -1984,6 +2008,22 @@ def llm_on_the_hosts_loopback(m):
 
 
 @llm_case
+def llm_killswitch_keeps_exactly_the_server(m):
+    """sandbox-ai net cut RUN api: the supervisor learns the --llm server as the start opened it - its address and
+    port, or the host's port it listens on - and the provider's hosts only while the run reaches them."""
+    llm_endpoint(m)
+    killswitch = m.run("--llm", "gpu", "--no-provider-defaults").config["killswitch"]
+    assert killswitch["api"] == {"https": [], "tcp": [["10.0.0.5", 11434]], "loopback": [], "names": []}
+    killswitch = m.run("--llm", "gpu").config["killswitch"]
+    assert killswitch["api"]["tcp"] == [["10.0.0.5", 11434]] and killswitch["api"]["names"] == provider(m)
+    if m.backend == "podman":
+        llm_endpoint(m, url="http://localhost:11434")
+        killswitch = m.run("--llm", "gpu", "--no-provider-defaults").config["killswitch"]
+        assert killswitch["api"]["loopback"] == [11434] and killswitch["host_ports"] == [11434]
+        assert killswitch["api"]["tcp"] == []
+
+
+@llm_case
 def llm_refusals(m):
     llm_endpoint(m)
     m.refused("--llm", "gpu", "--no-proxy", match="drop --no-proxy")
@@ -2271,6 +2311,31 @@ def vpn_tor_sends_every_connection_through_tor(m):
 
 
 @vpn
+def vpn_tor_killswitch_counts_everything_past_tor(m):
+    """sandbox-ai net cut in a Tor run: only --vpn-bypass-tcp's target is the local network (everything else lies past
+    Tor), "api" keeps the provider through Tor, tor's own packets pass the cut chain (its transport)."""
+    rt, tunnel, inside = tor_vpn(m)
+    if m.backend == "bwrap":
+        return
+    m.fake_vpn(tunnel=tunnel, inside=inside)
+    run = m.run("--vpn", "anon", "--vpn-bypass-tcp", "192.168.1.20:1234")
+    killswitch = run.config["killswitch"]
+    assert killswitch["tor"] is True and killswitch["bypass"] == [["192.168.1.20", 1234]]
+    assert killswitch["vpn_mark"] == f"meta skuid {rt.TOR_UID}"
+    cut = {**s.RUNTIME.cut_settings(killswitch), "mode": "remote"}
+    assert s.RUNTIME.cut_allows(cut, "192.168.1.20", 1234)
+    assert not s.RUNTIME.cut_allows(cut, "192.168.1.21", 1234) and not s.RUNTIME.cut_allows(cut, "10.192.0.7", 443)
+    rules = [line for line in s.RUNTIME.cut_rules(cut, killswitch["vpn_mark"]).splitlines()
+             if line.startswith("add rule")]
+    assert rules[0] == f"add rule inet agent_sandbox cut meta skuid {rt.TOR_UID} return"  # tor's own: before any mode
+    api = {**cut, "mode": "api"}
+    for host in provider(m):
+        for found in run.config["killswitch"]["api"]["https"]:
+            assert s.RUNTIME.cut_allows(api, found, 443)
+        assert host in killswitch["api"]["names"]
+
+
+@vpn
 def vpn_tor_refusals_and_failed_checks(m):
     rt, tunnel, inside = tor_vpn(m)
     if m.backend == "bwrap":
@@ -2364,18 +2429,41 @@ def preset_values(m, preset, dev):
             values.append(f"{name}={folder}")
         elif kind == "device":
             values.append(f"{name}={dev / ('kvm' if name == 'kvm' else 'ttyACM0')}")
+        elif kind == "host" and "default" not in spec:
+            values.append(f"{name}=192.0.2.44")
         elif "default" not in spec:
             values.append(f"{name}=a question for the test")
     return [token for value in values for token in ("--preset-value", value)]
 
 
+def preset_mcp(preset):
+    """The MCP servers a start with PRESET uses: those of its --mcp options (their defaults), then its "mcp" ones."""
+    defaults = {name: str(spec["default"]) for name, spec in preset.get("values", {}).items() if "default" in spec}
+    return [*(value for value, _ in PRESETS.option_values(preset, defaults, "--mcp")),
+            *(server.split(":", 1)[-1] for server in preset.get("mcp", []))]
+
+
 def register_preset_servers(m):
-    """The catalog servers the presets name, as `sandbox-ai mcp add` would define them."""
-    names = {server.split(":", 1)[-1] for preset in PRESETS.catalog().values() for server in preset.get("mcp", [])}
+    """The catalog servers the presets name, as `sandbox-ai mcp add` would define them: those with a folder of their
+    own (engram, memory: /data) as image servers with it, so that a preset's --mcp-mount can change it; and the images
+    the presets' services name, as `sandbox-ai images pull --as NAME` records them."""
+    names = {name for preset in PRESETS.catalog().values() for name in preset_mcp(preset)}
     path = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "mcp.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({name: {"command": ["python3", "-c", "pass"], "description": f"stand-in for {name}"}
-                                for name in sorted(names)}))
+    servers = {}
+    for name in sorted(names):
+        if name in ("engram", "memory"):
+            folder = m.tmp / f"brain-{name}"
+            folder.mkdir(exist_ok=True)
+            servers[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64, "network": "none",
+                             "mounts": [{"target": "/data", "host": str(folder), "mode": "rw"}]}
+        else:
+            servers[name] = {"command": ["python3", "-c", "pass"], "description": f"stand-in for {name}"}
+    path.write_text(json.dumps(servers))
+    images = {name: {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + digit * 64,
+                     "id": "sha256:" + digit * 64, "user": user}
+              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"))}
+    (path.parent / "user-images.json").write_text(json.dumps({"version": 1, "images": images}))
 
 
 @presets_scenario
@@ -2390,13 +2478,14 @@ def every_builtin_preset_starts(m, dev):
         if any(spec.get("kind") in ("vpn", "llm") and not spec.get("optional")
                for spec in preset.get("values", {}).values()):
             continue  # a registered VPN profile or LLM server: test_presets_all.py registers them and starts these
-        if m.backend == "bwrap" and "--allow-host-port" in preset.get("options", []):
-            # pasta forwards the host's ports: Podman only, as the start option says (the preset's note too).
+        if m.backend == "bwrap" and ("--allow-host-port" in preset.get("options", [])
+                                     or "--service" in preset.get("options", [])):
+            # pasta forwards the host's ports, a service is a container of the pod: Podman only, as the start option
+            # says (the preset's note too).
             m.refused("--preset", preset["id"], *preset_values(m, preset, dev), match="needs the Podman backend")
             continue
         plan = m.plan("--preset", preset["id"], *preset_values(m, preset, dev))
-        assert [entry["name"] for entry in plan.get("mcp", [])] == \
-            [server.split(":", 1)[-1] for server in preset.get("mcp", [])], preset["id"]
+        assert [entry["name"] for entry in plan.get("mcp", [])] == preset_mcp(preset), preset["id"]
         checked.append(preset["id"])
     assert len(checked) >= 20
 

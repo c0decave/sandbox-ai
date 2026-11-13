@@ -188,7 +188,8 @@ def test_own_presets_save_export_import(tmp_path, monkeypatch):
     document = json.loads(path.read_text())
     assert document["format"] == PR.FORMAT and document["mcp_servers"]["search"]["options"][1] == "mv"
     imported = PR.import_file(sai, path)
-    assert PR.to_document(imported) == document
+    # (one of yours has its id: kept beside it, never in its place - review 0.1.94)
+    assert PR.to_document(imported) == {**document, "id": "my-search-behind-mullvad-2"}
     shadow = dict(document, id="locked")
     path.write_text(json.dumps(shadow))
     assert PR.import_file(sai, path).id == "my-locked", "a built-in preset is never replaced"

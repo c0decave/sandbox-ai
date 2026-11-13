@@ -4,6 +4,12 @@
   "id": "agent-race",
   "title": "Agent race",
   "description": "The same task for Claude, Codex and OpenCode, each in its own sandbox; compare time, steps and what was blocked.",
+  "translations": {
+    "de": {
+      "title": "Agenten-Rennen",
+      "description": "Dieselbe Aufgabe für Claude, Codex und OpenCode, jeder in seiner eigenen Sandbox; verglichen werden Zeit, Schritte und was blockiert wurde."
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

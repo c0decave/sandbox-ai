@@ -41,6 +41,8 @@ TITLES = {
     "device": N_("device refused"), "memory": N_("process ended: memory nearly full"),
     "supervisor-memory": N_("the supervisor dropped its caches"), "guard": N_("a safety check failed"),
     "canary": N_("a canary went off"), "oom": N_("out of memory: the kernel ended a process"),
+    "mcp-server": N_("an MCP server's process ended or failed"),
+    "loop": N_("loop guard intervened"),
 }
 # The grouped popup of each kind: {count} in the last minute, {target} where.
 GROUPED = {
@@ -51,6 +53,7 @@ GROUPED = {
     "approval-timeout": N_("{count} questions about {target} refused without an answer in the last minute"),
     "push": N_("{count} pushes to {target} refused in the last minute"),
     "publish": N_("{count} publishing requests to {target} refused in the last minute"),
+    "loop": N_("{count} loop guard interventions at {target} in the last minute"),
 }
 
 
@@ -122,7 +125,7 @@ class SafeguardsView(QWidget):
         for kind in TITLES:
             self.kind.addItem(f"{kind_title(kind)} ({kind})", kind)
         self.kind.currentIndexChanged.connect(lambda _: self.show_records(self.records))
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         top.addWidget(self.refresh_button)
         top.addWidget(self.kind)
         top.addWidget(self.status, 1)

@@ -27,6 +27,8 @@ from .i18n import N_, tr
 from .widgets import MONO, FlowLayout, plain_label, safe_tooltip
 
 OPENER = None   # the window's show_help(section id): set by the main window
+VIDEO_OPENER = None  # the window's watch_video(page key): set by the main window (else video_player.open_video)
+VIDEO_SAI = []  # the window's SandboxAI (where the videos are looked for, the version they are downloaded for)
 OPENED = []     # the ids of the explanations opened in this run (a tour step waits for one)
 SIZE = 18
 _SHOWN = [True]  # the setting help_buttons: the (?)s are shown (the Help page, tours and F1 stay either way)
@@ -188,6 +190,14 @@ class HelpPopover(QFrame):
         self.cli.setVisible(bool(self.tip.cli))
         row = QHBoxLayout()
         row.addStretch(1)
+        # The (?) of a page: its video too (help_view.watch_video; downloaded first when the videos are not here).
+        self.page = tip_id[len("page."):] if tip_id.startswith("page.") else None
+        self.video = QPushButton(tr("Watch the video"))
+        self.video.setToolTip(tr("The video about this page, with sound (Help > Videos lists them all)"))
+        self.video.clicked.connect(lambda _=False: self.watch())
+        row.addWidget(self.video)
+        from . import videos
+        self.video.setVisible(self.page in videos.PAGE_TITLES)
         self.more = QPushButton(tr("More in Help"))
         self.more.setProperty("role", "primary")
         self.more.clicked.connect(lambda _=False: self.more_in_help())
@@ -199,6 +209,11 @@ class HelpPopover(QFrame):
         section, owner = self.tip.section, self.parentWidget()
         self.close()
         open_section(section, owner)
+
+    def watch(self):
+        page = self.page
+        self.close()
+        watch_video(page)
 
     def show_at(self, point):
         """Below POINT (global), kept on its screen."""
@@ -237,6 +252,17 @@ def open_section(section, owner=None):
     dialog = HelpDialog(section, window)
     dialog.show()
     return dialog
+
+
+def watch_video(page):
+    """The video about PAGE: through the window (VIDEO_OPENER), else in a player of its own."""
+    if VIDEO_OPENER is not None:
+        try:
+            return VIDEO_OPENER(page)
+        except RuntimeError:  # the window that set it is gone
+            pass
+    from . import video_player
+    return video_player.open_video(page)
 
 
 # -- where the (?)s go --
@@ -608,6 +634,37 @@ def tour_title(ident, language=None):
 
 
 ALL_TOURS = "tours"  # the index entry listing every tour
+VIDEOS = "videos"  # the index entry listing the videos about the pages
+
+
+def videos_html(found, language=None, places=()):
+    """The Help page's list of the videos about the pages: each with its part, title, length and the page it is about
+    (a link to its section); without any, where they are looked for and the offer to download them."""
+    from . import videos as V
+    rows = [f"<h2>{html.escape(tr_in(language, N_('Videos about the pages')))}</h2>",
+            f"<p>{html.escape(tr_in(language, N_('One short video per page of the app, with sound, in the order of the navigation. A click plays it in the app; the button beside the (?) of a page plays the one about it.')))}</p>"]
+    if not found:
+        rows.append(f"<p>{html.escape(tr_in(language, N_('The videos are not on this computer. The app looks for them in:')))}</p><ul>")
+        rows += [f"<li><code>{html.escape(str(place))}</code></li>" for place in places]
+        rows.append(f'</ul><p><a href="download:videos">{html.escape(tr_in(language, N_("Download them from the release…")))}</a> '
+                    f"{html.escape(tr_in(language, N_('(checked against its signed SHA256SUMS before they are used)')))}</p>")
+        return "\n".join(rows)
+    head = [tr_in(language, N_("Part")), tr_in(language, N_("Video")), tr_in(language, N_("Length")),
+            tr_in(language, N_("Page")), tr_in(language, N_("Language"))]
+    rows.append('<table cellspacing="0" cellpadding="4"><tr>' + "".join(f"<th align=\"left\">{html.escape(h)}</th>"
+                                                                       for h in head) + "</tr>")
+    for video in found:
+        page = tr_in(language, V.PAGE_TITLES.get(video.page, video.page))
+        section = H.PAGE_SECTIONS.get(video.page)
+        page_link = f'<a href="section:{section}">{html.escape(page)}</a>' if section else html.escape(page)
+        spoken = tr_in(language, V.LANGUAGE_NAMES.get(video.language, video.language))
+        rows.append(f"<tr><td>{video.number}</td><td><a href=\"video:{html.escape(video.page)}\">"
+                    f"{html.escape(page)}</a></td><td>{html.escape(video.length())}</td><td>{page_link}</td>"
+                    f"<td>{html.escape(spoken)}{' + ' + html.escape(tr_in(language, N_('subtitles'))) if video.subtitles else ''}"
+                    "</td></tr>")
+    rows.append("</table>")
+    rows.append(f"<p>{html.escape(tr_in(language, N_('From: {folder}'), folder=str(found[0].path.parent)))}</p>")
+    return "\n".join(rows)
 
 
 class HelpPage(QWidget):
@@ -697,6 +754,14 @@ class HelpPage(QWidget):
                     item.setData(Qt.ItemDataRole.UserRole, section.id)
                     self.index.addItem(item)
                     self.items[section.id] = item
+        header = QListWidgetItem(tr_in(self.lang(), N_("Videos")).upper())
+        header.setFlags(Qt.ItemFlag.NoItemFlags)
+        header.setData(Qt.ItemDataRole.UserRole + 1, VIDEOS)
+        self.index.addItem(header)
+        item = QListWidgetItem("  " + tr_in(self.lang(), N_("Videos about the pages")))
+        item.setData(Qt.ItemDataRole.UserRole, VIDEOS)
+        self.index.addItem(item)
+        self.items[VIDEOS] = item
         if self.with_tours:
             header = QListWidgetItem(tr_in(self.lang(), N_("Tours")).upper())
             header.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -720,6 +785,11 @@ class HelpPage(QWidget):
         if ident == ALL_TOURS:
             haystack = " ".join(H.say(t.title, lang) + " " + H.say(t.summary, lang)
                                 for t in tours.TASK_TOURS.values() for lang in i18n.LANGUAGES)
+        elif ident == VIDEOS:
+            from . import videos
+            haystack = " ".join([tr_in(lang, N_("Videos about the pages")) for lang in i18n.LANGUAGES]
+                                + [tr_in(lang, title) for title in videos.PAGE_TITLES.values()
+                                   for lang in i18n.LANGUAGES] + ["video videos film"])
         else:
             section = self.content.BY_ID[ident]
             haystack = " ".join([section.title.en, section.title.de, section.body.en, section.body.de,
@@ -756,8 +826,9 @@ class HelpPage(QWidget):
             self.show_section(item.data(Qt.ItemDataRole.UserRole))
 
     def show_section(self, ident):
-        """Show section IDENT (a help_content id, or "tours" for every tour); False for an unknown one."""
-        if ident != ALL_TOURS and ident not in self.content.BY_ID:
+        """Show section IDENT (a help_content id, "tours" for every tour, "videos" for the videos); False for an
+        unknown one."""
+        if ident not in (ALL_TOURS, VIDEOS) and ident not in self.content.BY_ID:
             return False
         self.shown = ident
         language = self.lang()
@@ -772,6 +843,9 @@ class HelpPage(QWidget):
             rows.append("</p>")
             self.text.setHtml("\n".join(rows))
             wanted = tuple(tours.TASK_TOURS)
+        elif ident == VIDEOS:
+            self.show_videos()
+            wanted = ()
         else:
             section = self.content.BY_ID[ident]
             self.text.setHtml(render(section, language))
@@ -810,11 +884,22 @@ class HelpPage(QWidget):
         self.tour_dialog = dialog
         return dialog
 
+    def show_videos(self):
+        """The videos on this computer (looked for again each time: a download may have brought them)."""
+        from . import videos
+        places = videos.folders(getattr(VIDEO_SAI[0], "directory", None) if VIDEO_SAI else None)
+        self.found_videos = videos.catalog(places, self.lang() or i18n.language())
+        self.text.setHtml(videos_html(self.found_videos, self.lang(), places))
+
     def link(self, target):
         if target.startswith("section:"):
             self.show_section(target[len("section:"):])
         elif target.startswith("tour:"):
             self.tour_requested.emit(target[len("tour:"):])
+        elif target.startswith("video:"):
+            watch_video(target[len("video:"):])
+        elif target == "download:videos":
+            watch_video(None)
 
 
 KIND_LABELS = {"task": N_("Tour through a task"), "area": N_("Tour of a page"), "section": N_("Help section")}
@@ -844,7 +929,7 @@ class TourSearchDialog(QDialog):
         self.results = QListWidget()
         self.results.itemActivated.connect(lambda item: self.start(item))
         layout.addWidget(self.results, 1)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         layout.addWidget(self.status)
         buttons = QHBoxLayout()
         buttons.addStretch()

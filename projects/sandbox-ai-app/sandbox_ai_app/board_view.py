@@ -37,8 +37,10 @@ from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
 from .copying import copy_entries
 from .i18n import tr
+from . import mcp_fields as MF
 from .widgets import (
-    MONO, ElidedLabel, StartControls, ask_first, background, confirm, disclosure, flow, inform, plain_label, safe_tooltip, warn,
+    MONO, AsyncCommand, ElidedLabel, StartControls, ask_first, background, confirm, disclosure, flow, inform, plain_label,
+    safe_tooltip, warn,
 )
 
 NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
@@ -165,6 +167,10 @@ MIME_PARTS = "application/x-sandbox-ai-parts"  # parts copied (Copy, Cut): their
 PARTS_FORMAT = "sandbox-ai-board-parts"  # the same as JSON text, for a clipboard that keeps only text
 CLIP_LIMIT = 256 * 1024  # bytes of copied parts read back at most (the clipboard may hold anything)
 
+
+
+# The launcher's refusal of a model server in the local network behind Tor names the option that lets it in.
+BYPASS_OFFER = re.compile(r"--vpn-bypass-tcp ((?:\d{1,3}\.){3}\d{1,3}:\d{1,5})")
 
 class Snapshot(QUndoCommand):
     """One change of the board: the state before and after it (redo restores after, undo before)."""
@@ -943,7 +949,15 @@ def summary(node):
     """One line of what a node sets (shown under its title)."""
     props = node.props
     if node.kind == "agent":
-        return " ".join(filter(None, [props.get("model"), "-D" if props.get("--dangerously-skip-permissions") else ""]))
+        # Which model and effort it works with, at a glance (the agent's default when none is chosen; the effort
+        # only for an agent that has levels), then -D.
+        from . import guide
+        parts = [str(props.get("model") or tr("default model"))]
+        if guide.AGENT_EFFORTS.get(props.get("agent", "claude")):
+            parts.append(tr("effort {level}", level=props["effort"]) if props.get("effort") else tr("default effort"))
+        if props.get("--dangerously-skip-permissions"):
+            parts.append("-D")
+        return printable(" · ".join(parts))
     if node.kind == "workspace":
         return tr("read-only") if props.get("readonly") else tr("writable")
     if node.kind == "mount":
@@ -973,6 +987,11 @@ def summary(node):
         reaches, hosts, vpn = B.server_network(definition)
         network = (", ".join(hosts) or tr("every destination")) if reaches else tr("no network")
         return printable(tr("VPN {vpn} · {network}", vpn=vpn, network=network) if vpn else network)
+    if node.kind == "service":  # its image and where the agent reaches it, unchecked
+        if props.get("raw"):
+            return tr("cannot be read")
+        where = ", ".join(f"localhost:{port}" for port in props.get("ports") or [])
+        return printable(" · ".join(filter(None, [str(props.get("image") or ""), where, tr("UNCHECKED")])))
     if node.kind == "llm":  # which server (and model, when named) the agent works with, on the board at a glance
         value = str(props.get("--llm") or "")
         return printable(f"{elide(value, 40)} · {tr('its address and port only')}") if value \
@@ -1141,6 +1160,7 @@ class HostCombo(QComboBox):
 class BoardPage(Prerequisites, QWidget):
     """The board of one sandbox, its checks, and Apply / Dry run / Start."""
     opened = Signal(str)  # a project folder was opened
+    server_properties = Signal(str, str)  # an MCP server's Properties (its defaults for every start): name, host
 
     def __init__(self, sai, terminal, settings=None):
         super().__init__()
@@ -1161,6 +1181,9 @@ class BoardPage(Prerequisites, QWidget):
         self.close_request = None  # the window: close the properties, folded or floating (their OK and Cancel)
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
         self.llm_servers, self.llm_loading = None, False  # sandbox-ai llm list --json, for the agent's Model server
+        # Your images (sandbox-ai images list) and the variants' bases of the host it starts on: the services choose
+        # from them, the checks and the score use them (None: not read yet).
+        self.user_images, self.image_bases, self.user_images_loading = None, None, False
         self.state, self.saved_boards, self.restored = None, {}, set()  # drafts and zoom kept between starts
         self.forbidden = self.read_forbidden()
         self.policy_data = self.read_policy()
@@ -1181,6 +1204,12 @@ class BoardPage(Prerequisites, QWidget):
         new_button.setToolTip(tr("Ready boards, simple and complex (MCP servers, VPNs, LLM servers, rules), and "
                                  "your own"))
         new_button.clicked.connect(lambda: self.open_gallery())
+        # The board as a preset of yours (with its values and folders), or the one of yours it came from updated.
+        save_preset = self.save_preset_button = QPushButton(tr("Save as preset…"))
+        save_preset.setToolTip(tr("Keep this board as a preset of your own, with its values, folders, notes and "
+                                  "layout (never a secret); a board made from one of yours can replace it"))
+        save_preset.clicked.connect(lambda: self.save_as_preset())
+        self.own_preset = None  # the preset of yours the board came from (new_from_preset), to update
         wizard_button = QPushButton(tr("Wizard…"))
         wizard_button.setToolTip(tr("A new project step by step; it ends on this board"))
         wizard_button.clicked.connect(lambda: self.open_wizard())
@@ -1224,13 +1253,13 @@ class BoardPage(Prerequisites, QWidget):
         self.cli_button.toggled.connect(lambda on: self.show_cli(on))
         # The project and its folder are named at the top of the window (its project chooser): not again here, the
         # row keeps its room for the buttons. (self.folder is still the board's record of its folder.)
-        layout.addWidget(flow(open_button, new_button, wizard_button, undo, redo, arrange, zoom_out, zoom_in, fit,
-                              self.cli_button, self.score_button))
+        layout.addWidget(flow(open_button, new_button, save_preset, wizard_button, undo, redo, arrange, zoom_out,
+                              zoom_in, fit, self.cli_button, self.score_button))
         # The board's notes (a project file not trusted yet, placeholders to fill in, restored changes) go to the
         # window's log window, one place for every message; the last one is kept here (not shown).
         # (Not in a layout, so given the page as their parent: a widget of no parent whose signal holds the page
         # would keep both alive for good - a cycle through C++ that Python's collector cannot see.)
-        self.notice = plain_label(role="secondary")
+        self.notice = plain_label(role="secondary", selectable=True)
         self.notice.setParent(self)
         self.notice.hide()
         self.folder.setParent(self)
@@ -1315,15 +1344,32 @@ class BoardPage(Prerequisites, QWidget):
         self.preview.setAccessibleName(tr("Command line"))
         self.preview.hide()  # until CLI command is pressed
         layout.addWidget(self.preview)
-        # One line under the board (the page does not scroll): a long refusal is cut there, whole in the tooltip.
+        # One line under the board (the page does not scroll): a long refusal is cut there, whole in the tooltip,
+        # copied with its context menu or Ctrl+C, shown whole on a double click.
         self.verdict = ElidedLabel(role="secondary")
-        layout.addWidget(self.verdict)
+        verdict_row = QHBoxLayout()
+        verdict_row.setContentsMargins(0, 0, 0, 0)
+        verdict_row.addWidget(self.verdict, 1)
+        # A model server of the local network refused behind Tor: the launcher names the --vpn-bypass-tcp it needs.
+        self.bypass_target, self.bypass_state = None, None
+        self.bypass_button = QPushButton()
+        self.bypass_button.hide()
+        self.bypass_button.clicked.connect(lambda: self.allow_past_tor())
+        verdict_row.addWidget(self.bypass_button)
+        layout.addLayout(verdict_row)
         self.apply_button = QPushButton(tr("Apply…"))
         self.apply_button.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
                                         "it and what changes"))
         self.apply_button.clicked.connect(lambda: self.apply())
         self.dry_button = QPushButton(tr("Dry run"))
         self.dry_button.clicked.connect(lambda: self.dry_run())
+        # Clone: this setup as a new project (another folder, its own .sandbox-ai.json) or as a new session.
+        self.clone_button = QPushButton(tr("Clone"))
+        self.clone_button.setToolTip(tr("This setup as a new project (another folder) or as a new session"))
+        clone_menu = QMenu(self.clone_button)
+        clone_menu.addAction(tr("As a new project…"), lambda: self.clone_to_project())
+        clone_menu.addAction(tr("As a new session"), lambda: self.clone_to_session())
+        self.clone_button.setMenu(clone_menu)
         # One Start: where, and whether as a session (a codename unless one is typed) - widgets.StartControls.
         self.start_controls = StartControls(lambda embedded, session: self.start(embedded=embedded, session=session),
                                             sai, self.settings())
@@ -1341,7 +1387,8 @@ class BoardPage(Prerequisites, QWidget):
         self.host_note = plain_label(role="secondary")
         self.host_note.hide()
         layout.addWidget(self.host_note)
-        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, self.start_controls))
+        layout.addWidget(flow(self.host_choice, self.apply_button, self.dry_button, self.clone_button,
+                              self.start_controls))
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self.check)
@@ -1412,6 +1459,9 @@ class BoardPage(Prerequisites, QWidget):
 
     def set_board(self, board, directory):
         self.board, self.directory = board, (str(directory) if directory else None)
+        # The offer of the last verdict was the board's before: never applied to this one.
+        self.bypass_target, self.bypass_state = None, None
+        self.bypass_button.hide()
         self.show_folder()
         self.undo.clear()
         self.show_notice("")
@@ -1617,6 +1667,12 @@ class BoardPage(Prerequisites, QWidget):
         if kind == "mcp" and not props:
             names = self.mcp_names()
             props = {"name": names[0] if names else ""}
+        if kind == "service" and not props:
+            taken = {n.props.get("name") for n in self.board.of_kind("service")}
+            name = next(f"service{i}" if i else "service" for i in range(100) if (f"service{i}" if i else "service")
+                        not in taken)
+            mine = sorted(self.user_image_names() or ())
+            props = {**B.default_service(name), "image": mine[0] if mine else name}
 
         added = []
 
@@ -1657,7 +1713,9 @@ class BoardPage(Prerequisites, QWidget):
             item = self.palette.item(row)
             kind = item.data(Qt.ItemDataRole.UserRole)
             taken = B.KINDS[kind].single and self.board.first(kind) is not None
-            item.setFlags(item.flags() & ~movable if taken else item.flags() | movable)
+            flags = item.flags() & ~movable if taken else item.flags() | movable
+            if flags != item.flags():  # (set again, unchanged, it laid the whole list out and drew it again)
+                item.setFlags(flags)
             item.setToolTip(safe_tooltip(tr(B.KINDS[kind].help) + ("\n" + tr("On the board already: a board has one.")
                                                        if taken else "")))
 
@@ -1864,7 +1922,7 @@ class BoardPage(Prerequisites, QWidget):
             QTimer.singleShot(0, self.fit)
 
     def canvas_menu(self, point):
-        """The context menu at the scene point POINT: a node's (Properties, Set up step by step…, What is this?, Cut,
+        """The context menu at the scene point POINT: a node's (Properties, Wizard…, What is this?, Cut,
         Copy, Paste, Remove), an edge's (Delete), else the canvas's (add a part there, paste there, select all, fit,
         zoom 100 %, arrange, undo, redo, what the board is). A node or edge right-clicked is selected first (alone,
         unless it already was)."""
@@ -1887,8 +1945,12 @@ class BoardPage(Prerequisites, QWidget):
             node_id, kind = hit.node_id, hit.kind
             menu.setToolTipsVisible(True)
             menu.addAction(tr("Properties"), lambda: self.show_properties(node_id))
+            server = self.board.node(node_id).props if kind == "mcp" else {}
+            if server.get("name") and not server.get("project"):  # the server's own (every start), on the MCP page
+                menu.addAction(tr("Defaults for every start…"),
+                               lambda name=str(server["name"]): self.server_properties.emit(name, self.host()))
             if guide.questions(kind):
-                menu.addAction(tr("Set up step by step…"), lambda: self.guide_node(node_id))
+                menu.addAction(tr("Wizard…"), lambda: self.guide_node(node_id))
             menu.addAction(tr("What is this?"), lambda: hit.help_mark.explain())
             menu.addSeparator()
             removable = self.removable_selected()
@@ -1919,6 +1981,7 @@ class BoardPage(Prerequisites, QWidget):
         menu.addAction(tr("Zoom 100 %"), self.view.zoom_reset)
         menu.addAction(tr("Arrange"), self.arrange)
         menu.addSeparator()
+        menu.addAction(tr("Save as preset…"), lambda: self.save_as_preset())
         discard = menu.addAction(tr("Discard the changes not applied"), lambda: self.discard_changes())
         discard.setEnabled(bool(self.directory) and self.dirty())
         undo = menu.addAction(tr("Undo"), self.undo_group.undo)
@@ -2069,8 +2132,12 @@ class BoardPage(Prerequisites, QWidget):
     # -- checks --
 
     def refresh(self):
-        problems = B.problems(self.sai, self.board, self.policy())
-        score, badges = B.badges(self.board, self.policy())
+        engine = self.board.first("engine")
+        if self.user_images is None and (self.board.of_kind("service") or (engine is not None and
+                                                                           engine.props.get("--image-variant"))):
+            self.load_user_images()
+        problems = B.problems(self.sai, self.board, self.policy(), self.user_image_names())
+        score, badges = B.badges(self.board, self.policy(), bases=self.image_bases)
         levels, why = {}, {}
         for problem in problems:
             if problem.node is not None and levels.get(problem.node) != "error":
@@ -2082,22 +2149,28 @@ class BoardPage(Prerequisites, QWidget):
             if node.id in self.items:
                 self.items[node.id].update_from(node, levels.get(node.id), self.board.connected(node),
                                                 tuple(why.get(node.id, ())))
-        self.findings.clear()
-        for problem in problems:
-            item = QListWidgetItem(("✘ " if problem.level == "error" else "! ") + problem.text)
-            item.setForeground(QBrush(QColor(theme.color("bad" if problem.level == "error" else "warn"))))
-            item.setData(Qt.ItemDataRole.UserRole, problem.node)
-            self.findings.addItem(item)
-        for badge in badges:
-            item = QListWidgetItem({"bad": "▼ ", "warn": "▽ ", "ok": "✔ ", "info": "· "}[badge.level] + badge.text)
-            if badge.level in ("bad", "warn", "ok"):
-                item.setForeground(QBrush(QColor(theme.color(badge.level))))
-            item.setData(Qt.ItemDataRole.UserRole, badge.node)
-            self.findings.addItem(item)
+        # The findings (text, colour, part) as they would be listed: the list is filled again only when they differ -
+        # every step of the board (a move, a property) filled it anew, the list laid out and drawn again each time.
+        findings = [(("✘ " if problem.level == "error" else "! ") + problem.text,
+                     theme.color("bad" if problem.level == "error" else "warn"), problem.node) for problem in problems]
+        findings += [({"bad": "▼ ", "warn": "▽ ", "ok": "✔ ", "info": "· "}[badge.level] + badge.text,
+                      theme.color(badge.level) if badge.level in ("bad", "warn", "ok") else None, badge.node)
+                     for badge in badges]
+        if findings != getattr(self, "findings_shown", None):
+            self.findings_shown = findings
+            self.findings.clear()
+            for text, color, node_id in findings:
+                item = QListWidgetItem(text)
+                if color is not None:
+                    item.setForeground(QBrush(QColor(color)))
+                item.setData(Qt.ItemDataRole.UserRole, node_id)
+                self.findings.addItem(item)
         self.score.setText(tr("Security score: {score} of 100", score=score))
         self.score_button.setText(self.score.text())
         self.refresh_palette()
-        self.preview.setPlainText(B.command_line(self.sai, self.board))
+        command = B.command_line(self.sai, self.board)
+        if command != self.preview.toPlainText():  # (the same text set again was laid out again, scrolled to the top)
+            self.preview.setPlainText(command)
         self.problems = problems
         self.verdict.setText(tr("The launcher checks the options…"))
         self.check_timer.start(self.check_delay())
@@ -2117,6 +2190,7 @@ class BoardPage(Prerequisites, QWidget):
         self.check_token += 1
         token = self.check_token
         self.check_running, self.check_pending = True, False
+        self.checking_state = self.board.state()  # (one check at a time: the board its verdict is about)
         background(self.sai.host_dry_run, host, agent, B.check_argv(self.sai, self.board, local=host == LOCAL),
                    timeout=120,
                    done=lambda result, error: self.checked(token, result, error, host))
@@ -2156,6 +2230,12 @@ class BoardPage(Prerequisites, QWidget):
             said = " ".join(printable((message or "").strip()[-400:]).split())
             self.verdict.setText(tr("The launcher refuses: {message}", message=said))
             self.verdict.setProperty("role", "notice-error")
+        offered = BYPASS_OFFER.search(message or "") if plan is None else None
+        self.bypass_target = offered.group(1) if offered else None
+        self.bypass_state = getattr(self, "checking_state", None) if offered else None
+        if offered:
+            self.bypass_button.setText(tr("Reach {target} past Tor…", target=self.bypass_target))
+        self.bypass_button.setVisible(bool(offered))
         self.verdict.style().unpolish(self.verdict)
         self.verdict.style().polish(self.verdict)
         self.launcher_ok = plan is not None
@@ -2212,7 +2292,68 @@ class BoardPage(Prerequisites, QWidget):
         while self.inspector.rowCount():
             self.inspector.removeRow(0)
 
+    def focus_memo(self):
+        """Where the keyboard is in the inspector, to bring it back after the inspector is made again (a list field
+        takes what was typed after a pause, and the change makes the rows anew): (row, role, index of the widget of
+        its kind in that row's widget, the text as typed, the cursor), or None when the keyboard is elsewhere."""
+        focused = QApplication.focusWidget()
+        if focused is None or not self.inspector_holder.isAncestorOf(focused):
+            return None
+        for row in range(self.inspector.rowCount()):
+            for role in (QFormLayout.ItemRole.FieldRole, QFormLayout.ItemRole.SpanningRole,
+                         QFormLayout.ItemRole.LabelRole):
+                item = self.inspector.itemAt(row, role)
+                holder = item.widget() if item is not None else None
+                if holder is None or not (holder is focused or holder.isAncestorOf(focused)):
+                    continue
+                kind = type(focused)
+                index = -1 if holder is focused else holder.findChildren(kind).index(focused)
+                if isinstance(focused, QPlainTextEdit):
+                    text, cursor = focused.toPlainText(), focused.textCursor().position()
+                elif isinstance(focused, QLineEdit):
+                    text, cursor = focused.text(), focused.cursorPosition()
+                else:
+                    text, cursor = None, None
+                return row, role, kind, index, text, cursor
+        return None
+
+    def restore_focus(self, memo):
+        """The keyboard back in the field it was in (focus_memo), with the text as typed when only the committed
+        form differs (a list's last empty line, spaces at the ends) and the cursor where it was."""
+        if memo is None:
+            return
+        row, role, kind, index, text, cursor = memo
+        if row >= self.inspector.rowCount():
+            return
+        item = self.inspector.itemAt(row, role)
+        holder = item.widget() if item is not None else None
+        if holder is None:
+            return
+        if index < 0:
+            widget = holder if isinstance(holder, kind) else None
+        else:
+            found = holder.findChildren(kind)
+            widget = found[index] if index < len(found) else None
+        if widget is None or not widget.isEnabled():
+            return
+        if text is not None and isinstance(widget, QPlainTextEdit):
+            if widget.toPlainText() != text and widget.toPlainText().split() == text.split():
+                widget.blockSignals(True)
+                widget.setPlainText(text)
+                widget.blockSignals(False)
+            moved = widget.textCursor()
+            moved.setPosition(min(cursor, len(widget.toPlainText())))
+            widget.setTextCursor(moved)
+        elif text is not None and isinstance(widget, QLineEdit):
+            if widget.text() != text and widget.text().strip() == text.strip():
+                widget.blockSignals(True)
+                widget.setText(text)
+                widget.blockSignals(False)
+            widget.setCursorPosition(min(cursor, len(widget.text())))
+        widget.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def inspect(self, node):
+        memo = self.focus_memo() if node is not None and node.id == self.edit_node else None
         self.clear_inspector()
         self.live_token = getattr(self, "live_token", 0) + 1  # a live row still being looked up is for another look
         if node is None:
@@ -2225,6 +2366,7 @@ class BoardPage(Prerequisites, QWidget):
             self.edit_node, self.edit_index, self.edit_stack = node.id, self.undo.index(), self.undo
         self.inspect_rows(node)
         self.edit_buttons(node)
+        self.restore_focus(memo)
 
     def edit_buttons(self, node):
         """OK (keep the changes made here), Cancel (back to the part as it was when its properties opened: those
@@ -2239,6 +2381,12 @@ class BoardPage(Prerequisites, QWidget):
         ok.clicked.connect(lambda _=False: self.edit_done(True))
         cancel.clicked.connect(lambda _=False: self.edit_done(False))
         row = QHBoxLayout()
+        from . import guide
+        if guide.questions(node.kind):  # bottom left, named as everyone knows it: the guide for this part
+            helper = QPushButton(tr("Wizard"))
+            helper.setToolTip(tr("The guide asks what matters for this part, one question at a time"))
+            helper.clicked.connect(lambda _=False, node_id=node.id: self.guide_node(node_id))
+            row.addWidget(helper)
         if not B.KINDS[node.kind].required:
             remove = QPushButton(tr("Remove"))
             remove.setToolTip(tr("Remove this part from the board (Undo brings it back)"))
@@ -2268,12 +2416,6 @@ class BoardPage(Prerequisites, QWidget):
         self.inspector_help.set_tip(f"kind.{node.kind}")
         node_id = node.id
         kind = node.kind
-        from . import guide
-        if guide.questions(kind):
-            helper = QPushButton(tr("Set up step by step…"))
-            helper.setToolTip(tr("The guide asks what matters for this part, one question at a time"))
-            helper.clicked.connect(lambda _=False: self.guide_node(node_id))
-            self.inspector.addRow(helper)
         if kind == "agent":
             agent = QComboBox()
             agent.addItems(list(self.sai.agents))
@@ -2315,6 +2457,7 @@ class BoardPage(Prerequisites, QWidget):
                     definition = None
             for label, value in B.mcp_summary(definition):
                 self.inspector.addRow(label, plain_label(value))
+            self.mcp_limit_rows(node, definition)
         elif kind == "proxy":
             enabled = QCheckBox(OL.shown(tr("on (every connection passes it; off: --no-proxy)")))
             enabled.setChecked(node.props.get("enabled", True) is not False)
@@ -2327,6 +2470,8 @@ class BoardPage(Prerequisites, QWidget):
             rules = RulesEdit(node.props.get("--allow-http", []))
             rules.changed.connect(lambda values: self.set_prop(node_id, "--allow-http", values))
             self.inspector.addRow(OL.shown(tr("Requests per host (--allow-http)")), rules)
+        elif kind == "service":
+            self.service_rows(node)
         elif kind == "kits":
             self.kit_rows(node)
         elif kind == "approvals" and isinstance(node.props.get("rules"), dict):
@@ -2347,6 +2492,253 @@ class BoardPage(Prerequisites, QWidget):
                 self.ask_note()
         if kind in ("devices", "limits"):
             self.live_rows(node)
+        if kind == "engine":
+            self.engine_rows(node)
+        if kind == "llm":
+            self.llm_param_rows(node)
+
+    # -- services and your own images --
+
+    def set_user_images(self, rows, bases, host=LOCAL):
+        """Your images and the variants' bases of the host the board starts on (backend.user_images, variant_bases),
+        read in the background: the service nodes choose from them, the checks and the score use them."""
+        self.user_images_loading = False
+        if host != self.host():
+            self.load_user_images()
+            return
+        self.user_images_failed = rows is None  # not answered: the services' images are not checked then
+        self.user_images = rows if isinstance(rows, list) else []
+        self.image_bases = bases if isinstance(bases, dict) else {}
+        self.refresh()
+        if self.inspected in self.items and self.board.node(self.inspected) is not None and \
+                self.board.node(self.inspected).kind in ("service", "engine"):
+            self.inspect_timer.start()
+
+    def load_user_images(self):
+        if getattr(self, "user_images_loading", False):
+            return
+        host = self.host()
+        self.user_images_loading = True
+
+        def read():
+            rows, bases = [], {}
+            try:
+                rows = self.sai.user_images(host)
+            except Exception:  # noqa: BLE001 - an older sandbox-ai or a host that does not answer: none known
+                rows = None
+            try:
+                bases = self.sai.variant_bases(host)
+            except Exception:  # noqa: BLE001
+                bases = {}
+            return rows, bases
+
+        def done(result, error):
+            rows, bases = result if error is None and isinstance(result, tuple) else (None, {})
+            self.set_user_images(rows, bases, host)
+        background(read, owner=self, done=done, timeout=180)
+
+    def user_image_names(self):
+        """The names of your images, or None while they are not known (the check of the services leaves it then)."""
+        rows = getattr(self, "user_images", None)
+        return None if rows is None or getattr(self, "user_images_failed", False) else {str(row.get("name")) for row in rows if isinstance(row, dict)}
+
+    def service_rows(self, node):
+        """The service node's properties: its name, one of your images (or add one), ports, readiness, variables,
+        secrets (names only), data folders, user, read-only root and limits; edited as the spec sandbox-ai reads."""
+        node_id = node.id
+        if getattr(self, "user_images", None) is None:
+            self.load_user_images()
+        props = dict(node.props)
+        warning = plain_label(tr("UNCHECKED: the image of a service has been reviewed by nobody. The service runs "
+                                 "beside the agent, in the sandbox's pod, behind the same firewall and connection proxy; "
+                                 "the agent reaches it at localhost:PORT. Treat what it returns as untrusted."),
+                              role="notice-error", selectable=True)
+        self.inspector.addRow(warning)
+        if props.get("raw"):
+            self.inspector.addRow(tr("As given"), plain_label(printable(props["raw"]), selectable=True))
+            if props.get("error"):
+                self.inspector.addRow(plain_label(printable(props["error"]), role="notice-error", selectable=True))
+            return
+
+        def update(**changes):
+            current = self.board.node(node_id)
+            if current is None:
+                return
+            merged = {**current.props, **changes}
+            if merged == current.props:
+                return
+
+            def apply():
+                current.props = merged
+            self.change(tr("Change {name}", name=tr("Service (container)")), apply)
+
+        name = QLineEdit(str(props.get("name", "")))
+        name.setPlaceholderText(tr("e.g. db or cache"))
+        name.editingFinished.connect(lambda: update(name=name.text().strip()))
+        self.inspector.addRow(tr("Name"), name)
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        image = QComboBox()
+        image.setEditable(True)
+        image.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        for entry in getattr(self, "user_images", None) or []:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                image.addItem(f"{entry['name']} · {printable(entry.get('ref') or entry.get('image') or '')}",
+                              entry["name"])
+        index = image.findData(props.get("image"))
+        if index >= 0:
+            image.setCurrentIndex(index)
+        else:
+            image.setCurrentIndex(-1)
+            image.setEditText(str(props.get("image", "")))
+
+        def image_chosen(_index=None):
+            data = image.currentData()
+            text = data if isinstance(data, str) and image.currentText() == image.itemText(image.currentIndex()) \
+                else image.currentText()
+            update(image=str(text or "").strip())
+            entry = next((e for e in getattr(self, "user_images", None) or [] if e.get("name") == text), None)
+            current = self.board.node(node_id)
+            if entry is not None and current is not None and not current.props.get("ports") and entry.get("ports"):
+                update(ports=[p for p in entry["ports"] if isinstance(p, int)][:16])  # the ports the image names
+        image.activated.connect(image_chosen)
+        image.lineEdit().editingFinished.connect(image_chosen)
+        row.addWidget(image, 1)
+        add = QPushButton(tr("Add…"))
+        add.setToolTip(tr("Add one of your images: from a registry (pulled once, pinned by digest) or your own "
+                          "Containerfile"))
+        menu = QMenu(add)
+        menu.addAction(tr("Add from a registry…"), lambda: self.add_user_image(node_id, "pull"))
+        menu.addAction(tr("Add from a Containerfile…"), lambda: self.add_user_image(node_id, "build"))
+        add.setMenu(menu)
+        row.addWidget(add)
+        self.inspector.addRow(tr("Image"), holder)
+        if getattr(self, "user_images", None) is None:
+            self.inspector.addRow(plain_label(tr("Reading your images (sandbox-ai images list)…"), role="secondary"))
+        entry = next((e for e in getattr(self, "user_images", None) or [] if e.get("name") == props.get("image")), None)
+        if entry is not None:
+            self.inspector.addRow(tr("Pinned as"), plain_label(printable(entry.get("image") or ""), selectable=True))
+
+        def number_list(text):
+            return [int(part) for part in re.split(r"[\s,]+", text.strip()) if part.isdigit()]
+        ports = QLineEdit(", ".join(str(p) for p in props.get("ports") or []))
+        ports.setPlaceholderText(tr("e.g. 5432 (the agent reaches it at localhost:5432)"))
+        ports.editingFinished.connect(lambda: update(ports=number_list(ports.text())))
+        self.inspector.addRow(tr("Ports"), ports)
+        ready = QLineEdit("" if props.get("ready") is None else str(props["ready"]))
+        ready.setPlaceholderText(tr("the first port; none: do not wait"))
+        ready.setToolTip(tr("The agent starts once this port accepts connections"))
+
+        def ready_value():
+            text = ready.text().strip()
+            return int(text) if text.isdigit() else "none" if text == "none" else None
+        ready.editingFinished.connect(lambda: update(ready=ready_value()))
+        self.inspector.addRow(tr("Ready when"), ready)
+        timeout = QLineEdit(str(props.get("ready_timeout", B.SERVICE_DEFAULTS["ready_timeout"])))
+        timeout.editingFinished.connect(lambda: update(ready_timeout=int(timeout.text()) if timeout.text().strip()
+                                                       .isdigit() else B.SERVICE_DEFAULTS["ready_timeout"]))
+        self.inspector.addRow(tr("Wait at most (s)"), timeout)
+        env = LinesEdit([(f"{e['name']}" if e.get("from_host") else f"{e['name']}={e.get('value', '')}")
+                         for e in props.get("env") or []])
+        env.setPlaceholderText(tr("KEY=VALUE per line (nothing secret: it is in the project file); KEY alone passes "
+                                  "your variable"))
+
+        def env_values():
+            found = []
+            for line in env.values():
+                key, has_value, value = line.partition("=")
+                found.append({"name": key.strip(), "value": value} if has_value else
+                             {"name": key.strip(), "from_host": True})
+            return found
+        env.changed.connect(lambda _values: update(env=env_values()))
+        self.inspector.addRow(tr("Variables"), env)
+        secrets = LinesEdit([e["name"] if (e.get("secret") or e["name"]) == e["name"] else f"{e['name']}={e['secret']}"
+                             for e in props.get("secrets") or []])
+        secrets.setPlaceholderText(tr("KEY=SECRET per line: KEY gets the secret SECRET of sandbox-ai secrets (only "
+                                      "its name is kept)"))
+
+        def secret_values():
+            found = []
+            for line in secrets.values():
+                key, _, secret = line.partition("=")
+                found.append({"name": key.strip(), "secret": secret.strip() or key.strip()})
+            return found
+        secrets.changed.connect(lambda _values: update(secrets=secret_values()))
+        self.inspector.addRow(tr("Secrets"), secrets)
+        data = LinesEdit(list(props.get("data") or []))
+        data.setPlaceholderText(tr("a writable folder per line, e.g. /data"))
+        data.changed.connect(lambda values: update(data=[v.strip() for v in values if v.strip()],
+                                                   keep=bool(values) and bool(self.board.node(node_id).props.get(
+                                                       "keep"))))
+        self.inspector.addRow(tr("Data folders"), data)
+        keep = QCheckBox(tr("keep the data with the start (a Podman volume; else a tmpfs that goes with the run)"))
+        keep.setChecked(bool(props.get("keep")))
+        keep.setEnabled(bool(props.get("data")))
+        keep.toggled.connect(lambda on: update(keep=bool(on)))
+        self.inspector.addRow("", keep)
+        user = QLineEdit(str(props.get("user") or ""))
+        user.setPlaceholderText(tr("the image's own user; UID or UID:GID"))
+        user.editingFinished.connect(lambda: update(user=user.text().strip() or None))
+        self.inspector.addRow(tr("User"), user)
+        read_only = QCheckBox(tr("read-only root file system"))
+        read_only.setChecked(props.get("read_only", True) is not False)
+        read_only.toggled.connect(lambda on: update(read_only=bool(on)))
+        self.inspector.addRow("", read_only)
+        for key, label, hint in (("memory", tr("Memory"), "512m"), ("cpus", tr("CPUs"), "1"),
+                                 ("pids", tr("Processes"), "256")):
+            edit = QLineEdit(str(props.get(key, B.SERVICE_DEFAULTS[key])))
+            edit.setPlaceholderText(hint)
+
+            def changed(edit=edit, key=key):
+                text = edit.text().strip() or str(B.SERVICE_DEFAULTS[key])
+                update(**{key: int(text) if key == "pids" and text.isdigit() else text})
+            edit.editingFinished.connect(changed)
+            self.inspector.addRow(label, edit)
+        self.inspector.addRow(tr("Option"), plain_label("--service " + B.service_spec(self.board.node(node_id).props),
+                                                        selectable=True))
+
+    def add_user_image(self, node_id, how):
+        """Add one of your images from the service's properties (the Images page's dialogs, its command in the
+        background); the service then uses it."""
+        from .images_page import BuildImageDialog, PullDialog
+        host = self.host()
+        taken = sorted(self.user_image_names() or ())
+        dialog = PullDialog(self, taken) if how == "pull" else BuildImageDialog(self, taken, local=host == LOCAL)
+        if not dialog.exec():
+            return
+        name = dialog.chosen_name() if how == "pull" else dialog.name.text().strip()
+        command = AsyncCommand(timeout=7200 if how == "build" else 3600, parent=self)
+        self.image_commands = [c for c in getattr(self, "image_commands", []) if c is not command] + [command]
+
+        def done(status, out, err):
+            self.image_commands = [c for c in self.image_commands if c is not command]
+            if status != 0:
+                warn(self, tr("Board"), tr("sandbox-ai did not add the image {name}.", name=name),
+                     details=printable((err or out).strip()[-3000:]), modal=False)
+                return
+            self.user_images = None
+            self.load_user_images()
+            current = self.board.node(node_id)
+            if current is not None and host == self.host():
+                self.set_prop(node_id, "image", name)
+            self.show_notice(tr("{name} is added, pinned. It is UNCHECKED: nobody reviewed it.", name=name))
+        command.finished.connect(done)
+        command.start(self.sai.host_command(host, *dialog.argv()))
+        self.show_notice(tr("Adding the image {name}…", name=name))
+
+    def engine_rows(self, node):
+        """Beside the engine's options: the chosen variant's base, when it is one of your images (UNCHECKED)."""
+        variant = node.props.get("--image-variant")
+        if getattr(self, "image_bases", None) is None:
+            self.load_user_images()
+        base = (getattr(self, "image_bases", None) or {}).get(variant) if variant else None
+        if base:
+            self.inspector.addRow(plain_label(tr(
+                "The variant {name} is built on your image {base}, UNCHECKED: the sandbox's own supervisor (its "
+                "firewall, connection proxy and approvals) runs from that image's programs. The security modes high "
+                "and paranoid refuse it.", name=printable(variant), base=printable(base)), role="notice-error",
+                selectable=True))
 
     # -- kits --
 
@@ -2425,6 +2817,93 @@ class BoardPage(Prerequisites, QWidget):
             box.toggled.connect(toggled)
         self.disable_if_forbidden(holder, "--kit")
         self.inspector.addRow(OL.shown(tr("Kits (--kit)")), holder)
+
+    def allow_past_tor(self):
+        """The launcher refused a model server of the local network behind Tor and named the --vpn-bypass-tcp it
+        needs: after one question, exactly that address and port go into the VPN part."""
+        target = self.bypass_target
+        # The board changed since the verdict that offered it (an edit meanwhile): the next verdict says anew.
+        if not target or self.bypass_state != self.board.state():
+            return
+        if not confirm(self, tr("Past Tor"), tr(
+                "Reach {target} directly, past Tor? Only this address and port of your network: the rest of your "
+                "network stays closed, everything else still goes through Tor, and the connection proxy still checks "
+                "and logs it. Whatever listens there (a model server, your machine) could reach the internet from "
+                "your own address.", target=target), tr("Allow")):
+            return
+
+        def update():
+            vpn = self.board.first("vpn")
+            if vpn is None:  # Tor from a preset or the project file: the option still goes with the VPN part
+                vpn = self.board.add("vpn")
+                vpn.x, vpn.y = B.snap(40.0, self.grid()), B.snap(40.0 + 110.0 * len(self.board.nodes) % 700,
+                                                                self.grid())
+            values = list(vpn.props.get("--vpn-bypass-tcp") or [])
+            if target not in values:
+                vpn.props["--vpn-bypass-tcp"] = values + [target]
+        self.change(tr("Reach {target} past Tor", target=target), update)
+
+    def clone_to_project(self, directory=None):
+        """The board shown now as the board of another project folder DIRECTORY (asked for): the same parts and
+        options, its workspace that folder instead of this one; not applied yet (Apply writes its .sandbox-ai.json
+        after showing it). A folder that has a project file already is opened, never overwritten."""
+        if directory is None:
+            directory = choose_folder(self, tr("Folder of the new project"), "project")
+        if not directory:
+            return False
+        directory = os.path.abspath(os.path.expanduser(str(directory)))
+        if self.key_of(directory) == self.key_of(self.directory):
+            inform(self, tr("Clone"), tr("Choose another folder than this project's."))
+            return False
+        if os.path.exists(os.path.join(directory, ".sandbox-ai.json")):
+            warn(self, tr("Clone"), tr("{path} has a project file already: open it instead (Open project folder…).",
+                                       path=printable(directory)))
+            return False
+        # That folder's board kept with changes not applied (its tab, another project's board) is replaced: asked.
+        if self.dirty_for(directory) and not ask_first(
+                self, "board-discard", tr("Changes not applied"),
+                tr("The board of {path} has changes that are not applied. Drop them?", path=printable(directory)),
+                tr("Drop the changes"), reject=tr("Keep them")):
+            return False
+        old_directory = self.directory
+        board = B.Board.from_state(self.board.state())
+        # Apply writes into the first workspace: that one becomes the folder (also when it was not this project's
+        # folder, or the board had none - the clone's Apply wrote into the old workspace then), and every workspace
+        # that was the same folder with it.
+        main = next((n for n in board.included() if n.kind == "workspace" and str(n.props.get("path", "")).strip()),
+                    None)
+        before = main.props.get("path") if main is not None else old_directory
+        for node in board.of_kind("workspace"):
+            if node is main or (before and self.key_of(node.props.get("path")) == self.key_of(before)):
+                node.props["path"] = directory
+        key = self.key_of(directory)
+        self.restored.add(key)  # a draft once kept for that folder does not replace the clone
+        # A clone of a board from a project file nobody trusted is not trusted either: it carries that file's keys no
+        # part of the board shows (its security mode, canaries, ...), and Start ran them unasked. Apply (it shows
+        # everything it trusts) lifts it, as for the original.
+        untrusted = self.untrusted.get(self.key_of(old_directory)) if old_directory else None
+        self.sources[key] = {"digest": None, "trusted": not untrusted}
+        if untrusted:
+            self.untrusted[key] = untrusted
+        else:
+            self.untrusted.pop(key, None)
+        self.load(board, directory, positioned=True)
+        self.undo.resetClean()  # not applied: Apply writes the project file
+        self.show_notice(tr("A clone of {old}: Apply writes .sandbox-ai.json into {new}.",
+                            old=printable(old_directory or tr("this board")), new=printable(directory)), "notice-ok")
+        return True
+
+    def clone_to_session(self):
+        """The next Start starts this setup as a new session: as a session, under a new codename (or the name
+        typed)."""
+        controls = self.start_controls
+        controls.as_session.setChecked(True)
+        controls.name.clear()
+        controls.new_name()
+        controls.name.setFocus()
+        self.show_notice(tr("Start now starts this setup as the new session {name} (or the name you type).",
+                            name=controls.suggestion or "…"), "notice-ok")
+        return True
 
     def enable_kit(self, directory, name):
         """Use kit NAME in the project DIRECTORY: the board of that project gets it in its kits node, and Apply
@@ -2744,6 +3223,76 @@ class BoardPage(Prerequisites, QWidget):
                 node.props["readonly"] = bool(on)
         self.change(tr("Change {name}", name="--workspace-ro"), update)
 
+    def mcp_limit_rows(self, node, definition):
+        """The MCP node's own limits for this board's starts (--mcp-limits): empty fields show the server's own (its
+        defaults for every start) as such; a value typed in is checked at once by sandbox-ai's rules and kept only when
+        valid; Reset to defaults empties them. Defaults for every start…: the server's Properties (MCP page)."""
+        node_id = node.id
+        mcp = MF.mcp_module(self.sai)
+        defaults = B.mcp_defaults(self.sai, definition) if self.host() == LOCAL else None
+        fields = MF.LimitsFields(MF.limit_checks(mcp), defaults, node.props.get("limits") or {},
+                                 default_text=tr("the server's own"))
+        fields.setToolTip(tr("This board's limits for the server (--mcp-limits); empty: the server's own. Other "
+                             "limits give this board's starts an instance of the server of their own."))
+
+        def commit():
+            values = {key: str(value) for key, value in fields.values().items()}
+            self.set_prop(node_id, "limits", values or None)
+        fields.committed.connect(commit)
+        self.inspector.addRow(tr("Limits for this board"), fields)
+        if not B.launcher_knows(self.sai, "--mcp-limits"):
+            fields.setEnabled(False)
+            self.inspector.addRow("", plain_label(tr("This sandbox-ai has no --mcp-limits: the server runs with its "
+                                                     "own limits."), role="notice-warn"))
+        if node.props.get("project") or not node.props.get("name"):
+            return
+        server = QPushButton(tr("Defaults for every start…"))
+        server.setToolTip(tr("The server's own limits, network and folders (the MCP page's Properties…)"))
+        server.clicked.connect(lambda _=False, name=node.props.get("name"): self.server_properties.emit(
+            str(name), self.host()))
+        self.inspector.addRow("", server)
+
+    def llm_param_rows(self, node):
+        """The LLM node's own parameters for this board's starts (--llm-param KEY=VALUE, forced for them): empty fields
+        leave the server's own (sandbox-ai llm set, the LLM servers page's Parameters…); a value typed in is checked at
+        once against sandbox-ai's catalogue (names, types, ranges) and kept only when valid; Reset to defaults empties
+        them."""
+        from . import llm_params as LP
+        from . import llm_params_view as LPV
+        node_id = node.id
+        catalogue = LP.local_catalogue(self.sai)
+        if catalogue is None:
+            self.inspector.addRow("", plain_label(tr("This sandbox-ai has no model parameters (sandbox-ai llm "
+                                                     "params): the server's own hold."), role="notice-warn"))
+            return
+        params = node.props.get("params") if isinstance(node.props.get("params"), dict) else {}
+        fields = LPV.ParamsFields(catalogue, {k: v for k, v in params.items() if not k.startswith("loop_guard.")},
+                                  force=False, default_text=tr("the server's own"))
+        fields.setToolTip(tr("This board's model parameters (--llm-param): in place of the agent's and the server's "
+                             "own for these starts; empty: the server's (its Parameters… on the LLM servers page)."))
+        spec = LP.loop_spec(self.sai)
+        layers = LPV.LoopFields(spec, {k[11:]: v for k, v in params.items() if k.startswith("loop_guard.")}) \
+            if spec is not None else None
+
+        def commit():
+            if not fields.valid() or layers is not None and not layers.valid():
+                return
+            values = dict(fields.texts())
+            values.update({f"loop_guard.{k}": v for k, v in (layers.texts() if layers is not None else {}).items()})
+            self.set_prop(node_id, "params", values or None)
+        fields.committed.connect(commit)
+        self.inspector.addRow(tr("Model parameters for this board"), fields)
+        if layers is not None:
+            layers.committed.connect(commit)
+            layers.setToolTip(tr("This board's loop guard (--llm-param loop_guard.LAYER=VALUE); empty: the server's"))
+            self.inspector.addRow(tr("Loop guard for this board"), layers)
+        if not B.launcher_knows(self.sai, "--llm-param"):
+            fields.setEnabled(False)
+            if layers is not None:
+                layers.setEnabled(False)
+            self.inspector.addRow("", plain_label(tr("This sandbox-ai has no --llm-param: the server's own parameters "
+                                                     "hold."), role="notice-warn"))
+
     def mcp_names(self):
         try:
             return sorted(self.sai.mcp_definitions())
@@ -2755,6 +3304,20 @@ class BoardPage(Prerequisites, QWidget):
         the project's own (.sandbox-ai.json) and, once read, the catalogs' entries not added yet (marked: they are
         added on the MCP page first). A name may still be typed (a server of another host)."""
         node_id = node.id
+        combo = self.mcp_combo(node.props.get("name", ""))
+
+        def chosen(_index=None):
+            data = combo.currentData()
+            text = data if isinstance(data, str) and combo.currentText() == combo.itemText(combo.currentIndex()) \
+                else combo.currentText()
+            self.set_prop(node_id, "name", str(text or "").strip())
+        combo.activated.connect(chosen)
+        combo.lineEdit().editingFinished.connect(chosen)
+        return combo
+
+    def mcp_combo(self, current):
+        """An editable combo box of every MCP server there is to choose from (see mcp_chooser), CURRENT chosen (or
+        typed in when it lists no such server); its items' data are the names. The inspector and the guide use it."""
         combo = QComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -2773,21 +3336,12 @@ class BoardPage(Prerequisites, QWidget):
             combo.addItem(tr("{name} (catalog: add it on the MCP page first)", name=name), name)
             combo.setItemData(index, tr("Not added yet: the MCP page adds it from its catalog"),
                               Qt.ItemDataRole.ToolTipRole)
-        current = node.props.get("name", "")
         index = combo.findData(current)
         if index >= 0:
             combo.setCurrentIndex(index)
         else:
             combo.setCurrentIndex(-1)
             combo.setEditText(current)
-
-        def chosen(_index=None):
-            data = combo.currentData()
-            text = data if isinstance(data, str) and combo.currentText() == combo.itemText(combo.currentIndex()) \
-                else combo.currentText()
-            self.set_prop(node_id, "name", str(text or "").strip())
-        combo.activated.connect(chosen)
-        combo.lineEdit().editingFinished.connect(chosen)
         return combo
 
     def load_mcp_catalog(self):
@@ -2881,6 +3435,7 @@ class BoardPage(Prerequisites, QWidget):
     def load(self, board, directory, positioned=False):
         """Show BOARD for the project DIRECTORY, laid out (its saved layout, if any) unless POSITIONED (a
         preset: its own positions)."""
+        self.own_preset = None  # another board: no preset of yours it came from (new_from_preset sets it after)
         if self.key_of(directory) != self.key_of(self.directory):
             self.stash()  # the project shown until now keeps its board
             old = self.sessions.pop(self.key_of(directory), None)  # replaced by what is loaded now
@@ -3078,11 +3633,32 @@ class BoardPage(Prerequisites, QWidget):
         board = presets.build(self.sai, preset, directory, agent=self.default_agent(), values=values,
                               grid=self.grid(), backend=self.settings().get("default_backend"))
         self.load(board, directory, positioned=True)
+        self.own_preset = preset if preset.source == "mine" else None  # (Save as preset… offers to update it)
         if B.placeholders(board) and values is not None:  # values given and some left empty: asked again, by name
             self.fill_in()
         self.say_left_to_fill()
         self.check_prerequisites(why="preset")  # what the preset needs (an identity, an image variant) made now
         return board
+
+    def save_as_preset(self, choices=None):
+        """The board as a preset of yours (SavePresetDialog unless CHOICES: name, description of several lines,
+        category, notes, the folders and values kept by default); made from one of yours (own_preset), it replaces that
+        one after asking, unless unticked. The preset, or None."""
+        from . import presets as PR
+        from .preset_gallery import SavePresetDialog, save_board_preset
+        mine = {p.id: p for p in PR.load_mine(self.sai)[0]}
+        current = mine.get(self.own_preset.id) if getattr(self, "own_preset", None) is not None else None
+        if choices is None:
+            dialog = SavePresetDialog(self, self.sai, current)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            choices = dialog.choices()
+        preset = save_board_preset(self, self.sai, self.board, choices, replacing=current)
+        if preset is not None:
+            self.own_preset = preset
+            self.show_notice(tr("Saved as your preset {name}: New from preset… lists it under My presets.",
+                                name=printable(preset.title)), "notice-ok")
+        return preset
 
     def prerequisite_argv(self):
         """The launcher options the board starts with (what prerequisites.Prerequisites reads its needs from)."""
@@ -3183,6 +3759,7 @@ class BoardPage(Prerequisites, QWidget):
                                         "it and what changes")))
         self.host_note.setVisible(remote)
         self.llm_servers = None  # the agent's Model server: that host's servers, read again (load_llm_servers)
+        self.user_images, self.image_bases = None, None  # that host's images and variants, read again
         if remote:
             self.host_note.setText(tr("Starts on {host}: folders and files are {host}'s (typed in; nothing of this "
                                       "computer is chosen), and its sandbox-ai checks the board.",

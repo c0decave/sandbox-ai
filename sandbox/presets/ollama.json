@@ -4,6 +4,12 @@
   "id": "ollama",
   "title": "Ollama",
   "description": "The agent works with a model on your Ollama server instead of the cloud: only the server's address is opened, nothing else.",
+  "translations": {
+    "de": {
+      "title": "Ollama",
+      "description": "Der Agent arbeitet mit einem Modell auf Ihrem Ollama-Server statt in der Cloud: nur die Adresse des Servers ist offen, sonst nichts."
+    }
+  },
   "category": "llm",
   "agents": [
     "claude",

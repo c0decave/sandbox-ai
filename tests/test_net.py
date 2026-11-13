@@ -82,8 +82,8 @@ def test_list_and_show(sandbox, tmp_path):
     assert json.loads("\n".join(lines))[0]["run"] == "codex-1234abcd"
     assert json.loads("\n".join(lines))[0]["name"] is None  # registered by an older version: no name
     status, lines = run_net(["show", "--json"])
-    assert json.loads("\n".join(lines)) == {"run": "codex-1234abcd", "all_ports": [], "dns": [], "git": [], "host_ports": [],
-                                            "https": [], "tcp": [], "host_wildcards": []}
+    assert json.loads("\n".join(lines)) == {"run": "codex-1234abcd", "cut": None, "all_ports": [], "dns": [], "git": [], "api_keys": [],
+                                            "host_ports": [], "https": [], "tcp": [], "host_wildcards": []}
 
 
 def test_allow_host_reaches_firewall_proxy_and_hosts_in_place(sandbox):

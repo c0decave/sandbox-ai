@@ -1,0 +1,36 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "infrastructure",
+  "title": "Infrastructure as code",
+  "description": "Terraform and OpenTofu: their registries and releases and GitHub open; no cloud's API and none of your cloud logins: validate, lint and plan offline.",
+  "translations": {
+    "de": {
+      "title": "Infrastructure as Code",
+      "description": "Terraform und OpenTofu: ihre Registries und Releases und GitHub offen; keine Cloud-API und keines Ihrer Cloud-Logins: offline prüfen, linten und planen."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-github",
+    "--allow-host",
+    "registry.terraform.io",
+    "--allow-host",
+    "releases.hashicorp.com",
+    "--allow-host",
+    "registry.opentofu.org",
+    "--allow-host",
+    "get.opentofu.org"
+  ],
+  "prompt": "Review this infrastructure code: run fmt and validate (terraform or tofu), find what is unsafe or wasteful (open security groups, public buckets, secrets in variables, missing encryption, pinned versions missing) and fix it. No apply, no cloud credentials: say what a plan against the real cloud would need.",
+  "notes": [
+    "Terraform or OpenTofu from their releases into the sandbox's HOME (kept with the start); the providers come from the registries, OpenTofu's from GitHub's releases.",
+    "A plan against a real cloud needs its API host and a login: --allow-host for the API and --secret-env NAME (sandbox-ai secrets) on the command line, on purpose not in this preset. Never --copy your cloud's credential files in.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

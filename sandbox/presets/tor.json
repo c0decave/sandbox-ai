@@ -4,6 +4,12 @@
   "id": "tor",
   "title": "Everything through Tor",
   "description": "Every connection of the sandbox and of its MCP servers, the agent's own API connections included, leaves through Tor; lookups go to Tor's resolver and .onion names work. Checked before the agent starts and again during the run: an address that is no Tor exit stops it. The allow-list, approvals and the connection proxy apply as always.",
+  "translations": {
+    "de": {
+      "title": "Alles über Tor",
+      "description": "Jede Verbindung der Sandbox und ihrer MCP-Server, auch die API-Verbindungen des Agenten, geht über Tor; Namen löst Tors Resolver auf, .onion-Namen funktionieren. Geprüft vor dem Start des Agenten und erneut während des Laufs: eine Adresse, die kein Tor-Exit ist, beendet ihn. Freigabeliste, Rückfragen und der Verbindungs-Proxy gelten wie immer."
+    }
+  },
   "category": "privacy",
   "agents": [
     "claude",
@@ -32,7 +38,7 @@
     "Nothing of the start reaches your own address: no URL of the agent opens in your browser (open it in Tor Browser), names allowed during the run are looked up through Tor, and the host's ports (--allow-host-port, an --llm server on this host, a Git server on localhost) are refused, since whatever listens there reaches the internet from your address; --vpn-bypass-host-ports lets them in when you mean it. An --llm server in your local network cannot be reached (Tor's exits refuse private addresses).",
     "TCP over IPv4 only: no UDP (no QUIC, ping or NTP) and no IPv6; slower than without, and many sites, the agent's provider among them, may refuse or challenge Tor exits.",
     ".onion names resolve into 10.192.0.0/10 and connect through Tor; with --dns (set here) every .onion the agent looks up, not only those of its allow-list.",
-    "With --socks in the profile, 127.0.0.1:9050 in the sandbox is Tor's SocksPort for programs that speak SOCKS (curl --socks5-hostname, torsocks, Tor Browser with TOR_SKIP_LAUNCH=1); what goes through it passes the connection proxy by. torsocks and Tor Browser in the agent's image: sandbox-ai images recipe tor --from AGENT && sandbox-ai build --variant tor, then add --image-variant tor.",
+    "With --socks in the profile (sandbox-ai vpn add NAME --tor --socks), 127.0.0.1:9050 in the sandbox is Tor's SocksPort for programs that speak SOCKS (curl --socks5-hostname, torsocks, Tor Browser with TOR_SKIP_LAUNCH=1); what goes through it passes the connection proxy by. torsocks and Tor Browser in the agent's image: sandbox-ai images recipe tor --from AGENT && sandbox-ai build --variant tor, then add --image-variant tor.",
     "The exit relay sees what is not encrypted: use HTTPS. Podman only (the tunnel runs in a container of the pod)."
   ]
 }

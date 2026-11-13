@@ -1,0 +1,7 @@
+HyperFrames (HeyGen, Apache-2.0) 0.8.214: video from HTML - compositions, captions, voice-overs, the CLI, the registry, media, Figma, slideshows, Remotion ports (7 skills) - for Claude Code, Codex and OpenCode.
+
+Built-in kit `hyperframes` of sandbox-ai, off unless a start names it: `sandbox-ai claude --kit hyperframes` (or codex, opencode), `"options": ["--kit", "hyperframes"]` in a project's .sandbox-ai.json, or the app's Kits & plugins page (Use in the current project). Skills: figma, hyperframes, hyperframes-cli, hyperframes-registry, media-use, remotion-to-hyperframes, slideshow.
+
+Its telemetry (PostHog), update checks and installs at run time are off in every sandbox (sandbox-ai sets HYPERFRAMES_NO_TELEMETRY, DO_NOT_TRACK, HYPERFRAMES_NO_UPDATE_CHECK, HYPERFRAMES_NO_AUTO_INSTALL, HYPERFRAMES_NO_OPTIONAL_INSTALL, HYPERFRAMES_SKIP_SKILLS unless --telemetry on). The CLI is not in the agent images: `sandbox-ai images recipe hyperframes --from AGENT` builds a variant with hyperframes 0.8.214 and its 125 npm packages pinned by their SHA-512, Chromium and FFmpeg from Debian. Left out: the skills' tests and Remotion's test corpus.
+
+Upstream: https://github.com/heygen-com/hyperframes at cfa653af4d0f95d751286fb25c8d38bdb56ef663 (2026-10-28T23:27:27+00:00), licence Apache-2.0. The files are unchanged; kit.json lists each with its SHA-256 and git blob id. Review: docs/skills-review.md.

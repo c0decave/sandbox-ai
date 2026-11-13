@@ -4,7 +4,13 @@
   "id": "hardware-analysis",
   "title": "Hardware analysis",
   "description": "A device's serial console, by default sandbox-ai's emulated SB-42 sensor node: identify it, read its boot, note bootloader, firmware and flash layout; the agent reaches only its provider and the device.",
-  "category": "analysis",
+  "translations": {
+    "de": {
+      "title": "Hardware-Analyse",
+      "description": "Die serielle Konsole eines Geräts, standardmäßig der emulierte SB-42-Sensorknoten von sandbox-ai: es erkennen, seinen Start lesen, Bootloader, Firmware und Flash-Aufteilung notieren; der Agent erreicht nur seinen Anbieter und das Gerät."
+    }
+  },
+  "category": "hardware",
   "agents": [
     "claude",
     "codex",

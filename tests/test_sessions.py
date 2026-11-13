@@ -1505,3 +1505,22 @@ def test_a_host_that_cannot_say_whether_it_has_the_session_never_loses_it(monkey
     assert m.copy_to_host("work", "ct1", run=remote, out=lines.append) == 1
     assert "could not be told" in "\n".join(lines)
     assert ["session", "delete", "work", "--yes"] not in remote.calls and "work" in remote.sessions
+
+
+def test_launch_records_the_app_tab_it_was_started_in(tmp_path, monkeypatch):
+    """The desktop app sets SANDBOX_AI_APP_TAB in each terminal tab: a start (or resume) there records it, so that
+    the app attaches a tab for it again after a restart; started elsewhere it records none (an old one goes)."""
+    data = make_session("s")
+    monkeypatch.setattr(m, "clear_stale_pod", lambda name, d: None)
+
+    def popen(cmd, **kwargs):
+        (m.session_dir("s") / "tmux" / "attach.sock").touch()
+        return Mock(pid=4243, poll=Mock(return_value=None))
+    monkeypatch.setattr(m.subprocess, "Popen", popen)
+    monkeypatch.setenv("SANDBOX_AI_APP_TAB", "0123456789abcdef")
+    assert m.launch("s", data, []) == 0
+    assert m.load("s")["app_tab"] == "0123456789abcdef"
+    for value in ("", "short", "no spaces allowed here", "x" * 65):
+        monkeypatch.setenv("SANDBOX_AI_APP_TAB", value)
+        assert m.launch("s", m.load("s"), []) == 0
+        assert "app_tab" not in m.load("s"), value

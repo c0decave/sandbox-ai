@@ -1,0 +1,1387 @@
+{
+ "$comment": "Provenance of the files vendored into this built-in kit (sandbox-ai). Each file is the upstream file at the pinned commit, unchanged: its git blob id matches `git ls-tree -r COMMIT` upstream. The review: docs/skills-review.md.",
+ "name": "hyperframes",
+ "agents": [
+  "claude",
+  "codex",
+  "opencode"
+ ],
+ "default": "off",
+ "upstream": {
+  "repository": "https://github.com/heygen-com/hyperframes",
+  "commit": "cfa653af4d0f95d751286fb25c8d38bdb56ef663",
+  "committed": "2026-10-28T23:27:27+00:00",
+  "version": "0.8.214",
+  "license": "Apache-2.0"
+ },
+ "skills": {
+  "hyperframes": "skills/hyperframes",
+  "hyperframes-cli": "skills/hyperframes-cli",
+  "hyperframes-registry": "skills/hyperframes-registry",
+  "media-use": "skills/media-use",
+  "figma": "skills/figma",
+  "slideshow": "skills/slideshow",
+  "remotion-to-hyperframes": "skills/remotion-to-hyperframes"
+ },
+ "left_out": [
+  "skills/hyperframes/scripts/lib/main-module.test.mjs",
+  "skills/hyperframes/scripts/plugin-cli.test.mjs",
+  "skills/media-use/.gitignore",
+  "skills/media-use/audio/scripts/audio.test.mjs",
+  "skills/media-use/audio/scripts/carve.test.mjs",
+  "skills/media-use/audio/scripts/gemini-pipeline.test.mjs",
+  "skills/media-use/audio/scripts/heygen-tts.test.mjs",
+  "skills/media-use/audio/scripts/heygen-voice.test.mjs",
+  "skills/media-use/audio/scripts/lib/audio-meta.test.mjs",
+  "skills/media-use/audio/scripts/lib/bgm.test.mjs",
+  "skills/media-use/audio/scripts/lib/concurrency.test.mjs",
+  "skills/media-use/audio/scripts/lib/gemini-auth.test.mjs",
+  "skills/media-use/audio/scripts/lib/gemini-auth_test.py",
+  "skills/media-use/audio/scripts/lib/gemini-tts.test.mjs",
+  "skills/media-use/audio/scripts/lib/heygen.test.mjs",
+  "skills/media-use/audio/scripts/lib/media-record.test.mjs",
+  "skills/media-use/audio/scripts/lib/python.test.mjs",
+  "skills/media-use/audio/scripts/lib/sfx.test.mjs",
+  "skills/media-use/audio/scripts/lib/tts.cleanup.test.mjs",
+  "skills/media-use/audio/scripts/lib/tts.spawn.test.mjs",
+  "skills/media-use/audio/scripts/lib/tts.test.mjs",
+  "skills/media-use/audio/scripts/wait-bgm.test.mjs",
+  "skills/media-use/scripts/compatibility.test.mjs",
+  "skills/media-use/scripts/dither.test.mjs",
+  "skills/media-use/scripts/lib/telemetry.test.mjs",
+  "skills/media-use/scripts/resolve-plugin.test.mjs",
+  "skills/media-use/scripts/transcribe.test.mjs",
+  "skills/media-use/scripts/transcript-cut.test.mjs",
+  "skills/remotion-to-hyperframes/assets/.gitkeep",
+  "skills/remotion-to-hyperframes/assets/test-corpus/.gitignore",
+  "skills/remotion-to-hyperframes/assets/test-corpus/run.sh",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/.gitignore",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/README.md",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/expected.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/hf-src/compositions/title.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/hf-src/index.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/remotion-src/package.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/remotion-src/remotion.config.ts",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/remotion-src/src/Root.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/remotion-src/src/TitleCard.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/remotion-src/src/index.ts",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-1-title-card/remotion-src/tsconfig.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/.gitignore",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/README.md",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/expected.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/hf-src/compositions/scene-1.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/hf-src/compositions/scene-2.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/hf-src/compositions/scene-3.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/hf-src/index.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/remotion-src/package.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/remotion-src/remotion.config.ts",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/remotion-src/src/MultiScene.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/remotion-src/src/Root.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/remotion-src/src/index.ts",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/remotion-src/tsconfig.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-2-multi-scene/setup.sh",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/.gitignore",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/README.md",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/expected.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/hf-src/compositions/scene-1.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/hf-src/compositions/scene-2.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/hf-src/compositions/scene-3.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/hf-src/index.html",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/package.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/remotion.config.ts",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/Root.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/Stargazed.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/components/AnimatedNumber.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/components/StatCard.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/components/UnderlinedText.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/index.ts",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/scenes/OutroScene.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/scenes/StatsScene.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/src/scenes/TitleScene.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-3-data-driven/remotion-src/tsconfig.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/README.md",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/01-use-state.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/02-use-effect-deps.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/03-async-metadata.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/04-third-party-react.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/05-lambda-config.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/06-warnings-only.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/07-custom-hook.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/cases/08-mixed.tsx",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/expected.json",
+  "skills/remotion-to-hyperframes/assets/test-corpus/tier-4-escape-hatch/validate.sh",
+  "skills/remotion-to-hyperframes/scripts/.gitkeep",
+  "skills/remotion-to-hyperframes/scripts/tests/boxSizing.test.mjs",
+  "skills/remotion-to-hyperframes/scripts/tests/fixtures/blocker.tsx",
+  "skills/remotion-to-hyperframes/scripts/tests/fixtures/clean.tsx",
+  "skills/remotion-to-hyperframes/scripts/tests/smoke.sh"
+ ],
+ "files": {
+  "skills/hyperframes/SKILL.md": {
+   "upstream": "skills/hyperframes/SKILL.md",
+   "sha256": "96f3793bd677dde345c5aca4aa6484334100a154e8a5d9e2ad07d69c9b9e2b0e",
+   "blob": "6f4166472b0f0c6f26e4b3db6829ecf385686701",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/biennale-yellow/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/biennale-yellow/FRAME.md",
+   "sha256": "76d22cced9c152b0edb520543cf34c4ce772a312caa7211c40d4315b53c053cf",
+   "blob": "c082ea2fefdd47bd2679d72d6a50a3a41aa99eaf",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/biennale-yellow/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/biennale-yellow/caption-skin.html",
+   "sha256": "b0e4812d9cb5852969be276f8a98ffa2b293ba8cc902fababae3f3f6340088c3",
+   "blob": "dc103fcdfa63de12b51669f2a68b2b914e91cad2",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/biennale-yellow/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/biennale-yellow/frame-showcase.html",
+   "sha256": "5ba04e47cf9897e023dcfa49e1ec26fe26bac0c5061097dc6e7cb1d9ed46d7d0",
+   "blob": "186f8252ad7aeaa18d1fbed1680e4227f0a9ac23",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/blockframe/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/blockframe/FRAME.md",
+   "sha256": "ef8d9d47a209bed4ccc2d928c14a81cdaecb5129f5dc0cdc0dc40afc7ef92931",
+   "blob": "00e4d88318288c8c138716d266b13dcb31350d57",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/blockframe/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/blockframe/caption-skin.html",
+   "sha256": "a1073a9910efb0bd146d9ee4513ef95bd72c4993db399ccb4decf2d10002faab",
+   "blob": "e606041543020dadc570bb4e93db3ef1bc3102ec",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/blockframe/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/blockframe/frame-showcase.html",
+   "sha256": "8d2e4963713928b353d0aa28c2c83fce415df81b66a500c192b602c0aaf4ddf2",
+   "blob": "3f5a165072f67559e2c10bbd12d5cbb8bae820e5",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/blue-professional/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/blue-professional/FRAME.md",
+   "sha256": "62e9a445885f6057084493de385a8ce20c3b4a299ae36a553ef54884f06bad68",
+   "blob": "e821dee2dccc8e424ac160ca6714d561027cce46",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/blue-professional/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/blue-professional/caption-skin.html",
+   "sha256": "e2524d610d0c833f6b71355357c13b26e670ec581c28ce37d12ead15ce4297b4",
+   "blob": "c76013359d5fd893816fae4cdd0c3791ea159d4e",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/blue-professional/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/blue-professional/frame-showcase.html",
+   "sha256": "715b130d086977a48925a3c79bb079fbc7270274c9c9a7761bf275df3020b0ba",
+   "blob": "ff00e7be733ca18714a5b48c4f49669b68d17f5f",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/bold-poster/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/bold-poster/FRAME.md",
+   "sha256": "af756ef993099f9ac78328f676eb79a6572ff0e9c2aacf12787471cd4525b171",
+   "blob": "c9f31256cd127913c3ff2457811f8467639da539",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/bold-poster/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/bold-poster/caption-skin.html",
+   "sha256": "a19c81d30377687605e2345601efabba5315d0d4db13c3ab4748d7004778c24a",
+   "blob": "858dc91108890ac24c980f148545e2cfbb03d7ac",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/bold-poster/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/bold-poster/frame-showcase.html",
+   "sha256": "57bbc3374b6a8b37ce59e36ed784c22bbb88fd44d039955221913b3e1bacf159",
+   "blob": "a8f91897faa3b5b4c74108a6424fcf9290325cd6",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/broadside/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/broadside/FRAME.md",
+   "sha256": "3af0a1e5e61bece19841671672d7732082f03d5699b713475e90323a21dbcc89",
+   "blob": "4dff52def23bb5492844cbbc25a25c19909c6fc4",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/broadside/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/broadside/caption-skin.html",
+   "sha256": "f074e1a9662d48ec0008aff7fffa1bdeeda40c5c5e05db9bd0fa6dd2ecdc7a6b",
+   "blob": "5e90ac4215a59c11f361e11b75e345a7b58cbb2d",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/broadside/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/broadside/frame-showcase.html",
+   "sha256": "8d23a2cbeb898568a5626b38ffc864236fb4a09930d59b17c34c45f34c8e4161",
+   "blob": "0d2a6cd15266207ca6feed354cadd2b8eaa21670",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/capsule/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/capsule/FRAME.md",
+   "sha256": "f06dba67a3859f7c732b5177f7bcc58c94592caa5d6bbbcc6730a7876f5baa7a",
+   "blob": "a37f828c847c031f1603406ce1440a8fc2b4f803",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/capsule/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/capsule/caption-skin.html",
+   "sha256": "0e62f725051213512566b6f615c438b893a3b39507a5a2666a52938c8dd74e46",
+   "blob": "d15690d148784bd83255bdccde05ad907d989880",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/capsule/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/capsule/frame-showcase.html",
+   "sha256": "b3a642b5df3bbfb1ff227f1b82ee3ea02b51f20a0d7c5c46c97d72b180cddb4f",
+   "blob": "65b4e196dbf09cd76208df59daaf77b142bd1dba",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/cartesian/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/cartesian/FRAME.md",
+   "sha256": "3dc6a31813a333b2a7a1509ddbd3b4dabbbd7e12e6479b6cff10d69c185fec95",
+   "blob": "a00c21d9250ace9886fc835834993b9d63f64b3f",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/cartesian/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/cartesian/caption-skin.html",
+   "sha256": "e3e08147d1725d40576f4f97687ce0c6a4c32ee1b74dac2720f0ba652b9dfcfd",
+   "blob": "3738c67bf631474ad86ae8c703fa7f9a329bf186",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/cartesian/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/cartesian/frame-showcase.html",
+   "sha256": "d7867cee5e07c4f22345c566071f2ce0261b3fccca111a94dfbec5fde64f3e55",
+   "blob": "7918b04e9ddb4bfb924668f24470a24e1d4b9e71",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/cobalt-grid/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/cobalt-grid/FRAME.md",
+   "sha256": "62a6c9e6e5188cc29b9c0098e9bb8e72c23f152d9a99dd92c58139d26b69b19f",
+   "blob": "af52eec8f3cd86880530f4c0169c9cf422e31e4e",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/cobalt-grid/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/cobalt-grid/caption-skin.html",
+   "sha256": "5cc71d8f0669e80d12ccb6bb83722870eecfeccade0bf64f8fb165e23fbadf3f",
+   "blob": "4690790ad293fb97792585870089e0f09a31dcf1",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/cobalt-grid/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/cobalt-grid/frame-showcase.html",
+   "sha256": "b135214cd2e310273a01e3f72b2828149f022803954a22a13cbf27aa1c2f518a",
+   "blob": "d9449880f1a7b21ff30976dcdbd1d8a385cf3386",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/FRAME.md",
+   "sha256": "c24f6925cf938b88a93368443091440648e715c75ac38bd90abdaab6130bb4ad",
+   "blob": "e356faee0de6aeed96821318834b8c5c7640e696",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/caption-skin.html",
+   "sha256": "724a20adff3824e4d31d5d51cc094337209a896a5ef3ae1e4e28aa502ee980e4",
+   "blob": "89f43b4fe66f19693d661280636fb30f5fc64328",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/EBGaramond-400.woff2": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/EBGaramond-400.woff2",
+   "sha256": "b63448e2680a0dbde70ebb2f3de78f6c515122835491f938e8a8595b46f29210",
+   "blob": "ffed311d3ecff2090519c97c2e7149ccd96305b2",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/EBGaramond-700.woff2": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/EBGaramond-700.woff2",
+   "sha256": "5d0f8a497a48fd2a3611d07acc844f65c9fbb35419eafa4e1295f5f0f95f86e4",
+   "blob": "85d520902feaa6f8646f036bf1dbe6b901106e8f",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/Inter-400.woff2": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/Inter-400.woff2",
+   "sha256": "8909904ab6c872eb994093482a88a28eca2cd95912d7b6fecd72103b0dc07edc",
+   "blob": "f15b025d666269fb07daf0263e54231481e4289c",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/Inter-700.woff2": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/Inter-700.woff2",
+   "sha256": "6f56409fd3d64bb85f7d070bce20749db2d66b6d63cec586cc22d1c761be2491",
+   "blob": "a68fb101cd9224aa7bb6ca80356b5132c40c6f3f",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/JetBrainsMono-400.woff2": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/JetBrainsMono-400.woff2",
+   "sha256": "14425ba9c695763c1547f48a206b7aa60350a33ae23de09f0407877f3fcd89eb",
+   "blob": "585887339efd032b6b715466ae72d86e306bec79",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/JetBrainsMono-700.woff2": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/JetBrainsMono-700.woff2",
+   "sha256": "d0d4e818808f2a0ba39b2b09d1989366f63494e295f003c7ef436697378507e8",
+   "blob": "3a4e333fc9316f9989e16af6788bf1fc788c7084",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/OFL-eb-garamond.txt": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/OFL-eb-garamond.txt",
+   "sha256": "f03c8eda63076cd52317dcd40aa04db8472d4cb592dfaafa385129dfdafc7f9c",
+   "blob": "da3ca89595df81b16855b86a4d0d370f34a908fa",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/OFL-inter.txt": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/OFL-inter.txt",
+   "sha256": "3b0a5fca3d17942cde889069889dedbbbd075e9b599968c82a95f4d944e9b345",
+   "blob": "40589daa9de8bc96606292ea0be712ff0f0626eb",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/fonts/OFL-jetbrains-mono.txt": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/fonts/OFL-jetbrains-mono.txt",
+   "sha256": "403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b",
+   "blob": "8f7ed671137e7a27c646ead86f45d5cb4875f459",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/code-editorial/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/code-editorial/frame-showcase.html",
+   "sha256": "08d711f5409a6af3fb6de05febe47fee77e4c8e85517bf2d087e2277b524e4ab",
+   "blob": "e0a70eab89b1e20dc131153f04f0424d44b2acc1",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/coral/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/coral/FRAME.md",
+   "sha256": "8530ecb36d1bb2d53392d88d972df35beeba19a5bcb3260fc9b18a58de7cdfe8",
+   "blob": "0c73b04acba1d4b86e5285daa90273b5e346a3c9",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/coral/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/coral/caption-skin.html",
+   "sha256": "44904b0567292521391fb576f07de7d2f5d8bce81d0369460f1054d093a06877",
+   "blob": "d284d034e8111846b8fc284ec720874d17b4421a",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/coral/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/coral/frame-showcase.html",
+   "sha256": "8ddf31ae13a4e57fe9730892fbbcb171cae67a204b5cb00b00374984f49b8f76",
+   "blob": "ae87659f3b61426694e9e522f6573b28b1d6c4e7",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/creative-mode/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/creative-mode/FRAME.md",
+   "sha256": "c1a1359502d9fc79ef267305291fe0f651219c72d88088cee32327dd933dead8",
+   "blob": "e00e6fed67b6a1a1f366119714d548238427d752",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/creative-mode/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/creative-mode/caption-skin.html",
+   "sha256": "2a45f759d64f5f6713ad2d529468df5bb345afe7d441d46c6316072348c1061b",
+   "blob": "246cb38ed4ba87fc8190933cde56f9bccc6ad4ca",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/creative-mode/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/creative-mode/frame-showcase.html",
+   "sha256": "32c1371fcd526c56edb515e5b255ad736a3e330ba3ff2631c61576064b384ef0",
+   "blob": "e540e40a39733abced1ea3d249f692c0eca32832",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/daisy-days/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/daisy-days/FRAME.md",
+   "sha256": "42d827dbd279990052e171d04380b5e6bbc111ae391dc283deb7a452e70b9b97",
+   "blob": "ed3ebf49e0a0f78cb5ac543e5c175d8da4c07541",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/daisy-days/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/daisy-days/caption-skin.html",
+   "sha256": "5af839f607efb817d96956f3b016fd6fd065851f69ac1ac223a8634737bd497e",
+   "blob": "6a5141ec42eea884b58f68d66018cf8844b0f71a",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/daisy-days/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/daisy-days/frame-showcase.html",
+   "sha256": "4fb93e5fa3ba12367f303996b6ca8b62f8e18c721d02e8032274df12d49d96f3",
+   "blob": "c577bdbab3a1f023139349f3a63f2e5ff875b274",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/editorial-forest/FRAME.md": {
+   "upstream": "skills/hyperframes/assets/frame-presets/editorial-forest/FRAME.md",
+   "sha256": "ceeb2ab768367da1e1f3e1eca36ab9feeb3de3e4d15493319b0044c3d869329c",
+   "blob": "83e2594f6301b54d98569ad478417d6fbb0d95ed",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/editorial-forest/caption-skin.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/editorial-forest/caption-skin.html",
+   "sha256": "50427bf7fcec9c8ac22f195a0e7fc442ad85e733198837ee0b9b8050296a0fa5",
+   "blob": "7b79f3f8858fca156d4fcd3dccf9f47dc5ce3dbe",
+   "mode": "100644"
+  },
+  "skills/hyperframes/assets/frame-presets/editorial-forest/frame-showcase.html": {
+   "upstream": "skills/hyperframes/assets/frame-presets/editorial-forest/frame-showcase.html",
+   "sha256": "bb87b88b91184f4fee7f02eea63ed35d9d378fa89fad8988326e31e82a43dbb1",
+   "blob": "c5c08718fef48120a17ee7d7858e3bfe592c63e7",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/captions.md": {
+   "upstream": "skills/hyperframes/references/captions.md",
+   "sha256": "e7e2af7eace992487baa455bfa703fb3d770fb29f36732541554e60a46896d54",
+   "blob": "db13fc7e3ed25af4324ec7408aafb98c2f2d8f8f",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/film.md": {
+   "upstream": "skills/hyperframes/references/film.md",
+   "sha256": "b684403f725cf720b9f192bafd420ca55f24060114004234a4e46a715de7a183",
+   "blob": "ae6d515ebec77829dd56ceddd994f1d1b94f5306",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/format.md": {
+   "upstream": "skills/hyperframes/references/format.md",
+   "sha256": "babb5d4bfeffa8422c8e3474833a827a2a3dd95d234e8a37c130c4973d360533",
+   "blob": "1a64c00daf1d6bf9a7ab04ac774c59dab3f22f00",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/look.md": {
+   "upstream": "skills/hyperframes/references/look.md",
+   "sha256": "5128a54cdb75bca2f627170e4a3a9667f4f11cf1579301fc16c53862c29c3ad3",
+   "blob": "b20dc1480e3e1c22e05d8237ea12ca67409178ca",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/motion.md": {
+   "upstream": "skills/hyperframes/references/motion.md",
+   "sha256": "80b9bd70c011b7fc679f351cb41b993b16d610af1cda316eaf9d19bf9c08372f",
+   "blob": "a9f9e3c7a34bdb914b078dd64dbc113e0ae79c41",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/overlays.md": {
+   "upstream": "skills/hyperframes/references/overlays.md",
+   "sha256": "d87fa3d13e8e0dace593f4aafb68c085b7f4393eee468c7695a74d5665150da3",
+   "blob": "2f5f83a74157ffca2555318bdab6faa5880396c1",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/plugin-installation.md": {
+   "upstream": "skills/hyperframes/references/plugin-installation.md",
+   "sha256": "d3268edd1bbf2bc4e077108462aacff8c04bd2660472dd6ca9fd1bb32839b661",
+   "blob": "ad7809bb114f949148d1127f45ecaedde41126f9",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/review.md": {
+   "upstream": "skills/hyperframes/references/review.md",
+   "sha256": "90886b58db02aaa53e6b91c433748629eda061b18465804b56ebbbab92508e56",
+   "blob": "9dcef20320703ca2d65877949e3ae6d23552e719",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/runtimes.md": {
+   "upstream": "skills/hyperframes/references/runtimes.md",
+   "sha256": "ace12b068aa573717f68e7e3e2e333bed8fc692ba63434efaaf362073b3463b6",
+   "blob": "ed72ff2137900e15c2db8f9fc0ea5f0316a8ffe5",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/skill-lifecycle.md": {
+   "upstream": "skills/hyperframes/references/skill-lifecycle.md",
+   "sha256": "3039b344a4bc63118ff7680a1008bcc7bfc0637563e6ac69f59cc5e06a31874a",
+   "blob": "2f397f01147a8f952902890c33426ad818a4d5ff",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/sound.md": {
+   "upstream": "skills/hyperframes/references/sound.md",
+   "sha256": "be9e39ef947678b3ffed452063ce414af4a7d7c534b1e6c440bb5ce474d28ab4",
+   "blob": "8c252cabc4a8635fa1c73c26f7dd544eebdc9139",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/spec.md": {
+   "upstream": "skills/hyperframes/references/spec.md",
+   "sha256": "6fa0658c5cf5c23058f70a6549cc952d683979052a0934760ba748bbec88fbc0",
+   "blob": "ac756a0fab94c2d02acfba9b2bbff55ac058868c",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/story.md": {
+   "upstream": "skills/hyperframes/references/story.md",
+   "sha256": "3c2b96bb7f262652f4bf5efdef1ae806b47fd259c6704cb131938c5254965f22",
+   "blob": "528ca1d43151b2f41ae2e5e73215dc9dca6ccc48",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/storyboard-format.md": {
+   "upstream": "skills/hyperframes/references/storyboard-format.md",
+   "sha256": "f79e3be44cf2e506cdd2d1c46926319a0067f11889fe8aaf3a55759a9c61fb86",
+   "blob": "9653cd08240b90109a908bc9bdb240d69749953f",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/storyboard.md": {
+   "upstream": "skills/hyperframes/references/storyboard.md",
+   "sha256": "f757c6d2b26e1a3587a63a4a8f9aafab86d9507ed31579f4dda4279397742fe3",
+   "blob": "6d35319b2de5647c6335bb418442eeccde066857",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/3d.md": {
+   "upstream": "skills/hyperframes/references/types/3d.md",
+   "sha256": "1a8c965d36bac37c5625cd404b37c3d3913632cb858881d89741afacc560ea12",
+   "blob": "a0a2965e48cdc8965d23679474a54d01e25b482e",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/character.md": {
+   "upstream": "skills/hyperframes/references/types/character.md",
+   "sha256": "e8b4f6fd622acff593e2d7e478aa4e18ace1f9f785d16e42db5faf57ed525498",
+   "blob": "d2aea1fe9d7e68ffbdc98cb9a1dad03b414097b8",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/data.md": {
+   "upstream": "skills/hyperframes/references/types/data.md",
+   "sha256": "c5fda22433aca573b871eeff956cd57e3773d6b16ffd9b3cc5726937912c1b7a",
+   "blob": "3b6c6ede3071e0ce588d205172d0667e528439d3",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/explainer.md": {
+   "upstream": "skills/hyperframes/references/types/explainer.md",
+   "sha256": "ef2bd945bd347e760fd483515189c58e8000bd2cbc5f4b1c2d3e5d34e4d81f4e",
+   "blob": "049e4f75f91456e7afc265709f34b4d7e98316fd",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/launch.md": {
+   "upstream": "skills/hyperframes/references/types/launch.md",
+   "sha256": "1405b663227018d3dd7bfef895bcea3d3dd6c596078316bec30e8686d014f661",
+   "blob": "30077317bd146b72f1031f2109aafdd8061c0a94",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/music.md": {
+   "upstream": "skills/hyperframes/references/types/music.md",
+   "sha256": "868df2814d2a8e8f2bc884372d674320aee43c995fc67d25a109ebfdecb58b4a",
+   "blob": "c602f0c903b6ab9f429ef105f905657fca7035ff",
+   "mode": "100644"
+  },
+  "skills/hyperframes/references/types/vertical.md": {
+   "upstream": "skills/hyperframes/references/types/vertical.md",
+   "sha256": "fed9f5a1a3ceb204bb54e0dda0fd50befe611d0ab388a5036fc80cbc117a691b",
+   "blob": "e482c2c78a3617fce5b4e039d829d3b0a05f89eb",
+   "mode": "100644"
+  },
+  "skills/hyperframes/scripts/bake-basemap.mjs": {
+   "upstream": "skills/hyperframes/scripts/bake-basemap.mjs",
+   "sha256": "8322256cd43c597e2962af6c33c6be652084ae24c0c9a6af24183388d64e2b8d",
+   "blob": "55b14bb387e36fcaab68674a285e661364f6c517",
+   "mode": "100644"
+  },
+  "skills/hyperframes/scripts/lib/main-module.mjs": {
+   "upstream": "skills/hyperframes/scripts/lib/main-module.mjs",
+   "sha256": "61811e09110856e1439c29875e4a4ad7701ae45d4045f9d1dcb6a7929698e4c0",
+   "blob": "5fd2fa9d04a8dd840842d18bd3e889736add9e2d",
+   "mode": "100644"
+  },
+  "skills/hyperframes/scripts/locate.mjs": {
+   "upstream": "skills/hyperframes/scripts/locate.mjs",
+   "sha256": "9274b1b63a74b305f044dfd907ae5ddae538d566d31c23b81c39975be6317147",
+   "blob": "173f0111b26288ab2d17d3bbc0f1996be597755b",
+   "mode": "100644"
+  },
+  "skills/hyperframes/scripts/plugin-cli.mjs": {
+   "upstream": "skills/hyperframes/scripts/plugin-cli.mjs",
+   "sha256": "1ec46cdb9d819ecc9367aba719fea9253089617ead8c5454e59ab18b206711fb",
+   "blob": "4eeb01b8bd91803a729a00b1d85bb4be6038ca12",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/SKILL.md": {
+   "upstream": "skills/hyperframes-cli/SKILL.md",
+   "sha256": "44a48ccfa4cbd4f4234f8306c96268a4be56a0f2376abedbf31d2167b3c21286",
+   "blob": "7f51bc528abc5bb4f3e9659de97332dfea9047ca",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/beats.md": {
+   "upstream": "skills/hyperframes-cli/references/beats.md",
+   "sha256": "a14417f6308c1bb5cae7f1244635abb634003a1befe0972666924a2a2078751e",
+   "blob": "4f127177253048a4340c87ef6dae32517a983eb7",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/cloud.md": {
+   "upstream": "skills/hyperframes-cli/references/cloud.md",
+   "sha256": "8191550a036130249c26b37912dfd321c771c6670223cc7e0fff7aedd67607bf",
+   "blob": "c886e5cb727936529b722d64759f5c3874c494ba",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/cloudrun.md": {
+   "upstream": "skills/hyperframes-cli/references/cloudrun.md",
+   "sha256": "16f46a18ee3d165dba3b7ee50362bb32cb0a927643a90821e7b63494fe0bde83",
+   "blob": "083a71b625f3c1dc08e7a44d94181f70b96cf8cb",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/compare-and-batch.md": {
+   "upstream": "skills/hyperframes-cli/references/compare-and-batch.md",
+   "sha256": "d17fa5a16707d981fa6473b99a28aa45abf41bca0fd96c5157c632abd0bfc222",
+   "blob": "7e2a2e0dd33dd01f9673bd3a5d34be89ba6cab99",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/conventions.md": {
+   "upstream": "skills/hyperframes-cli/references/conventions.md",
+   "sha256": "5012403aa194bc350bdfd89d7c9f00e85c0ecc0356a1417ae4146b7bb8bb7b07",
+   "blob": "982f99527cdcb655fad85b7d6927638a35e8489b",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/doctor-browser.md": {
+   "upstream": "skills/hyperframes-cli/references/doctor-browser.md",
+   "sha256": "9747dd5a545d2528914c58d55d0c54281ace686fc5c782072334c6ba0ff65c55",
+   "blob": "7b01899eea7c3143dbebcfd182a1c0992d081efc",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/feedback.md": {
+   "upstream": "skills/hyperframes-cli/references/feedback.md",
+   "sha256": "ae188d5c3e90f0e011b1e322bbfbe10575667b2a5073cffdac05026ac59925a7",
+   "blob": "76e69ed0484fc5fb60f7280a5d365bb162f3a0c2",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/init-and-scaffold.md": {
+   "upstream": "skills/hyperframes-cli/references/init-and-scaffold.md",
+   "sha256": "dad4c2212f6df8ed4ff8d7b8154c2f8a6bdeec0fa27562b0b6c4d8da9d2e1078",
+   "blob": "ddf6fcd241407e69f98830ec599503d8f4bf581d",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/lambda.md": {
+   "upstream": "skills/hyperframes-cli/references/lambda.md",
+   "sha256": "80b8ce187a1dec26bf8bed682cdd1415a79a5d72ba6ef07650c58f5d3795845b",
+   "blob": "a1985a2b51fcce224614fb43aaa7cf3588d7c5f0",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/lint-validate-inspect.md": {
+   "upstream": "skills/hyperframes-cli/references/lint-validate-inspect.md",
+   "sha256": "8144df629f9b913e1237539f2eafa24d8413be0ec4cf694264c6eab33b903904",
+   "blob": "55cbaa89ee12e7cb971ca217461002e1f7f0203e",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/preview-render.md": {
+   "upstream": "skills/hyperframes-cli/references/preview-render.md",
+   "sha256": "851d85d7f4e6939d90ed6e350180a8edadc67b44dfc5d19163376485324d00b2",
+   "blob": "ddb32564c1400904a764cc5f5a1c45e411c17f25",
+   "mode": "100644"
+  },
+  "skills/hyperframes-cli/references/upgrade-info-misc.md": {
+   "upstream": "skills/hyperframes-cli/references/upgrade-info-misc.md",
+   "sha256": "a46662ad866669d1cf70bfa6404e9a01f68d2db4eb667fe6dc8a8442f6a069d8",
+   "blob": "f52ed865f58fd6586203515da579e9bd702631af",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/SKILL.md": {
+   "upstream": "skills/hyperframes-registry/SKILL.md",
+   "sha256": "0ac5bb49dd7aed66e0d61248eca94e8c9f1a95b482c8004fb0113f724fffe6cd",
+   "blob": "7b1bc6a6c95c02ee03319cc8adaba7e54b020cba",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/examples/add-block.md": {
+   "upstream": "skills/hyperframes-registry/examples/add-block.md",
+   "sha256": "0e3353755c4ef55e53570d1266a4a43b2c5aef9bbe41276430e38cfa6580b83a",
+   "blob": "95bee6ff87928db0f6b3d39008e4f0913600ea79",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/examples/add-component.md": {
+   "upstream": "skills/hyperframes-registry/examples/add-component.md",
+   "sha256": "d06992d31eec617a91f5c34630c9274c52dd07898bd24f10a869d0d1cab5af29",
+   "blob": "1371289ddfa21b27ec461947686c840f02e3d956",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/component-quality-bar.md": {
+   "upstream": "skills/hyperframes-registry/references/component-quality-bar.md",
+   "sha256": "f0d4c3c44131bc0791f8a8cc3d2d7478d38045451775af7d20b2dd47cf5f91ac",
+   "blob": "c34ec97847059002b7a115b937ab6dfa67495dd3",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/contributing.md": {
+   "upstream": "skills/hyperframes-registry/references/contributing.md",
+   "sha256": "3724d1dd269768da26b731f6592ac749f47f62443e909f881ac12ceba36db0fa",
+   "blob": "de02d476611856493d7419eece0537a8a35775dd",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/demo-html-pattern.md": {
+   "upstream": "skills/hyperframes-registry/references/demo-html-pattern.md",
+   "sha256": "dfc50cd33eff2c2be75437786fc3e851ab0085f7d453fb35b3380ecf9a6e9f04",
+   "blob": "3e53838c10b91dbf5fb196c95cde64bc385d2bc7",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/discovery.md": {
+   "upstream": "skills/hyperframes-registry/references/discovery.md",
+   "sha256": "ca82fcc1e0b2d824b72a8bda99b60d257b23d493fa1d28adbb0548a762cacd04",
+   "blob": "55042430f222176f0a8132c87ceb5407f2c254e6",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/install-locations.md": {
+   "upstream": "skills/hyperframes-registry/references/install-locations.md",
+   "sha256": "83793e7d6aeea9a751755e4bd23ea48182ff9af082287b98a1192343d2571dd1",
+   "blob": "65e3d34e57f1e509f82476992c8d72c05a7106ee",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/placeholder-material.md": {
+   "upstream": "skills/hyperframes-registry/references/placeholder-material.md",
+   "sha256": "15adf4a40b26166f64df784aed065adb58051d9ccd5c0c52ad9b71e3b8367a09",
+   "blob": "d6648aafc463a378dd851c36d6cabd8804b476e4",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/search.md": {
+   "upstream": "skills/hyperframes-registry/references/search.md",
+   "sha256": "3da7b42d2a0d8d9e2cbcdd8591da5a83203c424de9f46a995950d374a74531ee",
+   "blob": "a87d4ccb575edbf05ea21abcb654c2bc4299cdfe",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/templates.md": {
+   "upstream": "skills/hyperframes-registry/references/templates.md",
+   "sha256": "98e1ef62d3c1264b28139d85a1c9b5a8b7438209914aebef6d9890e3f4275805",
+   "blob": "8834c959e2d1d02d30e44e0c72d5960619a31c3a",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/wiring-blocks.md": {
+   "upstream": "skills/hyperframes-registry/references/wiring-blocks.md",
+   "sha256": "397f9ad5a9244d173b97bb5a5dfe76ea3cbccfb8dde16cba8b3dabc6044b011a",
+   "blob": "d3f4474cfa7af80e157c44c51dd6cb0ce6d1d076",
+   "mode": "100644"
+  },
+  "skills/hyperframes-registry/references/wiring-components.md": {
+   "upstream": "skills/hyperframes-registry/references/wiring-components.md",
+   "sha256": "6c8341c29fdae6de4f9fd1560a668d11cf34731b81fe5a06c9aeb4a000047b2a",
+   "blob": "9521a2174a37734efb3de8370224e21647a5655c",
+   "mode": "100644"
+  },
+  "skills/media-use/SKILL.md": {
+   "upstream": "skills/media-use/SKILL.md",
+   "sha256": "ef3976a02ff516d8e5ed0b7fff19d4bbf9358264233bace33fdacaa3aa7f37de",
+   "blob": "53fe2edcf5ebf9d47dd1e4de2c2f43694f471232",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/CREDITS.md": {
+   "upstream": "skills/media-use/audio/assets/sfx/CREDITS.md",
+   "sha256": "79590c7738b0427b10f362f76b02cfd2643158a40e1d5fd787f9ac6b33bcf4ce",
+   "blob": "750d6e83934164d6cb38f6cc96269104dc4695b4",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/chime.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/chime.mp3",
+   "sha256": "74823b1b27703c56e0652db838f503c150ce9c2442d47d27430af3d5121d6d12",
+   "blob": "12da953a356a49458d03e09185336d81f4b92f81",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/click-soft.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/click-soft.mp3",
+   "sha256": "075e17bdac5c13662a1c9530050e0046f81d4138e00eb3bf30427a7b4404103d",
+   "blob": "2706b1d2ea64721d1888d15fee2fcc98f0609570",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/click.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/click.mp3",
+   "sha256": "075e17bdac5c13662a1c9530050e0046f81d4138e00eb3bf30427a7b4404103d",
+   "blob": "2706b1d2ea64721d1888d15fee2fcc98f0609570",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/error.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/error.mp3",
+   "sha256": "b4882e3941ca496b5038e7c7d64318419da9f69d3da9540a1c693adc639cf121",
+   "blob": "6b4487ff46c03a883ded41b2ad0bb2830b2dbde6",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/glitch-1.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/glitch-1.mp3",
+   "sha256": "760b72bdaad71f83350e2ef3a9d037daf58f44855a05a6cce25d990f1ffb888a",
+   "blob": "124f4501948aafd03ae655bf11570bfbe47fa704",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/glitch-2.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/glitch-2.mp3",
+   "sha256": "b326efdf687f18f68f0df7443a65b0ea7a4a1287dfe3143ea23707cc645257f1",
+   "blob": "580b6fdc4f665660b2c74872a0bcdccf826222be",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/glitch-3.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/glitch-3.mp3",
+   "sha256": "7ebe61cfd0d69a2d35d9ee3a88c26025101e999d5cc6bfb2df410f820b433042",
+   "blob": "5a8adc2442314cf79e6e1fb25598d0149afbd421",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/impact-bass-1.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/impact-bass-1.mp3",
+   "sha256": "634d5eda5eb7b501aca98393a64f3815eccf24157cd1d95df55aaec1b5000bd7",
+   "blob": "ecfe0c48a672e77c98afac6810fd4c446dde94b0",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/impact-bass-2.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/impact-bass-2.mp3",
+   "sha256": "fb832995477784f44ba8533359d20caf706195b52117ecc2a33b3e63e3c1307b",
+   "blob": "4ae448b58a5011e4aaeeab3cbcaf0e4a0d59cd86",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/key-press.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/key-press.mp3",
+   "sha256": "bcc892df0898bf466162f14233c3e92a8c1ea351f6affd8a3a7e56c9a760bb72",
+   "blob": "d669006e01071d57b3ee7c8ada064a2bf6b7dddc",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/manifest.json": {
+   "upstream": "skills/media-use/audio/assets/sfx/manifest.json",
+   "sha256": "1b1aae06c6e25412e1d217ebf1e646a0ed36410c0fcad11acdb8f5d5e5b7dc10",
+   "blob": "7db0ad7ca58f8ebcebb813a253c47b039ef2b9ec",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/notification.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/notification.mp3",
+   "sha256": "b1559967dedb7994a82371f10cec9f7f3992e6b147b4cd88d62112bcdc3f9ba3",
+   "blob": "d3f0d1fa22dde07ae601b20cbafb9cc1274dafeb",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/ping.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/ping.mp3",
+   "sha256": "c54d088fa2709e6b3c9ce87594a9187d0d5338d3a8c683271f9c4353a8ee8c91",
+   "blob": "99808c8b6399ffa82a074ffeb0f180ec9afd3920",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/pop.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/pop.mp3",
+   "sha256": "19ab7193f626ff57fdeef60b45543bac416fcbcec803cfb417abe4b271c1b352",
+   "blob": "e3ed16fef09641bbd7c0d53f508c71d6af863efb",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/riser.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/riser.mp3",
+   "sha256": "d2f29d49f27dee7d3b25af22ffe5bebc39390cc5d5fb3b3e1c433499c77f3d1d",
+   "blob": "0cea32c08dc8524cd592d6779165157115cb6dc2",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/sparkle.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/sparkle.mp3",
+   "sha256": "a66b2829a307bcb5b1f6551d7cdc72fe45bbe9a91abfb994d28db8d5e4e42ea8",
+   "blob": "dae37802ff423cfb82a259a60812a83e5397a520",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/typing.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/typing.mp3",
+   "sha256": "944160652faeb7b32acc9341ede4d735a5c9a4ce3fe8509ef7eab91efb430487",
+   "blob": "ff69cc04200bb1af6e0785a801ca4d77281b4fce",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/whoosh-cinematic.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/whoosh-cinematic.mp3",
+   "sha256": "0a0f3505856fdfa84ac6b86b3c55ccd0ef1eb4ff0907d7b6934002218a73404e",
+   "blob": "93b721800780ac4fe5e1847bb58dc60248db2402",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/whoosh-short.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/whoosh-short.mp3",
+   "sha256": "c2efd9d902a59bf9ec5019035d7deadd17762136896b6e3cb6dd99ea50997a30",
+   "blob": "e23e513d273009fbf48e8bcd44f65953e38bc3b0",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/assets/sfx/whoosh.mp3": {
+   "upstream": "skills/media-use/audio/assets/sfx/whoosh.mp3",
+   "sha256": "c2efd9d902a59bf9ec5019035d7deadd17762136896b6e3cb6dd99ea50997a30",
+   "blob": "e23e513d273009fbf48e8bcd44f65953e38bc3b0",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/bgm.md": {
+   "upstream": "skills/media-use/audio/references/bgm.md",
+   "sha256": "d21a03d47aa8b77ef74bd8a1e91a06de71085ec15312cc71d3b7b52d655c93b4",
+   "blob": "be12c653f2b42338c0bf09faaefd575bea3f3e33",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/captions/authoring.md": {
+   "upstream": "skills/media-use/audio/references/captions/authoring.md",
+   "sha256": "c1f159e6a99b5ed65812fbc777fabdbf8cb82dec7fcb2e970b9524653d96bb59",
+   "blob": "45944775b2b97a6866baa58eb84e83d1196935d2",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/captions/motion.md": {
+   "upstream": "skills/media-use/audio/references/captions/motion.md",
+   "sha256": "ee1b89fc53e7433e1c1192c24e09365a3894bae653d8061c2bbc4202c097250f",
+   "blob": "72446cf312f9dec4128047b34c29fcfad507b11f",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/captions/transcript-handling.md": {
+   "upstream": "skills/media-use/audio/references/captions/transcript-handling.md",
+   "sha256": "84c4d5181749022c00b6de62ffe95fe257598fb5f9111d9e8541d25a13836287",
+   "blob": "3a87d6410f73db41b880bd329b0539d5ad30834c",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/remove-background.md": {
+   "upstream": "skills/media-use/audio/references/remove-background.md",
+   "sha256": "fb6b38a25c6535c57a461bbe2ca681b38f18e5f09b1e904e4a0b5f6eca7a5b98",
+   "blob": "7ba4e32c3d71d9b3451323047168d8f941aa6d19",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/requirements.md": {
+   "upstream": "skills/media-use/audio/references/requirements.md",
+   "sha256": "3a9092a3ad9e3133dc2d4888c73c9373e988cbcc5dd46997cd800e075127d09c",
+   "blob": "e621f776545d0254bad4c2b4ccd2e6376369ab9c",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/sfx.md": {
+   "upstream": "skills/media-use/audio/references/sfx.md",
+   "sha256": "b89b14e4d819594d07cf2899e3ca59ceafe743e77e7df46dafdbebe4effebe75",
+   "blob": "bdb17c277d0110fd6f54ad7a32b6ff163a223657",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/transcribe.md": {
+   "upstream": "skills/media-use/audio/references/transcribe.md",
+   "sha256": "5525a555f5356766a5e3333a945b5f90af51f63b2b98210d23e3a605a5de8703",
+   "blob": "59d9c488617eb9d72edc56b377f537a03c7f3f7c",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/tts-to-captions.md": {
+   "upstream": "skills/media-use/audio/references/tts-to-captions.md",
+   "sha256": "bc74fa83c096d64997dde33c9873c01b23c3b575b80689793440cd91466c8bd1",
+   "blob": "4b99fa0a8ccaeb5b81ddbc4b700ccc571a4c859b",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/references/tts.md": {
+   "upstream": "skills/media-use/audio/references/tts.md",
+   "sha256": "37ce53c1744359b68f09b31878ede560c75791ecd73b4e7bbaaff0b147cbc442",
+   "blob": "2728b215ffccb607956ab676d8a9d24570b973e0",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/audio.mjs": {
+   "upstream": "skills/media-use/audio/scripts/audio.mjs",
+   "sha256": "f41c88d86aa3c87c41a8edfe1017a41c86ea44a6e5bdd5f5442fb4046c63f8ef",
+   "blob": "06cd7665e565c3e49ca13f5a835db666873976a8",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/carve.mjs": {
+   "upstream": "skills/media-use/audio/scripts/carve.mjs",
+   "sha256": "7ddef413955ca81b66eba4630e3296220613150d428795f636577f2d8626c160",
+   "blob": "4649117fee12f63fe865eccb851bce226b37273b",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/extract-audio-data.py": {
+   "upstream": "skills/media-use/audio/scripts/extract-audio-data.py",
+   "sha256": "2b72d7aaa8688a4c524042274364f9696fb26fa9dd7125c58798cbdf021950e8",
+   "blob": "b76ad9959354ec4a6382fcfc434f379f811f5bf6",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/heygen-tts.mjs": {
+   "upstream": "skills/media-use/audio/scripts/heygen-tts.mjs",
+   "sha256": "7cf5e907807e0df919fdff2c762733c9d6dbdad5b605d05236ea788d8aecf5ff",
+   "blob": "3e1de356bf7727d906e19b859d9fac633c0d3932",
+   "mode": "100755"
+  },
+  "skills/media-use/audio/scripts/heygen-voice.mjs": {
+   "upstream": "skills/media-use/audio/scripts/heygen-voice.mjs",
+   "sha256": "1ab6d29860c106b49ca0c3dec408d99a8d3297a5bbc953d21f1148c3d8568064",
+   "blob": "0e25377f515155f1c7e0c1257a48fb3de5bd22ad",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/audio-meta.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/audio-meta.mjs",
+   "sha256": "94e1b4cf242362eeb52bb8a5665b5b50fe4ffdc7854f4366b82e290c33d03890",
+   "blob": "f3c032a9c4313e4731bcb7c599ae25b8229e0ca4",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/bgm-volume.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/bgm-volume.mjs",
+   "sha256": "bb9debebdbd09724f6d07cd10b3982a076639664420ff8caf5f5a36ae7429a8c",
+   "blob": "52ea0ced7d23a597cc35c2b79f711b27977b1a3a",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/bgm.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/bgm.mjs",
+   "sha256": "2e7e7590bef554c4aa8fa0250ca4fd0dc96da5e388644c90128cf7767c6a7532",
+   "blob": "d23c8c0b6572f7c83220138c87aa23fb95225531",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/concurrency.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/concurrency.mjs",
+   "sha256": "36a28dc1a0528b5605cba29a593dd54a786ad6283611b09a634946b12a5ed32e",
+   "blob": "4988b619202f15a6002be7475bc80408f8b0c0f2",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/gemini-auth.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/gemini-auth.mjs",
+   "sha256": "72fa1b984693279656ef5398bbdc48c074040ac4feafaedd1b7c45f12545bf10",
+   "blob": "e20a6a44d19101814964c335be8767e71203c154",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/gemini-auth.py": {
+   "upstream": "skills/media-use/audio/scripts/lib/gemini-auth.py",
+   "sha256": "5ba85af3b5b46bfa04013f5d24b2c5b72dc7677b6cc5ef5ef926de82be4f8542",
+   "blob": "db5b3b2c0611f366ea4ff601cc7e652574505277",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/gemini-tts.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/gemini-tts.mjs",
+   "sha256": "cf34c6781e809d39b7d36a8f0caf32afd23a21860db45ccdc4cd70c6a08e9597",
+   "blob": "bf94cb891256bfe0a1375f13037dfd134cad91b9",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/heygen.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/heygen.mjs",
+   "sha256": "65c996c8f494248aba28030888b43b32e1da659a48842ad2ba259c64b4a2967e",
+   "blob": "24ab9ed4b6ae6a585d422abec978667e3a285842",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/main-module.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/main-module.mjs",
+   "sha256": "61811e09110856e1439c29875e4a4ad7701ae45d4045f9d1dcb6a7929698e4c0",
+   "blob": "5fd2fa9d04a8dd840842d18bd3e889736add9e2d",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/media-record.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/media-record.mjs",
+   "sha256": "bf904e88b0038b6fbae8b562ff1fc99ff8794383c5b3470773c7692162c948e9",
+   "blob": "a11433cc20002395d450d03bc58a9b4b184b351c",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/openverse.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/openverse.mjs",
+   "sha256": "e2b176ed6e0b91231debab84ef6633a1a4885e400b9511a39f11e97acef261bd",
+   "blob": "87f80aa74d548f9ebe1cff2408f7f5e477e2a3da",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/python.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/python.mjs",
+   "sha256": "cfcee5d30291edc45f0bf3779ee346adb5bb91ae3b6e9e504d4b4f63259fdd4f",
+   "blob": "f5cd7fe6c7db1454153dfd5ac17718f2b3abf0d1",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/sfx.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/sfx.mjs",
+   "sha256": "ddd7da6f359011f2aaa9e3b78e62246766be4dedb4825b5c40f2c287c0c2c62c",
+   "blob": "b967e892058b81826568ac1c940439fe731d707e",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lib/tts.mjs": {
+   "upstream": "skills/media-use/audio/scripts/lib/tts.mjs",
+   "sha256": "0a706b9f83ba1b8723d5f8247b5d35c6f85b28b6849bbf47a7bef2f413eb2ffd",
+   "blob": "879fb89f2bd2c1c8b2abdaa579fe8aec80051df4",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/lyria-recipe.py": {
+   "upstream": "skills/media-use/audio/scripts/lyria-recipe.py",
+   "sha256": "07bcba4a128430545a03e7ced49b9a6750a77d72a3659d67e4e9886fe9731436",
+   "blob": "5fdf7d3df13346a1dc1ee06ef1b87a3439bf0507",
+   "mode": "100644"
+  },
+  "skills/media-use/audio/scripts/wait-bgm.mjs": {
+   "upstream": "skills/media-use/audio/scripts/wait-bgm.mjs",
+   "sha256": "bb9cf35cae4342ca1b03c1c129df199d6e389b67a8d5be9d4973a3bc20d585e3",
+   "blob": "02bd1d6ac426b089a284ee94b4c7879d6032fcd7",
+   "mode": "100644"
+  },
+  "skills/media-use/luts/README.md": {
+   "upstream": "skills/media-use/luts/README.md",
+   "sha256": "c06cbbf2aab80cbf8aa25c83497202a63107a61e083b6c199a89d513e8096a3b",
+   "blob": "dc3ed9ae55b6909732ca8f06cf8c89dc99da2bc6",
+   "mode": "100644"
+  },
+  "skills/media-use/luts/index.json": {
+   "upstream": "skills/media-use/luts/index.json",
+   "sha256": "988ac83c14bc3a9ef09aa6ab64459a0aa9e766e96361738136970ec89df1675a",
+   "blob": "9f6725c4a7c80c4b368a01196f57c0dcdc3a44c1",
+   "mode": "100644"
+  },
+  "skills/media-use/references/audio.md": {
+   "upstream": "skills/media-use/references/audio.md",
+   "sha256": "4c2602fec675b5234b18a0a03ac05aa6c380398c75176c6a071ce683d5107973",
+   "blob": "350185512b98e481c33db03feeb7de9c51118ef9",
+   "mode": "100644"
+  },
+  "skills/media-use/references/grading.md": {
+   "upstream": "skills/media-use/references/grading.md",
+   "sha256": "430e2b57dfb64c3acfbdd02317ba967ebb580d42b348686ccffbc175d3de8392",
+   "blob": "f1fadff29f4ac1c4f3104094870ed28943d1da13",
+   "mode": "100644"
+  },
+  "skills/media-use/references/local.md": {
+   "upstream": "skills/media-use/references/local.md",
+   "sha256": "659271d787fe3bdd39f0bc32b1eeb03860b9c76c2672cb71b6bb8d4a88fe4385",
+   "blob": "5c9576ddddce444dfa65843077dd38c9bf658822",
+   "mode": "100644"
+  },
+  "skills/media-use/references/media-treatment-recipes.md": {
+   "upstream": "skills/media-use/references/media-treatment-recipes.md",
+   "sha256": "852e7e978af56c9e99ba14f19009da974cd78f99b399ca194dc416c31c49bda5",
+   "blob": "86517df0839d446e33d7d935c2f47885f45aee9f",
+   "mode": "100644"
+  },
+  "skills/media-use/references/media-treatments.md": {
+   "upstream": "skills/media-use/references/media-treatments.md",
+   "sha256": "2125e106e7f891e14716efabda40f5d6a46284592c6f37d5a14b2b86bda96c1a",
+   "blob": "38c2facffa8346046a3f7cf1525c122dfa33c8b6",
+   "mode": "100644"
+  },
+  "skills/media-use/references/memory.md": {
+   "upstream": "skills/media-use/references/memory.md",
+   "sha256": "55477edafb7f9c8294cafd3f1633b7a1820d538695c0868f9c3ddb6b418dadbc",
+   "blob": "9c749f87dca8d0ed87b145a888913cbbe25bc2a5",
+   "mode": "100644"
+  },
+  "skills/media-use/references/meta.md": {
+   "upstream": "skills/media-use/references/meta.md",
+   "sha256": "0397b11301e10de6b126f6f39e5ad8bac68f8b22a5ab32236fb6a8f0e5c279dd",
+   "blob": "8ad2f119b4cd27c6305f1ccf98db7b415dd6d0b0",
+   "mode": "100644"
+  },
+  "skills/media-use/references/mixing.md": {
+   "upstream": "skills/media-use/references/mixing.md",
+   "sha256": "0ac67d3230cf1a6e31ca9355371ea133557d7e2fdb541742a02f086eac20a574",
+   "blob": "8215001560dd8c85f6a995a7525b7877532b0376",
+   "mode": "100644"
+  },
+  "skills/media-use/references/operations.md": {
+   "upstream": "skills/media-use/references/operations.md",
+   "sha256": "a40792b8f01f99ccf3ccab8f15b0b9285fa08d5ac9fa1f189cf60efdf3e17b30",
+   "blob": "8c461e898d365c49fd047a2f5757e7bc3e36cc04",
+   "mode": "100644"
+  },
+  "skills/media-use/references/resolve.md": {
+   "upstream": "skills/media-use/references/resolve.md",
+   "sha256": "c90a833f6c3dcc8f33b289f5ad90e9f835f59581873bdc774035f25b6eb72314",
+   "blob": "5edcd383e742fda3f4eba12df037485521bd3f94",
+   "mode": "100644"
+  },
+  "skills/media-use/references/setup-providers.md": {
+   "upstream": "skills/media-use/references/setup-providers.md",
+   "sha256": "76f133bb9c4b1e0323b58544e2e7235f5ac09408adad1502e69e64c92eeeb085",
+   "blob": "6babb88fb4496b26707537450b316ef420f32e1d",
+   "mode": "100644"
+  },
+  "skills/media-use/references/telemetry-dashboard.md": {
+   "upstream": "skills/media-use/references/telemetry-dashboard.md",
+   "sha256": "bdc30ad1ff84ebe7f5ca835acb9f47b33717e041ea79b41c6f0db489b86094a7",
+   "blob": "e0aac2de532581919f83447245a18f32bda995ef",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/audio-duck.mjs": {
+   "upstream": "skills/media-use/scripts/audio-duck.mjs",
+   "sha256": "6beac3c1c6c0e0375e67a04c184406ced3740cc832bb3ba9a09c796bbe16d40e",
+   "blob": "e797515ad8530cc862e76c6b997610d96a115d39",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/dither.mjs": {
+   "upstream": "skills/media-use/scripts/dither.mjs",
+   "sha256": "8e9f437526f39f417f6793912ddeef71094ddb5a5b8d4893c5339086bc39547f",
+   "blob": "7e4bfef6ff2eee1fcf2b2b0c489edc37f9f4b138",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/eval.mjs": {
+   "upstream": "skills/media-use/scripts/eval.mjs",
+   "sha256": "fadf274111a682acbfdff91eca75b977e3821c53026cd058551c538027f21f51",
+   "blob": "7184c6fc1538ab41864dd94a54dc40f52ce22f1d",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/config-lock.mjs": {
+   "upstream": "skills/media-use/scripts/lib/config-lock.mjs",
+   "sha256": "a9d1679e2039be38cd1756a1011f813ae4be0577c2ff77b9ed411b99b1c94275",
+   "blob": "dd5c5ca9c4d72d4cf4d99d1864174e767429d96a",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/cutlist.mjs": {
+   "upstream": "skills/media-use/scripts/lib/cutlist.mjs",
+   "sha256": "c395f49bdb602b29dfc1ea98b7f6d0d5d8781f00eca1c16d009d10e7ef0205be",
+   "blob": "9cc7d139b6562dc710d8e00b4ccff439205d86d8",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/duck.mjs": {
+   "upstream": "skills/media-use/scripts/lib/duck.mjs",
+   "sha256": "0930aea672a8cb204d344902cb90442491a8979f9f554f9c7c61cd13666a6846",
+   "blob": "8541f5896873846f524c39b4f3934d008c73bd8a",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/error-diffusion.mjs": {
+   "upstream": "skills/media-use/scripts/lib/error-diffusion.mjs",
+   "sha256": "aa718fe95f98087979bab5ea31d68b8e45fbde0c5b874c6888ad21923fb45936",
+   "blob": "e59a9c5ab600ba4b32dec45ff2d229778004da64",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/index-gen.mjs": {
+   "upstream": "skills/media-use/scripts/lib/index-gen.mjs",
+   "sha256": "fde84f36ebfb4fa819935956b2b6dc43a70b749a5c846d5470295d7c439e40e6",
+   "blob": "c25ee6d264b5dd787f598ddd8f247efab69c298c",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/manifest.mjs": {
+   "upstream": "skills/media-use/scripts/lib/manifest.mjs",
+   "sha256": "67f827f7591241c170fd92eb7fa789df2f1756b2cd4889907141936179f5d00f",
+   "blob": "d4b6e4f87105b46ddef0e3989f3c8bc372dc62b5",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/media-fetch.mjs": {
+   "upstream": "skills/media-use/scripts/lib/media-fetch.mjs",
+   "sha256": "6a90740eee3e4765b83b4c9726676b2935a7fbc9990f61ad5b166f9263188366",
+   "blob": "7664c2af5f0cab7cb4d2aed4d8f9269ca9d51aef",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/media-home.mjs": {
+   "upstream": "skills/media-use/scripts/lib/media-home.mjs",
+   "sha256": "7f69890d7b822f202b44ddec0d8176c767cd8b1da4dfc4d918599c6a05cfecb1",
+   "blob": "8a9128fd3bf2df83ab4e1e59ce008ce7b075910e",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/npx-sync.mjs": {
+   "upstream": "skills/media-use/scripts/lib/npx-sync.mjs",
+   "sha256": "1dc7f6372da36242f8c373defcba80fe9e006ce824e0f459e6d56226b3bf919a",
+   "blob": "b1049cd2b8c5ff911839f68fc5303e0e42d80a4a",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/parakeet-words.mjs": {
+   "upstream": "skills/media-use/scripts/lib/parakeet-words.mjs",
+   "sha256": "d5b66efe6cb8975beab2f523503113c3be3117e687ebc20695e7ab08c2ba1b4d",
+   "blob": "04df79c7d4b1da6c6da51248fd817e1029c2bee7",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/prefs-store.mjs": {
+   "upstream": "skills/media-use/scripts/lib/prefs-store.mjs",
+   "sha256": "960429595e5c5dda3f88f2899852d2ac2322a7d26b27ed8139612d0161fff749",
+   "blob": "36f87d9edabce436d50a9d0d48fa3631b6b2d955",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/recipe-store.mjs": {
+   "upstream": "skills/media-use/scripts/lib/recipe-store.mjs",
+   "sha256": "6d2786c2ba4959178351047c3b6d1d2b29a701685c9b256fcc4793c50717ce83",
+   "blob": "9e1ac57487c52628c7ad482951e993bdca908cd2",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/telemetry.mjs": {
+   "upstream": "skills/media-use/scripts/lib/telemetry.mjs",
+   "sha256": "292ca36e91189e69d36b197311a345664a3a407b4e3fdb91f8044190649961cd",
+   "blob": "182e3505b5f3fd0ba0c795c8c79746f23013874e",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/transcriptCutFade.mjs": {
+   "upstream": "skills/media-use/scripts/lib/transcriptCutFade.mjs",
+   "sha256": "ee9c7ec28650cf0f6a0f1f21f1c6a1faa5e152337163cccc0cc9a109b3c99805",
+   "blob": "bc1676074abdddc0574ccf073a95cc5b32eeff99",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/lib/words.mjs": {
+   "upstream": "skills/media-use/scripts/lib/words.mjs",
+   "sha256": "bfc1f93523d2fc8ce55580b262efcca537c7feabaf029c1c6f33433591377adb",
+   "blob": "e062ecbfefe9e0d2c498b65fbb82f944dda59619",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/prefs.mjs": {
+   "upstream": "skills/media-use/scripts/prefs.mjs",
+   "sha256": "f551d5efe51dea7b59d37595c052b950111c6734d913567630181959e7497a04",
+   "blob": "6334130c1087b32506fc03d1920e12b61e00146c",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/recipe.mjs": {
+   "upstream": "skills/media-use/scripts/recipe.mjs",
+   "sha256": "97d2a12604084668599c44f235d6300b77593f86a9a58a6034cf5aa92c98fcba",
+   "blob": "12d5dde7cd6ba62981d5bce74dae1cda281b8937",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/resolve.mjs": {
+   "upstream": "skills/media-use/scripts/resolve.mjs",
+   "sha256": "85aec401d22b65639fa6a91056e515563135962a127516aaae1e2644d48fa0b9",
+   "blob": "a2a0b9ba16327ad57f3e627bbc4f3feb904f8087",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/transcribe.mjs": {
+   "upstream": "skills/media-use/scripts/transcribe.mjs",
+   "sha256": "9e0f2fd2775e3a76267fc219d4b5aa52373a95478812884f8f40f6292e09dac7",
+   "blob": "ccf9b244dc385ce530c3620a691c3878720d42d6",
+   "mode": "100644"
+  },
+  "skills/media-use/scripts/transcript-cut.mjs": {
+   "upstream": "skills/media-use/scripts/transcript-cut.mjs",
+   "sha256": "17e148571738ad8cf30b0ccb3f28d0837df5072114b9dfb63bc8d9f5d25e5a5d",
+   "blob": "eb0bcbfaf09ca725a6937fc68bb585041d8d1354",
+   "mode": "100644"
+  },
+  "skills/figma/SKILL.md": {
+   "upstream": "skills/figma/SKILL.md",
+   "sha256": "d9537758a88bf3cbfc5699167742e437a6791c57c0180556c930ec6c3aae0ab6",
+   "blob": "2a33e19bee8715a5225f6743d91a828aa8b66ea2",
+   "mode": "100644"
+  },
+  "skills/figma/scripts/verify-motion.mjs": {
+   "upstream": "skills/figma/scripts/verify-motion.mjs",
+   "sha256": "1988721525e929caa5d3ced6d16c31467996e0c57757d281a971fb77e2297de8",
+   "blob": "38247a8fa4f058dfd76d157b69fb2ed8acb979da",
+   "mode": "100644"
+  },
+  "skills/slideshow/SKILL.md": {
+   "upstream": "skills/slideshow/SKILL.md",
+   "sha256": "4525f1a0d468f91957b638f14599c37f4af5e00c9b3c4df519a1cbe16101c908",
+   "blob": "3a53c1e211e1a016949bcddc87b4bb09eef2d53f",
+   "mode": "100644"
+  },
+  "skills/slideshow/references/standalone-harness.md": {
+   "upstream": "skills/slideshow/references/standalone-harness.md",
+   "sha256": "0f12d69a9c05a801291d923c7b1dbe666b29f3b68f6bb73d7c80681ae09df7e9",
+   "blob": "bc429574304b5c10e82c9cb8e62cc25534a368a5",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/SKILL.md": {
+   "upstream": "skills/remotion-to-hyperframes/SKILL.md",
+   "sha256": "f6fb227e1a5d4fc47ed5375a24efc7bbc55b47a1ac2593825e63e34f6155ca63",
+   "blob": "283b03619d8ab26480faeb0884e10faac85fbc4b",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/api-map.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/api-map.md",
+   "sha256": "9f92de58615a32e45032e6d06edd1027bec3bc098a5f9f7cf67e76b24a4950f5",
+   "blob": "83aede4af0719d0baae505284935df713046619c",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/escape-hatch.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/escape-hatch.md",
+   "sha256": "047472599b5f38502f8419839740e3fcb2198ddba96211d70331c4ad3b6774c7",
+   "blob": "9dd0fa445226596451a3ded2b683b98424b02e9b",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/eval.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/eval.md",
+   "sha256": "70fb49186755905bf43777618bd51af2189413109dde76e4964b5724991baa3c",
+   "blob": "edb951c3a7dbc60dd9572fae7a883e1bd7d9aad0",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/fonts.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/fonts.md",
+   "sha256": "c7f59567c1f6d560c8c6f95577a86fabfafdc7517a5d7eaebb73d564ad955ad6",
+   "blob": "56c92983be34ee5f7aa038898dc773899ca5b5d8",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/limitations.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/limitations.md",
+   "sha256": "fe5f721523952b454ca5a7bc7bc0579d81f1cd4a1dfb3d010b327f3d1963f4bc",
+   "blob": "f40d99a109ea64fe20f522629cb93c8d26a21b63",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/lottie.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/lottie.md",
+   "sha256": "1f6b46fb926e07e2a2e629f902da0ec9385a4fdf956660013805f470f5bfafde",
+   "blob": "70dc006d2691549e7fcb21842b79f6e757d4866a",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/media.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/media.md",
+   "sha256": "0e9861f959298f7171ec709399a236b4575e9530d095a87224bca3365bfb0947",
+   "blob": "8354183a3196dfb83c802a07fa314497afa1384e",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/parameters.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/parameters.md",
+   "sha256": "eabfa937f1613fb5d14e6e1d160d48864682c04edd5ff843d179fa9e786f362a",
+   "blob": "f7a5264f72cb8e807279d301100c03da295868b3",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/sequencing.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/sequencing.md",
+   "sha256": "5b916e26efcd4d100d097ff25886df463c7d6934bb9bdec1da5ed7189afd13ae",
+   "blob": "9b828620f1c9b4b1712db43cf8e741a33b983ef8",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/timing.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/timing.md",
+   "sha256": "597bad21c9229ef790c2e122879cdbf6e7fc11aa1e3694d5ede0014a1e734192",
+   "blob": "2120d5df847ceac4a0d8685c801cd59d07ddf5f5",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/references/transitions.md": {
+   "upstream": "skills/remotion-to-hyperframes/references/transitions.md",
+   "sha256": "4d32d654ba5872fc8e55f0559415f61feafcdf20f1918ae724e4d14b76486873",
+   "blob": "223cc7ff11541ae13d2baa56f6f8689629b5001e",
+   "mode": "100644"
+  },
+  "skills/remotion-to-hyperframes/scripts/frame_strip.sh": {
+   "upstream": "skills/remotion-to-hyperframes/scripts/frame_strip.sh",
+   "sha256": "c6cb73b4886991b2092417b5c3fa257d34fefb288e248a7fda854047b8c66bae",
+   "blob": "73264fe6b0e0be0798c367288505dca93245c528",
+   "mode": "100755"
+  },
+  "skills/remotion-to-hyperframes/scripts/lint_source.py": {
+   "upstream": "skills/remotion-to-hyperframes/scripts/lint_source.py",
+   "sha256": "6043611ad04ce16d2ef5596822eb2887e865ed9759c8e528471b994dff7d88b1",
+   "blob": "5b72eec0cadd095c244c55d275fd447e3911e7dc",
+   "mode": "100755"
+  },
+  "skills/remotion-to-hyperframes/scripts/render_diff.sh": {
+   "upstream": "skills/remotion-to-hyperframes/scripts/render_diff.sh",
+   "sha256": "516be1130a6edbe5927106905349bafba3d8ff1a99b3f0e0394b6d0ecf7a223b",
+   "blob": "dc349fd11ed5f883c028e3f141e4981b85e7dbcf",
+   "mode": "100755"
+  },
+  "LICENSE": {
+   "upstream": "LICENSE",
+   "sha256": "4259155fb06f127687ee7b0a8a3682d45132db0f2da26cbc0b7a2d1e796436b8",
+   "blob": "ae06b37e1c5116ccfaa615ac25ec1aabf5658d8c",
+   "mode": "100644"
+  }
+ }
+}

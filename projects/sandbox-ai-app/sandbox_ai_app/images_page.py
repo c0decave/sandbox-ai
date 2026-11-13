@@ -71,6 +71,7 @@ def image_entries(document):
             "created": printable(str(image.get("created") or "").replace("T", " ")),
             "size": f"{size / 1e9:.2f} GB" if isinstance(size, (int, float)) and size else "",
             "image": printable(image.get("image", "")), "extended": bool(image.get("extended")),
+            "base_image": printable(image["base_image"]) if isinstance(image.get("base_image"), str) else None,
             "status": image.get("status") if isinstance(image.get("status"), str) else None})
     return entries
 
@@ -329,7 +330,7 @@ class PackageList(QWidget):
         row.addWidget(self.add_button)
         row.addWidget(self.remove_button)
         layout.addLayout(row)
-        self.problem = plain_label(role="notice-error")
+        self.problem = plain_label(role="notice-error", selectable=True)
         self.problem.hide()
         layout.addWidget(self.problem)
         self.add_button.setEnabled(False)
@@ -461,7 +462,7 @@ class RecipeDialog(QDialog):
 
 
 class NewVariantDialog(QDialog):
-    def __init__(self, parent, agents, agent, valid):
+    def __init__(self, parent, agents, agent, valid, bases=()):
         super().__init__(parent)
         self.setWindowTitle(tr("New variant"))
         self.valid = valid
@@ -477,7 +478,25 @@ class NewVariantDialog(QDialog):
         layout.addRow(tr("Name"), self.name)
         layout.addRow(tr("Agent"), self.agent)
         layout.addRow("", self.copy)
-        self.problem = plain_label(role="notice-error")
+        # A base image of yours (sandbox-ai images new NAME --base IMAGE): only those that can be one (Debian 12).
+        self.base = QComboBox()
+        self.base.addItem(tr("the agent's own base (sandbox-ai's image)"), "")
+        for entry in bases:
+            index = self.base.count()
+            if entry.get("base_problem"):
+                self.base.addItem(tr("{name} (cannot be a base)", name=entry["name"]), "")
+                item = self.base.model().item(index)
+                if item is not None:
+                    item.setEnabled(False)
+                self.base.setItemData(index, entry["base_problem"], Qt.ItemDataRole.ToolTipRole)
+            else:
+                self.base.addItem(tr("{name} (your image, UNCHECKED)", name=entry["name"]), entry["name"])
+                self.base.setItemData(index, unchecked_text(), Qt.ItemDataRole.ToolTipRole)
+        self.base_note = plain_label(role="notice-error")
+        self.base.currentIndexChanged.connect(self.check)
+        layout.addRow(tr("Base image"), self.base)
+        layout.addRow(self.base_note)
+        self.problem = plain_label(role="notice-error", selectable=True)
         layout.addRow(self.problem)
         buttons = QDialogButtonBox()
         self.ok = buttons.addButton(tr("Create"), QDialogButtonBox.ButtonRole.AcceptRole)
@@ -493,7 +512,238 @@ class NewVariantDialog(QDialog):
         good = self.valid(name)
         self.problem.setText("" if good or not name else
                              tr("Lower-case letters, digits, '.', '_' and '-', up to 30 characters; not an agent's name."))
+        self.base_note.setText(tr("The sandbox's own supervisor (firewall, connection proxy, approvals) runs from this "
+                                  "image's programs: choose only an image you trust as much as sandbox-ai's own. The "
+                                  "security modes high and paranoid refuse it.") if self.base.currentData() else "")
         self.ok.setEnabled(good)
+
+
+# -- your own images: from a registry or your own Containerfile (sandbox-ai images pull|build-image|list|remove) --
+
+IMAGE_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}")
+IMAGE_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,510}")
+
+
+def user_image_entries(document):
+    """The rows of `sandbox-ai images list --json` (your images) with printable texts."""
+    entries = []
+    for row in document if isinstance(document, list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            continue
+        release = row.get("os") if isinstance(row.get("os"), dict) else {}
+        ports = [str(p) for p in row.get("ports") or [] if isinstance(p, int)]
+        entries.append({
+            "name": printable(row["name"]), "kind": "pulled" if row.get("kind") == "pulled" else "built",
+            "image": printable(row.get("image") or ""), "source": printable(row.get("ref") or row.get("containerfile")
+                                                                              or ""),
+            "id": printable(str(row.get("id") or "").removeprefix("sha256:")[:12]),
+            "user": printable(row.get("user") or ""), "ports": ", ".join(ports),
+            "system": printable(release.get("PRETTY_NAME") or release.get("ID") or ""),
+            "used_by": [printable(v) for v in row.get("used_by") or [] if isinstance(v, str)],
+            "unchecked": row.get("unchecked", True) is not False, "present": row.get("present"),
+            "base_problem": printable(row["base_problem"]) if isinstance(row.get("base_problem"), str) else None})
+    return entries
+
+
+def unchecked_text():
+    return tr("UNCHECKED: nobody reviewed this image. It is pinned to what was pulled or built when it was added, "
+              "nothing more. A service of it runs behind the sandbox's firewall and proxy like the agent; as a "
+              "variant's base it runs the sandbox's own supervisor (firewall, proxy, approvals).")
+
+
+def default_image_name(reference):
+    """A name for the image of REFERENCE: its repository's last part (as sandbox-ai images pull names it)."""
+    path = str(reference).partition("@")[0]
+    last = path.rsplit("/", 1)[-1]
+    last = last.rpartition(":")[0] if ":" in last else last
+    name = re.sub(r"[^a-z0-9_.-]", "-", last.lower()).strip("._-")[:30]
+    return name if IMAGE_NAME.fullmatch(name or "") else ""
+
+
+class PullDialog(QDialog):
+    """`sandbox-ai images pull REFERENCE --as NAME [--replace]`: one of your images from a registry (Docker Hub,
+    quay.io, ghcr.io ...), pulled once and pinned by its digest."""
+
+    def __init__(self, parent, taken=()):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Add an image from a registry"))
+        self.taken = set(taken)
+        layout = QFormLayout(self)
+        self.reference = QLineEdit()
+        self.reference.setPlaceholderText(tr("e.g. docker.io/library/redis:7-alpine or quay.io/org/app@sha256:…"))
+        self.name = QLineEdit()
+        self.name.setPlaceholderText(tr("the repository's last part"))
+        self.replace = QCheckBox(tr("Replace an image of this name (pin it anew)"))
+        layout.addRow(tr("Image reference"), self.reference)
+        layout.addRow(tr("Name"), self.name)
+        layout.addRow("", self.replace)
+        layout.addRow(plain_label(unchecked_text(), role="notice-error"))
+        self.problem = plain_label(role="notice-error", selectable=True)
+        layout.addRow(self.problem)
+        buttons = QDialogButtonBox()
+        self.ok = buttons.addButton(tr("Pull and pin"), QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        for widget in (self.reference, self.name):
+            widget.textChanged.connect(self.check)
+        self.replace.toggled.connect(self.check)
+        self.check()
+
+    def chosen_name(self):
+        return self.name.text().strip() or default_image_name(self.reference.text().strip())
+
+    def check(self):
+        reference, name = self.reference.text().strip(), self.chosen_name()
+        problem = ""
+        if reference and not IMAGE_REFERENCE.fullmatch(reference):
+            problem = tr("Not an image reference.")
+        elif name and not IMAGE_NAME.fullmatch(name):
+            problem = tr("Lower-case letters, digits, '.', '_' and '-', up to 30 characters; not an agent's name.")
+        elif name in self.taken and not self.replace.isChecked():
+            problem = tr("You have an image {name} already: choose another name, or replace it.", name=name)
+        self.problem.setText(problem)
+        self.ok.setEnabled(bool(reference and name) and not problem)
+
+    def argv(self):
+        return ["images", "pull", self.reference.text().strip(), "--as", self.chosen_name(),
+                *(["--replace"] if self.replace.isChecked() else []), "--json"]
+
+
+class BuildImageDialog(QDialog):
+    """`sandbox-ai images build-image NAME --file CONTAINERFILE [--context DIR] [--replace] [--build-network]
+    [--trust-agent-written]`: one of your images from your own Containerfile, every FROM pulled once and pinned by
+    digest. Its RUN steps get no network unless the box for it is ticked (this computer's own, outside the sandbox's
+    firewall, VPN and Tor). A Containerfile or context where a sandbox can write (an agent could have changed it - and
+    its build runs on this computer) is built only after "I reviewed it" is ticked; that box is shown only then (on
+    this machine: WRITABLE(path, what) - sandbox-ai's images.check_location - says so; another host's build says it)."""
+
+    def __init__(self, parent, taken=(), local=True, writable=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Add an image from a Containerfile"))
+        self.taken, self.local, self.writable = set(taken), local, writable
+        layout = QFormLayout(self)
+        self.name = QLineEdit()
+        self.name.setPlaceholderText(tr("e.g. tools"))
+        self.file = QLineEdit()
+        self.file.setPlaceholderText(tr("the Containerfile (a path on the host chosen)"))
+        self.context = QLineEdit()
+        self.context.setPlaceholderText(tr("the Containerfile's folder"))
+        file_row, context_row = QHBoxLayout(), QHBoxLayout()
+        file_row.addWidget(self.file, 1)
+        context_row.addWidget(self.context, 1)
+        if local:
+            file_row.addWidget(button(tr("Choose…"), tr("Choose the Containerfile"), self.choose_file))
+            context_row.addWidget(button(tr("Choose…"), tr("Choose the build context"), self.choose_context))
+        self.replace = QCheckBox(tr("Replace an image of this name (build it anew)"))
+        self.network = QCheckBox(tr("RUN steps may use this computer's network (outside the sandbox's firewall, VPN "
+                                    "and Tor)"))
+        self.network.setToolTip(safe_tooltip(build_network_warning()))
+        self.network_note = plain_label(build_network_warning(), role="secondary")
+        self.agent_note = plain_label(role="notice-error", selectable=True)
+        self.trust = QCheckBox(tr("I reviewed this agent-written Containerfile and every file it copies: build it "
+                                  "anyway"))
+        layout.addRow(tr("Name"), self.name)
+        layout.addRow(tr("Containerfile"), file_row)
+        layout.addRow(tr("Build context"), context_row)
+        layout.addRow("", self.replace)
+        layout.addRow("", self.network)
+        layout.addRow("", self.network_note)
+        layout.addRow(self.agent_note)
+        layout.addRow("", self.trust)
+        self.form = layout
+        layout.addRow(plain_label(unchecked_text(), role="notice-error"))
+        self.problem = plain_label(role="notice-error", selectable=True)
+        layout.addRow(self.problem)
+        buttons = QDialogButtonBox()
+        self.ok = buttons.addButton(tr("Build and pin"), QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        for widget in (self.name, self.file, self.context):
+            widget.textChanged.connect(self.check)
+        for box in (self.replace, self.trust):
+            box.toggled.connect(self.check)
+        self.check()
+
+    def choose_file(self):
+        from .state import choose_file
+        path = choose_file(self, tr("Containerfile"), key="containerfile")
+        if path:
+            self.file.setText(path)
+
+    def choose_context(self):
+        from .state import choose_folder
+        path = choose_folder(self, tr("Build context"), key="containerfile-context")
+        if path:
+            self.context.setText(path)
+
+    def agent_written(self):
+        """Why the Containerfile or the context chosen lies where a sandbox can write ("" when neither does, or when
+        it is not known here: another host's)."""
+        if self.writable is None or not self.local:
+            return ""
+        file = self.file.text().strip()
+        context = self.context.text().strip() or (os.path.dirname(os.path.abspath(os.path.expanduser(file)))
+                                                  if file else "")
+        for path, what in ((file, "the Containerfile"), (context, "the build context")):
+            if not path:
+                continue
+            try:
+                self.writable(path, what)
+            except ValueError as exc:
+                return printable(str(exc))
+            except OSError:
+                continue
+        return ""
+
+    def check(self):
+        name = self.name.text().strip()
+        problem = ""
+        written = self.agent_written()
+        self.agent_note.setText(tr("Written where a sandbox can write: {why}. An agent could have changed it, and its "
+                                   "build runs on this computer. Review the Containerfile and every file it copies - "
+                                   "or copy them to a folder of your own.", why=written) if written else "")
+        for widget in (self.agent_note, self.trust):
+            self.form.setRowVisible(widget, bool(written))
+        if not written and self.trust.isChecked():
+            self.trust.setChecked(False)  # (a review is of the file it was given for)
+        if name and not IMAGE_NAME.fullmatch(name):
+            problem = tr("Lower-case letters, digits, '.', '_' and '-', up to 30 characters; not an agent's name.")
+        elif name in self.taken and not self.replace.isChecked():
+            problem = tr("You have an image {name} already: choose another name, or replace it.", name=name)
+        self.problem.setText(problem)
+        self.ok.setEnabled(bool(name and self.file.text().strip()) and not problem
+                           and (not written or self.trust.isChecked()))
+
+    def argv(self):
+        context = self.context.text().strip()
+        return ["images", "build-image", self.name.text().strip(), "--file", self.file.text().strip(),
+                *(["--context", context] if context else []), *(["--replace"] if self.replace.isChecked() else []),
+                *(["--build-network"] if self.network.isChecked() else []),
+                *(["--trust-agent-written"] if self.trust.isChecked() and self.agent_written() else []),
+                "--json"]
+
+
+def build_network_warning():
+    return tr("Off (the default): its RUN steps have no network. On: they reach the network from this computer "
+              "directly - not through the sandbox's firewall, proxy, VPN or Tor; a Containerfile written by an agent "
+              "could send out what it reads.")
+
+
+def build_failed_hint(argv, said):
+    """What to do about a build-image (ARGV) that failed with SAID: the dialog's box that would have let it."""
+    hints = []
+    if "--build-network" not in argv and ("had no network" in said or "--build-network" in said):
+        hints.append(tr("Its RUN steps had no network: if they need it (packages downloaded), tick “RUN steps may use "
+                        "this computer's network” and build again."))
+    if "--trust-agent-written" not in argv and "--trust-agent-written" in said:
+        hints.append(tr("The Containerfile or its context lies where a sandbox can write: review them, then tick “I "
+                        "reviewed this agent-written Containerfile” (shown for such a file) - or copy them to a "
+                        "folder of your own."))
+    return " ".join(hints)
 
 
 # -- the page --
@@ -567,7 +817,7 @@ class ImagesPage(QWidget):
             row.addWidget(widget)
         row.addStretch()
         images_layout.addLayout(row)
-        self.status = plain_label()
+        self.status = plain_label(selectable=True)
         images_layout.addWidget(self.status)
         splitter.addWidget(images)
 
@@ -584,6 +834,7 @@ class ImagesPage(QWidget):
         packages_layout.addWidget(self.packages)
         self.tabs.addTab(packages, tr("Installed packages"))
         self.tabs.addTab(self.build_editor(), tr("Extension"))
+        self.tabs.addTab(self.build_user_images(), tr("Your images"))
         splitter.addWidget(self.tabs)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
@@ -647,7 +898,7 @@ class ImagesPage(QWidget):
                                   role="primary")
         self.revert_button = button(tr("Revert"), tr("Drop the changes not saved yet"), self.revert)
         self.task = Task()
-        self.verdict = plain_label(role="secondary")
+        self.verdict = plain_label(role="secondary", selectable=True)
         row.addWidget(self.save_button)
         row.addWidget(self.revert_button)
         row.addWidget(self.verdict, 1)
@@ -699,8 +950,9 @@ class ImagesPage(QWidget):
 
     def host_changed(self):
         """Another host: nothing of the last one stays (its lists, its extension in the editor)."""
-        for command in (self.list_command, self.package_command, self.show_command):
+        for command in (self.list_command, self.package_command, self.show_command, self.user_command):
             command.stop()
+        self.show_user_images([])
         self.entries, self.rows, self.package_list, self.packages_for, self.document = [], [], [], None, None
         self.description, self.target = None, None
         fill(self.images, [])
@@ -711,6 +963,7 @@ class ImagesPage(QWidget):
             self.refresh()
 
     def refresh(self):
+        self.refresh_user_images()
         if self.list_command.start(self.run_argv("images", "--json")):
             self.status.setText(tr("Asking Podman…") if self.host() == LOCAL else
                                 tr("Asking {host}…", host=self.hosts.label()))
@@ -735,9 +988,11 @@ class ImagesPage(QWidget):
         self.images.blockSignals(True)
         try:
             fill(self.images, [[e["target"], e["agent"], tr("yes") if e["present"] else tr("not built"),
-                                status_text(e), e["version"], e["created"], e["size"], e["image"]]
+                                status_text(e), e["version"], e["created"], e["size"],
+                                e["image"] + (" · " + tr("on your image {name} (UNCHECKED)", name=e["base_image"])
+                                              if e.get("base_image") else "")]
                                for e in self.entries],
-                 [status_color(e) if e["present"] else "warn" for e in self.entries],
+                 ["bad" if e.get("base_image") else status_color(e) if e["present"] else "warn" for e in self.entries],
                  keys=[e["target"] for e in self.entries])
         finally:
             self.images.blockSignals(False)
@@ -1088,6 +1343,153 @@ class ImagesPage(QWidget):
         if self.description is not None:
             self.show_description(self.description)
 
+    # -- your own images (sandbox-ai images pull|build-image|list|remove) --
+
+    def build_user_images(self):
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.addWidget(plain_label(tr("Images from a registry (Docker Hub, quay.io, ghcr.io …) or your own "
+                                        "Containerfile: for services beside the agent (Service on the board, "
+                                        "--service) and as the base of a variant. Each is pinned when it is added "
+                                        "and never pulled at a start; nobody reviewed them (UNCHECKED)."),
+                                     role="secondary"))
+        self.user_table = table([tr("Name"), tr("Review"), tr("From"), tr("Pinned as"), tr("ID"), tr("User"),
+                                 tr("Ports"), tr("System"), tr("Used by")], stretch=3, compact=(1, 4, 5, 6))
+        self.user_table.setAccessibleName(tr("Your images"))
+        self.user_table.itemSelectionChanged.connect(self.update_user_buttons)
+        layout.addWidget(self.user_table)
+        row = QHBoxLayout()
+        self.pull_button = button(tr("Add from a registry…"), tr("Pull an image once and pin it by its digest: "
+                                                                 "sandbox-ai images pull"), self.pull_image)
+        self.build_image_button = button(tr("Add from a Containerfile…"),
+                                         tr("Build your Containerfile, every FROM pulled once and pinned by digest: "
+                                            "sandbox-ai images build-image"), self.build_user_image)
+        self.remove_image_button = button(tr("Remove…"), tr("Forget the selected image and remove it from Podman: "
+                                                            "sandbox-ai images remove"), self.remove_user_image,
+                                          role="danger")
+        for widget in (self.pull_button, self.build_image_button, self.remove_image_button,
+                       button(tr("Refresh"), tr("Read your images again"), self.refresh_user_images)):
+            row.addWidget(widget)
+        row.addStretch()
+        layout.addLayout(row)
+        self.user_status = plain_label(selectable=True)
+        layout.addWidget(self.user_status)
+        self.user_entries = []
+        self.user_command = AsyncCommand(timeout=200, parent=self)
+        self.user_command.finished.connect(self.user_images_listed)
+        self.update_user_buttons()
+        return box
+
+    def refresh_user_images(self):
+        self.user_command.start(self.run_argv("images", "list", "--json"))
+
+    def user_images_listed(self, status, out, err):
+        try:
+            document = json.loads(out) if status == 0 else None
+        except ValueError:
+            document = None
+        if not isinstance(document, list):
+            text = (err or out).strip()
+            self.show_user_images([])
+            self.user_status.setText(
+                tr("This sandbox-ai has no images of your own yet; update it (sandbox-ai update).")
+                if "invalid choice" in text else tr("Cannot list your images: {error}", error=printable(text[-300:])))
+            return
+        self.show_user_images(document)
+
+    def show_user_images(self, document):
+        self.user_entries = user_image_entries(document)
+        fill(self.user_table, [[e["name"], tr("UNCHECKED") if e["unchecked"] else tr("reviewed"),
+                                e["source"] or (tr("registry") if e["kind"] == "pulled" else tr("Containerfile")),
+                                e["image"], e["id"], e["user"] or tr("unknown"), e["ports"], e["system"],
+                                ", ".join(e["used_by"])] for e in self.user_entries],
+             ["bad" if e["present"] is False else "warn" if e["unchecked"] else None for e in self.user_entries],
+             tooltips=[unchecked_text() + ("\n" + tr("Missing from Podman: add it again (replace).")
+                                           if e["present"] is False else "")
+                       + ("\n" + tr("Not usable as a variant's base: {why}", why=e["base_problem"])
+                          if e["base_problem"] else "") for e in self.user_entries],
+             keys=[e["name"] for e in self.user_entries])
+        missing = sum(1 for e in self.user_entries if e["present"] is False)
+        text = tr("{count} images of yours, each UNCHECKED", count=len(self.user_entries)) if self.user_entries \
+            else tr("No images of yours yet: add one from a registry or a Containerfile.")
+        if missing:
+            text += " · " + tr("{count} missing from Podman", count=missing)
+        self.user_status.setText(text)
+        self.update_user_buttons()
+
+    def user_entry(self):
+        keys = selected_keys(self.user_table)
+        return next((e for e in self.user_entries if keys and e["name"] == keys[0]), None)
+
+    def update_user_buttons(self):
+        entry = self.user_entry() if hasattr(self, "user_entries") else None
+        self.remove_image_button.setEnabled(entry is not None)
+
+    def pull_image(self):
+        host = self.host()
+        dialog = PullDialog(self, [e["name"] for e in self.user_entries])
+        if dialog.exec():
+            name = dialog.chosen_name()
+            self.task.run(self.run_argv(*dialog.argv(), host=host),
+                          lambda status, out, err: self.user_image_added(status, out, err, name, host),
+                          tr("Pulling {name} (once; it is pinned by its digest)…", name=name), self.pull_button,
+                          timeout=3600)
+
+    def build_user_image(self):
+        host = self.host()
+        dialog = BuildImageDialog(self, [e["name"] for e in self.user_entries], local=host == LOCAL,
+                                  writable=self.location_check() if host == LOCAL else None)
+        if dialog.exec():
+            name, argv = dialog.name.text().strip(), dialog.argv()
+            self.task.run(self.run_argv(*argv, host=host),
+                          lambda status, out, err: self.user_image_added(status, out, err, name, host, argv),
+                          tr("Building {name} (every FROM pulled once and pinned)…", name=name),
+                          self.build_image_button, timeout=7200)
+
+    def location_check(self):
+        """sandbox-ai's images.check_location(path, what) of this machine (ValueError: a sandbox can write there), or
+        None for a sandbox-ai without it."""
+        try:
+            return getattr(self.sai.module("images"), "check_location", None)
+        except Exception:  # noqa: BLE001 - a sandbox-ai that does not load: its build says it
+            return None
+
+    def user_image_added(self, status, out, err, name, host=None, argv=()):
+        if status == -2 or (host is not None and host != self.host()):
+            return
+        if status != 0:
+            hint = build_failed_hint(list(argv), f"{out}\n{err}")
+            warn(self, tr("Images"), tr("sandbox-ai did not add the image {name}.", name=name) + (
+                "\n\n" + hint if hint else ""), details=printable((err or out).strip()[-3000:]))
+            return
+        inform(self, tr("Images"), tr("{name} is added, pinned. {unchecked}", name=name, unchecked=unchecked_text()),
+               modal=False)
+        self.refresh_user_images()
+
+    def remove_user_image(self):
+        entry, host = self.user_entry(), self.host()
+        if entry is None:
+            return
+        if entry["used_by"]:
+            warn(self, tr("Images"), tr("{name} is the base of the variants {variants}: give them another base or "
+                                        "delete them first.", name=entry["name"], variants=", ".join(entry["used_by"])))
+            return
+        if not ask_first(self, "image-remove", tr("Remove your image"), on_host(host, tr(
+                "Forget your image {name} and remove {image} from Podman? Boards and projects whose services use it "
+                "stop working.", name=entry["name"], image=entry["image"])), tr("Remove")):
+            return
+        self.task.run(self.run_argv("images", "remove", entry["name"], host=host),
+                      lambda status, out, err: self.user_image_removed(status, out, err, entry["name"], host),
+                      tr("Removing {name}…", name=entry["name"]), self.remove_image_button)
+
+    def user_image_removed(self, status, out, err, name, host=None):
+        if host is not None and host != self.host():
+            return
+        if status not in (0, -2):
+            warn(self, tr("Images"), tr("sandbox-ai did not remove the image {name}.", name=name),
+                 details=printable((err or out).strip()[-3000:]))
+        self.refresh_user_images()
+
     # -- variants --
 
     def new_variant(self):
@@ -1097,15 +1499,15 @@ class ImagesPage(QWidget):
             return
         entry, host = self.entry(), self.host()
         dialog = NewVariantDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0],
-                                  module.valid_name)
+                                  module.valid_name, getattr(self, "user_entries", []))
         if dialog.exec():
             self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked(),
-                                host=host)
+                                host=host, base=dialog.base.currentData() or None)
 
-    def create_variant(self, name, agent, empty=False, host=None):
+    def create_variant(self, name, agent, empty=False, host=None, base=None):
         host = self.host() if host is None else host
-        argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []), "--json",
-                             host=host)
+        argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []),
+                             *(["--base", base] if base else []), "--json", host=host)
         self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name, host),
                       tr("Creating the variant {name}…", name=name), self.new_button)
 

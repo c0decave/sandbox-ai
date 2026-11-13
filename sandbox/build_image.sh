@@ -26,7 +26,9 @@ top (localhost/AGENT-sandbox:latest), and building an agent also builds its
 variants (localhost/AGENT-sandbox-NAME). A VARIANT builds its agent'"'"'s base and
 that variant only; --variant VARIANT names one whose name is also a target here (the
 variant tor of the recipe tor: build tor is the image of the Tor VPN). Each layer is
-labelled with the hash of its extension.
+labelled with the hash of its extension. A variant on one of your images (images new
+NAME --base IMAGE) gets the agent'"'"'s layers on that image instead (Debian 12; nothing
+but uv'"'"'s image is pulled), then its extension.
 
   --extension-only  build only the extension layers, on the base image there is
 
@@ -47,7 +49,7 @@ profile (vpn add NAME --tor): tor, obfs4proxy, the GeoIP files, nftables. Tor is
 not a VPN; the two images share no software.'
 die_usage() { echo "$usage" >&2; exit 2; }
 
-podman_cmd=(podman) podman_url="" pin="" uv="" node="" agents=() variant="" extension_only="" vpn="" team=""
+podman_cmd=(podman) podman_url="" pin="" uv="" node="" agents=() variant="" variant_kind="" extension_only="" vpn="" team=""
 python=${SANDBOX_AI_PYTHON:-python3}
 images=("$python" -I "$script_dir/images.py")
 while [[ $# -gt 0 ]]; do
@@ -74,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         why=$("${images[@]}" build-plan "$2" 2>&1 >/dev/null | tail -n 1) || true
         echo "sandbox-ai build: $2 is not a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
         exit 2; }
-      agents=("${plan%% *}") variant=$2; shift 2; break ;;
+      agents=("${plan%% *}") variant=$2; read -r _ variant_kind _ <<<"$plan"; shift 2; break ;;
     [a-z0-9]*)
       # A variant (sandbox-ai images new NAME --from AGENT): its agent's base, then the variant only.
       [[ "$1" =~ ^[a-z0-9][a-z0-9_.-]{0,29}$ ]] || die_usage
@@ -83,7 +85,7 @@ while [[ $# -gt 0 ]]; do
         why=$("${images[@]}" build-plan "$1" 2>&1 >/dev/null | tail -n 1) || true
         echo "sandbox-ai build: $1 is neither codex, claude, opencode, all, team, vpn, tor nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
         exit 2; }
-      agents=("${plan%% *}") variant=$1; shift; break ;;
+      agents=("${plan%% *}") variant=$1; read -r _ variant_kind _ <<<"$plan"; shift; break ;;
     *) die_usage ;;
   esac
 done
@@ -143,6 +145,10 @@ if [[ -z "${SANDBOX_AI_BUILD_NO_DNS_CHECK:-}" ]] && ! given_network "$@"; then
     echo "sandbox-ai build: $probe_image could not be pulled to check the build's name resolution; building anyway" >&2
   fi
 fi
+# Every podman build and pull from here on says what it does as it goes, bounded and readable (progress.py: its
+# steps as "building the image X (step 4/12): ...", a few lines of each step's output, the time it took, the whole
+# end of a failure); every other podman command runs as it is. SANDBOX_AI_PODMAN_OUTPUT=full: podman's own output.
+podman_cmd=("$python" -I "$script_dir/progress.py" podman "${podman_cmd[@]}")
 if [[ -n "$vpn" ]]; then
   [[ -z "$pin$uv$node$extension_only" ]] || {
     echo "sandbox-ai build: --pin, --uv, --node and --extension-only apply to the agent images, not $vpn" >&2; exit 2; }
@@ -170,6 +176,11 @@ if [[ -n "$pin" ]]; then
 fi
 [[ -z "$uv" || "$uv" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "sandbox-ai build: --uv expects a tag: $uv" >&2; exit 2; }
 [[ -z "$node" || "$node" =~ ^[A-Za-z0-9./:@_-]+$ ]] || { echo "sandbox-ai build: --node expects an image: $node" >&2; exit 2; }
+if [[ "$variant_kind" == based ]]; then
+  # A variant on one of your images (sandbox-ai images new NAME --base IMAGE): that image is its Node.js base.
+  [[ -z "$node" ]] || { echo "sandbox-ai build: --node: the variant $variant is built on your own image" >&2; exit 2; }
+  [[ -z "$podman_url" ]] || { echo "sandbox-ai build: the variant $variant is built on your own image, which is recorded on this machine: build it without --podman-url" >&2; exit 2; }
+fi
 
 package() {
   case "$1" in
@@ -264,7 +275,19 @@ done
 
 status=0
 for agent in "${agents[@]}"; do
-  if [[ -z "$extension_only" ]]; then
+  if [[ -z "$extension_only" && "$variant_kind" == based ]]; then
+    # The agent's layers on your image (made ready first: images.py prep), with nothing pulled implicitly: uv's image
+    # is pulled here as the other builds refresh it, the rest is local (--pull=never).
+    prep=$("${images[@]}" prep "$variant" | tail -n 1) || exit 1
+    "${podman_cmd[@]}" pull "ghcr.io/astral-sh/uv:${uv:-latest}" >/dev/null || {
+      echo "sandbox-ai build: the uv image ghcr.io/astral-sh/uv:${uv:-latest} could not be pulled" >&2; exit 1; }
+    extra=(--pull=never --build-arg "NODE_IMAGE=$prep")
+    [[ "${pinned[$agent]:-}" == given ]] || extra+=(--build-arg "${agent^^}_VERSION=${versions[$agent]}")
+    [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
+    extra+=(--label "sandbox-ai.agent-version=${versions[$agent]}")
+    "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag "localhost/${agent}-sandbox-${variant}:base" \
+      --file "$script_dir/Containerfile.$agent" "${extra[@]}" "$@" "$script_dir"
+  elif [[ -z "$extension_only" ]]; then
     # Floating base tags are refreshed; pinned ones stay what they name.
     extra=(--pull=newer)
     [[ "${pinned[$agent]:-}" == given ]] || extra+=(--build-arg "${agent^^}_VERSION=${versions[$agent]}")

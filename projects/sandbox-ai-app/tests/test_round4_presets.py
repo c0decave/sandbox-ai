@@ -95,7 +95,8 @@ def test_another_hosts_presets_come_from_presets_list_json_there(sai):
     assert tool.host == "ct1" and tool.rules is None
     notes = " ".join(tool.notes)
     assert "/srv/presets" in notes and "team-tool.rules.json" in notes and "ct1" in notes
-    assert catalogue.groups()[-2][1] == "sandbox-ai's presets on ct1"
+    titles = [title for key, title, _ in catalogue.groups() if key.startswith(PR.SAI_CATEGORY)]
+    assert titles and all(title.startswith("sandbox-ai on ct1: ") for title in titles), titles  # by its categories
     sai.answers[("presets", "show")] = (0, json.dumps(extra), "")
     assert sai.host_preset("ct1", "team-tool")["id"] == "team-tool"
     assert sai.asked[-1] == ("ct1", "presets", "show", "--json", "team-tool")
@@ -564,8 +565,8 @@ def test_the_project_tabs_show_only_on_the_pages_the_project_changes(qt, tmp_pat
             shown.append(key)
         assert window.add_tab_button.isVisibleTo(window) == window.tabs.isVisibleTo(window)
         assert window.tabs.parentWidget().height() == height, "the strip keeps its height: nothing below moves"
-    assert shown == ["launch", "board", "sandboxes", "approvals", "connections", "statistics", "files", "kits",
-                     "team"]
+    assert shown == ["launch", "board", "sandboxes", "approvals", "files", "kits", "team", "connections",
+                     "statistics"]
     assert set(ui.PROJECT_TAB_PAGES) == set(shown)
     window.shutdown()
 

@@ -1,0 +1,41 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "jvm",
+  "title": "Java and Kotlin",
+  "description": "JVM projects with Maven or Gradle: Maven Central, the Gradle plugin portal and distributions, and GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Java und Kotlin",
+      "description": "JVM-Projekte mit Maven oder Gradle: Maven Central, das Gradle-Plugin-Portal und die Gradle-Distributionen und GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-github",
+    "--allow-host",
+    "repo.maven.apache.org",
+    "--allow-host",
+    "repo1.maven.org",
+    "--allow-host",
+    "plugins.gradle.org",
+    "--allow-host",
+    "plugins-artifacts.gradle.org",
+    "--allow-host",
+    "services.gradle.org",
+    "--allow-host",
+    "downloads.gradle.org",
+    "--memory",
+    "12g"
+  ],
+  "notes": [
+    "The JDK and Maven in an image variant: sandbox-ai images new jvm --from claude, sandbox-ai images extend jvm --add-apt default-jdk-headless --add-apt maven, sandbox-ai build --variant jvm, then --image-variant jvm. Gradle comes from the project's wrapper (services.gradle.org).",
+    "Another repository (your company's, Google's for Android) needs its host: --allow-host NAME on the command line.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

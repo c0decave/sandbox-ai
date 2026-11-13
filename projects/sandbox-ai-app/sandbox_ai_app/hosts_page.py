@@ -367,7 +367,7 @@ class WebPanel(QWidget):
         self.service_url = None
         layout.addWidget(flow(self.cert_button, self.renew_button, self.vendor_button, self.serve_button,
                               self.open_button))
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.set_host(None)
@@ -771,7 +771,7 @@ class HostsPage(QWidget):
         self.task = Task(output=self.updates)
         self.task.setAccessibleName(tr("Update or installation running"))
         layout.addWidget(self.task)
-        self.status = plain_label(role="secondary")
+        self.status = plain_label(role="secondary", selectable=True)
         layout.addWidget(self.status)
         self.entries, self.versions, self.queue, self.results = [], {}, [], []
         self.fleet, self.question_counts = {}, {}

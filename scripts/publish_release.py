@@ -12,6 +12,8 @@ Usage: scripts/publish_release.py --source URL [--tag vX.Y.Z] [--token-env NAME]
 
 Before anything is uploaded, every file SHA256SUMS lists must match it, and when sandbox/release-signers lists
 keys, SHA256SUMS.sig must be a good signature by one of them: installations would refuse the release otherwise.
+The videos about the app's pages (sandbox-ai-videos.tar, make_dist.py --videos DIR) are optional; when they are among
+the files, SHA256SUMS must list them (the app installs them only then).
 Files with the same name in an existing release are replaced. The token is sent only to the
 repository's API host (and GitHub's upload host), never printed, never over plain http except to localhost.
 """
@@ -31,6 +33,7 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+VIDEOS = "sandbox-ai-videos.tar"  # make_dist.py VIDEOS
 
 
 def fail(message):
@@ -54,12 +57,16 @@ def check_files(files, key, allow_unsigned):
         fail(str(exc))
     names = {path.name: path for path in files}
     sums = names.get("SHA256SUMS")
+    if VIDEOS in names and sums is None:
+        fail(f"{VIDEOS} without SHA256SUMS: the app would refuse it (make_dist.py --videos DIR)")
     if sums is None:
         if key:
             fail("--sign: no SHA256SUMS among the files")
         return files
     listed = {parts[1].lstrip("*"): parts[0] for parts in (line.split() for line in sums.read_text().splitlines())
               if len(parts) == 2}
+    if VIDEOS in names and VIDEOS not in listed:
+        fail(f"SHA256SUMS does not list {VIDEOS}: the app would refuse it (make_dist.py --sums-only --videos DIR)")
     for name, path in names.items():
         if name in listed and hashlib.sha256(path.read_bytes()).hexdigest() != listed[name]:
             fail(f"{path} does not match SHA256SUMS (rebuild dist/ with scripts/make_dist.py)")

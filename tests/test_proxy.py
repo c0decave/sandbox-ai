@@ -1666,6 +1666,25 @@ def test_plain_http_credentials_need_the_endpoints_name_address_or_the_loopback(
         assert (b"Authorization: Basic" in upstream) == sent
 
 
+def test_rules_for_every_host_hold_for_a_request_at_the_llm_endpoint_naming_another_host(tmp_path):
+    """A ruleset's rules for every host are not meant for the agent's model API (its --llm endpoint) - but only a
+    request naming the endpoint in its Host header is one: "Host: other.example" at the same front end reaches
+    another server there, and the writes rule asks about it as about any other host."""
+    rules = [{"name": "tor-researcher", "version": 1, "http": [
+        {"id": "writes", "host": "*", "methods": ["POST"], "decision": "ask", "reason": "sends data"}]}]
+    llm = [{"name": "gw", "scheme": "https", "host": "llm.example.org", "port": 443, "prefix": "", "headers": [],
+            "addresses": [], "placeholder": "sandbox-ai-llm-key-placeholder"}]  # no key: nothing is added
+    asked = []
+    server, log = fronting_server(tmp_path, {"rules": rules, "llm": llm},
+                                  asker=lambda kind, details: asked.append(details) or
+                                  {"decision": "deny", "scope": "once"})
+    request = b"POST /v1/chat/completions HTTP/1.1\r\nHost: %s\r\nContent-Length: 2\r\n\r\n{}"
+    upstream, answer = exchange_once(server, request % b"llm.example.org", "llm.example.org")
+    assert answer.startswith(b"HTTP/1.1 200") and upstream and not asked  # the model API: not asked
+    upstream, answer = exchange_once(server, request % b"other.example", "llm.example.org")
+    assert answer.startswith(b"HTTP/1.1 403") and upstream == b"" and len(asked) == 1
+
+
 def test_a_question_names_the_verified_server_and_the_host_header_as_a_claim(tmp_path):
     """Review 5 M1 (PoC poc2_approval_host.py): in mode high a POST to an attacker's server, with Host:
     api.github.com, was asked about as a write to api.github.com. The question and the log now name the server the

@@ -1043,8 +1043,12 @@ class Plan:
                     approvals.desktop_question(title, body, ident, actions=CANARY_ACTIONS, seconds=ASK_SECONDS)
             else:
                 def asker(title, body, ident):
-                    approvals.desktop_notification(title, f"{body}\nsandbox-ai approvals allow {ident} (continue) "
-                                                          f"or deny {ident} (stop)")
+                    try:
+                        approvals.desktop_notification(title, f"{body}\nsandbox-ai approvals allow {ident} "
+                                                              f"(continue) or deny {ident} (stop)", alarm=True)
+                    except TypeError:  # an approvals module without alarms: it shows every notification
+                        approvals.desktop_notification(title, f"{body}\nsandbox-ai approvals allow {ident} "
+                                                              f"(continue) or deny {ident} (stop)")
         def put():
             with contextlib.suppress(Exception):
                 asker(self.title(), text, ident)
@@ -1136,6 +1140,9 @@ class Plan:
         self.paused = False
         if marker is not None:
             marker.unlink(missing_ok=True)
+        if getattr(self, "control_dir", None):  # the kill switch asked for while it was paused (sandbox-ai net cut)
+            with contextlib.suppress(Exception):
+                self.launcher.load_starts_module().module("net").apply_pending_cut(self.control_dir)
         self.record({"event": "resumed", "canary": None, "action": "resume", "summary": "resumed"})
         return True
 

@@ -1,0 +1,30 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "dependency-upgrade",
+  "title": "Dependency upgrade",
+  "description": "Upgrades the project's dependencies one at a time, with the tests after each: PyPI, npm and GitHub open.",
+  "translations": {
+    "de": {
+      "title": "Abhängigkeiten aktualisieren",
+      "description": "Aktualisiert die Abhängigkeiten des Projekts eine nach der anderen, mit den Tests nach jeder: PyPI, npm und GitHub offen."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github"
+  ],
+  "prompt": "Upgrade this project's dependencies, one at a time: read its changelog for breaking changes, upgrade it, run the tests, fix what breaks or go back to the old version and say why. A major version only when the tests pass. Keep a log in UPGRADES.md (from, to, what changed, what you fixed) and commit each upgrade on its own.",
+  "notes": [
+    "The lock files change with each upgrade: review the commits before you push.",
+    "Other registries (crates.io, Maven Central, NuGet) as in the presets rust, jvm and dotnet: --allow-host NAME on the command line.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

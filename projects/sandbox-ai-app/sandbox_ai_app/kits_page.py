@@ -577,7 +577,7 @@ class KitsPage(QWidget):
         holder_layout.addWidget(flow(self.fetch_button, self.market_new_button))
         self.market_hint = plain_label(role="secondary")
         holder_layout.addWidget(self.market_hint)
-        self.market_status = plain_label()
+        self.market_status = plain_label(selectable=True)
         holder_layout.addWidget(self.market_status)
         split = self.market_split = QSplitter(Qt.Orientation.Vertical)
         top = QWidget()

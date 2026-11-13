@@ -1,0 +1,32 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "paranoid",
+  "title": "Minimal and paranoid",
+  "description": "The strictest start: the security mode paranoid (every workspace read-only, approvals once, no -D, no display, no MCP server with network, nothing kept), no project memory, kits or plugins, every decoy in place; only the agent's provider.",
+  "translations": {
+    "de": {
+      "title": "Minimal und paranoid",
+      "description": "Der strengste Start: der Sicherheitsmodus paranoid (jeder Arbeitsordner nur lesend, Freigaben nur einmal, kein -D, kein Bildschirm, kein MCP-Server mit Netz, nichts wird behalten), kein Projektgedächtnis, keine Kits oder Plugins, jeder Köder ausgelegt; nur der Anbieter des Agenten."
+    }
+  },
+  "category": "privacy",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--mode",
+    "paranoid",
+    "--no-memory",
+    "--no-default-kit",
+    "--no-plugins",
+    "--canaries",
+    "all"
+  ],
+  "notes": [
+    "For an untrusted repository or a first look: the agent can read the workspace and answer, nothing more. Its HOME goes with the run (paranoid keeps nothing).",
+    "The preset's mode is a floor: --mode on the command line cannot lower it. Every request but the provider's is refused, every MCP tool result and the agent's own web tools taint the run, and then its shell and edits ask."
+  ]
+}

@@ -249,6 +249,7 @@ ACTIONS = [
     ("POST", "/limits/web", {"pids": "none", "confirm": True}, [["limits", "web", "--pids=none"]]),
     ("GET", "/limits/web", None, [["limits", "web", "--show", "--json"]]),
     ("GET", "/presets", None, [["presets", "list", "--json"]]),
+    ("GET", "/preset-categories", None, [["presets", "categories", "--json"]]),
     ("GET", "/vpn", None, [["vpn", "list", "--json"]]),
     ("POST", "/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "location": "se-sto"},
      [["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]]),

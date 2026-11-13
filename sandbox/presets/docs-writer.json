@@ -4,7 +4,13 @@
   "id": "docs-writer",
   "title": "Documentation writer",
   "description": "Write and build documentation (MkDocs, Sphinx) with PyPI and GitHub open.",
-  "category": "development",
+  "translations": {
+    "de": {
+      "title": "Dokumentation schreiben",
+      "description": "Dokumentation schreiben und bauen (MkDocs, Sphinx) mit PyPI und GitHub offen."
+    }
+  },
+  "category": "writing",
   "agents": [
     "claude",
     "codex",

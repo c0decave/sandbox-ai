@@ -11,6 +11,11 @@ setup(VIEW, STRETCH, COMPACT) and fitted with fit_columns(VIEW) when its rows ar
   the titles and compact columns alone are wider than the view;
 - no column is ever narrower than its title (with room for the sort arrow).
 
+A view with stretch_interactive True (the Files page's panes) keeps every column Interactive, the stretch column too
+(its edge can be dragged): it is given the room the others leave each time the columns are fitted (also when the
+view's width changes, until the human sizes a column). Nothing is stretched by Qt: what Qt's last-section stretching
+gives depends on the width the view had when it was first fitted, and it moved columns at a change of folder.
+
 Widths are measured with the font's metrics on at most SAMPLE rows (the first ones and some spread over the rest),
 never with ResizeToContents on every row: a folder of 20,000 files is fitted in a few milliseconds. A table is
 fitted in full when its first rows arrive; later fills only widen a column whose content became wider (nothing
@@ -61,7 +66,7 @@ def setup(view, stretch=None, compact=()):
     header.setStretchLastSection(False)
     if not view.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
         view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-    if stretch is not None:
+    if stretch is not None and not getattr(view, "stretch_interactive", False):
         header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
     if getattr(view, "fit_watcher", None) is None:
         view.fit_watcher = _Watcher(view)
@@ -79,11 +84,14 @@ def stretch_of(view):
 
 def _modes(view, header, stretch, squeezed=False):
     """The resize modes setup() chose (a header state restored from an older version may have others); SQUEEZED:
-    the stretch column has a width of its own too (the view is too narrow for all columns: it scrolls)."""
+    the stretch column has a width of its own too (the view is too narrow for all columns: it scrolls). A view with
+    STRETCH_INTERACTIVE (the Files page's panes) has every column Interactive - the stretch column's edge can be
+    dragged too (apply gives it the room the others leave)."""
+    last = bool(getattr(view, "stretch_interactive", False))
     if header.stretchLastSection():
         header.setStretchLastSection(False)
     for column in range(header.count()):
-        mode = QHeaderView.ResizeMode.Stretch if column == stretch and not squeezed else \
+        mode = QHeaderView.ResizeMode.Stretch if column == stretch and not squeezed and not last else \
             QHeaderView.ResizeMode.Interactive
         if header.sectionResizeMode(column) != mode:
             header.setSectionResizeMode(column, mode)
@@ -252,6 +260,9 @@ def apply(view):
         _modes(view, header, stretch, squeezed)
         if squeezed:
             widths[stretch] = need
+        elif stretch in titles and getattr(view, "stretch_interactive", False):
+            # Interactive: the stretch column is given the room the others leave.
+            widths[stretch] = max(need, room - sum(width for column, width in widths.items() if column != stretch))
         for column, width in widths.items():
             if header.sectionSize(column) != width:
                 header.resizeSection(column, width)

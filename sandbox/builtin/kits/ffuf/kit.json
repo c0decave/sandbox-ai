@@ -1,0 +1,53 @@
+{
+ "$comment": "Provenance of the files vendored into this built-in kit (sandbox-ai). Each file is the upstream file at the pinned commit, unchanged: its git blob id matches `git ls-tree -r COMMIT` upstream. The review: docs/skills-review.md.",
+ "name": "ffuf",
+ "agents": [
+  "claude",
+  "codex",
+  "opencode"
+ ],
+ "default": "off",
+ "upstream": {
+  "repository": "https://github.com/jthack/ffuf_claude_skill",
+  "commit": "50fd4af4d8bd60cfc48fd84eda1720fbd718857d",
+  "committed": "2025-10-16T15:39:14-04:00",
+  "version": null,
+  "license": "MIT (stated in the upstream README; no LICENSE file upstream)"
+ },
+ "skills": {
+  "ffuf-web-fuzzing": "ffuf-skill"
+ },
+ "left_out": [],
+ "files": {
+  "skills/ffuf-web-fuzzing/SKILL.md": {
+   "upstream": "ffuf-skill/SKILL.md",
+   "sha256": "ddedfc6165b0b85a0fd84f032df7a9970d48a614b266485458e83bf8dc705cbc",
+   "blob": "8d8e997199f17f98ca861e4289933ed9d38ba2cc",
+   "mode": "100644"
+  },
+  "skills/ffuf-web-fuzzing/ffuf_helper.py": {
+   "upstream": "ffuf-skill/ffuf_helper.py",
+   "sha256": "146e73d162b71f6535da267a09584f2de10757291088c1405fa98ce81eda7a7d",
+   "blob": "5c67e820f0ec86c9a7d87c87681d0ee392a7ff94",
+   "mode": "100755"
+  },
+  "skills/ffuf-web-fuzzing/resources/REQUEST_TEMPLATES.md": {
+   "upstream": "ffuf-skill/resources/REQUEST_TEMPLATES.md",
+   "sha256": "dad5734c8df662bfe9c2014636df4a0d5daafaff6b8c30cbd88352b2dd3e7b7b",
+   "blob": "d8415a22fe7f9718fdf82da54660450cf7ff9b72",
+   "mode": "100644"
+  },
+  "skills/ffuf-web-fuzzing/resources/WORDLISTS.md": {
+   "upstream": "ffuf-skill/resources/WORDLISTS.md",
+   "sha256": "a698968d67d0259f544d0448e48575703b3ca907d1d3fbfbf18c0be6748dad80",
+   "blob": "e866cd69f6e0817517d9d54c509a0966edc62da2",
+   "mode": "100644"
+  },
+  "UPSTREAM-README.md": {
+   "upstream": "README.md",
+   "sha256": "e06a8050761d3793d4ab4c8a9d8a7bb1f4efb5360ebc7bb4c09446b73398264b",
+   "blob": "071b29cf4c722664847b716dc12de86da585b3d2",
+   "mode": "100644"
+  }
+ }
+}

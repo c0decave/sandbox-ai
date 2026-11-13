@@ -227,6 +227,60 @@ def test_summarize_and_report(scenario, tmp_path, capsys):
         assert "Blocked egress: none" in text
 
 
+def test_parent_of_is_pathlibs_parent(scenario):
+    """The busiest folders: each folder's parent is worked out once, the same as pathlib's for every path in it."""
+    paths = {"happy": ["/work/a.txt", "/work/b.txt", "/work/src/c.py", "rel/x", "x"],
+             "sad": ["", ".", "/", "//", "///", "/work/", "/work/.", "a/..", "/.."],
+             "edge": ["//x", "//y", "///x", "a//b/c", "a//b/d", "a/./b", "./a", "/work/ä b/..", "/work/ä b/c"]}[scenario]
+    known = {}
+    for _ in range(2):  # the second time from what the first kept
+        assert [logs.parent_of(path, known) for path in paths] == [str(Path(path).parent) for path in paths]
+    assert len(known) <= len(paths)
+
+
+def test_summarize_suggests_once_per_destination(scenario, tmp_path, monkeypatch):
+    """Retries to one destination: one suggestion() each; records that differ only in a value's type (1, 1.0, true)
+    or hold a list are not taken for one another."""
+    denied = {"happy": [{"host": "pypi.org"}] * 5 + [{"address": "192.0.2.9", "protocol": "tcp", "port": 8080}] * 3,
+              "sad": [{"address": "192.0.2.9", "protocol": "tcp", "port": ["x"]}] * 2,
+              "edge": [{"address": "192.0.2.9", "protocol": "tcp", "port": port} for port in (1, 1.0, True, 1)]}[scenario]
+    calls = []
+    real = logs.suggestion
+    monkeypatch.setattr(logs, "suggestion", lambda record: calls.append(record) or real(record))
+    summary = logs.summarize(log_dir(tmp_path, denied))
+    assert len(calls) == {"happy": 2, "sad": 2, "edge": 3}[scenario]
+    entries = {}  # what summarize made of them asking suggestion() for every record
+    for record in denied:
+        found = real(record)
+        if found:
+            entry = entries.setdefault(found[0], {"option": found[1], "why": found[2], "count": 0})
+            entry["count"] += 1
+    assert summary["suggestions"] == sorted(entries.values(), key=lambda entry: -entry["count"])
+    assert len(summary["suggestions"]) == {"happy": 2, "sad": 1, "edge": 3}[scenario]
+
+
+def test_iter_records_parses_only_the_lines_that_can_hold_what_is_needed(scenario, tmp_path, monkeypatch):
+    """refusals(): a connection log's lines without "denied" are not parsed; what is read and found stays the same,
+    an escaped value, UTF-16 and a damaged line included."""
+    lines = {"happy": [b'{"event": "denied", "n": 1}', b'{"event": "http", "n": 2}', b'{"event": "tls", "n": 3}'],
+             "sad": [b'{"event": "denied"', b'not json', b'{"event": "http"}'],
+             "edge": [b'{"event": "\\u0064enied", "n": 1}', '{"event": "denied", "n": 2}'.encode("utf-16"),
+                      b'["denied"]', b'{"event": "http", "note": "denied"}']}[scenario]
+    path = tmp_path / "connections-1.jsonl"
+    path.write_bytes(b"".join(line + b"\n" for line in lines))
+    parsed = []
+    real = logs.jsonltail().loads
+    monkeypatch.setattr(logs.jsonltail(), "loads", lambda line: parsed.append(line) or real(line))
+    every, budget = list(logs.iter_records(path)), logs.new_budget()
+    every_parsed, parsed[:] = len(parsed), []
+    needed = list(logs.iter_records(path, budget, needs=b"denied"))
+    assert [r for r in needed if r.get("event") == "denied"] == [r for r in every if r.get("event") == "denied"]
+    assert budget["lines"] == len(lines)  # every line counted
+    assert len(parsed) == {"happy": 1, "sad": 1, "edge": 4}[scenario] <= every_parsed
+    assert [r.get("n") for r in needed if r.get("event") == "denied"] == \
+        {"happy": [1], "sad": [], "edge": [1]}[scenario]  # UTF-16 in a JSONL file breaks at its newline's NUL
+
+
 def test_logs_cli(scenario, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     project = tmp_path / "proj"

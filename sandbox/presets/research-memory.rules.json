@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "description": "research-memory: every result of the web servers is untrusted; the case memory's deletions are asked.",
+  "untrusted": [
+    {
+      "id": "web-search",
+      "server": "duckduckgo",
+      "tool": "*"
+    },
+    {
+      "id": "web-pages",
+      "server": "web-fetch",
+      "tool": "*"
+    }
+  ],
+  "mcp": [
+    {
+      "id": "memory-deletes",
+      "server": "memory",
+      "tool": [
+        "delete_entities",
+        "delete_observations",
+        "delete_relations"
+      ],
+      "decision": "ask",
+      "reason": "removes something from the case memory"
+    }
+  ]
+}

@@ -13,9 +13,9 @@ from __future__ import annotations
 import functools
 import re
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit, QMenu,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QMessageBox, QPushButton, QRadioButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -23,6 +23,7 @@ from . import theme, widgets
 from .backend import SandboxAI
 from .files import printable
 from .copying import copy_entries
+from .credential_tab import CredentialTab, even_out
 from .i18n import N_, tr
 from .host_choice import on_host
 from .name_fields import NameField, publish as publish_names
@@ -35,8 +36,9 @@ KINDS = (("logins", N_("Agent login")), ("secrets", N_("Secret")), ("git", N_("G
          ("publish", N_("Publish login")), ("identities", N_("Identity")), ("vpn", N_("VPN profile")))
 
 
-class LoginsBox(QGroupBox):
-    """Base of the Git and publish logins: a table, Add, Remove and Check, all through sandbox-ai's commands."""
+class LoginsBox(CredentialTab):
+    """Base of the Git and publish logins: a table, Add, Remove and Check, all through sandbox-ai's commands (laid
+    out as every tab of the page: credential_tab.py)."""
     command = ""
     title = ""
     headers = ()
@@ -46,22 +48,15 @@ class LoginsBox(QGroupBox):
         super().__init__(tr(self.title))
         self.sai, self.changed, self.entries, self.secret_names, self.host = sai, changed, [], [], LOCAL
         self.secrets_known = False  # whether secret_names are what the host said (else a replace is asked about)
-        layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(self.about(), role="secondary"))
-        self.list = multi_select(table([tr(h) for h in self.headers], stretch=self.stretch, compact=self.compact))
-        layout.addWidget(self.list, 1)
-        row = QHBoxLayout()
+        self.add_about(self.about())
+        self.list = self.set_list(multi_select(table([tr(h) for h in self.headers], stretch=self.stretch,
+                                                     compact=self.compact)))
         self.add_button, self.remove_button, self.check_button = \
             QPushButton(tr("Add…")), QPushButton(tr("Remove…")), QPushButton(tr("Check"))
         self.add_button.clicked.connect(lambda _=False: self.add())
         self.remove_button.clicked.connect(lambda _=False: self.remove())
         self.check_button.clicked.connect(lambda _=False: self.check())
-        for widget in (self.add_button, self.remove_button, self.check_button, *self.more_buttons()):
-            row.addWidget(widget)
-        row.addStretch()
-        layout.addLayout(row)
-        self.message = plain_label()
-        layout.addWidget(self.message)
+        self.add_buttons(self.add_button, self.remove_button, self.check_button, *self.more_buttons())
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; what acts on one login waits
         delete_key(self.list, self.remove)
         one_only(self.list, self.single_buttons())
@@ -220,8 +215,8 @@ class GitLoginsBox(LoginsBox):
         if not hasattr(self, "give_button"):
             self.give_button = QPushButton(tr("Give to a running sandbox…"))
             self.give_button.setToolTip(safe_tooltip(tr(
-                "A sandbox started before this login was added gets it now (sandbox-ai net allow RUN --git-token-secret); "
-                "every sandbox started later has it anyway")))
+                "A sandbox started before this login was added gets it now (sandbox-ai git-logins give RUN URL "
+                "--secret NAME); every sandbox started later has it anyway")))
             self.give_button.clicked.connect(lambda _=False: self.give())
             self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             self.list.customContextMenuRequested.connect(self.menu)
@@ -251,7 +246,7 @@ class GitLoginsBox(LoginsBox):
 
     def give(self):
         """Give the chosen login to a sandbox that runs (on this host): its runs are read in the background, then
-        one is chosen, asked about (the app's one policy for widening a run) and `net allow` sent."""
+        one is chosen, asked about (the app's one policy for widening a run) and `git-logins give` sent."""
         if self.host != LOCAL:
             self.message.setText(tr("Only a login of this machine is given to a sandbox from here."))
             return
@@ -273,28 +268,23 @@ class GitLoginsBox(LoginsBox):
         dialog = GiveDialog(self, runs)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        run, keep = dialog.run(), dialog.keep.isChecked()
+        run, keep, called = dialog.run(), dialog.keep.isChecked(), dialog.run_label()
         target = git_login_url(entry)
         question = tr("Give the Git login for {url} (secret {secret}) to {run} until it ends, at once? Its Git "
-                      "logs in with it from now on (the token stays outside the sandbox: its proxy uses it).",
-                      url=printable(target), secret=printable(entry["secret"]), run=printable(run))
+                      "logs in with it from now on.", url=printable(target), secret=printable(entry["secret"]),
+                      run=called)
         if keep:
             question += "\n\n" + tr("It is also kept for the later starts of its project: written into its trusted "
                                      ".sandbox-ai.json.")
         if not ask_first(self, "net-allow", tr("Give the login"), question, tr("Give")):
             return
         self.message.setText(tr("Giving the login…"))
-        background(self.sai.host_run, LOCAL, "net", "allow", run, "--git-token-secret", f"{target}={entry['secret']}",
-                   *(["--keep"] if keep else []), owner=self, work=True, source=self.give_button, timeout=150,
-                   done=lambda result, error_: self.given(run, result, error_))
+        background(self.sai.host_run, LOCAL, "git-logins", "give", *give_login_args(run, entry, keep), owner=self, work=True,
+                   source=self.give_button, timeout=150,
+                   done=lambda result, error_: self.given(called, run, entry, result, error_))
 
-    def given(self, run, result, error):
-        status, out, err = result if error is None and isinstance(result, tuple) else (1, "", str(error or ""))
-        if status == 0:
-            self.message.setText(tr("{run} has the login now.", run=printable(run)))
-        else:
-            self.message.setText(printable((err or out or "").strip().splitlines()[-1:] and
-                                           (err or out).strip().splitlines()[-1] or tr("Not given")))
+    def given(self, called, run, entry, result, error):
+        self.message.setText(login_given_text(called, run, entry, result, error))
 
     def add(self):
         seen = self.seen()
@@ -415,7 +405,7 @@ class LoginDialog(QDialog):
         buttons.accepted.connect(self.check_and_accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
-        self.problem = plain_label(role="notice-error")
+        self.problem = plain_label(role="notice-error", selectable=True)
         form.addRow(self.problem)
         self.typed.toggled.connect(lambda _on: self.show_choice())
         if self.kind is not None:
@@ -491,29 +481,34 @@ class CredentialsPage(QWidget):
         self.hosts.changed.connect(self.host_changed)
         self.secret_host = self.hosts.box  # (the Secrets tab had a chooser of its own: the page's now)
         layout.addWidget(self.hosts)
-        self.summary = plain_label(role="secondary")
+        # one line (cut with "…", whole in its tooltip): a longer summary never moves the tabs below it
+        self.summary = widgets.ElidedLabel(about=120, role="secondary")
         layout.addWidget(self.summary)
         self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(lambda _index: self.even_out())
         layout.addWidget(self.tabs, 1)
 
         # the overview
-        overview = QWidget()
-        overview_layout = QVBoxLayout(overview)
-        overview_layout.addWidget(plain_label(tr("Everything configured, with its state. Click a row to open its "
-                                                 "tab."), role="secondary"))
-        self.overview = table([tr("Kind"), tr("Name"), tr("Where / used by"), tr("State")], stretch=2, compact=(0, 3))
+        overview = CredentialTab(tr("Everything configured"))
+        overview.add_about(tr("Everything configured, with its state. Click a row to open its tab."))
+        self.overview = overview.set_list(table([tr("Kind"), tr("Name"), tr("Where / used by"), tr("State")],
+                                                stretch=2, compact=(0, 3)))
         self.overview.setAccessibleName(tr("Overview"))
         self.overview.cellClicked.connect(lambda row, _column: self.open_row(row))
         self.overview.cellActivated.connect(lambda row, _column: self.open_row(row))
-        overview_layout.addWidget(self.overview, 1)
-        self.tabs.addTab(overview, tr("Overview"))
+        refresh_all = QPushButton(tr("Refresh"))
+        refresh_all.setToolTip(tr("Read everything again (on the host chosen)"))
+        refresh_all.clicked.connect(lambda _=False: self.refresh_all())
+        overview.add_buttons(refresh_all)
+        self.overview_tab = overview
+        self.add_tab(None, overview, tr("Overview"))
 
         # agent logins
-        logins = QGroupBox(tr("Agent logins for sandboxes"))
-        logins_layout = QVBoxLayout(logins)
-        self.logins = table([tr("Agent"), tr("Login from"), tr("State"), tr("File")], stretch=3, compact=(0, 1, 2))
-        logins_layout.addWidget(self.logins)
-        row = QHBoxLayout()
+        logins = CredentialTab(tr("Agent logins for sandboxes"))
+        logins.add_about(tr("The agents' own logins (sandbox-ai login AGENT): kept once, used by every sandbox of "
+                            "that agent; without one a sandbox uses the host's login."))
+        self.logins = logins.set_list(table([tr("Agent"), tr("Login from"), tr("State"), tr("File")], stretch=3,
+                                            compact=(0, 1, 2)))
         login = QPushButton(tr("Log in…"))
         login.setToolTip(tr("Runs the agent's own login inside a sandbox and keeps it for all sandboxes"))
         login.clicked.connect(lambda: self.login(False))
@@ -521,27 +516,32 @@ class CredentialsPage(QWidget):
         logout.clicked.connect(lambda: self.login(True))
         refresh = QPushButton(tr("Refresh"))
         refresh.clicked.connect(self.refresh)
-        for widget in (login, logout, refresh):
-            row.addWidget(widget)
-        row.addStretch()
-        logins_layout.addLayout(row)
+        # The app's browser at a provider's sign-in page (web_browser.py): the login browser's profile, so a
+        # subscription signed in to there makes the agent's Log in… one click.
+        self.cloud_button = QPushButton(tr("Sign in to a cloud subscription…"))
+        self.cloud_button.setToolTip(safe_tooltip(tr(
+            "Opens the app's browser at a provider's sign-in page (claude.ai, ChatGPT, OpenCode ...): the sign-in "
+            "stays in the login browser's profile, so the next Log in… finds it")))
+        self.cloud_menu = QMenu(self.cloud_button)
+        self.cloud_menu.aboutToShow.connect(self.fill_cloud_menu)
+        self.cloud_button.setMenu(self.cloud_menu)
+        logins.add_buttons(login, logout, refresh, self.cloud_button)
+        self.logins_message = logins.message
         self.add_tab("logins", logins)
 
         # secrets
-        secrets = QGroupBox(tr("Secrets (API keys and tokens for --secret-env and MCP servers)"))
-        secrets_layout = QVBoxLayout(secrets)
+        secrets = CredentialTab(tr("Secrets (API keys and tokens for --secret-env and MCP servers)"))
         # {host: [(name, where)]} of the secret names read there; a host missing: not known (not read yet, or the
         # read failed), and a replace there is asked about (an unknown secret may exist).
         self.remote_secrets, self.secrets_token = {}, 0
-        self.backend_label = plain_label()
-        secrets_layout.addWidget(self.backend_label)
+        self.backend_label = secrets.add_header(plain_label(role="secondary"))
         # Where a secret kept now goes on the chosen host (`sandbox-ai secrets backend` there: keyring or file).
-        self.store_label, self.store_token = plain_label(role="secondary"), 0
-        secrets_layout.addWidget(self.store_label)
-        self.secrets = multi_select(table([tr("Name"), tr("Kept in"), tr("Used by")], stretch=2, compact=(1,)))
+        self.store_label, self.store_token = secrets.add_header(plain_label(role="secondary")), 0
+        self.secrets = secrets.set_list(multi_select(table([tr("Name"), tr("Kept in"), tr("Used by")], stretch=2,
+                                                           compact=(1,))))
         self.secrets.itemSelectionChanged.connect(lambda: self.name.setText(selected(self.secrets) or self.name.text()))
-        secrets_layout.addWidget(self.secrets, 1)
         form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
         self.name = QLineEdit()
         self.name.setPlaceholderText("API_TOKEN")
         self.value = QLineEdit()
@@ -549,8 +549,7 @@ class CredentialsPage(QWidget):
         self.value.setAccessibleName(tr("Value"))  # its form label names the field's row, not the field itself
         form.addRow(tr("Name"), self.name)
         form.addRow(tr("Value"), widgets.secret_value(self.value))
-        secrets_layout.addLayout(form)
-        row = QHBoxLayout()
+        secrets.add_below(form)
         keep = self.add_button = QPushButton(tr("Add"))
         keep.setToolTip(tr("Keep the value under that name for good (sandbox-ai secrets set, on standard input); a "
                            "name kept already is replaced only after a yes"))
@@ -561,8 +560,9 @@ class CredentialsPage(QWidget):
         delete.clicked.connect(self.delete_secret)
         give = self.give_key_button = QPushButton(tr("Give to a running sandbox…"))
         give.setToolTip(safe_tooltip(tr(
-            "The selected secret as an API key of a sandbox that runs (sandbox-ai net allow RUN --api-key "
-            "HOST=NAME=SECRET): its proxy puts the key in on the wire, the agent only sees a placeholder")))
+            "The selected secret for a sandbox that runs: as an API key (sandbox-ai secrets give RUN NAME --api-key "
+            "HOST; its proxy puts the key in on the wire, the agent only sees a placeholder) or, for a Git server, as "
+            "a Git login (sandbox-ai git-logins give RUN URL --secret NAME)")))
         give.clicked.connect(lambda _=False: self.give_secret())
         self.secrets.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.secrets.customContextMenuRequested.connect(self.secret_menu)
@@ -571,12 +571,8 @@ class CredentialsPage(QWidget):
         one_only(self.secrets, [give])
         self.secret_buttons = [keep, delete]
         self.generation = 0
-        for widget in (keep, delete, give):
-            row.addWidget(widget)
-        row.addStretch()
-        secrets_layout.addLayout(row)
-        self.message = plain_label()
-        secrets_layout.addWidget(self.message)
+        secrets.add_buttons(keep, delete, give)
+        self.message = secrets.message
         self.add_tab("secrets", secrets)
 
         # Git and publish logins
@@ -596,6 +592,21 @@ class CredentialsPage(QWidget):
         self.vpn = VpnBox(sai)
         self.vpn.on_change = self.show_overview
         self.add_tab("vpn", self.vpn)
+
+    def fill_cloud_menu(self):
+        """The providers' sign-in pages (sandbox-ai's PROVIDERS), a section per agent, and the browser itself."""
+        from . import web_browser
+        try:
+            launcher = self.sai.launcher  # (sandbox-ai's own PROVIDERS)
+        except Exception:  # noqa: BLE001 - not loadable: terminal_text's copy of the lists
+            launcher = None
+        web_browser.quick_menu(self.cloud_menu, self.open_browser, launcher)
+        self.cloud_menu.addSeparator()
+        self.cloud_menu.addAction(tr("Open the browser"), lambda: self.open_browser(None))
+
+    def open_browser(self, url):
+        from . import web_browser
+        return web_browser.open_browser(url, parent=self)
 
     def secret_menu(self, point):
         """A secret's menu: give it to a running sandbox as an API key, remove."""
@@ -630,14 +641,31 @@ class CredentialsPage(QWidget):
         if not runs:
             self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable(error))
             return
-        dialog = GiveDialog(self, runs, secret=secret)
+        dialog = GiveDialog(self, runs, secret=secret, git_hosts=self.git_hosts())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        run, keep = dialog.run(), dialog.keep.isChecked()
-        host, variable = dialog.host.text().strip().lower().rstrip("."), dialog.variable.text().strip()
+        run, keep, called = dialog.run(), dialog.keep.isChecked(), dialog.run_label()
+        host, variable = dialog.key_host(), dialog.variable.text().strip()
+        if dialog.as_git_login():
+            user = dialog.user.text().strip() or "x-access-token"
+            entry = {"url": f"https://{host}", "user": user, "secret": secret}
+            question = tr("Give the secret {secret} to {run} as a Git login for https://{host} (user {user}), until "
+                          "it ends? Its Git logs in with it from now on (git push).", secret=printable(secret),
+                          run=called, host=printable(host), user=printable(user))
+            if keep:
+                question += "\n\n" + tr("It is also kept for the later starts of its project: written into its "
+                                         "trusted .sandbox-ai.json.")
+            if not ask_first(self, "net-allow", tr("Give the login"), question, tr("Give")):
+                return
+            self.message.setText(tr("Giving the login…"))
+            background(self.sai.host_run, LOCAL, "git-logins", "give", *give_login_args(run, entry, keep), owner=self, work=True,
+                       source=self.give_key_button, timeout=150,
+                       done=lambda result, error_: self.message.setText(
+                           login_given_text(called, run, entry, result, error_)))
+            return
         question = tr("Give the secret {secret} to {run} as the API key {name} for {host}, until it ends? Its proxy "
                       "puts the key in on the wire for HTTPS requests to {host}; the agent sends the placeholder "
-                      "and never sees the key. {host} is allowed too.", secret=printable(secret), run=printable(run),
+                      "and never sees the key. {host} is allowed too.", secret=printable(secret), run=called,
                       name=printable(variable), host=printable(host))
         if keep:
             question += "\n\n" + tr("It is also kept for the later starts of its project: written into its trusted "
@@ -645,26 +673,55 @@ class CredentialsPage(QWidget):
         if not ask_first(self, "net-allow", tr("Give the key"), question, tr("Give")):
             return
         self.message.setText(tr("Giving the key…"))
-        background(self.sai.host_run, LOCAL, "net", "allow", run, "--api-key", f"{host}={variable}={secret}",
+        background(self.sai.host_run, LOCAL, "secrets", "give", run, secret, "--api-key", host, "--as", variable,
                    *(["--keep"] if keep else []), owner=self, work=True, source=self.give_key_button, timeout=150,
-                   done=lambda result, error_: self.secret_given(run, variable, result, error_))
+                   done=lambda result, error_: self.secret_given(called, run, host, variable, result, error_))
 
-    def secret_given(self, run, variable, result, error):
-        status, out, err = result if error is None and isinstance(result, tuple) else (1, "", str(error or ""))
-        if status == 0:
-            self.message.setText(tr("{run} has the key now: in the sandbox, export {name}={placeholder}",
-                                    run=printable(run), name=printable(variable),
-                                    placeholder=f"sandbox-ai-api-key-placeholder-{variable}"))
-        else:
-            lines = (err or out or "").strip().splitlines()
-            self.message.setText(printable(lines[-1]) if lines else tr("Not given"))
+    def secret_given(self, called, run, host, variable, result, error):
+        status, out, err = given_outcome(result, error)
+        if status != 0:
+            self.message.setText(not_given_text(called, out, err))
+            return
+        self.message.setText(with_notes(tr(
+            "{run} has the key {name} now, for HTTPS requests to {host} only: in the sandbox, export "
+            "{name}={placeholder} and send that. To check: sandbox-ai net show {id}", run=called,
+            name=printable(variable), host=printable(host), placeholder=f"sandbox-ai-api-key-placeholder-{variable}",
+            id=printable(str(run))), out))
+
+    def git_hosts(self):
+        """The hosts a secret given to is most likely meant as a Git login: the well-known forges and the servers
+        of the Git logins (and identities) configured."""
+        hosts = set(GIT_FORGES)
+        entries = list(self.state.get("git", []))
+        for identity in (getattr(self.identities, "known", {}) or {}).values() if self.identities is not None else []:
+            entries += [e for e in identity.get("git", []) if isinstance(e, dict)]
+        for entry in entries:
+            host = git_host(entry.get("url"))
+            if host:
+                hosts.add(host)
+        return hosts
 
     TAB_TITLES = {"logins": N_("Agent logins"), "secrets": N_("Secrets"), "git": N_("Git logins"),
                   "publish": N_("Publish logins"), "identities": N_("Identities"), "vpn": N_("VPN")}
 
-    def add_tab(self, key, widget):
+    def add_tab(self, key, widget, title=None):
         widget.setProperty("credential_kind", key)
-        self.tabs.addTab(widget, tr(self.TAB_TITLES[key]))
+        widget.resized = self.even_out
+        self.tabs.addTab(widget, title or tr(self.TAB_TITLES[key]))
+
+    def even_out(self):
+        """Every tab's header as high as the highest at this width (credential_tab.even_out): switching tabs moves
+        no list, no button and no text."""
+        current = self.tabs.currentWidget()
+        even_out([current] + [self.tabs.widget(i) for i in range(self.tabs.count())
+                              if self.tabs.widget(i) is not current])
+
+    def refresh_all(self):
+        """The overview's Refresh: every tab read again."""
+        self.refresh()
+        self.vpn.refresh()
+        if self.identities is not None:
+            self.identities.refresh()
 
     def tab_of(self, key):
         for index in range(self.tabs.count()):
@@ -674,12 +731,10 @@ class CredentialsPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802
         super().showEvent(event)
+        self.even_out()
         if not self.loaded:
             self.loaded = True
-            self.refresh()
-            self.vpn.refresh()
-            if self.identities is not None:
-                self.identities.refresh()
+            self.refresh_all()
 
     def host(self):
         return self.hosts.host() or LOCAL
@@ -1070,6 +1125,65 @@ def git_login_url(entry):
     return url
 
 
+def give_login_args(run, entry, keep):
+    """What follows `sandbox-ai git-logins give` for the login ENTRY ({url, user, secret}): --secret NAME [--user
+    USER] [--keep] -- RUN URL (the URL after "--" is never read as an option)."""
+    user = str(entry.get("user") or "")
+    return ["--secret", entry["secret"], *(["--user", user] if user else []),
+            *(["--keep"] if keep else []), "--", run, str(entry.get("url", "")).rstrip("/")]
+
+
+def given_outcome(result, error):
+    """(status, out, err) of a give's `sandbox-ai ...` (an exception, a timeout: a failure saying so)."""
+    return result if error is None and isinstance(result, tuple) else (1, "", str(error or ""))
+
+
+def with_notes(text, out):
+    """TEXT, then the notes the command said ("note: ..." lines of OUT: a server on the host's loopback, a port that
+    needs --allow-tcp), one per line."""
+    notes = [printable(line.strip()) for line in (out or "").splitlines() if line.strip().startswith("note:")]
+    return "\n".join([text, *notes])
+
+
+def not_given_text(called, out, err):
+    """What a give that failed says: which run did not get it, and the command's reason (its last line)."""
+    lines = (err or out or "").strip().splitlines()
+    return tr("Not given to {run}: {error}", run=called,
+              error=printable(lines[-1]) if lines else tr("the command said nothing"))
+
+
+def login_given_text(called, run, entry, result, error):
+    """What a Git login given to RUN (CALLED: "RUN (NAME)") says: the server and user it got, or why not."""
+    status, out, err = given_outcome(result, error)
+    if status != 0:
+        return not_given_text(called, out, err)
+    url = str(entry.get("url", "")).rstrip("/")
+    user = str(entry.get("user") or "") or (url.split("://", 1)[-1].split("@", 1)[0] if "@" in url else
+                                             "x-access-token")
+    return with_notes(tr("{run} has the Git login for {url} (user {user}) now: its git logs in with it until the run "
+                         "ends (a remote whose URL names another user does not get it). To check: sandbox-ai net show "
+                         "{id}", run=called, url=printable(url), user=printable(user), id=printable(str(run))), out)
+
+
+# The forges whose host a secret is most likely given to for git push (besides the Git logins configured).
+GIT_FORGES = ("github.com", "gitlab.com", "codeberg.org", "bitbucket.org", "gitea.com")
+# Forges whose API is not on the Git server's own host: a key for github.com is never put into requests to
+# api.github.com (the proxy puts a key in for its very host only), so the key goes to the API's host.
+FORGE_API_HOSTS = {"github.com": "api.github.com", "bitbucket.org": "api.bitbucket.org"}
+
+
+def git_host(url):
+    """The host of a Git login's URL (http(s)://[USER@]HOST[:PORT]), lower case; None for another form."""
+    match = re.fullmatch(r"https?://(?:[^@/]*@)?([A-Za-z0-9.-]+)(?::\d+)?/?", str(url or ""))
+    return match[1].lower().rstrip(".") if match else None
+
+
+def run_label(instance):
+    """"RUN (NAME)": the run id and the start's name, as the messages of a credential given name them."""
+    run, name = str(getattr(instance, "run", "") or ""), str(getattr(instance, "name", "") or "")
+    return printable(f"{run} ({name})" if name and name != run else run)
+
+
 def running_here(found, error):
     """The runs and sessions that run on this machine now, of `instances` (FOUND, ERROR as background gives them)."""
     instances = (found[0] if isinstance(found, tuple) else found) if error is None else []
@@ -1081,19 +1195,47 @@ API_HOST = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+
 API_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 
+class NoteLabel(QLabel):
+    """A wrapped note in a row of a form: at least as high as its text at its width. A QFormLayout gave the row's
+    widget the height of its size hint - the note's lines at another width - and the note was cut short (the Git
+    server's note of GiveDialog to one line)."""
+
+    def __init__(self, text, role=None):
+        super().__init__()
+        self.setTextFormat(Qt.TextFormat.PlainText)  # (as plain_label: never HTML)
+        self.setWordWrap(True)
+        self.setText(str(text))
+        if role:
+            self.setProperty("role", role)
+
+    def fit(self):
+        need = self.heightForWidth(self.width())
+        if need > 0 and need != self.minimumHeight():
+            self.setMinimumHeight(need)
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self.fit()
+
+
 class GiveDialog(QDialog):
     """Which running sandbox gets the login (or, with SECRET, the secret as an API key: for which host, under which
     variable), and whether its project keeps it."""
 
-    def __init__(self, parent, runs, secret=None):
+    def __init__(self, parent, runs, secret=None, git_hosts=()):
         super().__init__(parent)
         self.setWindowTitle(tr("Give to a running sandbox"))
         layout = QVBoxLayout(self)
         self.choice = QComboBox()
         self.choice.setAccessibleName(tr("Sandbox"))
+        self.labels = {}
         for instance in runs:
-            label = f"{instance.name}  ({instance.agent})" if getattr(instance, "agent", "") else instance.name
+            # Its run id beside the name: the run that gets it, as every message and sandbox-ai net show name it.
+            what = ", ".join(str(part) for part in (getattr(instance, "agent", ""), instance.run if instance.run !=
+                                                     instance.name else "") if part)
+            label = f"{instance.name}  ({what})" if what else instance.name
             self.choice.addItem(printable(label), instance.run)
+            self.labels[instance.run] = run_label(instance)
         self.keep = QCheckBox(tr("Also for the later starts of its project"))
         layout.addWidget(plain_label(tr("The sandbox that gets the key:") if secret else
                                      tr("The sandbox that gets the login:")))
@@ -1109,16 +1251,105 @@ class GiveDialog(QDialog):
             self.variable.setToolTip(tr("The variable whose placeholder the agent sends (export NAME=… in the "
                                         "sandbox: the app says the line)"))
             form.addRow(tr("Server"), self.host)
+            # A Git server's host: the secret is offered as a Git login (git push), not silently as an API key.
+            self.git_hosts = {h.lower() for h in git_hosts}
+            self.as_key = QRadioButton(tr("As an API key (the agent sends a placeholder)"))
+            self.as_login = QRadioButton(tr("As a Git login (for git push)"))
+            self.as_key.setChecked(True)
+            self.kinds = QWidget()
+            kinds = QVBoxLayout(self.kinds)
+            kinds.setContentsMargins(0, 0, 0, 0)
+            self.git_note = NoteLabel(tr("This is a Git server: give the secret as a Git login to push there, or as an "
+                                         "API key for its API."), role="secondary")
+            kinds.addWidget(self.git_note)
+            kinds.addWidget(self.as_login)
+            kinds.addWidget(self.as_key)
+            form.addRow(self.kinds)
+            self.user = QLineEdit("x-access-token")
+            self.user.setToolTip(tr("The user Git logs in as (GitHub: x-access-token, GitLab: oauth2 or your user "
+                                    "name)"))
+            form.addRow(tr("User"), self.user)
             form.addRow(tr("Variable"), self.variable)
+            self.form = form
+            self.offered = False
             layout.addLayout(form)
+            layout.addStretch(1)  # (the room kept for the Git server's choice, while it is not shown: below the form)
+            self.host.textChanged.connect(lambda _text: self.show_kind())
+            self.as_login.toggled.connect(lambda _on: self.show_kind())
+            self.show_kind()
+        self.reserved = False
         layout.addWidget(self.keep)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)  # (first: the app's [x] in the corner makes room at the top as the dialog is shown)
+        if self.host is not None and not self.reserved:
+            self.reserved = True
+            self.reserve_room()
+
+    def reserve_room(self):
+        """The dialog as large as it is with the Git server's choice shown, from the start: when the choice appeared,
+        the window had to grow, and where the window manager keeps a dialog's size once it is shown (tiling, some
+        Wayland compositors) the note above the choice was cut to one line."""
+        self.ensurePolished()  # (its style sheet's padding: sizes before it are smaller - the window still grew)
+        rows = (self.kinds, self.user, self.variable)
+        shown = [self.form.isRowVisible(widget) for widget in rows]
+        for widget in rows:
+            widget.ensurePolished()
+        for widget in rows:
+            self.form.setRowVisible(widget, True)
+        self.layout().activate()
+        self.resize(self.layout().totalSizeHint())  # (laid out once: the note's width, then its lines at that width)
+        self.layout().activate()
+        self.git_note.fit()
+        self.layout().invalidate()
+        self.layout().activate()
+        hint = self.layout().totalSizeHint()
+        height = self.layout().totalHeightForWidth(hint.width()) if self.layout().hasHeightForWidth() else -1
+        for widget, visible in zip(rows, shown):
+            self.form.setRowVisible(widget, visible)
+        size = QSize(hint.width(), max(hint.height(), height))
+        self.setMinimumSize(size)
+        self.resize(size.expandedTo(self.size()))
+
     def run(self):
         return self.choice.currentData()
+
+    def run_label(self):
+        """"RUN (NAME)" of the sandbox chosen."""
+        return self.labels.get(self.run(), printable(str(self.run())))
+
+    def git_server(self):
+        """Whether the server typed is a Git server's host (a forge, a Git login's)."""
+        return self.host is not None and self.host.text().strip().lower().rstrip(".") in self.git_hosts
+
+    def as_git_login(self):
+        return self.git_server() and self.as_login.isChecked()
+
+    def key_host(self):
+        """The host the secret is given for: the one typed - as an API key for a forge whose API has a host of its own,
+        the API's (github.com: api.github.com - a key for github.com would never be put into its API's requests)."""
+        host = self.host.text().strip().lower().rstrip(".") if self.host is not None else ""
+        return FORGE_API_HOSTS.get(host, host) if self.git_server() and not self.as_git_login() else host
+
+    def show_kind(self):
+        """The choice of a Git login or an API key for a Git server's host (a Git login offered first, once), the
+        user for a login, the variable for a key."""
+        git = self.git_server()
+        typed = self.host.text().strip().lower().rstrip(".")
+        api = FORGE_API_HOSTS.get(typed, typed)
+        self.as_key.setText(tr("As an API key for {host} (the agent sends a placeholder)", host=printable(api))
+                            if git and api != typed else
+                            tr("As an API key (the agent sends a placeholder)"))
+        if git and not self.offered:
+            self.offered = True
+            self.as_login.setChecked(True)
+        self.form.setRowVisible(self.kinds, git)
+        self.form.setRowVisible(self.user, git and self.as_login.isChecked())
+        self.form.setRowVisible(self.variable, not (git and self.as_login.isChecked()))
 
     def problem(self):
         """Why the host or variable typed cannot be taken (None: they can)."""
@@ -1126,6 +1357,10 @@ class GiveDialog(QDialog):
             return None
         if not API_HOST.fullmatch(self.host.text().strip().lower().rstrip(".")):
             return tr("Name the server as a host name, such as api.example.com (no address, no https://).")
+        if self.as_git_login():
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", self.user.text().strip()):
+                return tr("The user: letters, digits and . _ - only.")
+            return None
         if not API_VARIABLE.fullmatch(self.variable.text().strip()):
             return tr("The variable: letters, digits and _, not starting with a digit.")
         return None

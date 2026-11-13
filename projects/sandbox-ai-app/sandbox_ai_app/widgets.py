@@ -85,15 +85,40 @@ def local_time(text, seconds=False):
     return time.strftime(pattern + (":%S" if seconds else ""), time.localtime(moment))
 
 
-def plain_label(text="", word_wrap=True, role=None):
-    """A label that never interprets its text as HTML (texts from logs and questions come from the agent)."""
+def plain_label(text="", word_wrap=True, role=None, selectable=False):
+    """A label that never interprets its text as HTML (texts from logs and questions come from the agent).
+    SELECTABLE: a message, a status or a refusal - its text can be marked and copied (Ctrl+C, its context menu)."""
     label = QLabel()
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(word_wrap)
     label.setText(str(text))
     if role:
         label.setProperty("role", role)
+    if selectable:
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                      | Qt.TextInteractionFlag.TextSelectableByKeyboard)
     return label
+
+
+def show_text_window(parent, title_text, text):
+    """TEXT whole in a window of its own, to mark and copy (a refusal cut short in a status line)."""
+    from PySide6.QtWidgets import QDialog, QDialogButtonBox, QPlainTextEdit, QVBoxLayout
+    dialog = QDialog(parent)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    dialog.setWindowTitle(title_text)
+    layout = QVBoxLayout(dialog)
+    view = QPlainTextEdit(str(text))
+    view.setReadOnly(True)
+    view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+    layout.addWidget(view)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    copy = buttons.addButton(tr("Copy all"), QDialogButtonBox.ButtonRole.ActionRole)
+    copy.clicked.connect(lambda: QApplication.clipboard().setText(str(text)))
+    buttons.rejected.connect(dialog.close)
+    layout.addWidget(buttons)
+    dialog.resize(640, 260)
+    dialog.show()
+    return dialog
 
 
 class ElidedLabel(QLabel):
@@ -105,6 +130,7 @@ class ElidedLabel(QLabel):
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.about = about
         self.elides = True  # cut on purpose (tests/test_layout.py: not a clipped text)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # Ctrl+C after a click copies the whole text
         if role:
             self.setProperty("role", role)
 
@@ -118,6 +144,33 @@ class ElidedLabel(QLabel):
     def setText(self, text):  # noqa: N802
         super().setText(str(text))
         self.setToolTip(safe_tooltip(text) if text else "")
+
+    def copy_text(self):
+        QApplication.clipboard().setText(self.text())
+
+    def show_whole(self):
+        if self.text():
+            show_text_window(self, tr("Whole text"), self.text())
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        """Copy the whole text (also Ctrl+C after a click), or show it whole in a window to mark a part."""
+        if not self.text():
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.addAction(tr("Copy"), self.copy_text)
+        menu.addAction(tr("Show the whole text…"), self.show_whole)
+        menu.exec(event.globalPos())
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        self.show_whole()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        from PySide6.QtGui import QKeySequence
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_text()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event):  # noqa: N802
         from PySide6.QtGui import QPainter
@@ -445,6 +498,18 @@ def warn(parent, title_text, text, details=None, modal=True):
 # The log in a window of its own (set by the main window): Ctrl+Shift+L opens it from any dialog too.
 LOG_WINDOW_OPENER = None
 LOG_WINDOW_KEYS = "Ctrl+Shift+L"
+# The window's emergency stop, its QAction (set by the main window): Ctrl+Shift+X also in a dialog that blocks the
+# window (emergency_shortcut).
+EMERGENCY_ACTION = None
+EMERGENCY_KEYS = "Ctrl+Shift+X"
+
+
+def on_screen(widget):
+    """True while WIDGET is shown and its window is not minimised (in the tray the window is hidden: not shown either).
+    What a page only shows (a list, a log, a timeline) is read again meanwhile, every few seconds, for nobody: a
+    minimised window's pages count as shown (isVisible); their timers ask this, and read again at their next tick once
+    the window is back. The questions are read whatever this says."""
+    return widget.isVisible() and not widget.window().isMinimized()
 
 
 def page_of(widget):
@@ -703,6 +768,7 @@ def nonblocking_dialogs(platform=sys.platform):
         log_window_shortcut(dialog)
         if isinstance(dialog, QMessageBox):  # (Qt makes every message box application modal itself)
             dialog.setWindowModality(Qt.WindowModality.NonModal)
+        emergency_shortcut(dialog)
         if dialog.windowModality() != Qt.WindowModality.NonModal:  # a modality chosen for it (the open questions
             return original(dialog, *args)  # above a dialog)
         if isinstance(dialog, QFileDialog):
@@ -932,6 +998,22 @@ def log_window_shortcut(dialog):
     shortcut = QShortcut(QKeySequence(LOG_WINDOW_KEYS), dialog)
     shortcut.activated.connect(lambda: LOG_WINDOW_OPENER is not None and LOG_WINDOW_OPENER())
     dialog.setProperty("logWindowKeys", True)
+
+
+def emergency_shortcut(dialog):
+    """Ctrl+Shift+X in DIALOG is the emergency stop too: the window's own action (EMERGENCY_ACTION) is added to it
+    (nothing before the window set it). That action is an application shortcut, and Qt takes none in a window a modal
+    dialog blocks: in a file dialog (window-modal) and in the Questions window (application-modal) the key did
+    nothing. The same action, never a second shortcut: two of one key where both count are ambiguous - neither acts
+    (a dialog that blocks only a window of its own, the log window's, leaves the main window's counting)."""
+    action = EMERGENCY_ACTION
+    if action is None:
+        return
+    try:
+        if action not in dialog.actions():
+            dialog.addAction(action)
+    except RuntimeError:  # the window and its action are gone
+        pass
 
 
 def show_modeless(dialog):
@@ -2740,3 +2822,139 @@ class StartControls(QWidget):
         if started and session and not self.name.text().strip():
             self.new_name()  # the next one gets another
         return started
+
+
+# -- every extra window: an [x] at its top right and Esc to close it -------------------------------------------------
+
+CLOSE_CORNER = 22  # pixels: the [x] button's side
+CLOSE_MARGIN = 6  # pixels from the window's top and right edge
+
+
+class CloseCorner(QToolButton):
+    """The [x] at the top right of an extra window (window_close_controls): it closes the window as its own Close
+    or Cancel would - a dialog is rejected, any other window closed (its closeEvent asks about unsaved changes)."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setObjectName("closeCorner")
+        self.setText("✕")
+        self.setAutoRaise(True)
+        hint = self.sizeHint()  # (the theme's padding decides: never smaller than its text needs)
+        side = max(CLOSE_CORNER, hint.width(), hint.height())
+        self.setFixedSize(side, side)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # (Tab goes through the window's own controls)
+        self.setToolTip(tr("Close (Esc)"))
+        self.setAccessibleName(tr("Close"))
+        self.clicked.connect(lambda: close_window(window))
+        self.place()
+
+    def place(self):
+        window = self.parentWidget()
+        if window is not None:
+            self.move(window.width() - self.width() - CLOSE_MARGIN, CLOSE_MARGIN)
+            self.raise_()
+
+
+def close_window(window):
+    """Close WINDOW as its own Cancel/Close would: a dialog is rejected (the caller gets Rejected), any other window
+    closed - its closeEvent may ask first (an editor with unsaved changes)."""
+    if isinstance(window, QDialog):
+        window.reject()
+    else:
+        window.close()
+
+
+def takes_close_controls(widget, main=None):
+    """WIDGET is an extra window of the app that gets an [x] and Esc: a window of its own (a dialog, a message box,
+    the log window, an editor, the login browser...) - not the main window MAIN, nor popups, menus, tooltips,
+    splash screens, toasts, floating panels (their own title bar closes them) or frameless overlays."""
+    from PySide6.QtWidgets import QDockWidget, QMainWindow, QMenu
+    if not widget.isWindow() or widget is main or isinstance(widget, (QMenu, QDockWidget)):
+        return False
+    if isinstance(widget, QMainWindow) and widget.objectName() == "mainWindow":
+        return False
+    kind = widget.windowType()
+    if kind in (Qt.WindowType.Popup, Qt.WindowType.ToolTip, Qt.WindowType.SplashScreen, Qt.WindowType.Desktop,
+                Qt.WindowType.SubWindow, Qt.WindowType.Drawer):
+        return False
+    if widget.windowFlags() & Qt.WindowType.FramelessWindowHint:
+        return False
+    return not widget.property("noCloseCorner")
+
+
+class WindowCloseKeys(QObject):
+    """The filter of ONE extra window (installed on it with its [x]): keeps the [x] at the top right as the window's
+    size changes, and Esc that no control of the window took (a field, a find bar, a menu) closes it - a dialog
+    rejects Esc itself."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        window.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if watched is not self.window:
+            return False
+        kind = event.type()
+        if kind in (event.Type.Resize, event.Type.Show):
+            if kind == event.Type.Show:
+                make_room_for_corner(watched)  # (a window given its [x] before its layout was set)
+            corner = watched.findChild(CloseCorner, "closeCorner", Qt.FindChildOption.FindDirectChildrenOnly)
+            if corner is not None:
+                corner.place()
+        elif kind == event.Type.KeyPress and event.key() == Qt.Key.Key_Escape \
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier and not isinstance(watched, QDialog):
+            close_window(watched)
+            return True
+        return False
+
+
+def close_controls(window):
+    """Give WINDOW (an extra window of the app) its [x] at the top right and Esc to close it, once."""
+    try:
+        if window.property("closeControls") or not takes_close_controls(window, None):
+            return
+        window.setProperty("closeControls", True)
+        CloseCorner(window).show()
+        WindowCloseKeys(window)
+        make_room_for_corner(window)
+    except RuntimeError:  # (deleted meanwhile)
+        pass
+
+
+def make_room_for_corner(window):
+    """Room at the top of WINDOW for its [x], so that it covers none of the window's own controls: the window's top
+    margin (a main-window-like one: its contents margins; else its layout's) grows to the [x]'s height."""
+    from PySide6.QtWidgets import QMainWindow
+    corner = window.findChild(CloseCorner, "closeCorner", Qt.FindChildOption.FindDirectChildrenOnly)
+    need = (corner.height() if corner is not None else CLOSE_CORNER) + CLOSE_MARGIN
+    if isinstance(window, QMainWindow):
+        margins = window.contentsMargins()
+        if margins.top() < need:
+            window.setContentsMargins(margins.left(), need, margins.right(), margins.bottom())
+        return
+    layout = window.layout()
+    if layout is not None:
+        margins = layout.contentsMargins()
+        if margins.top() < need:
+            layout.setContentsMargins(margins.left(), need, margins.right(), margins.bottom())
+
+
+def window_close_controls(app=None, main=None):
+    """Every dialog and message box gets an [x] at its top right as it is first shown, and closes with Esc (Qt's own
+    for a dialog); the app's other windows of their own (the log window, the login browser) call close_controls
+    themselves. Some window managers (tiling ones) draw no title bar: the window's own [x] is then the only one. Once
+    per process. (Not an application-wide event filter: one in Python crashed the app together with QtWebEngine.)"""
+    from PySide6.QtWidgets import QMessageBox as Box
+    for cls in (QDialog, Box):
+        original = cls.showEvent
+        if getattr(original, "closeControls", False):
+            continue
+
+        def show_event(dialog, event, original=original):
+            if not event.spontaneous():
+                close_controls(dialog)
+            return original(dialog, event)
+        show_event.closeControls = True
+        cls.showEvent = show_event
+

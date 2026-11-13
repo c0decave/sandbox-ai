@@ -183,8 +183,11 @@ def test_launcher_and_net_judge_processes_through_it(mac, monkeypatch):
             net.launcher_process({"run": "x", "pid": 701, "pid_start": 1_700_000_100_000_000})
         with pytest.raises(ValueError, match="has ended"):
             net.launcher_process({"run": "x", "pid": 4242, "pid_start": 1})
-    with pytest.raises(ValueError, match="belongs to another user"):
-        net.launcher_process(record)
+    with pytest.MonkeyPatch.context() as patch:
+        # Another user than the launcher's 501 - also on a Mac whose own user is 501 (GitHub's macOS runners).
+        patch.setattr(os, "getuid", lambda: 502)
+        with pytest.raises(ValueError, match="belongs to another user"):
+            net.launcher_process(record)
     assert net.ended(702, start)  # a zombie has ended
     canary = load("canary", "canary_macos_test")
     canary._procinfo = s.procinfo()
@@ -202,7 +205,7 @@ def test_sessions_tree_and_mcp_supervisors_on_macos(mac, monkeypatch):
 def test_machine_exec_runs_only_runtime_clients():
     record = {"backend": "podman", "pod": "agent-claude-1a2b3c4d", "podman_url": None}
     assert s.machine_exec(record, ["--internal-control-client"]) == [
-        "podman", "exec", "--interactive", "--user=0:0", "agent-claude-1a2b3c4d-agent", "/usr/bin/python3", "-I",
+        "podman", "exec", "--interactive", "--user=0:0", "agent-claude-1a2b3c4d-agent", "/usr/bin/python3", "-I", "-S",
         "/sandbox/runtime.py", "--internal-control-client"]
     assert "--tty" in s.machine_exec({**record, "container": "c-1"}, ["x"], tty=True)
     assert s.machine_exec({**record, "container": "c-1"}, ["x"], interactive=False)[2:4] == ["--user=0:0", "c-1"]
@@ -333,7 +336,8 @@ def test_attach_on_macos_runs_the_byte_pipe_in_the_container(monkeypatch):
     assert sessions.attach_machine(data, runner=lambda command, **k: calls.append(command) or
                                    SimpleNamespace(returncode=0)) == 0
     assert calls == [["podman", "exec", "--interactive", "--tty", "--user=0:0", "agent-claude-5e5e5e5e-agent",
-                      "/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-attach-client", s.ATTACH_SOCKET]]
+                      "/usr/bin/python3", "-I", "-S", "/sandbox/runtime.py", "--internal-attach-client",
+                      s.ATTACH_SOCKET]]
     with pytest.raises(RuntimeError, match="status 125"):
         sessions.attach_machine(data, runner=lambda command, **k: SimpleNamespace(returncode=125))
 

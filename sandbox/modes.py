@@ -57,14 +57,14 @@ MODES = {
         "summary": "the launcher's defaults: the agent's provider only, approvals on (the default mode)"},
     "high": {
         "summary": "the provider only, nothing can be opened by options; approvals at most for the run; writes "
-                   "to other hosts are asked; workspaces after the first read-only; no devices or Wayland; "
-                   "privacy check of every push; 4g memory, 2048 processes",
+                   "to other hosts are asked; workspaces after the first read-only; no devices, nested containers, "
+                   "Wayland or variants on your own base images; privacy check of every push; 4g memory, 2048 processes",
         "privacy_check": "always", "limits": {"memory": "4g", "pids": "2048"}, "approval_scope": "run",
         "other_workspaces_ro": True, "rules": "ask-writes", "taint": "ask-mcp",
         "canaries": {"categories": ["credentials", "home"], "on_read": "ask", "on_send": "stop"}},
     "paranoid": {
         "summary": "as high, and: every HTTP request but the provider's refused, approvals only once, all "
-                   "workspaces read-only, no -D, no display, no MCP server with network, --log-debug; 2g "
+                   "workspaces read-only, no -D, no display, no MCP server with network, no services, --log-debug; 2g "
                    "memory, 2 CPUs, 1024 processes",
         "privacy_check": "always", "limits": {"memory": "2g", "cpus": "2", "pids": "1024"},
         "approval_scope": "once", "flags": ["--workspace-ro", "--log-debug"], "rules": "deny",
@@ -248,6 +248,8 @@ RULES = [
      "it opens hosts beyond the agent's provider (so does a Git token for another server)"),
     (STRICT, lambda a, l: _given(a.allow, "--allow"), "it opens addresses"),
     (STRICT, lambda a, l: _given(a.allow_tcp, "--allow-tcp"), "it opens TCP ports"),
+    (STRICT, lambda a, l: _given(getattr(a, "vpn_bypass_tcp", None) or [], "--vpn-bypass-tcp"),
+     "it reaches an address of your network past Tor, from your own address"),
     (STRICT, lambda a, l: _given(a.allow_host_port, "--allow-host-port"),
      "it opens ports on the host (so does a Git token for a server on this host)"),
     (STRICT, lambda a, l: ("--nameserver " + " ".join(a.nameserver)) if a.nameserver else "--dns" if a.dns
@@ -267,9 +269,21 @@ RULES = [
      "the agents would make calls beyond the model's (plugin downloads, model lists, language servers)"),
     (STRICT, lambda a, l: _given(a.device, "--device"), "the device's driver runs in your host's kernel"),
     (STRICT, lambda a, l: f"--gpu {a.gpu}" if a.gpu else None, "the GPU's driver runs in your host's kernel"),
+    (STRICT, lambda a, l: "--nested-containers" if getattr(a, "nested_containers", False) else None,
+     "the agent gets user namespaces of its own and more system calls, which reach more of your host's kernel"),
     (STRICT, lambda a, l: "--gui-wayland" if a.gui_wayland else None, "it reaches your desktop's compositor"),
+    (STRICT, lambda a, l: f"--image-variant {a.image_variant}" if getattr(l, "variant_base", None) and
+     l.variant_base(a) else None,
+     "the variant is built on an image of yours that nobody reviewed, and the sandbox's own supervisor (firewall, "
+     "proxy, approvals) would run from its programs"),
+    (("paranoid",), lambda a, l: _given(list(getattr(a, "service", None) or []), "--service"),
+     "an image nobody reviewed would run beside the agent, on its network"),
     (STRICT, lambda a, l: _given([m for m in a.mount if m.rsplit(":", 1)[-1] == "rw"], "--mount"),
      "the agent could write a host folder"),
+    # A start's own folder for an MCP server (a memory per project): what the agent has it keep there outlives the run.
+    (("paranoid",), lambda a, l: _given([m for m in getattr(a, "mcp_mount", None) or [] if not m.endswith(":ro")],
+                                        "--mcp-mount"),
+     "an MCP server would keep what the agent gives it in a host folder, beyond the run"),
     (("paranoid",), lambda a, l: "--dangerously-skip-permissions" if a.dangerously_skip_permissions else None,
      "the agent would act without asking"),
     (("paranoid",), lambda a, l: ("--gui-vnc" if a.gui_vnc else "--gui") if a.gui else None,
@@ -431,19 +445,20 @@ WEAKENING_OPTIONS = frozenset({
     "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",
     "--profile", "--dns", "--nameserver", "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask",
     "--local-config", "--llm", "--preset", "--preset-value", "--vpn-check",  # --vpn-check: a failing VPN used anyway
-    "--vpn-bypass-host-ports",  # the host's ports past Tor
+    "--vpn-bypass-host-ports", "--vpn-bypass-tcp",  # the host's ports, an address of your network past Tor
     # files, devices, displays and sound
     "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
-    "--state-dir", "--kit", "--kit-dir", "--mcp",
+    "--state-dir", "--kit", "--kit-dir", "--mcp", "--mcp-mount",  # --mcp-mount: a host folder an MCP server writes
     # logins, secrets and identities
     "--dangerously-skip-permissions", "--env", "--secret-env", "--api-key", "--publish", "--git-token-env",
     "--git-token-file", "--git-token-secret", "--git-credentials", "--git-identity", "--git-logins", "--identity",
     "--auth-file", "--import-codex-auth", "--copy-auth", "--with", "--helper",
     # what is noticed, checked and kept
     "--privacy-check", "--privacy-rules", "--canaries", "--no-canaries", "--keep", "--log-debug", "--log-dir",
-    "--telemetry",
+    "--telemetry", "--llm-param",  # --llm-param loop_guard=off: the loop guard off
     # what runs the sandbox, and its limits
     "--runtime", "--binary", "--image", "--image-variant", "--podman-url", "--backend", "--memory", "--cpus", "--pids",
+    "--tmp-size", "--nested-containers", "--service",  # --service: an image nobody reviewed, beside the agent
 })
 
 

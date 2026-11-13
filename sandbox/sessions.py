@@ -629,19 +629,79 @@ def effective(data):
     return a, document
 
 
-def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None):
+def services_wait(a):
+    """How much longer a start with services (--service) may take to be ready: the agent starts once each of them
+    accepts connections (their ready-timeout, 60 s each by default), plus their own start."""
+    total = 0
+    for value in getattr(a, "service", None) or []:
+        timeout = re.search(r"(?:^|[:,])ready-timeout=([0-9]{1,3})(?:,|$)", str(value))
+        total += (int(timeout.group(1)) if timeout else 60) + 30
+    return min(total, 3600)
+
+
+_progress = None
+
+
+def progress_module():
+    """progress.py: the lines a start says while it prepares."""
+    global _progress
+    if _progress is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_progress_for_sessions", HERE / "progress.py")
+        with LOADING:
+            if _progress is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _progress = loaded
+    return _progress
+
+
+QUIET_SECONDS = 15  # a start that says nothing for so long says that it still starts, and since when
+
+
+def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=None, out=None, clock=time.monotonic):
     """Until the terminal relay is there (it starts after the tmux session exists): its socket on the host, or
-    READY() (macOS: a probe through podman exec)."""
+    READY() (macOS: a probe through podman exec). FOLLOW (the size supervisor.log had before the supervisor
+    started): meanwhile, what the supervisor says of its start (its "agent-sandbox:" lines: an image pulled, the
+    VPN, MCP servers starting, ...) is said here too (OUT, default standard error; never a secret: progress.scrub),
+    after QUIET_SECONDS of silence that it still starts, and at the end "ready in N s"."""
     socket_path = directory / "tmux" / "attach.sock"
     ready = ready or socket_path.exists
-    deadline = time.monotonic() + timeout
+    begun = clock()
+    deadline = begun + timeout
+    told = progress_module().Progress(out=out, clock=clock) if follow is not None else None
+    position, pending, quiet_since = follow or 0, b"", begun
+
+    def relay():
+        nonlocal position, pending, quiet_since
+        try:
+            with open(directory / "supervisor.log", "rb") as log:
+                log.seek(position)
+                chunk = log.read(1 << 16)
+        except OSError:
+            return
+        position += len(chunk)
+        pending += chunk
+        *lines, pending = pending.split(b"\n")
+        for raw in lines:
+            text = raw.decode(errors="replace").rstrip("\r")
+            if text.startswith("agent-sandbox: "):
+                told.say(progress_module().shown(text[len("agent-sandbox: "):], 300))
+                quiet_since = clock()
     while not ready():
+        if told is not None:
+            relay()
+            if clock() - quiet_since >= QUIET_SECONDS:
+                told.say(f"still starting ({progress_module().seconds(clock() - begun)})…")
+                quiet_since = clock()
         if process.poll() is not None:
             log = launcher().printable((directory / "supervisor.log").read_text(errors="replace")[-3000:])
             raise RuntimeError(f"Session failed to start (status {process.returncode}):\n{log}")
-        if time.monotonic() > deadline:
+        if clock() > deadline:
             raise RuntimeError(f"Session did not become ready within {timeout} s; see {directory / 'supervisor.log'}")
         time.sleep(0.2)
+    if told is not None:
+        relay()
+        told.ready()
 
 
 def clear_stale_pod(name, data):
@@ -672,6 +732,13 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
     # A task that is brought back comes back as a session.
     run = f"{data['agent']}-{secrets.token_hex(4)}"
     data.update(pod=f"agent-{run}", run=run, mode="tmux")
+    # The desktop app's terminal tab this run was started in (SANDBOX_AI_APP_TAB, which the app sets in each tab it
+    # opens): after a restart the app attaches a tab for it again (list --json "app_tab"). Started elsewhere: none.
+    tab = os.environ.get("SANDBOX_AI_APP_TAB", "")
+    if re.fullmatch(r"[A-Za-z0-9-]{8,64}", tab):
+        data["app_tab"] = tab
+    else:
+        data.pop("app_tab", None)
     # Without agent arguments the project configuration's agent_args apply.
     # Without a kept HOME the launcher makes a fresh one and discards it at the end.
     cmd = [sys.executable, "-I", str(launcher().launcher_script()), data["agent"], *run_options(data),
@@ -688,6 +755,7 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
         (directory / "home").mkdir(mode=0o700, exist_ok=True)
         (directory / "home").chmod(0o700)
     with open(directory / "supervisor.log", "ab") as log:
+        follow = log.tell()  # what the supervisor says from here on is said in this terminal too (wait_ready)
         # Own session: closing the terminal no longer ends the sandbox.
         process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                    start_new_session=True, cwd=data["cwd"])
@@ -697,8 +765,9 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
     shown = display(name, data)
     starts().record(shown, event, name, run, agent=data["agent"], workspace=data.get("workspace"))
     try:
-        wait_ready(directory, process, ready=(lambda: machine_relay_listening(data))
-                   if launcher().machine_record(data) else None)
+        wait_ready(directory, process, timeout=READY_TIMEOUT + services_wait(a),
+                   ready=(lambda: machine_relay_listening(data)) if launcher().machine_record(data) else None,
+                   follow=follow)
     except RuntimeError:
         if process.poll() is not None:
             starts().record(shown, "exit", name, run, status=process.returncode)
@@ -899,6 +968,11 @@ def thaw(name, data):
     else:
         signal_tree(data["pid"], signal.SIGCONT, include_root=not foreground(data))
     (session_dir(name) / "paused").unlink(missing_ok=True)
+    # The kill switch asked for while it was paused (sandbox-ai net cut): set now, before the resume returns.
+    net = starts().module("net")
+    record = net.running().get(current_run(name, data))
+    if record is not None:
+        net.apply_pending_cut(record["directory"])
 
 
 def added_options(data, workspaces=(), mounts=(), mcp=()):
@@ -1424,9 +1498,26 @@ def delete_locked(name, yes):
     home = session_dir(name) / "home"
     shutil.rmtree(session_dir(name), onerror=make_writable_and_retry)
     forget_canaries(home)
+    forget_service_volumes(name)
     starts().record(display(name, data), "delete", name)
     print(f"agent-sandbox: session {shown} deleted", file=sys.stderr)
     return 0
+
+
+def forget_service_volumes(key):
+    """The data a start's services kept (--service ...,keep=yes: Podman volumes labelled with its key) goes with it."""
+    if not shutil.which("podman"):
+        return []
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_services_for_sessions", HERE / "services.py")
+        services = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(services)
+        removed = services.forget_volumes(key)
+    except Exception:  # noqa: BLE001 - the start is deleted in any case; a volume left is podman volume rm's
+        return []
+    for volume in removed:
+        print(f"agent-sandbox: removed the data volume {volume} of its services", file=sys.stderr)
+    return removed
 
 
 def forget_canaries(home):

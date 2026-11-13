@@ -10,13 +10,19 @@
                        [--api-key HOST=NAME[=SECRET]]      an API key the proxy puts in (runs from 0.1.92)
   sandbox-ai net revoke [RUN] (the same options)       take back what `allow` gave
   sandbox-ai net untaint [RUN]                         take back the run's taint (untrusted content entered it)
+  sandbox-ai net cut [RUN] MODE [--only] | --all-runs MODE
+                                                       the kill switch: MODE remote (only the local network and the
+                                                       host's ports stay), local (only the internet stays), api (only
+                                                       the model API stays), all (nothing); off lifts it. Also cuts
+                                                       the run's MCP servers, helpers and team (not with --only)
 
 RUN is the name a sandbox shows to its agent as $SANDBOX_AI_RUN, or the name of its start as `sandbox-ai list`
 (ps) shows it, also after a rename; it may be left out
 when only one sandbox runs, or only one for the current directory (not for `stop`). Changes last until
 the sandbox ends; to keep them, add the same options to its start command or its .sandbox-ai.json. Only
 you can make them: the agent cannot reach the control socket. Connections that are already open stay
-open. A sandbox is ended with `sandbox-ai stop NAME` (any start: a run, a session, an MCP server);
+open, except those a cut forbids: the kill switch closes them, and it never opens anything the run may not reach
+otherwise. A sandbox is ended with `sandbox-ai stop NAME` (any start: a run, a session, an MCP server);
 `sandbox-ai net stop RUN [--wait SECONDS]` is its older form for a run, kept for scripts and the app.
 
 Standard library only.
@@ -214,6 +220,9 @@ def running(orphans=None):
                                                                        "orphaned": True})
                 continue
             record["directory"] = str(entry)
+            cut = cut_state(entry)
+            if cut:  # the kill switch holds (sandbox-ai net cut): net list, list and the app show it
+                record["cut"] = cut
             runs.setdefault(record.get("run", entry.name), record)
     return runs
 
@@ -274,6 +283,58 @@ def label(run, record):
     return name if isinstance(name, str) and name else run
 
 
+def who(record, run=None):
+    """"RUN (NAME)": the run's id and the name of its start as `sandbox-ai list` shows it (RUN alone when they are
+    the same) - what every message about a credential given to a run names."""
+    printable = launcher().printable
+    run = record.get("run") or run or "?"
+    name = label(run, record)
+    return f"{printable(run)} ({printable(str(name))})" if name and name != run else printable(run)
+
+
+def given_credentials(record):
+    """{"git": [{url, user}], "api_keys": [{name, host, port, placeholder, secret}]} the run was given during the run
+    (`net allow --git-token-*`/`--api-key`, `git-logins give`, `secrets give`): names, never a token or a key."""
+    return {"git": [{"url": entry["url"], "user": entry.get("user")} for entry in git_logins(record)],
+            "api_keys": [{"name": entry["name"], "host": entry.get("host"), "port": entry.get("port"),
+                          "placeholder": entry.get("placeholder"), "secret": entry.get("secret")}
+                         for entry in added_api_keys(record)]}
+
+
+def list_given(run, kind, out=print, as_json=False, prog="net"):
+    """`git-logins list --run RUN` (KIND "git") and `secrets list --run RUN` (KIND "api_keys"): what the running RUN
+    was given during the run, by name (never a token or a key)."""
+    printable = launcher().printable
+    try:
+        record = choose(running(), run, command=f"{prog} list")
+        found = given_credentials(record)[kind]
+        if as_json:
+            out(json.dumps({"run": record.get("run"), "name": label(record.get("run"), record), kind: found},
+                           indent=2))
+            return 0
+        t, name = textout(), who(record, run)
+        if kind == "git":
+            t.section(f"{name}: Git logins given during the run", out,
+                      note="sandbox-ai git-logins give / revoke; the tokens stay in the run's session directory")
+            t.table(["SERVER", "USER"], [[printable(e["url"]), printable(str(e.get("user") or ""))] for e in found],
+                    out, empty=f"none (give one: sandbox-ai git-logins give {printable(str(record.get('run')))} URL "
+                               "--secret NAME)")
+        else:
+            t.section(f"{name}: API keys given during the run", out,
+                      note="sandbox-ai secrets give / revoke; the proxy puts each in on the wire, the agent sends "
+                           "the placeholder")
+            t.table(["VARIABLE", "HOST", "SECRET", "PLACEHOLDER"],
+                    [[printable(str(e["name"])), printable(str(e.get("host") or "")),
+                      printable(str(e.get("secret") or "-")), printable(str(e.get("placeholder") or ""))]
+                     for e in found], out,
+                    empty=f"none (give one: sandbox-ai secrets give {printable(str(record.get('run')))} NAME "
+                          "--api-key HOST)")
+        return 0
+    except (ValueError, OSError) as exc:
+        print(f"sandbox-ai {prog}: {exc}", file=sys.stderr)
+        return 1
+
+
 def labels(runs):
     """{run: what to call it}: its name as `sandbox-ai list` shows it, with "(run RUN)" when that name is not unique
     among RUNS."""
@@ -312,6 +373,15 @@ STOPPED_HINTS = {
     "net show": "what was allowed during its run ended with it; start it again with: sandbox-ai resume {name}",
     "net untaint": "its taint ended with its run; start it again with: sandbox-ai resume {name}",
     "net stop": "nothing to stop",
+    "git-logins give": "start it first (sandbox-ai resume {name}), then: sandbox-ai git-logins give {name} URL ... (with "
+                       "--keep it goes into its project file for every later start too)",
+    "git-logins revoke": "a Git login given during its run ended with it",
+    "git-logins list": "what it was given during its run ended with it; start it again with: sandbox-ai resume {name}",
+    "secrets give": "start it first (sandbox-ai resume {name}), then: sandbox-ai secrets give {name} NAME --api-key "
+                    "HOST (with --keep it goes into its project file for every later start too)",
+    "secrets revoke": "an API key given during its run ended with it",
+    "secrets list": "what it was given during its run ended with it; start it again with: sandbox-ai resume {name}",
+    "net cut": "a stopped start reaches nothing; its network is as its options say when it starts again",
     "limits": "start it first (sandbox-ai resume {name}), then: sandbox-ai limits {name} --memory|--cpus|--pids ...",
     "devices add": "start it first (sandbox-ai resume {name}), then: sandbox-ai devices add {name} DEVICE",
     "devices remove": "what was added during its run ended with it; start it again with: sandbox-ai resume {name}",
@@ -388,6 +458,387 @@ def choose(runs, name, cwd=None, command=None):
     if not runs:
         raise ValueError("no sandbox is running")
     raise ValueError(f"several sandboxes run; name one: {', '.join(printable(str(n)) for n in labels(runs).values())}")
+
+
+# --- the kill switch: sandbox-ai net cut ---------------------------------------------------------------------------
+
+CUT_MODES = ("remote", "local", "api", "all")  # as runtime.CUT_MODES (a test keeps both the same); and "off"
+CUT_TEXT = {"remote": "the internet is cut: only the local network and the host's ports it may reach stay reachable",
+            "local": "the local network and the host's ports are cut: only the internet it may reach stays reachable",
+            "api": "only its model API stays reachable",
+            "all": "everything is cut, its model API too",
+            "off": "the cut is lifted: it reaches again what it may reach"}
+CUT_FILE = "cut.json"  # in the run's directory (outside the sandbox): the cuts its supervisor confirmed
+CUT_PENDING = "cut-pending.json"  # in the run's directory: cuts asked for while it was paused, set as it resumes
+CUT_SECONDS = 20  # one run's answer to a cut, at most (its firewall change included): an emergency must not wait long
+CUT_VERSION = "0.1.94"
+CUT_PENDING_LIMIT = 64  # requests kept for a paused run
+# A run whose supervisor does not listen yet (it starts: an MCP server, helper or team member joining a cut run) has no
+# CUT_READY in its directory: a cut for it waits in CUT_STARTING, which its supervisor sets before the agent runs
+# (runtime.starting_cuts, which also says why one of the two always sees the other's file).
+CUT_READY = "cut.ready"
+CUT_STARTING = "cut-starting.json"
+
+
+def cut_label(value):
+    """VALUE (a mode, or modes joined with "+" as the supervisor names cuts that hold together) if it names a cut,
+    else None."""
+    parts = str(value).split("+") if isinstance(value, str) else []
+    return value if parts and all(part in CUT_MODES for part in parts) else None
+
+
+def cut_state(directory):
+    """The kill switch of the run in DIRECTORY as its supervisor confirmed it last (cut_label: "api", "api+remote"),
+    or None."""
+    return cut_label(cut_record(directory).get("mode"))
+
+
+def cut_record(directory):
+    """{"mode", "cuts": {by: mode}} of the run in DIRECTORY (CUT_FILE), {} when there is none."""
+    try:
+        with open(Path(directory) / CUT_FILE, "rb") as stream:
+            found = json.loads(stream.read(65536))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(found, dict):
+        return {}
+    cuts = found.get("cuts") if isinstance(found.get("cuts"), dict) else {}
+    return {"mode": cut_label(found.get("mode")),
+            "cuts": {by: mode for by, mode in cuts.items() if isinstance(by, str) and mode in CUT_MODES}}
+
+
+def write_json(directory, name, value):
+    """VALUE as JSON into DIRECTORY/NAME, replaced at once (None: the file goes)."""
+    target = Path(directory) / name
+    if value is None:
+        with contextlib.suppress(FileNotFoundError):
+            target.unlink()
+        return
+    fd, temporary = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(value))
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def write_cut_state(directory, answer):
+    """Keep the cuts the supervisor's ANSWER names ("cut", "cuts") as the run's kill switch (CUT_FILE; none: the file
+    goes), for net list, sandbox-ai list and the app."""
+    mode = cut_label(answer.get("cut")) if isinstance(answer, dict) else None
+    cuts = answer.get("cuts") if isinstance(answer, dict) and isinstance(answer.get("cuts"), dict) else {}
+    write_json(directory, CUT_FILE, {"mode": mode, "cuts": cuts,
+                                     "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())} if mode else None)
+
+
+def team_servers(record):
+    return {name for name in record.get("mcp_servers") or [] if isinstance(name, str) and name.startswith("team-")}
+
+
+def mcp_server_of(run, record):
+    """The MCP server whose sandbox the run RUN (RECORD) is, or None."""
+    if record.get("kind") != "mcp" and not str(run).startswith("mcp-"):
+        return None
+    name = record.get("mcp_name")
+    return name if isinstance(name, str) else str(run)[len("mcp-"):] if str(run).startswith("mcp-") else None
+
+
+def related_runs(runs, record):
+    """[(run, record)] of RUNS that act for RECORD's run in sandboxes of their own, with supervisors of their own: the
+    MCP servers it reaches, its helpers (and theirs), the other members of the teams it works in, and theirs in turn;
+    each once, never the run itself. An MCP server several runs reach is among them: each one's cut holds there."""
+    found, todo, done = {}, [record], set()
+    while todo:
+        current = todo.pop()
+        key = current.get("run")
+        if key in done:
+            continue
+        done.add(key)
+        servers = {name for name in current.get("mcp_servers") or [] if isinstance(name, str)}
+        # A server it reaches in an instance with limits of its own (--mcp-limits): that instance's sandbox, NAME.HASH.
+        instances = current.get("mcp_instances") if isinstance(current.get("mcp_instances"), dict) else {}
+        servers = {name for name in servers if not isinstance(instances.get(name), str)} | \
+            {value for value in instances.values() if isinstance(value, str)}
+        teams = team_servers(current)
+        for run, other in runs.items():
+            if run in found or run == record.get("run") or not isinstance(other, dict):
+                continue
+            if mcp_server_of(run, other) in servers or (key and other.get("helper_of") == key) or \
+                    (teams and teams & team_servers(other)):
+                found[run] = other
+                todo.append(other)
+    return list(found.items())
+
+
+def run_paused(record):
+    """The run RECORD is paused: its run's marker (sandbox-ai pause of a run, a canary), or its session's."""
+    if (Path(record["directory"]) / "paused").exists():
+        return True
+    start = record.get("start") if isinstance(record.get("start"), str) else None
+    if start:
+        with contextlib.suppress(Exception):  # an unreadable session: as its run says
+            return (sessions_module().session_dir(start) / "paused").exists()
+    return False
+
+
+@contextlib.contextmanager
+def cut_lock(directory):
+    """The kill switch's requests to the run in DIRECTORY one after the other (cut_one, apply_pending_cut)."""
+    fd = os.open(Path(directory) / "cut.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+class Pending(Exception):
+    """A cut asked for a paused run: kept (CUT_PENDING), set as it resumes (apply_pending_cut); or for a run that
+    starts: kept (CUT_STARTING), set by its supervisor before the agent runs."""
+
+
+def keep_request(directory, name, request):
+    """REQUEST added to the list in DIRECTORY/NAME (at most CUT_PENDING_LIMIT, the newest kept); under cut_lock."""
+    try:
+        waiting = json.loads((Path(directory) / name).read_text())
+    except (OSError, ValueError):
+        waiting = []
+    waiting = (waiting if isinstance(waiting, list) else [])[-(CUT_PENDING_LIMIT - 1):] + [request]
+    write_json(directory, name, waiting)
+
+
+def cut_one(record, mode, by, clear=False, timeout=CUT_SECONDS):
+    """Ask the supervisor of the running RECORD for the kill switch MODE (CUT_MODES or "off") on behalf of BY (a run's
+    name, or a list: the runs whose cut it is). "off" takes back only BY's cut (CLEAR: every one). The supervisor's
+    answer, kept in the run's directory (CUT_FILE). A paused run keeps the request for its resume (Pending); a run of
+    a sandbox-ai before 0.1.94 has none: refused, with what to do."""
+    name = printable(str(label(record.get("run"), record)))
+    older = (f"{name} was started by a sandbox-ai older than {CUT_VERSION}, which has no kill switch: stop it "
+             f"(sandbox-ai stop {name}) or start it again with {CUT_VERSION} or newer")
+    if not record.get("net_cut"):
+        raise ValueError(older)
+    request = {"op": "cut", "mode": mode, "by": by, **({"clear": True} if clear else {})}
+    # Under the run's cut lock, which its resume takes to set the waiting cuts (apply_pending_cut): a run seen paused
+    # here is still paused when its request is kept, or its resume has set what waited and this one is asked now -
+    # never kept for a resume that has passed already, and never sent before what waited for the resume.
+    with cut_lock(record["directory"]):
+        if run_paused(record):
+            keep_request(record["directory"], CUT_PENDING, request)
+            raise Pending(f"{name} is paused: nothing leaves it now; the kill switch {mode} is set as it resumes, "
+                          "before its sandbox-ai resume returns")
+        ready = Path(record["directory"]) / CUT_READY
+        if not ready.exists():
+            # Kept first, looked again after: the supervisor writes CUT_READY first and reads CUT_STARTING after,
+            # so either it sets this request before its agent runs, or it listens now and is asked below.
+            keep_request(record["directory"], CUT_STARTING, request)
+            if not ready.exists():
+                raise Pending(f"{name} is starting: the kill switch {mode} is set before its agent runs (or it does "
+                              "not start)")
+        try:
+            answer = ask(record["directory"], request, timeout=timeout)
+        except ValueError as exc:
+            if "op must be allow or revoke" in str(exc):  # a supervisor that knows no "cut"
+                raise ValueError(older) from None
+            raise
+        cuts = answer.get("cuts") if isinstance(answer.get("cuts"), dict) else {}
+        names = [by] if isinstance(by, str) else list(by)
+        if (mode == "off" and (any(n in cuts for n in names) or clear and cuts)) or \
+                (mode != "off" and any(cuts.get(n) != mode for n in names)):
+            raise ValueError(f"{name}: its supervisor did not confirm the kill switch {mode}")
+        write_cut_state(record["directory"], answer)
+    return answer
+
+
+def apply_pending_cut(directory):
+    """The cuts asked for while the run in DIRECTORY was paused (CUT_PENDING), set now that it runs again (sandbox-ai
+    resume calls this right after the thaw, before it returns). [(request, error or None)]."""
+    try:
+        with cut_lock(directory):  # a cut asked for meanwhile waits (cut_one), then goes straight to the supervisor
+            return apply_pending_locked(directory)
+    except FileNotFoundError:  # the run has ended: nothing to set
+        return []
+
+
+def apply_pending_locked(directory):
+    path = Path(directory) / CUT_PENDING
+    try:
+        waiting = json.loads(path.read_text())
+        record = json.loads((Path(directory) / "run.json").read_text())
+    except (OSError, ValueError):
+        return []
+    record = {**record, "directory": str(directory)} if isinstance(record, dict) else {"directory": str(directory)}
+    done = []
+    for request in waiting if isinstance(waiting, list) else []:
+        if not isinstance(request, dict):
+            continue
+        try:
+            answer = ask(directory, {**request, "op": "cut"})
+            write_cut_state(directory, answer)
+            done.append((request, None))
+        except (ValueError, OSError) as exc:
+            done.append((request, str(exc)))
+    if all(error is None for _, error in done):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    for request, error in done:
+        if error:
+            print(f"sandbox-ai: the kill switch {printable(str(request.get('mode')))} asked for while it was paused "
+                  f"could not be set: {printable(error)}; set it again: sandbox-ai net cut "
+                  f"{printable(str(record.get('run', '')))} {printable(str(request.get('mode')))}", file=sys.stderr)
+    return done
+
+
+def joined_cuts(run, directory=None):
+    """{by: mode}: the cuts of the running runs that the run RUN (registered now, its supervisor not started yet)
+    acts for: their own cuts (by themselves) that their MCP servers, helpers and team would hold. What the launcher
+    hands the new supervisor, which sets them before the agent runs; also kept as the new run's CUT_FILE. Cheap when
+    nothing is cut (no CUT_FILE anywhere)."""
+    def any_cut():
+        for base in run_dirs():
+            try:
+                entries = list(base.iterdir())
+            except OSError:
+                continue
+            if any(entry.name != run and (entry / CUT_FILE).exists() for entry in entries):
+                return True
+        return False
+    if not any_cut():
+        return {}
+    runs = running()
+    found = {}
+    for other, record in runs.items():
+        if other == run:
+            continue
+        mode = cut_record(record["directory"]).get("cuts", {}).get(other)
+        if mode and run in {r for r, _ in related_runs(runs, record)}:
+            found[other] = mode
+    if found and directory is not None:
+        modes = sorted(set(found.values()))
+        write_json(directory, CUT_FILE, {"mode": "all" if "all" in modes else "+".join(
+            m for m in CUT_MODES if m in modes), "cuts": found})
+    return found
+
+
+def propagate_cut(record, runs=None):
+    """The running RECORD's own cut (the one it holds by itself) for the runs that act for it now, as they joined
+    later (sandbox-ai mcp attach --live): each one holds it as well. [(run, error or None)]."""
+    runs = running() if runs is None else runs
+    key = record.get("run")
+    mode = cut_record(record["directory"]).get("cuts", {}).get(key)
+    if not mode:
+        return []
+    done = []
+    for run, other in related_runs(runs, record):
+        if cut_record(other["directory"]).get("cuts", {}).get(key) == mode:
+            continue
+        try:
+            cut_one(other, mode, key)
+            done.append((run, None))
+        except Pending:  # set as it resumes
+            done.append((run, None))
+        except (ValueError, OSError) as exc:
+            done.append((run, str(exc)))
+    return done
+
+
+def cut_runs(runs, record, mode, out=print, alone=False, every=False, as_json=False):
+    """The kill switch MODE for the running RECORD on its own behalf and, unless ALONE, for the runs that act for it
+    (related_runs) on its behalf too; with EVERY for each of RUNS (and each one's on its behalf: a shared server holds
+    every run's cut). Each run keeps every requester's cut and holds them together, so "off" for one run leaves a
+    server cut that another run's cut still holds (said). All at once (an emergency waits for no run one after the
+    other); each one's result said. 0 when every one confirmed it (a paused run's cut waits for its resume: said)."""
+    wanted = {}  # run: [names on whose behalf]
+    parents = {}
+    sources = list(runs.items()) if every else [(record.get("run"), record)]
+    for source, entry in sources:
+        wanted.setdefault(source, []).append(source)
+        if alone:
+            continue
+        for run, _ in related_runs(runs, entry):
+            wanted.setdefault(run, []).append(source)
+            if not every:
+                parents.setdefault(run, source)
+    targets = [(run, runs[run], parents.get(run)) for run in wanted if run in runs]
+    results, answers, pending, threads = [], [], [], []
+
+    def one(index, run, entry):
+        try:
+            answers[index] = cut_one(entry, mode, sorted(set(wanted[run])), clear=every and mode == "off")
+        except Pending as exc:
+            pending[index] = str(exc)
+        except (ValueError, OSError) as exc:
+            results[index] = getattr(exc, "strerror", None) or str(exc)
+
+    def ask_all(first):
+        for items in (results, answers, pending):
+            items.extend([None] * (len(targets) - first))
+        started = [threading.Thread(target=one, args=(index, run, entry), daemon=True)
+                   for index, (run, entry, _) in enumerate(targets) if index >= first]
+        threads.extend(started)
+        for thread in started:
+            thread.start()
+        for thread in started:
+            thread.join(CUT_SECONDS + 30)
+    ask_all(0)
+    if mode != "off" and not alone and targets:
+        # A run registered after RUNS was read (an MCP server, helper or team member starting now) read the cuts
+        # (joined_cuts) perhaps before these were confirmed: looked for once more now that they are, and cut too.
+        fresh, first, late = running(), len(targets), set()
+        for source, entry in sources:
+            for run, other in related_runs(fresh, fresh.get(source, entry)):
+                if run not in wanted:
+                    late.add(run)
+                    targets.append((run, other, None if every else source))
+                if run in late:
+                    wanted.setdefault(run, []).append(source)
+        if len(targets) > first:
+            ask_all(first)
+    names = labels({run: entry for run, entry, _ in targets})
+    failed = [index for index, (error, thread) in enumerate(zip(results, threads))
+              if error is not None or thread.is_alive()]
+
+    def holds(index):
+        answer = answers[index] or {}
+        return cut_label(answer.get("cut")), {by: m for by, m in (answer.get("cuts") or {}).items()}
+    if as_json:
+        out(json.dumps({"mode": mode, "runs": [
+            {"run": run, "name": names.get(run), "for": parent, "ok": index not in failed,
+             "pending": pending[index] is not None,
+             "cut": None if index in failed else holds(index)[0], "cuts": holds(index)[1],
+             "error": (results[index] or "no answer in time") if index in failed else pending[index]}
+            for index, (run, entry, parent) in enumerate(targets)]}, indent=2))
+        return 1 if failed else 0
+    if not targets:
+        out("no sandbox is running")
+        return 0
+    for index, (run, entry, parent) in enumerate(targets):
+        shown = printable(str(names.get(run, run)))
+        why = f" (it acts for {printable(str(names.get(parent, parent)))})" if parent else ""
+        if index in failed:
+            out(f"{shown}: NOT {'lifted' if mode == 'off' else 'cut'}{why}: {printable(results[index] or 'no answer in time')}")
+            continue
+        if pending[index] is not None:
+            out(f"{shown}{why}: {printable(pending[index])}")
+            continue
+        now, cuts = holds(index)
+        others = sorted(by for by in cuts if by not in wanted[run])
+        if mode == "off" and now:
+            out(f"{shown}: still cut ({now}){why}: the cut of {', '.join(printable(o) for o in others)} holds there "
+                f"too; lift it with: sandbox-ai net cut {printable(others[0]) if others else shown} off")
+        elif mode == "off":
+            out(f"{shown}: kill switch off{why}: {CUT_TEXT['off']}")
+        elif now != mode:
+            out(f"{shown}: kill switch {mode}{why}; with the cut of {', '.join(printable(o) for o in others)} it holds "
+                f"{now}: only what every cut keeps stays reachable")
+        else:
+            out(f"{shown}: kill switch {mode}{why}: {CUT_TEXT[mode]}")
+    if mode != "off" and len(failed) < len(targets):
+        undo = "--all-runs" if every else printable(str(names.get(record.get("run"), record.get("run"))))
+        out(f"undo: sandbox-ai net cut {undo} off")
+    return 1 if failed else 0
 
 
 def resolve(hosts):
@@ -724,8 +1175,9 @@ def write_api_keys(record, entries):
     path = api_keys_file(record)
     if path is None or not ours(path.parent):
         raise ValueError("the run's directory is gone or not yours")
-    try:
-        ask(record["directory"], {"op": "api-keys", "api_keys": entries})
+    try:  # (the name of each key's secret stays here: the proxy gets what it puts in, no more)
+        ask(record["directory"], {"op": "api-keys", "api_keys": [{k: v for k, v in entry.items() if k != "secret"}
+                                                                 for entry in entries]})
     except ValueError as exc:
         if "op" in str(exc) and "allow" in str(exc):  # a supervisor before 0.1.92 knows no "api-keys"
             raise ValueError(f"{launcher().printable(record.get('run', '?'))} takes no API key during the run: it "
@@ -893,7 +1345,7 @@ def tainted_text(state):
         (f" (and {more} later source{'s' if more != 1 else ''})" if more > 0 else "")
 
 
-def show(result, out=print, names=None, run=None, as_json=False, logins=(), wildcards=()):
+def show(result, out=print, names=None, run=None, as_json=False, logins=(), wildcards=(), api_keys=(), title=None):
     """What was allowed during the run, grouped by kind; HTTPS addresses under the names they were allowed
     for (from `net allow --allow-host`, presets and approved lookups; never looked up anew: a name the
     agent chose may carry data)."""
@@ -910,15 +1362,23 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
     relayed = sorted({int(p) for p in result.get("host_ports", []) if isinstance(p, int)})
     taint = result.get("taint") if isinstance(result.get("taint"), dict) else None
     git = [{"url": entry["url"], "user": entry.get("user")} for entry in logins]  # never the token
+    keys = [{"name": e.get("name"), "host": e.get("host"), "port": e.get("port"), "placeholder": e.get("placeholder"),
+             "secret": e.get("secret")} for e in api_keys]  # never the key
+    cut = cut_label(result.get("cut"))
     if as_json:
-        out(json.dumps({"run": run, "all_ports": nets, "dns": dns, **({"taint": taint} if taint is not None else {}),
+        out(json.dumps({"run": run, "cut": cut, "all_ports": nets, "dns": dns,
+                        **({"taint": taint} if taint is not None else {}),
                         "host_wildcards": list(wildcards),
-                        "git": git, "host_ports": relayed,
+                        "git": git, "api_keys": keys, "host_ports": relayed,
                         "https": [{"address": a, "names": sorted(by_address.get(a, []))} for a in https],
                         "tcp": [{"address": a, "port": p, "names": sorted(by_address.get(a, []))} for a, p in tcp]},
                        indent=2))
         return
     t = textout()
+    if cut:
+        out(t.style(f"  kill switch: {cut}: {'; '.join(CUT_TEXT[part] for part in cut.split('+'))}", "warn"))
+        out(t.style(f"  lift it: sandbox-ai net cut {printable(run) if run else '[RUN]'} off", "muted"))
+        out("")
     if taint is not None:
         printable = launcher().printable
         line = printable(tainted_text(taint))
@@ -932,11 +1392,18 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
         t.table(["SERVER", "USER"], [[printable(entry["url"]), printable(str(entry.get("user") or ""))] for entry in git],
                 out)
         out("")
+    if keys:
+        t.section("API keys given during this run", out,
+                  note="the proxy puts each in on the wire for HTTPS requests to its host; the agent sends the "
+                       "placeholder")
+        t.table(["VARIABLE", "HOST", "SECRET"], [[printable(str(e["name"])), printable(str(e["host"] or "")),
+                                                   printable(str(e.get("secret") or "-"))] for e in keys], out)
+        out("")
     if wildcards:
         t.section("Host wildcards", out, note="every name below them is opened as it is looked up")
         t.table(["WILDCARD"], [[printable(w)] for w in wildcards], out)
         out("")
-    t.section(f"{printable(run) if run else 'this sandbox'}: allowed during this run", out,
+    t.section(f"{title or (printable(run) if run else 'this sandbox')}: allowed during this run", out,
               note=f"{total} destination{'s' if total != 1 else ''}, added with `sandbox-ai net allow` or approvals")
     if not total:
         out("  nothing beyond its start options")
@@ -1260,6 +1727,27 @@ def parser(lean=False):
     untainted = commands.add_parser("untaint", help="take back the run's taint: the rules for tainted runs no longer "
                                                     "hold, until untrusted content enters it again")
     untainted.add_argument("run", nargs="?")
+    cutting = commands.add_parser(
+        "cut", help="the kill switch: cut a running sandbox's network (and its MCP servers', helpers' and team's)",
+        description="The kill switch: cut a running sandbox's network down at once. MODE: remote (the internet is "
+                    "cut; only the local network and the host's ports it may reach stay), local (the local network "
+                    "and the host's ports are cut; only the internet it may reach stays), api (only its model API "
+                    "stays: its provider's hosts as the start opened them, or its --llm server), all (everything, "
+                    "the model API too), off (lifted: it reaches again what it may reach). A cut never opens "
+                    "anything; open connections it forbids are closed. Its firewall, its connection proxy and its "
+                    "supervisor hold it, out of the agent's reach, until it is lifted or the run ends. It holds for "
+                    "the run's MCP servers, helpers and team members too (each with a sandbox of its own), also those "
+                    "that join later, unless --only. Every run's cut is kept apart: a server two runs share stays cut "
+                    "while one of them is (only what every cut keeps stays reachable). A paused sandbox is cut as it "
+                    "resumes. Runs started by a sandbox-ai older than 0.1.94 have no kill switch.")
+    cutting.add_argument("words", nargs="+", metavar="[RUN] MODE",
+                         help="the run (left out: the only one, or the only one for this directory) and the mode: "
+                              "remote, local, api, all or off")
+    cutting.add_argument("--all-runs", action="store_true",
+                         help="every running sandbox of yours (the emergency stop: sandbox-ai net cut --all-runs all)")
+    cutting.add_argument("--only", action="store_true",
+                         help="this run alone, not its MCP servers, helpers and team members")
+    cutting.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts")
     stopped = commands.add_parser("stop", help="older form of `sandbox-ai stop NAME` (a run only)")
     stopped.add_argument("run")
     stopped.add_argument("--wait", type=seconds, default=STOP_WAIT, metavar="SECONDS",
@@ -1502,12 +1990,13 @@ def keep_allowed():
                          "allowed during the run is not kept for later starts (nothing was written)")
 
 
-def keep_in_project(record, tokens, write=True, workspaces=(), preview=None):
+def keep_in_project(record, tokens, write=True, workspaces=(), preview=None, change=None):
     """Add TOKENS (options) to the run's project file, WORKSPACE/.sandbox-ai.json, and trust the result: only while
     the file is exactly what you trusted (an agent's change is never trusted along), or a new one for the run's
     agent. Returns (path, [added options]); ValueError otherwise. WRITE False only checks (before the run changes:
     a refused --keep changes nothing; the write checks again). PREVIEW(path, added) is called before the write
-    with exactly what it adds."""
+    with exactly what it adds. CHANGE(document): another change of the document (an exception rule in its "rules",
+    approvals.rule_exception), made in place; it returns what it added ([] for nothing)."""
     l = launcher()
     workspace = record.get("workspace")
     if not workspace:
@@ -1559,6 +2048,8 @@ def keep_in_project(record, tokens, write=True, workspaces=(), preview=None):
             options += pair
             added += pair
         index += len(pair)
+    if change is not None:
+        added += change(document)
     if not added:
         return path, []
     if preview is not None:
@@ -1603,28 +2094,67 @@ def relay_main(argv):
     return serve_relay(directory, port, pid, start)
 
 
-def main(argv, out=print, resolver=resolve):
+def change_network(record, args, request, network, ports):
+    """The network part of an allow or revoke (PORTS: the host ports relayed); the supervisor's answer. A relay
+    started for it is stopped again when the supervisor refuses."""
+    # macOS: the supervisor in podman machine's VM connects to the Mac's port itself (runtime.PortRelay
+    # upstream); no host relay, whose socket would not cross the VM's shared folders.
+    relayed = [] if launcher().machine_record(record) else ports
+    if relayed and args.command == "allow":
+        for port in relayed:
+            start_relay(record, port)  # the host end first: the sandbox's end connects to its socket
+    try:
+        result = ask(record["directory"], request if network else {"op": "show"})
+    except ValueError:
+        if relayed and args.command == "allow":
+            for port in relayed:
+                if port not in (ask(record["directory"], {"op": "show"}).get("host_ports") or []):
+                    stop_relay(record, port)
+        raise
+    if relayed and args.command == "revoke":
+        for port in relayed:
+            stop_relay(record, port)
+    return result
+
+
+def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=None):
+    """BRIEF: an allow or revoke says what it gave or took back, without the table of everything the run was given
+    (git-logins give, secrets give: net show and their list --run have it). PROG: the command a refusal names
+    ("sandbox-ai PROG: ..."); COMMAND: the one a stopped start's hint is for (STOPPED_HINTS; default net ...)."""
     if argv[:1] == ["--internal-relay"]:
         return relay_main(argv[1:])
     # The first word names the command (the parser has no option but --help before it): only allow and revoke need
     # their options.
-    args = parser(lean=argv[:1] in (["list"], ["show"], ["untaint"], ["stop"])).parse_args(argv)
+    args = parser(lean=argv[:1] in (["list"], ["show"], ["untaint"], ["stop"], ["cut"])).parse_args(argv)
     try:
         runs = running()
         if args.command == "list":
             if args.json:
+                # "cut": the kill switch's mode (None: none); "killswitch": the run has one (sandbox-ai 0.1.94 on).
                 out(json.dumps([{"run": name, "name": r.get("name"), "agent": r.get("agent"),
                                  "workspace": r.get("workspace"), "started": r.get("started"),
-                                 "session": r.get("session")} for name, r in runs.items()], indent=2))
+                                 "session": r.get("session"), "kind": r.get("kind"), "cut": r.get("cut"),
+                                 "killswitch": bool(r.get("net_cut"))} for name, r in runs.items()], indent=2))
                 return 0
-            textout().table(["RUN", "NAME", "AGENT", "SINCE", "WORKSPACE"],
+            cut = any(r.get("cut") for r in runs.values())  # the column only while a kill switch holds somewhere
+            textout().table(["RUN", "NAME", "AGENT", "SINCE", "WORKSPACE", *(["CUT"] if cut else [])],
                             [[printable(name), printable(str(label(name, r) if label(name, r) != name else
                                                              r.get("session") or "-")),
                               printable(r.get("agent", "")), printable(r.get("started", "")),
-                              printable(r.get("workspace", ""))]
+                              printable(r.get("workspace", "")), *([r.get("cut") or "-"] if cut else [])]
                              for name, r in runs.items()], out, indent=0, empty="no sandbox is running")
             return 0
-        record = choose(runs, args.run, command=f"net {args.command}")
+        if args.command == "cut":
+            if len(args.words) > (1 if args.all_runs else 2):
+                raise ValueError("give [RUN] MODE" if not args.all_runs else "--all-runs takes the MODE alone")
+            mode = args.words[-1]
+            if mode not in (*CUT_MODES, "off"):
+                raise ValueError(f"no kill switch mode {printable(mode)}: remote, local, api, all or off")
+            if args.all_runs:
+                return cut_runs(runs, None, mode, out, every=True, as_json=args.json)
+            record = choose(runs, args.words[0] if len(args.words) == 2 else None, command="net cut")
+            return cut_runs(runs, record, mode, out, alone=args.only, as_json=args.json)
+        record = choose(runs, args.run, command=command or f"net {args.command}")
         if args.command == "stop":
             if sys.stderr.isatty() and not os.environ.get("SANDBOX_AI_NO_DEPRECATION"):
                 print(f"note: sandbox-ai net stop is the older form; sandbox-ai stop "
@@ -1636,7 +2166,8 @@ def main(argv, out=print, resolver=resolve):
                 keep_allowed()
             result = ask(record["directory"], {"op": "show"})
             show(result, out, names=remembered(record), run=record.get("run", args.run), as_json=args.json,
-                 logins=git_logins(record), wildcards=run_wildcards(record))
+                 logins=git_logins(record), wildcards=run_wildcards(record), api_keys=added_api_keys(record),
+                 title=who(record, args.run))
             if getattr(args, "keep", False) or getattr(args, "keep_all", False):
                 tokens, workspaces, notes = running_options(record, result, everything=args.keep_all)
                 said = (lambda line: print(line, file=sys.stderr)) if args.json else out  # the JSON stays JSON
@@ -1738,23 +2269,48 @@ def main(argv, out=print, resolver=resolve):
         if logins and args.command == "allow":
             # Read every token before anything changes: a missing variable or secret refuses the whole command.
             tokens = {credential["url"]: launcher().git_token_value(credential, kind) for kind, credential in logins}
-        # macOS: the supervisor in podman machine's VM connects to the Mac's port itself (runtime.PortRelay
-        # upstream); no host relay, whose socket would not cross the VM's shared folders.
-        relayed = [] if launcher().machine_record(record) else ports
-        if relayed and args.command == "allow":
-            for port in relayed:
-                start_relay(record, port)  # the host end first: the sandbox's end connects to its socket
+        if logins and args.command == "revoke":  # refused before anything changes, the network too
+            missing = {credential["url"] for _, credential in logins} - {entry["url"] for entry in git_logins(record)}
+            if missing:
+                raise ValueError(f"no Git login for {', '.join(sorted(missing))} was added during this run")
+        name = who(record, args.run)
+        # The credentials first, then the network: a login or key that cannot be written changes nothing else, and
+        # one written before a network change that fails is put back as it was (restore) - never half of a command.
+        restore = []
         try:
-            result = ask(record["directory"], request if network else {"op": "show"})
-        except ValueError:
-            if relayed and args.command == "allow":
-                for port in relayed:
-                    if port not in (ask(record["directory"], {"op": "show"}).get("host_ports") or []):
-                        stop_relay(record, port)
+            if logins:
+                before = git_logins(record)
+                file = Path(record["session_dir"]) / launcher().RUNTIME_GIT_TOKENS
+                existed = file.exists()
+                urls = {credential["url"] for _, credential in logins}
+                kept = [entry for entry in before if entry["url"] not in urls]
+                write_git_logins(record, kept if args.command == "revoke" else kept + [
+                    {"url": credential["url"], "user": credential["user"], "token": tokens[credential["url"]]}
+                    for _, credential in logins])
+                restore.append(lambda: write_git_logins(record, before) if existed else file.unlink())
+            if keys:
+                names_given = {key_name for _, key_name, _ in keys}
+                if args.command == "allow":
+                    key_entries = [{**entry, "secret": secret}
+                                   for entry, (_, _, secret) in zip(key_entries, keys)]
+                with api_keys_lock(record):  # read, give and keep as one step: two at once lose no key
+                    keys_before = added_api_keys(record)
+                    kept_keys = [entry for entry in keys_before if entry["name"] not in names_given]
+
+                    def give_back_keys(previous=keys_before):
+                        with api_keys_lock(record):
+                            write_api_keys(record, previous)
+                    # Before the write: the supervisor may have the keys already when the run's own list cannot be
+                    # kept (a full disk) - they are given back as they were then, never left with the proxy unlisted.
+                    restore.append(give_back_keys)
+                    write_api_keys(record, kept_keys + (key_entries if args.command == "allow" else []))
+            result = change_network(record, args, request, network, ports)
+        except BaseException:
+            if args.command == "allow":  # (a revoke keeps what it took back: the safe half)
+                for undo in reversed(restore):
+                    with contextlib.suppress(ValueError, OSError):
+                        undo()
             raise
-        if relayed and args.command == "revoke":
-            for port in relayed:
-                stop_relay(record, port)
         if args.command == "allow":
             update_hosts(record, names)
         elif hosts:
@@ -1764,34 +2320,23 @@ def main(argv, out=print, resolver=resolve):
                        launcher().tcp_targets(argparse.Namespace(allow_tcp=args.allow_tcp)))
         if wildcards:
             now = change_wildcards(record, args.command, wildcards)
-            out(f"{record.get('run', args.run)}: host wildcards: {', '.join(now) or 'none'}" + (
+            out(f"{name}: host wildcards: {', '.join(now) or 'none'}" + (
                 "; the names opened below them stay open for the run (revoke them by name)"
                 if args.command == "revoke" else "; each name below them is opened as it is looked up"))
-        if logins:
-            urls = {credential["url"] for _, credential in logins}
-            kept = [entry for entry in git_logins(record) if entry["url"] not in urls]
-            if args.command == "revoke":
-                missing = urls - {entry["url"] for entry in git_logins(record)}
-                if missing:
-                    raise ValueError(f"no Git login for {', '.join(sorted(missing))} was added during this run")
-                write_git_logins(record, kept)
+        for _, credential in logins:
+            out(f"{name}: Git login for {printable(credential['url'])} (user {printable(credential['user'])}): its "
+                "Git logs in with it until the run ends" if args.command == "allow" else
+                f"{name}: Git login for {printable(credential['url'])} taken back")
+        for host, key_name, _ in keys:
+            if args.command == "allow":
+                out(f"{name}: API key {key_name} for {host}: in the sandbox, "
+                    f"export {key_name}={launcher().API_KEY_PLACEHOLDER.format(name=key_name)} (the placeholder; the "
+                    "proxy puts the key in on the wire, the agent never sees it)")
             else:
-                write_git_logins(record, kept + [{"url": credential["url"], "user": credential["user"],
-                                                  "token": tokens[credential["url"]]} for _, credential in logins])
-        if keys:
-            names_given = {name for _, name, _ in keys}
-            with api_keys_lock(record):  # read, give and keep as one step: two at once lose no key
-                kept_keys = [entry for entry in added_api_keys(record) if entry["name"] not in names_given]
-                write_api_keys(record, kept_keys + (key_entries if args.command == "allow" else []))
-            for host, name, _ in keys:
-                if args.command == "allow":
-                    out(f"{record.get('run', args.run)}: API key {name} for {host}: in the sandbox, "
-                        f"export {name}={launcher().API_KEY_PLACEHOLDER.format(name=name)} (the placeholder; the "
-                        "proxy puts the key in on the wire, the agent never sees it)")
-                else:
-                    out(f"{record.get('run', args.run)}: API key {name} taken back")
-        show(result, out, names=remembered(record), run=record.get("run"), logins=git_logins(record),
-             wildcards=run_wildcards(record))
+                out(f"{name}: API key {key_name} taken back")
+        if not brief:
+            show(result, out, names=remembered(record), run=record.get("run"), logins=git_logins(record),
+                 wildcards=run_wildcards(record), api_keys=added_api_keys(record), title=name)
         for note in notes:
             out(f"note: {launcher().printable(note)}")
         if args.command == "allow":
@@ -1808,18 +2353,18 @@ def main(argv, out=print, resolver=resolve):
             if getattr(args, "keep", False):
                 path, added = keep_in_project(record, kept_options(args, ports))
                 if added:
-                    out(f"{record['run']}: kept in {launcher().printable(path)} (trusted): {' '.join(added)}")
+                    out(f"{name}: kept in {launcher().printable(path)} (trusted): {' '.join(added)}")
                 else:
-                    out(f"{record['run']}: {launcher().printable(path)} already has it")
+                    out(f"{name}: {launcher().printable(path)} already has it")
             else:
-                out(f"{record['run']}: allowed until the sandbox ends; to keep it, start with: {options} "
+                out(f"{name}: allowed until the sandbox ends; to keep it, start with: {options} "
                     f"(or add --keep: into the project's .sandbox-ai.json)")
         return 0
     except (ValueError, OSError) as exc:  # OSError: a run directory or socket gone meanwhile; never a traceback
         where = getattr(exc, "filename", None)
         text = f"{exc.strerror}: {where}" if getattr(exc, "strerror", None) and where else \
             getattr(exc, "strerror", None) or exc
-        print(f"sandbox-ai net: {text}", file=sys.stderr)
+        print(f"sandbox-ai {prog}: {text}", file=sys.stderr)
         return 1
 
 

@@ -11,12 +11,13 @@ import argparse
 import calendar
 import codecs
 import contextlib
+import functools
 import hashlib
 import importlib.util
 import inspect
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import selectors
@@ -83,18 +84,18 @@ GROUPS = {
     "Network": ["--ask", "--profile", "--allow-host", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",
-                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--llm"],
+                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--llm-param"],
     "Proxy & privacy": ["--mode", "--mode-at-least", "--no-proxy", "--no-inspect", "--rules", "--privacy-check", "--privacy-rules",
                         "--canaries", "--no-canaries", "--telemetry", "--log-dir", "--log-debug"],
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
             "--token-proxy", "--git-credentials"],
-    "Agent": ["--model", "--effort", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
+    "Agent": ["--model", "--effort", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
               "--no-memory", "--no-plugins", "--local-config", "--env", "--secret-env", "--api-key", "--publish"],
     "Login": ["--copy-auth", "--no-auth", "--auth-file", "--import-codex-auth"],
     "Display & terminal": ["--gui", "--gui-vnc", "--gui-screen", "--gui-wayland", "--audio", "--tmux", "--no-tmux"],
     "Hardware": ["--device", "--gpu"],
-    "Limits": ["--memory", "--cpus", "--pids"],
-    "Engine": ["--backend", "--image", "--image-variant", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
+    "Limits": ["--memory", "--cpus", "--pids", "--tmp-size"],
+    "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
 }
 PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--log-dir", "--git-credentials", "--local-config",
                 "--auth-file", "--import-codex-auth", "--gui-vnc", "--kit-dir", "--config", "--runtime", "--device"}
@@ -627,6 +628,40 @@ class SandboxAI:
     def mcp_catalog(self):
         """([(prefix, entry)], problems) of the MCP catalogs."""
         return self.module("mcp").catalog_entries()
+
+    def user_images(self, host="local"):
+        """[{name, kind, image, ref, digest, user, ports, os, unchecked, used_by, base_problem ...}] of your images
+        (sandbox-ai images pull|build-image): here read from their record (no Podman call), on another host its
+        `sandbox-ai images list --json`. [] for a sandbox-ai without them; ValueError when a host does not answer."""
+        if host == "local":
+            try:
+                module = self.module("services")
+            except Exception:  # noqa: BLE001 - an older or unreadable installation has none
+                return []
+            if not hasattr(module, "listing"):
+                return []
+            return [row for row in module.listing(check=False) if isinstance(row, dict)]
+        return self.host_listing(host, "images", "list")
+
+    def variant_bases(self, host="local"):
+        """{variant: your image it is built on} of the image variants (sandbox-ai images new NAME --base IMAGE); here
+        read from their files, on another host from `sandbox-ai images --json`."""
+        if host != "local":
+            return {str(row["target"]): str(row["base_image"]) for row in self.host_listing(host, "images")
+                    if row.get("base_image") and row.get("target")}
+        try:
+            images = self.module("images")
+        except Exception:  # noqa: BLE001
+            return {}
+        found = {}
+        for name, _agent in images.variants() if hasattr(images, "variants") else []:
+            try:
+                base = images.load(name, strict=False)[0].get("base")
+            except (ValueError, OSError):
+                continue
+            if isinstance(base, str) and base:
+                found[name] = base
+        return found
 
     def doctor(self, backend="podman"):
         return self.module("doctor").checks(backend)
@@ -1216,7 +1251,12 @@ class SandboxAI:
             rows, problems = [], problems + [str(exc)]
         try:
             mcp = self.module("mcp")
-            servers = {name: mcp.load_state(name) for name in sorted(mcp.definitions()) if mcp.status(name) == "running"}
+            servers = {}
+            for name in sorted(mcp.definitions()):
+                # Its running instances: NAME, and NAME.HASH of the starts with limits of their own (--mcp-limits).
+                running = mcp.instances(name) if hasattr(mcp, "instances") else \
+                    [name] if mcp.status(name) == "running" else []
+                servers.update({instance: mcp.load_state(instance) for instance in running})
         except Exception as exc:  # noqa: BLE001 - e.g. a damaged mcp.json
             servers, problems = {}, problems + [str(exc)]
         try:
@@ -1317,6 +1357,53 @@ class SandboxAI:
         if not valid_run(name):
             return 2, "", "invalid name"
         return self.call("mcp", "stop", name, timeout=300)
+
+    # -- the kill switch (sandbox-ai net cut) --
+
+    def cut_supported(self):
+        """Whether this sandbox-ai has the kill switch (sandbox-ai net cut, 0.1.94)."""
+        return "cut" in self.net_commands()
+
+    def cut_run(self, run, mode, host="local"):
+        """`sandbox-ai net cut RUN MODE --json` on HOST (the run with its MCP servers, helpers and team): (status,
+        out, err); the JSON report on stdout says each run's result (cut_report)."""
+        if not valid_run(run) or mode not in CUT_MODES:
+            return 2, "", "invalid run or mode"
+        return self.host_run(host, "net", "cut", run, mode, "--json", timeout=CUT_WAIT)
+
+    def cut_every_host(self, mode):
+        """The emergency stop (MODE "all") or Lift every cut ("off") on this machine and on every host of `sandbox-ai
+        hosts`, the hosts read afresh (not what a page saw last: right after the start it has seen none). A list of
+        hosts that cannot be read is said as the result of "hosts" (this machine is cut all the same)."""
+        try:
+            hosts, problem = list(self.remote_hosts()), None
+        except Exception as exc:  # noqa: BLE001 - this machine is cut regardless; the list's failure is said
+            hosts, problem = [], str(exc) or type(exc).__name__
+        found = self.cut_everywhere(mode, ["local", *hosts])
+        if problem is not None:
+            found["sandbox-ai hosts"] = (1, "", f"the list of hosts could not be read: {problem}")
+        return found
+
+    def cut_everywhere(self, mode, hosts=("local",)):
+        """`sandbox-ai net cut --all-runs MODE --json` on each of HOSTS at once (the emergency stop must not wait for
+        one host after another): {host: (status, out, err)}; a host that fails or does not answer says so."""
+        if mode not in CUT_MODES:
+            raise ValueError("invalid mode")
+        found, threads = {}, []
+
+        def one(host):
+            try:
+                found[host] = self.host_run(host, "net", "cut", "--all-runs", mode, "--json", timeout=CUT_WAIT)
+            except Exception as exc:  # noqa: BLE001 - one host's failure is its own result
+                found[host] = (1, "", str(exc))
+        for host in dict.fromkeys(hosts):
+            thread = threading.Thread(target=one, args=(host,), daemon=True)
+            thread.start()
+            threads.append((host, thread))
+        for host, thread in threads:
+            thread.join(CUT_WAIT + 30)
+            found.setdefault(host, (124, "", "no answer in time"))
+        return found
 
     # -- projects --
 
@@ -1508,6 +1595,43 @@ class SandboxAI:
         if not isinstance(document, list):
             raise ValueError("sandbox-ai canaries log --json: not a log")
         return document
+
+    # -- reports (sandbox-ai report): runs, statistics, network and the security report as Markdown, HTML or PDF --
+
+    REPORT_FORMATS = ("pdf", "html", "md")
+
+    def has_report(self):
+        """This sandbox-ai writes reports (report.py, `sandbox-ai report`)."""
+        return (self.directory / "report.py").is_file()
+
+    def report(self, path, kind="pdf", names=(), log_dir=None, parts=True, since=None):
+        """`sandbox-ai report NAME... -f KIND -o PATH` (or --log-dir DIR for every run of a log folder): one report of
+        the starts NAMES (each with its runs and, with PARTS, its MCP servers, helpers and team) written to PATH, from
+        SINCE on (10m, 2h, an ISO time) when given. Returns PATH; ValueError: not written."""
+        if kind not in self.REPORT_FORMATS:
+            raise ValueError(f"no report format {kind!r}")
+        if not valid_directory(path):
+            raise ValueError("not an absolute path for the report")
+        names = list(names or [])
+        if not names and not log_dir:
+            raise ValueError("no start and no log folder for the report")
+        if any(not valid_run(name) for name in names):
+            raise ValueError("invalid start")
+        if log_dir is not None and not valid_directory(log_dir):
+            raise ValueError("not an absolute path for the log folder")
+        args = ["report", "--format", kind, "--output", str(path)]
+        if not parts:
+            args.append("--no-parts")
+        if since:
+            if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z:.+ -]{0,39}", str(since)):
+                raise ValueError("not a time")
+            args += ["--since", str(since)]
+        if log_dir is not None:
+            args += ["--log-dir", str(log_dir)]
+        status, out, err = self.call(*args, "--", *names, timeout=600)
+        if status != 0:
+            raise ValueError((err or out).strip() or f"sandbox-ai report: exit status {status}")
+        return str(path)
 
     # -- safeguards (sandbox-ai safeguards): what refused or ended something in a run, why, and the fix --
 
@@ -1776,6 +1900,50 @@ class SandboxAI:
                 pass
         for kind, label, path in extra:
             add(kind, label, path)
+        return found
+
+    def sandbox_paths(self):
+        """{host folder (resolved): its path in the sandbox} for the workspaces and HOME of every running sandbox and
+        session on this host (sandbox_targets; HOME is SANDBOX_HOME): what the Files page's "Copy path in the
+        sandbox" gives. A folder two of them share keeps the first one's."""
+        found = {}
+
+        def add(pairs):
+            for host, inside in pairs:
+                found.setdefault(os.path.realpath(host), inside)
+
+        def ordered(first, others):
+            """FIRST (the record's workspace: the one at /work, also when a project file chose it over --workspace)
+            and the other workspaces after it, each once."""
+            first = os.path.realpath(os.path.expanduser(str(first))) if first else None
+            rest = [os.path.realpath(os.path.expanduser(str(w))) for w in others if w]
+            return [*([first] if first else []), *(w for w in dict.fromkeys(rest) if w != first)]
+        try:
+            runs = self.runs()
+        except Exception:  # noqa: BLE001 - what can be read
+            runs = {}
+        sessions = self.module("sessions")
+        for record in runs.values():
+            paths = run_paths(self.launcher, record.get("pid"), info=self.procinfo())
+            add(sandbox_targets(ordered(record.get("workspace"), paths["workspaces"]), paths.get("workspace_names")))
+            if paths["state_dir"]:
+                add([(paths["state_dir"], SANDBOX_HOME)])
+        try:
+            rows = sessions.rows()
+        except Exception:  # noqa: BLE001
+            rows = []
+        for row in rows:
+            try:
+                key = sessions.resolve(row[0]) if hasattr(sessions, "resolve") else row[0]
+                data = sessions.load(key)
+            except (OSError, ValueError):
+                continue
+            options = paths_from_options(self.launcher, data.get("options", []), data.get("cwd"))
+            add(sandbox_targets(ordered(data.get("workspace"), options["workspaces"]), options["workspace_names"]))
+            try:
+                add([(sessions.session_dir(key) / "home", SANDBOX_HOME)])
+            except ValueError:
+                pass
         return found
 
     def sandbox_folders(self):
@@ -2345,6 +2513,14 @@ class SandboxAI:
             return {}, f"{path}: expected an object with \"version\": 1"
         return document, None
 
+    def desktop_notification_levels(self):
+        """What the launchers may show on the desktop ("desktop_notifications" in sandbox-ai's defaults): all, alarms,
+        none - () for a sandbox-ai without that default (it shows them all)."""
+        try:
+            return tuple(getattr(self.launcher, "DESKTOP_NOTIFICATIONS", ()))
+        except Exception:  # noqa: BLE001
+            return ()
+
     def save_sandbox_default(self, key, value):
         """Set KEY of sandbox-ai's defaults file to VALUE (None: remove it, sandbox-ai's own default applies);
         the other keys stay. Only keys and values this sandbox-ai accepts: a file it refused would stop every
@@ -2354,6 +2530,16 @@ class SandboxAI:
                 raise ValueError("this sandbox-ai has no safeguard records yet; update it")
             if value is not None:
                 value = self.module("safeguards").check_mute(value)
+        elif key == "desktop_notifications":
+            if value is not None and value not in self.desktop_notification_levels():
+                raise ValueError(f"this sandbox-ai has no default {key} = {value!r}")
+        elif key == "loop_guard":
+            # The loop guard's layers for every LLM server (llm.check_loop: known layers, their types and ranges).
+            module = self.module("llm")
+            if not hasattr(module, "check_loop"):
+                raise ValueError("this sandbox-ai has no loop guard layers yet; update it")
+            if value is not None:
+                value = dict(module.check_loop(value, "loop_guard"))
         elif key != "telemetry" or value is not None and value not in self.telemetry_levels():
             raise ValueError(f"this sandbox-ai has no default {key} = {value!r}")
         document, problem = self.sandbox_defaults()
@@ -3253,6 +3439,8 @@ class SandboxAI:
         data = self.host_json(name, "mcp", "list", "--json", timeout=60)
         if not isinstance(data, list):
             raise ValueError("not a list of MCP servers")
+        self.__dict__.setdefault("_mcp_listed", {})[name] = [  # (host_mcp_notes: its problems and recommendations)
+            entry for entry in data if isinstance(entry, dict) and re.fullmatch(MCP_NAME, str(entry.get("name") or ""))]
         rows = []
         for entry in data:
             if not isinstance(entry, dict) or not re.fullmatch(MCP_NAME, str(entry.get("name") or "")):
@@ -3263,6 +3451,49 @@ class SandboxAI:
                          printable(str(entry.get("image") or entry.get("command") or ""))[:300],
                          origin_text(entry) if "catalog" in entry else ""))
         return rows
+
+    def host_mcp_notes(self, name):
+        """{server: {"problem": {time, what, why, fix} or None, "below": {key: value}}} of host NAME's MCP servers: what
+        ended or failed a server's processes last (mcp.py's watch) and the limits below its catalog's recommendation.
+        This machine: sandbox-ai's own module; a host: what its last `mcp list --json` said (host_mcp_servers)."""
+        if name == "local":
+            mcp = self.module("mcp")
+            if not hasattr(mcp, "last_problem"):
+                return {}
+            found = {}
+            for server, definition in mcp.definitions().items():
+                problems = [p for p in (mcp.last_problem(i) for i in mcp.instances(server, include_stopped=True)) if p]
+                problem = max(problems, key=lambda p: str(p.get("time") or "")) if problems else None
+                below = mcp.below_recommended(definition) if "image" in definition or "rootfs" in definition else {}
+                if problem or below:
+                    found[server] = {"problem": problem, "below": below}
+            return found
+        found = {}
+        for entry in self.__dict__.get("_mcp_listed", {}).get(name, []):
+            problem = entry.get("last_problem") if isinstance(entry.get("last_problem"), dict) else None
+            below = entry.get("below_recommended") if isinstance(entry.get("below_recommended"), dict) else {}
+            if problem or below:
+                found[entry["name"]] = {"problem": {k: printable(str(problem.get(k) or ""))[:600]
+                                                    for k in ("time", "what", "why", "fix")} if problem else None,
+                                        "below": {printable(str(k))[:20]: printable(str(v))[:20] for k, v in below.items()}}
+        return found
+
+    def host_mcp_list(self, name):
+        """[{"name", "status", "limits", "instances", "kind", "own", "definition", "builtin_defaults", ...}] of the MCP
+        servers of host NAME, as `sandbox-ai mcp list --json` there lists them (this machine: sandbox-ai's own module,
+        mcp.server_list); a server without one of these keys comes from an older sandbox-ai. ValueError: not read."""
+        if name == "local":
+            mcp = self.module("mcp")
+            if hasattr(mcp, "server_list"):
+                try:
+                    served = self.mcp_serving()
+                except Exception:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
+                    served = {}
+                return mcp.server_list(served)
+        data = self.host_json(name, "mcp", "list", "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("not a list of MCP servers")
+        return [entry for entry in data if isinstance(entry, dict) and re.fullmatch(MCP_NAME, str(entry.get("name")))]
 
     def host_mcp_catalog(self, name, catalogs=()):
         """([(prefix, entry)], problems) of the MCP catalogs as `sandbox-ai mcp catalog [--catalog SOURCE]...` on host
@@ -3617,6 +3848,33 @@ def valid_run(run):
     return isinstance(run, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run))
 
 
+# The kill switch (sandbox-ai net cut): its modes, and how long one host's answer may take (every run at once there).
+CUT_MODES = ("remote", "local", "api", "all", "off")
+CUT_WAIT = 90
+
+
+def cut_name(value):
+    """VALUE if it names a cut ("api", or modes that hold together: "remote+api"), else None."""
+    parts = value.split("+") if isinstance(value, str) else []
+    return value if parts and all(part in CUT_MODES[:-1] for part in parts) else None
+
+
+def cut_report(result):
+    """The runs of a `sandbox-ai net cut ... --json` RESULT ((status, out, err)): [{"run", "name", "for", "ok", "cut",
+    "error"}], or None when it said no report (an older sandbox-ai, no answer); then its error text explains."""
+    try:
+        report = json.loads(result[1])
+    except (ValueError, TypeError, IndexError):
+        return None
+    runs = report.get("runs") if isinstance(report, dict) else None
+    if not isinstance(runs, list):
+        return None
+    return [{"run": str(entry.get("run") or ""), "name": str(entry.get("name") or entry.get("run") or ""),
+             "for": entry.get("for") if isinstance(entry.get("for"), str) else None, "ok": entry.get("ok") is True,
+             "cut": cut_name(entry.get("cut")),
+             "error": str(entry.get("error") or "")} for entry in runs if isinstance(entry, dict)]
+
+
 def valid_directory(path):
     """An absolute path of one line (never read as an option)."""
     path = str(path or "")
@@ -3714,12 +3972,16 @@ NEEDS_CONFIRM = {
                     "unless kept)",
 }
 APP_NEEDS_CONFIRM = {
+    # the Approvals page's Allowed now: Revoke takes back what was allowed during the run, at once
+    "net-revoke": "revoking takes back what the running sandbox may reach, at once (open connections to it end)",
     # sandbox-ai session move: no route of the web interface does it
     "session-move": "moving a session stops it here once it runs on the other host (its HOME stays here until it is "
                     "deleted; logins and HOME are not copied)",
     # sandbox-ai session copy|move --replace: a session of that name on the other host is deleted first
     "session-replace": "replacing deletes the session of that name on the other host first, its HOME there too",
     "preset-delete": "deleting a preset of your own removes it for good (export it first to keep a copy)",
+    "preset-replace": "replacing a preset of your own overwrites it with the board shown now (export it first to keep "
+                      "a copy)",
     "files-delete": "deleting removes the files or folders for good (there is no wastebasket)",
     "files-replace": "replacing overwrites what is there now with what is copied or moved",
     # what the window itself ends, drops or runs (no sandbox-ai command): asked the same way, Cancel the default
@@ -3732,6 +3994,8 @@ APP_NEEDS_CONFIRM = {
     "board-remove-part": "the part and its connections go from the board (Undo brings them back)",
     "tab-close": "closing the tab drops the board's unapplied changes",
     "terminal-end": "ending the command of a terminal tab loses what it did not save",
+    "login-browser-forget": "forgetting the login browser's data signs you out of every provider there (its cookies, "
+                            "storage and cache go)",
     "app-quit": "quitting ends what runs only in the window (its commands and work) and leaves the sandboxes' questions "
                 "unanswered",
     "self-update": "updating replaces the sandbox-ai every later start and command uses (a system installation's for "
@@ -4385,12 +4649,15 @@ def settings_problem():
 
 # The settings the app knows, with their defaults (the Settings dialog edits them; the file keeps them).
 SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "", "language": "system", "terminal": "app", "tray": True, "notify": True,
-            "notify_safeguards": True,
+            "notifications": False, "notify_safeguards": True,
             "notify_seconds": 15, "notify_style": "themed", "approvals_interval": 1000, "sandboxes_interval": 3000, "connections_interval": 2000,
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
-            "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "guide_nodes": True,
+            "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "reopen_terminals": True, "guide_nodes": True,
             "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
-            "web_without_sandbox": False, "show_flags": False}
+            "web_without_sandbox": False, "show_flags": False,
+            # the terminal tabs: where sign-in links open (app, system), copy what is selected, ask before a paste of
+            # several lines, a program's OSC 52 clipboard write (ask, allow, off; a read is never answered)
+            "login_links": "app", "copy_on_select": False, "paste_warn": True, "terminal_osc52": "ask"}
 
 
 def setting(name, settings=None):
@@ -4734,7 +5001,7 @@ def summary(record):
 # -- paths of runs and sessions --
 
 # Without the launcher's parser: which of the options read here take a value.
-KNOWN_ARITY = {"--workspace": True, "--state-dir": True, "--workspace-ro": False}
+KNOWN_ARITY = {"--workspace": True, "--state-dir": True, "--workspace-ro": False, "--workspace-name": True}
 _arity = weakref.WeakKeyDictionary()  # {launcher: {option string: nargs}} (a launcher that went takes its entry along)
 
 
@@ -4771,7 +5038,7 @@ def paths_from_options(launcher, tokens, cwd=None):
     except Exception:  # noqa: BLE001 - an old or damaged record: read what can be read
         pass
     arity = {**KNOWN_ARITY, **option_arity(launcher)}
-    result = {"workspaces": [], "state_dir": None, "mounts": []}
+    result = {"workspaces": [], "state_dir": None, "mounts": [], "workspace_names": {}}
     base = Path(cwd) if cwd else None
 
     def path(value):
@@ -4797,12 +5064,42 @@ def paths_from_options(launcher, tokens, cwd=None):
             result["state_dir"] = path(value)
         elif name == "--workspace":
             result["workspaces"] += [path(v) for v in value.split(",") if v.strip()]
+        elif name == "--workspace-name":  # NAME=DIR: that workspace is /workspaces/NAME in the sandbox
+            label, separator, folder = value.partition("=")
+            if separator and label and folder:
+                result["workspace_names"][os.path.realpath(path(folder))] = label
         elif name == "--mount":
             source, _, mode = value.rpartition(":")
             source = source.rpartition(":")[0]  # SRC:DEST:MODE
             if mode == "rw" and source:
                 result["mounts"].append(path(source))
     return result
+
+
+SANDBOX_HOME = "/root"  # the agent's HOME in the sandbox (Podman and Bubblewrap alike: agent_sandbox.py)
+
+
+def sandbox_targets(workspaces, names=None):
+    """[(host path, path in the sandbox)] of WORKSPACES (in the order given to the launcher), as agent_sandbox's
+    workspace_targets mounts them: the first at /work, one named by --workspace-name (NAMES {resolved host path: NAME})
+    at /workspaces/NAME, the others at /workspaces/ and their folder's name (-2, -3 ... after the names taken)."""
+    names = dict(names or {})
+    workspaces = [os.path.realpath(os.path.expanduser(str(w))) for w in workspaces if w]
+    if not workspaces:
+        return []
+    targets, used = [(workspaces[0], "/work")], set(names.values())
+    for value in workspaces[1:]:
+        named = names.get(value)
+        if named is not None:
+            targets.append((value, f"/workspaces/{named}"))
+            continue
+        base = PurePosixPath(value).name or "root"
+        name, suffix = base, 2
+        while name in used:
+            name, suffix = f"{base}-{suffix}", suffix + 1
+        used.add(name)
+        targets.append((value, f"/workspaces/{name}"))
+    return targets
 
 
 def launcher_agents(launcher):
@@ -4815,7 +5112,7 @@ def launcher_agents(launcher):
 def run_paths(launcher, pid, proc=Path("/proc"), info=None):
     """Workspaces, --state-dir and rw --mount sources of a running launcher, from its command line in /proc (only for a
     process of this user; macOS: INFO, procinfo.py); empty when that cannot be read."""
-    empty = {"workspaces": [], "state_dir": None, "mounts": []}
+    empty = {"workspaces": [], "state_dir": None, "mounts": [], "workspace_names": {}}
     mac = mac_processes(proc, info)
     try:
         pid = int(pid)
@@ -5196,8 +5493,15 @@ def remote_questions(host, items, ident=re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-
 
 def parse_time(text):
     """Seconds since the epoch of a UTC time as sandbox-ai writes it (2026-11-03T10:00:00Z), or None."""
+    return _parse_time(text) if isinstance(text, str) else _parse_time(str(text)) if text is not None else None
+
+
+@functools.lru_cache(maxsize=4096)
+def _parse_time(text):
+    """parse_time of a string, kept: the Sandboxes tree turns the same start times into its rows at every look (UTC,
+    so the same text is always the same moment; strptime cost ~15 us each)."""
     try:
-        return calendar.timegm(time.strptime(str(text), "%Y-%m-%dT%H:%M:%SZ"))
+        return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
     except (ValueError, TypeError):
         return None
 
@@ -5549,10 +5853,10 @@ def catalog_options(catalogs):
 
 
 def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=None, pids=None, catalogs=(),
-                 no_pull=False, engine=None, unsigned=False, vpn=None):
+                 no_pull=False, engine=None, unsigned=False, vpn=None, cpus=None, tmp=None):
     """(the words after `sandbox-ai` of `mcp add ... ENTRY`, the host directories mounted writable) with --as,
-    --mount TARGET=HOST:MODE, --env, --network, --memory, --pids, --catalog, --no-pull, --backend, --unsigned and
-    --vpn, every value checked as the web interface checks it. ValueError says what is wrong."""
+    --mount TARGET=HOST:MODE, --env, --network, --memory, --cpus, --pids, --catalog, --no-pull, --backend,
+    --unsigned and --vpn, every value checked as the web interface checks it. ValueError says what is wrong."""
     if not re.fullmatch(MCP_ENTRY, str(entry or "")):
         raise ValueError("not a catalog entry (duckduckgo, hub:binwalk)")
     args, writable = ["mcp", "add"], []
@@ -5579,10 +5883,18 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
         if not re.fullmatch(SIZE, str(memory)):
             raise ValueError("memory is a size: 512m, 2g")
         args.append(f"--memory={memory}")
+    if cpus is not None:
+        if not re.fullmatch(CPUS, str(cpus)):
+            raise ValueError("CPUs: a number, like 2 or 1.5")
+        args.append(f"--cpus={cpus}")
     if pids is not None:
         if isinstance(pids, bool) or not isinstance(pids, int) or not 1 <= pids <= 1000000:
             raise ValueError("processes: a whole number")
         args.append(f"--pids={pids}")
+    if tmp:
+        if not re.fullmatch(SIZE, str(tmp)):
+            raise ValueError("/tmp is a size: 64m, 1g")
+        args.append(f"--tmp={tmp}")
     args += catalog_options(catalogs)
     if no_pull:
         args.append("--no-pull")
@@ -5597,6 +5909,58 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
     if unsigned:
         args.append("--unsigned")
     return args + [entry], writable
+
+
+CPUS = r"[0-9]{1,4}(?:\.[0-9]{1,2})?"  # a CPU limit (mcp.checked_cpus checks its range)
+
+
+def mcp_set_args(name, stop=False, **changes):
+    """The words after `sandbox-ai` of `mcp set NAME` with CHANGES: memory, cpus, pids (a value, or "default": back to
+    the default), network (none|full), mounts ([(target, host folder, "ro"|"rw")]: all of them; [] none), env ([NAME]:
+    all of them; [] none), vpn (a profile, or None: none); STOP: --stop. Every value checked for its form here (the
+    command checks the rest as `mcp add` does). ValueError says what is wrong."""
+    if not re.fullmatch(MCP_NAME, str(name or "")):
+        raise ValueError("a name for --mcp is 1-32 letters, digits, '_' or '-'")
+    if set(changes) - {"memory", "cpus", "pids", "tmp", "network", "mounts", "env", "vpn", "recommended"}:
+        raise ValueError("only memory, cpus, pids, tmp, network, mounts, env and vpn can be set")
+    args = ["mcp", "set", str(name)]
+    if changes.get("recommended"):
+        args.append("--recommended")
+    for key, pattern in (("memory", SIZE), ("cpus", CPUS), ("pids", r"[0-9]{1,7}"), ("tmp", SIZE)):
+        if key in changes:
+            value = str(changes[key])
+            if value != "default" and not re.fullmatch(pattern, value):
+                raise ValueError(f"{key}: not a value of its kind ({value[:40]})")
+            args.append(f"--{key}={value}")
+    if "network" in changes:
+        if changes["network"] not in ("none", "full"):
+            raise ValueError("the network is none or full")
+        args.append(f"--network={changes['network']}")
+    if "mounts" in changes:
+        if not changes["mounts"]:
+            args.append("--no-mounts")
+        for target, source, mode in changes["mounts"]:
+            target, source = path_value(target, "a mount's target"), path_value(source, "a mount's host directory")
+            if mode not in ("ro", "rw") or "=" in target + source or ":" in target + source:
+                raise ValueError("a mount is TARGET=HOST with ro or rw (no '=' or ':' in the paths)")
+            args.append(f"--mount={target}={source}:{mode}")
+    if "env" in changes:
+        if not changes["env"]:
+            args.append("--no-env")
+        for variable in changes["env"]:
+            if not re.fullmatch(VARIABLE, str(variable)):
+                raise ValueError("a variable is letters, digits and _, not starting with a digit")
+            args.append(f"--env={variable}")
+    if "vpn" in changes:
+        if changes["vpn"]:
+            if not re.fullmatch(VPN_PROFILE, str(changes["vpn"])):
+                raise ValueError("a VPN profile's name is 1-32 lower-case letters, digits, '_' or '-'")
+            args.append(f"--vpn={changes['vpn']}")
+        else:
+            args.append("--no-vpn")
+    if stop:
+        args.append("--stop")
+    return args
 
 
 # What `sandbox-ai mcp add` says when it refuses an entry only because its catalog is not signed by a trusted key

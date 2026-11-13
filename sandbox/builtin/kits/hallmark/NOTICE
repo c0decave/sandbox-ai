@@ -1,0 +1,5 @@
+This kit of sandbox-ai contains files of https://github.com/Nutlope/hallmark
+at commit 8f6969f8922caabde9de1784959eae11ddf68073 (2026-10-28T14:52:01+00:00), unchanged.
+Licence: MIT, the upstream licence text in LICENSE.
+sandbox-ai chose which files to include (kit.json: "files", "left_out") and added README.md, NOTICE,
+kit.json and the agent folders' markers. Security review: docs/skills-review.md.

@@ -229,6 +229,54 @@ def test_end_to_end_with_the_vendored_xterm(terminal, wait, tmp_path):
     run_terminal(terminal, terminal.WEB, wait, tmp_path)
 
 
+@pytest.mark.parametrize("real", [False, True], ids=["stand-in", "vendored"])
+def test_the_emergency_stop_s_key_works_in_a_terminal(terminal, stub_web, wait, qapp, real):
+    """Review: Ctrl+Shift+X with the focus in a terminal tab (Chromium's view, xterm.js's text area focused in it)
+    is the emergency stop too - an application shortcut is tried before the page gets the key - and the command in
+    the terminal never sees it (no ^X)."""
+    from PySide6.QtGui import QAction, QKeySequence
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMainWindow
+    from sandbox_ai_app import widgets
+    web = stub_web
+    if real:
+        ready, why = terminal.available()
+        if not ready:
+            pytest.skip(f"needs xterm.js vendored by scripts/vendor_xterm.py: {why}")
+        web = terminal.WEB
+    window = QMainWindow()
+    hits = []
+    stop = QAction("Emergency stop", window)
+    stop.setShortcut(QKeySequence(widgets.EMERGENCY_KEYS))
+    stop.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)  # as the main window's (ui.py)
+    stop.triggered.connect(lambda *_: hits.append(True))
+    window.addAction(stop)
+    view = terminal.TerminalView(["sh", "-c", "stty raw -echo; exec cat -v"], web=web)
+    window.setCentralWidget(view)
+    window.resize(700, 420)
+    window.show()
+    try:
+        assert wait(lambda: view.bridge.ready_seen, 30)
+        window.activateWindow()
+        view.view.setFocus()
+        assert wait(lambda: view.view.isAncestorOf(qapp.focusWidget()) or qapp.focusWidget() is view.view, 10)
+        if real:
+            assert wait(lambda: js(view, wait, "document.activeElement && document.activeElement.className")
+                        == "xterm-helper-textarea", 10)
+        controls = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        QTest.keyClick(window.windowHandle(), Qt.Key.Key_X, controls)
+        assert wait(lambda: hits == [True], 10), "the emergency stop never fired from the terminal"
+        if real:  # (the stand-in takes no keys)
+            QTest.keyClick(window.windowHandle(), Qt.Key.Key_A)
+            text = screen_text(view, wait, "a")
+            assert text.strip() == "a", text
+    finally:
+        view.close_terminal()
+        window.close()
+        window.deleteLater()
+
+
 def test_which_tabs_only_detach_when_the_app_quits(terminal):
     """Quitting ends the commands of the tabs, but a session or an attached start only detaches (tmux): those are
     not asked about. Interactive agent starts are sessions too (the launcher's default); tasks, builds, doctor and
@@ -349,3 +397,28 @@ def test_the_window_is_an_opengl_window_before_the_first_terminal_tab(qapp, monk
         assert terminal.prepare_window(window, platform="xcb", environ={}) is None
     finally:
         window.deleteLater()
+
+
+def test_terminal_tabs_move_and_alt_numbers_switch_to_them(terminal, stub_web, wait, monkeypatch):
+    """The terminals' tabs move left and right by dragging (movable), and Alt+1 ... Alt+9, Alt+0 show the first ten;
+    a key for a tab that is not there does nothing. Every lookup goes by the view, so a moved tab keeps its terminal."""
+    monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
+    page = terminal.TerminalsPage(stub_web)
+    views = [open_tab(page, ["sh", "-c", "sleep 60"], f"t{n}") for n in range(3)]
+    assert page.tabs.isMovable()
+    keys = [key.key().toString() for key in page.tab_keys]
+    assert keys == [f"Alt+{n}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 0)] or terminal.sys.platform == "darwin"
+    # macOS: Control+digit (Qt's Meta) - Option+digit types characters there ([ ] | { } on a German keyboard), which
+    # the shortcut took from every terminal.
+    assert [terminal.tab_key(n, "darwin") for n in (0, 4, 8, 9)] == ["Meta+1", "Meta+5", "Meta+9", "Meta+0"]
+    assert [terminal.tab_key(n, "linux") for n in (0, 9)] == ["Alt+1", "Alt+0"]
+    page.tab_keys[2].activated.emit()
+    assert page.tabs.currentIndex() == 2
+    page.tabs.tabBar().moveTab(2, 0)  # (what dragging it to the front does)
+    assert page.tabs.widget(0) is views[2] and page.tabs.tabText(0) == "t2"
+    page.tab_keys[0].activated.emit()
+    assert page.tabs.currentWidget() is views[2]
+    page.tab_keys[9].activated.emit()  # Alt+0: no tenth tab
+    assert page.tabs.currentWidget() is views[2]
+    page.close_all()
+    page.deleteLater()

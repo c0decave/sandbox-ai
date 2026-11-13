@@ -275,7 +275,8 @@ it. `sandbox-ai presets check NAME` names the MCP servers still to add.
 ```bash
 sandbox-ai net allow --allow-host pypi.org       # more destinations, until the sandbox ends
 sandbox-ai net allow --allow-host-port 3080      # a service on this host, through a relay
-sandbox-ai net allow --git-token-env http://localhost:3080=SANDBOX_GIT_TOKEN   # a Git login
+sandbox-ai git-logins give RUN http://localhost:3080 --env SANDBOX_GIT_TOKEN   # a Git login (RUN: sandbox-ai list)
+sandbox-ai secrets give RUN DEVTO_API_KEY --api-key dev.to   # an API key the proxy puts in
 sandbox-ai net allow --allow-host api.osv.dev --keep   # for the next starts too
 sandbox-ai net show                              # what was added
 ```

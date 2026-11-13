@@ -285,7 +285,8 @@ MCP-Server, die noch hinzuzufügen sind.
 ```bash
 sandbox-ai net allow --allow-host pypi.org       # mehr Ziele, bis die Sandbox endet
 sandbox-ai net allow --allow-host-port 3080      # ein Dienst auf diesem Host, über ein Relay
-sandbox-ai net allow --git-token-env http://localhost:3080=SANDBOX_GIT_TOKEN   # ein Git-Login
+sandbox-ai git-logins give LAUF http://localhost:3080 --env SANDBOX_GIT_TOKEN   # ein Git-Login (LAUF: sandbox-ai list)
+sandbox-ai secrets give LAUF DEVTO_API_KEY --api-key dev.to   # ein API-Schlüssel, vom Proxy eingesetzt
 sandbox-ai net allow --allow-host api.osv.dev --keep   # auch für die nächsten Starts
 sandbox-ai net show                              # was dazukam
 ```

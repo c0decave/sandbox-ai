@@ -322,6 +322,10 @@ class NodeGuide(QDialog):
             widget.setEditable(question.form == "model")
             self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current,
                                     self.parent())
+        elif self.node.kind == "mcp" and question.key == "name" and hasattr(self.parent(), "mcp_combo"):
+            # The servers there are to choose from (defined, the project's own, the catalogs'), any other typed.
+            widget = self.parent().mcp_combo(current)
+            widget.setAccessibleName(tr(question.label))
         elif question.key == "--vpn":  # the board's host's VPN profiles to choose from, any other name typed
             from .name_fields import NameField
             board = self.parent()

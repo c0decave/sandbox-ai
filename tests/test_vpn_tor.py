@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import ipaddress
 import json
+import socket
 from pathlib import Path
 import stat
 import sys
@@ -346,6 +347,8 @@ class FakeRunner:
 
 def test_tor_comes_up_behind_the_kill_switch(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "RUN", tmp_path / "vpn")
+    given = []
+    monkeypatch.setattr(rt, "own_data_directory", lambda uid: given.append(uid))
     waited = []
     monkeypatch.setattr(rt, "wait_bootstrap", lambda log, process, timeout, out, secrets: waited.append(secrets) or 100)
     runner = FakeRunner()
@@ -358,6 +361,7 @@ def test_tor_comes_up_behind_the_kill_switch(tmp_path, monkeypatch):
     rules = dict((tuple(c), d) for c, d in runner.commands)[("nft", "-f", "-")]
     assert f"meta skuid {rt.TOR_UID} ip daddr 192.0.2.10 tcp dport 443 accept" in rules
     tor = next(c for c in commands if c[0] == "tor")
+    assert given == [rt.TOR_UID]  # the data directory is debian-tor's before tor starts
     assert tor == ["tor", "-f", str(tmp_path / "vpn" / "torrc"), "--defaults-torrc", str(tmp_path / "vpn" / "torrc-defaults")]
     torrc = tmp_path / "vpn" / "torrc"
     assert stat.S_IMODE(torrc.stat().st_mode) == 0o600 and f"cert={CERT_A}" in torrc.read_text()
@@ -471,7 +475,7 @@ class FakeTunnel:
         FakeTunnel.timeout = timeout
         return {"tunnel": TOR_TUNNEL, "checks": FakeTunnel.inside, "hosts": {}}
 
-    def follow(self, on_event):
+    def follow(self, on_event, on_end=None):
         pass
 
     def close(self):
@@ -507,10 +511,13 @@ def test_the_tor_container(home):
     command = v.container_command(["podman"], "agent-x-vpn", tor_profile(), pod="agent-x")
     assert "--cap-drop=ALL" in command and "--cap-add=NET_ADMIN" in command
     # tor binds port 53 on loopback, then becomes debian-tor (whose uid the kill switch knows).
-    for cap in ("SETUID", "SETGID", "NET_BIND_SERVICE"):
+    for cap in ("SETUID", "SETGID", "NET_BIND_SERVICE", "CHOWN"):
         assert f"--cap-add={cap}" in command
     assert "--cap-add=NET_RAW" not in command and "--device=/dev/net/tun" not in command
-    assert f"--tmpfs=/var/lib/tor:rw,nosuid,nodev,mode=0700,uid={rt.TOR_UID},gid={rt.TOR_UID}" in command
+    # Podman's --tmpfs knows no uid= or gid= ("unknown mount option"): the runtime gives it to debian-tor.
+    tmpfs = [c for c in command if c.startswith("--tmpfs=/var/lib/tor")]
+    assert tmpfs == ["--tmpfs=/var/lib/tor:rw,nosuid,nodev,noexec,mode=0700"]
+    assert not any("uid=" in c or "gid=" in c for c in command if c.startswith("--tmpfs"))
     # Tor is not a VPN: its own image, never the VPN image.
     assert command[-4:] == [v.TOR_IMAGE, "-I", "/vpn/vpn_runtime.py", "serve"] and v.VPN_IMAGE not in command
     assert v.image(tor_profile()) == v.TOR_IMAGE and v.build_command(tor_profile()) == "sandbox-ai build tor"
@@ -561,10 +568,20 @@ def test_mcp_servers_take_a_tor_profile(home, monkeypatch):
     assert mcp.validated_image({"image": image, "network": "full", "vpn": "anon"}, "t")["vpn"] == "anon"
     monkeypatch.setattr(v, "Tunnel", FakeTunnel)
     monkeypatch.setattr(v, "host_baseline", lambda settings: HOST)
-    monkeypatch.setattr(v, "podman_run", lambda command, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+    def podman(command, **kw):
+        if command[1:3] == ["container", "inspect"] and "{{json .Config.Labels}}" not in command:
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="|".join(
+                ["e" * 64, "true", "2026-11-12 10:00:00 +0000 UTC", "pasta", "anon"]) + "\n")
+        if command[1] == "exec":  # `nft list table inet sandbox_ai_vpn` in the Tor container: the kill switch
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="table inet sandbox_ai_vpn {\n" + "".join(
+                f" chain {h} {{ type filter hook {h} priority -5; policy drop;\n }}\n"
+                for h in ("output", "input", "forward")) + "}\n")
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    monkeypatch.setattr(v, "podman_run", podman)
     FakeTunnel.inside = tor_inside()
     assert v.mcp_wrapper("anon", "sandbox-ai-vpn-mcp-x", "/owner", [sys.executable, "-c", "raise SystemExit(0)"]) == 0
     assert FakeTunnel.last.data["profile"]["type"] == "tor" and FakeTunnel.last.closed
+    assert FakeTunnel.last.data["mcp"] is True  # (Tor's own rules hand its lookups to the DNSPort)
 
 
 def test_doctor_does_not_ask_tor_for_a_tunnel_device(home, tmp_path, monkeypatch):
@@ -645,8 +662,16 @@ def test_an_image_running_as_tors_user_cannot_go_behind_tor(user, refused):
             mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect, passwd)
     else:
         mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", inspect, passwd)
+    # The user cannot be told: refused (it could be tor's). Before, an inspect that failed or timed out (a busy
+    # Podman) let the server go behind Tor unchecked, though its image then ran as whatever user it names.
     failed = lambda: subprocess.CompletedProcess([], 125, "", "no such image")  # noqa: E731
-    mcp.check_tor_image_user("osint", "missing", failed)  # podman's own error comes at the start
+    with pytest.raises(ValueError, match="cannot tell which user its image runs as.*no such image"):
+        mcp.check_tor_image_user("osint", "missing", failed)
+
+    def timed_out():
+        raise subprocess.TimeoutExpired(["podman", "image", "inspect"], 30)
+    with pytest.raises(ValueError, match="cannot tell which user its image runs as"):
+        mcp.check_tor_image_user("osint", "ghcr.io/x/osint@sha256:0", timed_out, passwd)
 
 
 def test_an_image_user_whose_uid_is_tors_cannot_go_behind_tor():
@@ -687,6 +712,45 @@ def test_the_image_passwd_is_read_without_starting_the_image(tmp_path):
     assert ["podman", "cp", "c0ffee:/etc/passwd", "-"] in commands and ["podman", "rm", "--force", "c0ffee"] in commands
     assert not any(command[1] in ("run", "start") for command in commands)
     assert mcp.image_passwd("img", lambda command: subprocess.CompletedProcess(command, 125, b"", b"")) is None
+
+
+def test_the_image_passwd_is_read_bounded_through_the_one_shared_reader(monkeypatch):
+    """mcp.image_passwd reads as services.image_file reads (one helper): only one regular file of at most 1 MiB, a
+    directory or more than that is no answer, and the copy is streamed and cut off (services.copy_bounded) - an image
+    behind Tor whose /etc/passwd is gigabytes never fills the launcher's memory."""
+    import io
+    import subprocess
+    import tarfile
+    mcp = load("sandbox_mcp_tor_passwd_bounded_test", "mcp.py")
+
+    def stream(*members):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            for name, kind, data in members:
+                info = tarfile.TarInfo(name)
+                info.type, info.size = kind, len(data) if kind == tarfile.REGTYPE else 0
+                archive.addfile(info, io.BytesIO(data) if kind == tarfile.REGTYPE else None)
+        return buffer.getvalue()
+
+    def answering(data):
+        def run(command):
+            if command[1] == "create":
+                return subprocess.CompletedProcess(command, 0, b"c0ffee\n", b"")
+            if command[1] == "cp":
+                return subprocess.CompletedProcess(command, 0, data, b"")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        return run
+    assert mcp.image_passwd("img", answering(stream(("passwd", tarfile.REGTYPE, b"a" * ((1 << 20) + 1))))) is None
+    assert mcp.image_passwd("img", answering(stream(("passwd", tarfile.DIRTYPE, b""),
+                                                    ("passwd/x", tarfile.REGTYPE, b"x\n")))) is None
+    assert mcp.image_passwd("img", answering(stream(("passwd", tarfile.FIFOTYPE, b"")))) is None
+    services = mcp.services_module()
+    seen = []
+    monkeypatch.setattr(services, "image_file", lambda *args, **kwargs: seen.append((args, kwargs)) or "root:x:0:0\n")
+    assert mcp.image_passwd("img") == "root:x:0:0\n"
+    (image, path, podman, *_), kwargs = seen[0]
+    assert (image, path, podman) == ("img", "/etc/passwd", ["podman"]) and kwargs.get("run") is None, \
+        "without a runner the copy streams through copy_bounded"
 
 
 # --- the guarantee during the run --------------------------------------------------------------------------------
@@ -778,7 +842,7 @@ def test_the_agents_firewall_lets_the_marked_checks_pass_before_its_own_rules():
 # --- what a Tor start reaches past Tor: nothing, unless it says so -----------------------------------------------
 
 def tor_args(*extra):
-    v.main(["add", "anon", "--tor"])
+    v.main(["add", "anon", "--tor", "--force"])
     return s.parse_args(["codex", "--backend", "podman", "--vpn", "anon", *extra])
 
 
@@ -812,12 +876,24 @@ def test_an_llm_server_in_the_local_network_is_refused_behind_tor(home, monkeypa
     llm = s.load_llm_module()
     monkeypatch.setattr(s, "load_llm_module", lambda: llm)  # (a fresh module at each call; vpn.py sees these)
     found = {"name": "lan", "url": "http://192.168.1.20:8000",
-             "parsed": {"address": "192.168.1.20", "loopback": False, "host": "192.168.1.20"}}
+             "parsed": {"address": "192.168.1.20", "loopback": False, "host": "192.168.1.20", "port": 8000}}
     monkeypatch.setattr(llm, "selection", lambda a: (found, "m"))
     a = tor_args()
     a.llm = "lan"
-    with pytest.raises(ValueError, match="lies in your local network, which a Tor start cannot reach"):
+    with pytest.raises(ValueError, match="lies in your local network, which a Tor start cannot reach") as refused:
         v.validate(a)
+    assert "--vpn-bypass-tcp 192.168.1.20:8000" in str(refused.value)
+    a = tor_args()
+    a.llm = "lan"
+    a.vpn_bypass_tcp = ["192.168.1.20:8000"]
+    v.validate(a)  # exactly this server past Tor, as asked
+    assert a.vpn_bypass_tcp == ["192.168.1.20:8000"] and "192.168.1.20:8000" in a.allow_tcp
+    a = tor_args()
+    a.llm = "lan"
+    a.vpn_bypass_tcp = ["192.168.1.20:8001"]  # another port of it: not this server
+    with pytest.raises(ValueError, match="lies in your local network"):
+        v.validate(a)
+    a = tor_args()
     found.update(url="https://llm.example.org", parsed={"address": None, "loopback": False, "host": "llm.example.org"})
     v.validate(a)  # a server on the internet: through Tor like everything else
 
@@ -831,3 +907,338 @@ def test_the_host_does_not_ask_an_llm_server_for_its_context_beside_a_vpn_start(
     endpoint = {"kind": "ollama", "url": "https://llm.example.org", "contexts": {}, "vpn": None}
     assert llm.context_window(endpoint, "m", client=Client(), behind_vpn=True) is None
     assert llm.context_window(endpoint, "m", client=Client()) is None  # without a VPN it asks (and fails here)
+
+
+def test_bypass_targets_are_addresses_of_the_local_network_only():
+    assert rt.bypass_target("192.168.1.20:1234") == ("192.168.1.20", 1234)
+    assert rt.bypass_target({"address": "10.1.2.3", "port": 22}) == ("10.1.2.3", 22)
+    for value in ("1.1.1.1:443", "100.64.0.1:80", "127.0.0.1:8000", "[fd00::1]:80", "192.168.1.1", "192.168.1.1:0",
+                  "192.168.1.1:70000", "host.lan:80"):
+        with pytest.raises(ValueError, match="--vpn-bypass-tcp"):
+            rt.bypass_target(value)
+
+
+def test_the_kill_switch_lets_exactly_the_bypass_past_tor():
+    rules = rt.tor_rules(bypass=[{"address": "192.168.1.20", "port": 1234}])
+    output, divert = chain(rules, "output").splitlines(), chain(rules, "divert").splitlines()
+    accept = "  ip daddr 192.168.1.20 tcp dport 1234 accept"
+    assert accept in output and output.index(accept) < output.index("  reject with icmpx type admin-prohibited")
+    back = "  ip daddr 192.168.1.20 tcp dport 1234 return"
+    assert back in divert and divert.index(back) < next(i for i, line in enumerate(divert) if "redirect to" in line)
+    assert "192.168" not in rt.tor_rules()
+    with pytest.raises(ValueError):
+        rt.tor_rules(bypass=["8.8.8.8:53"])
+
+
+def test_bypass_needs_a_tor_profile_and_reaches_the_payload(home, monkeypatch):
+    a = tor_args()
+    a.vpn_bypass_tcp = ["192.168.1.20:1234", "192.168.1.20:1234"]
+    v.validate(a)
+    assert a.vpn_bypass_tcp == ["192.168.1.20:1234"]
+    assert v.payload(a.vpn_profile, "serve", (), a.vpn_bypass_tcp)["bypass"] == [
+        {"address": "192.168.1.20", "port": 1234}]
+    assert "bypass" not in v.payload(a.vpn_profile, "serve", ())
+    a = tor_args()
+    a.vpn = None
+    a.vpn_bypass_tcp = ["192.168.1.20:1234"]
+    with pytest.raises(ValueError, match="--vpn-bypass-tcp goes with --vpn"):
+        v.validate(a)
+    a = tor_args()
+    a.vpn_bypass_tcp = ["8.8.8.8:53"]
+    with pytest.raises(ValueError, match="only an address of your local network"):
+        v.validate(a)
+
+
+def test_the_data_directory_becomes_debian_tors(tmp_path, monkeypatch):
+    data = tmp_path / "tor"
+    data.mkdir(mode=0o755)
+    owned, real_chmod = [], rt.os.chmod
+
+    def chown(path, uid, gid, follow_symlinks=True):
+        owned.append((str(path), uid, gid, follow_symlinks))
+
+    def chmod(path, mode):  # as in the container: no CAP_FOWNER, so no chmod once the directory is debian-tor's
+        if owned:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        real_chmod(path, mode)
+    monkeypatch.setattr(rt.os, "chown", chown)
+    monkeypatch.setattr(rt.os, "chmod", chmod)
+    rt.own_data_directory(rt.TOR_UID, data)
+    assert owned == [(str(data), rt.TOR_UID, rt.TOR_UID, False)]
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path)
+    with pytest.raises(RuntimeError, match="no directory"):
+        rt.own_data_directory(rt.TOR_UID, link)
+
+
+def test_the_bypass_counts_as_opening_a_port_for_modes_policy_and_trust(home, monkeypatch):
+    """The review of 0.1.94: --vpn-bypass-tcp was added to --allow-tcp after the mode's and the policy's checks."""
+    a = tor_args("--mode", "high", "--vpn-bypass-tcp", "192.168.1.20:22")
+    a.mode_origin = "--mode"
+    with pytest.raises(ValueError, match="--vpn-bypass-tcp 192.168.1.20:22 widens the security mode high"):
+        s.MODES.check(s, a, {})
+    assert ("--vpn-bypass-tcp", "192.168.1.20:22") in s.MODES.weakening_options(s, ["--vpn-bypass-tcp",
+                                                                                    "192.168.1.20:22"])
+    a = tor_args("--vpn-bypass-tcp", "192.168.1.20:22")
+    a.policy = {"forbid": ["--allow-tcp"]}
+    with pytest.raises(ValueError, match="administrator's policy forbids"):
+        v.validate(a)
+    a = tor_args("--vpn-bypass-tcp", "192.168.1.20:22")
+    a.policy = {"forbid": ["--allow-tcp=192.168.1.20:22"]}
+    with pytest.raises(ValueError, match="forbids --allow-tcp=192.168.1.20:22"):
+        v.validate(a)
+    a = tor_args("--vpn-bypass-tcp", "192.168.1.20:22")
+    a.policy = {"forbid": ["--allow-tcp=10.0.0.5:22"]}
+    v.validate(a)  # another target forbidden: this one is not
+
+
+def test_the_metadata_service_is_never_past_tor():
+    for value in ("169.254.169.254:80", "169.254.170.2:80"):
+        with pytest.raises(ValueError, match="metadata"):
+            rt.bypass_target(value)
+    assert rt.bypass_target("169.254.10.10:80") == ("169.254.10.10", 80)
+
+
+def test_the_tor_researchers_search_servers_go_behind_its_tor(home, monkeypatch):
+    """The Tor researcher's search servers (duckduckgo with its allow-list, searxng with network full) reach the
+    network only through the start's Tor; a server without network needs none."""
+    v.main(["add", "anon", "--tor", "--force"])
+    mcp = load("sandbox_mcp_tor_search_test", "mcp.py")
+    image = "ghcr.io/c0decave/sandbox-ai-mcp-{}@sha256:" + "0" * 64
+    # (an allow-list entry is added with network full: mcp.definition_from_entry)
+    servers = {"duckduckgo": {"image": image.format("duckduckgo"), "network": "full"},
+               "searxng": {"image": image.format("searxng"), "network": "full"},
+               "yara": {"image": "ghcr.io/c0decave/axross-mcp-yara@sha256:" + "1" * 64, "network": "none"}}
+    monkeypatch.setattr(mcp, "definitions", lambda document=None: servers)
+    a = tor_args()
+    behind = mcp.vpn_for_servers(a, list(servers))
+    assert behind == {"duckduckgo": "anon", "searxng": "anon", "yara": None}
+
+
+def test_the_address_check_tries_again_after_an_error_behind_tor():
+    """A Tor circuit just after bootstrap can fail once (a TLS connection closed at once by an exit) and work a few
+    seconds later: the check tries again (TOR_ATTEMPTS) before "no connection"; an answer ends it at once, and an
+    address that is not a Tor exit is never tried past. Other VPNs: again only after an error that is not blocked."""
+    answers = [OSError("TLS/SSL connection has been closed (EOF)"), (200, b'{"IsTor": true, "IP": "185.220.101.1"}')]
+    slept = []
+
+    def get(url, address, timeout):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    result = rt.echo_retried(["https://check.torproject.org/api/ip"], 4, lambda host, family: ["116.202.120.181"],
+                             get, 1, tor=True, attempts=4, sleep=slept.append)
+    assert result == {"ip": "185.220.101.1", "vpn": True, "url": "https://check.torproject.org/api/ip", "attempts": 2}
+    assert slept == [rt.RETRY_DELAYS[0]]
+    failing = lambda url, address, timeout: (_ for _ in ()).throw(OSError("closed"))  # noqa: E731
+    slept.clear()
+    result = rt.echo_retried(["https://check.torproject.org/api/ip"], 4, lambda host, family: ["116.202.120.181"],
+                             failing, 1, tor=True, attempts=4, sleep=slept.append)
+    assert "error" in result and result["attempts"] == 4 and slept == list(rt.RETRY_DELAYS)
+    slept.clear()
+    blocked = lambda url, address, timeout: (_ for _ in ()).throw(OSError(1, "Operation not permitted"))  # noqa: E731
+    result = rt.echo_retried(["https://example.org/ip"], 4, lambda host, family: ["192.0.2.7"], blocked, 1,
+                             tor=False, attempts=2, sleep=slept.append)
+    assert result["kind"] == "blocked" and "attempts" not in result and slept == [], "a kill switch stays a kill switch"
+
+
+def test_outside_tor_a_timeout_is_tried_again_a_refusal_never():
+    """Outside Tor too a fresh tunnel (WireGuard before its first handshake) lets a connection time out once: a
+    timeout is tried again; what the kill switch refuses here (EPERM, EACCES, no route) never is."""
+    resolve = lambda host, family: ["192.0.2.7"]  # noqa: E731
+    answers = [socket.timeout("timed out"), (200, b'{"ip": "198.51.100.4"}')]
+
+    def get(url, address, timeout):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    slept = []
+    result = rt.echo_retried(["https://example.org/ip"], 4, resolve, get, 1, tor=False, attempts=2,
+                             sleep=slept.append)
+    assert result.get("ip") == "198.51.100.4" and result["attempts"] == 2 and slept == [rt.RETRY_DELAYS[0]]
+    for errno_ in (1, 13, 101, 113):
+        slept.clear()
+        refused = lambda url, address, timeout, e=errno_: (_ for _ in ()).throw(OSError(e, "refused"))  # noqa: E731
+        result = rt.echo_retried(["https://example.org/ip"], 4, resolve, refused, 1, tor=False, attempts=3,
+                                 sleep=slept.append)
+        assert result["kind"] == "blocked" and slept == [], errno_
+    # One service timed out, the other was refused by the kill switch: refused it is, not tried again.
+    mixed = iter([socket.timeout("timed out"), OSError(1, "Operation not permitted")])
+    slept.clear()
+    result = rt.echo_retried(["https://a.example/ip", "https://b.example/ip"], 4, resolve,
+                             lambda url, address, timeout: (_ for _ in ()).throw(next(mixed)), 1, tor=False,
+                             attempts=3, sleep=slept.append)
+    assert result["kind"] == "blocked" and slept == []
+
+
+def test_the_retries_end_before_the_launcher_stops_waiting():
+    """attempts x timeout x services + the delays may be more than the launcher waits for the VPN (ready_timeout):
+    it would say "did not come up in time" instead of the reason. No attempt starts that could not end before the
+    deadline (what is left of it, less what the other checks take), and the answer says so."""
+    now = [0.0]
+
+    def clock():
+        return now[0]
+
+    def get(url, address, timeout):
+        now[0] += timeout
+        raise socket.timeout("timed out")
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+    result = rt.echo_retried(["https://example.org/ip"], 4, lambda host, family: ["192.0.2.7"], get, 30, tor=True,
+                             attempts=4, sleep=sleep, deadline=80, clock=clock)
+    # 30 s, then 3 s and 30 s (63), then 6 s and 30 s would end at 99 > 80: two attempts only
+    assert result["attempts"] == 2 and slept == [3] and now[0] <= 80
+    assert result.get("cut_short") is True
+    evaluated = v.evaluate({"type": "wireguard", "name": "w"}, {"ipv4": True, "full4": True},
+                           {"ipv4": {**result, "kind": "failed"}}, {})
+    assert any("2 attempts" in line and "time" in line for line in evaluated["failures"]), evaluated
+
+
+def test_the_launcher_hands_the_container_how_long_it_waits(home):
+    """The payload's checks say how long the launcher waits for the VPN to be ready (ready_timeout): the container's
+    first check keeps its retries within it."""
+    profile = {"name": "w", "type": "wireguard", "wireguard": {"private_key_secret": "k"}}
+    seconds = v.check_settings(profile).get("ready_seconds")
+    assert seconds == v.ready_timeout(profile)
+    assert v.check_settings({"name": "t", "type": "tor", "tor": {}})["ready_seconds"] == \
+        v.ready_timeout({"type": "tor"})
+
+
+def test_gather_checks_passes_the_deadline_to_the_first_check_only(monkeypatch):
+    seen = []
+    monkeypatch.setattr(rt, "echo_retried", lambda *args, **kwargs: seen.append(kwargs.get("deadline")) or
+                        {"error": "x", "kind": "failed"})
+    monkeypatch.setattr(rt, "echo", lambda *args, **kwargs: {"error": "x", "kind": "failed"})
+    monkeypatch.setattr(rt, "route_device", lambda server, runner: "wg0")
+    monkeypatch.setattr(rt, "dns_lookup", lambda *args, **kwargs: ["192.0.2.1"])
+    payload = {"checks": {"urls": ["https://example.org/ip"], "timeout": 8, "ready_seconds": 120, "dns_probe": None}}
+    tunnel = {"dns": ["10.0.0.1"]}
+    rt.gather_checks(payload, tunnel, None, started=100.0)
+    rt.gather_checks(payload, tunnel, None)  # a check during the run: no launcher waits for it
+    assert seen[0] is not None and 100 < seen[0] < 220 and seen[1] is None, seen
+
+
+# --- after some time (the report of 2026-11-12) ----------------------------------------------------------------
+
+def test_an_answer_no_tor_exit_confirms_is_a_leak_during_the_run(home, tmp_path):
+    """Behind Tor the address seen is not compared with this host's own during the run (it is not asked): an echo
+    service of the profile's own that answers without "IsTor" could be this host's own address. Only a confirmed exit
+    counts - anything else stops the run (--vpn-check stop), as an exit that is no Tor exit does."""
+    said, stopped = [], []
+    a = types.SimpleNamespace(log_dir=str(tmp_path), run_id="r1", vpn_check="stop")
+    seen = tor_inside(ipv4={"ip": "198.18.0.5", "vpn": None, "url": "https://api64.ipify.org/"})
+    verdict = v.rechecked(a, tor_profile(), {"tunnel": TOR_TUNNEL}, {"checks": seen}, said.append,
+                          stop=lambda: stopped.append(1))
+    assert verdict["leaks"] == ["IPv4: api64.ipify.org did not confirm that 198.18.0.5 is a Tor exit (no "
+                                '"IsTor": true)'] and stopped == [1]
+    # The retried address check: an error (an exit that closed the connection) is tried again; nothing but an answer
+    # with "IsTor": true passes - an answer without it is never retried into a pass.
+    answers = [OSError("EOF"), (200, b'{"IP": "198.18.0.5"}')]
+
+    def get(url, address, timeout):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    result = rt.echo_retried([rt.TOR_CHECK], 4, lambda host, family: ["116.202.120.181"], get, 1, tor=True,
+                             attempts=4, sleep=lambda seconds: None)
+    assert result["vpn"] is None and result["attempts"] == 2
+    verdict = v.evaluate(tor_profile(), TOR_TUNNEL, tor_inside(ipv4=result), {})
+    assert verdict["failures"] and verdict["leaks"]
+
+
+class EndingTunnel:
+    def __init__(self):
+        self.closed = False
+
+    def follow(self, on_event, on_end=None):
+        self.on_event, self.on_end = on_event, on_end
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_tor_container_that_ends_during_the_run_is_said_and_logged_and_nothing_restarts_it(home, tmp_path,
+                                                                                            monkeypatch):
+    """Tor (or its container) gone during the run: its kill switch is a table of the pod's namespace and stays; the
+    start neither restarts it nor brings anything up in its place - it says so and writes it to vpn.jsonl. The run's
+    own end (the cleanup closing the tunnel) is no such event."""
+    v.main(["add", "anon", "--tor"])
+    commands = []
+    monkeypatch.setattr(v, "podman_run", lambda command, **kwargs: commands.append(command) or
+                        types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    launcher = types.SimpleNamespace(podman_command=lambda a: ["podman"], printable=str,
+                                     pod_commands=lambda a, pod, session, home: [["podman", "pod", "create", pod]],
+                                     signals_deferred=contextlib.nullcontext)
+    monkeypatch.setattr(v, "launcher", lambda: launcher)
+    tunnel = EndingTunnel()
+    ready = {"tunnel": TOR_TUNNEL, "checks": tor_inside(), "hosts": {}}
+    monkeypatch.setattr(v, "bring_up", lambda *args, **kwargs: (tunnel, ready, {}))
+    said = []
+    monkeypatch.setattr(sys, "stderr", types.SimpleNamespace(write=said.append, flush=lambda: None))
+    a = argparse.Namespace(vpn="anon", vpn_profile=v.load_profile("anon"), vpn_check="stop", pod_name=None,
+                           run_id="claude-r1", agent="claude", log_dir=str(tmp_path), vpn_bypass_tcp=None)
+    with contextlib.ExitStack() as cleanup:
+        assert v.agent_up(a, "session", "/home", [], cleanup) == {}
+        created = len(commands)
+        tunnel.on_end()  # the Tor container ended
+        assert len(commands) == created, "nothing is started or recreated in its place"
+        text = "".join(said)
+        assert "the VPN container ended during the run; its kill switch stays" in text and "past Tor" in text
+        record = json.loads((tmp_path / "vpn.jsonl").read_text().splitlines()[-1])
+        assert record["event"] == "ended" and record["run"] == "claude-r1"
+        tunnel.on_event({"event": "down", "message": "tor exited (1); the kill switch blocks all traffic now"})
+        record = json.loads((tmp_path / "vpn.jsonl").read_text().splitlines()[-1])
+        assert record["event"] == "down" and "tor exited" in record["failures"][0]
+        said.clear()
+    assert tunnel.closed
+    tunnel.on_end()  # after the run's own end: nothing more is said
+    assert "VPN container ended" not in "".join(said)
+
+
+def test_behind_tor_the_agent_and_a_command_server_are_told_tor_and_its_onion_network(home):
+    """agent_environment: SANDBOX_AI_TOR and the network tor maps .onion names into, only for a Tor start (a command
+    MCP server's sandbox is one such start)."""
+    a = tor_args()
+    v.validate(a)
+    a.run_id = "codex-r1"
+    env = s.agent_environment(a)
+    assert env["SANDBOX_AI_TOR"] == "1" and env["SANDBOX_AI_TOR_VIRTUAL_NETWORK"] == rt.TOR_VIRTUAL_NET
+    plain = s.parse_args(["codex", "--backend", "podman"])
+    plain.run_id = "codex-r2"
+    assert not any(key.startswith("SANDBOX_AI_TOR") for key in s.agent_environment(plain))
+
+
+
+def test_the_kill_switch_check_works_with_the_runtime_a_running_container_has_mounted():
+    """Regression: the check of a running VPN container's kill switch ran `vpn_runtime.py killswitch` inside it - but
+    a running container keeps the runtime file it mounted when it started (a bind-mounted file keeps its inode; an
+    update replaces the file), and an older one knew no such command ("internal entry point"): every check failed,
+    and every MCP server behind it was stopped and started again, over and over. Now the container's nft lists the
+    table and this version judges it; the command never runs the container's runtime."""
+    commands = []
+    listing = "table inet sandbox_ai_vpn {\n" + "".join(
+        f" chain {h} {{ type filter hook {h} priority -5; policy drop;\n }}\n" for h in ("output", "input", "forward")) + "}\n"
+
+    def podman(command, **kwargs):
+        commands.append(command)
+        if command[1:3] == ["container", "inspect"]:
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="|".join(
+                ["a" * 64, "true", "2026-11-12 10:00:00 +0000 UTC", "pasta", "anon"]) + "\n")
+        if command[1] == "exec":
+            return types.SimpleNamespace(returncode=0, stdout=listing, stderr="")
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    v.check_vpn_container(["podman"], "sandbox-ai-vpn-mcp-x", "anon", run=podman)
+    executed = [c for c in commands if c[1] == "exec"]
+    assert executed and all("vpn_runtime.py" not in " ".join(c) for c in executed)
+    assert executed[0][2:] == ["a" * 64, "nft", "list", "table", "inet", "sandbox_ai_vpn"]
+    with pytest.raises(ValueError, match="output chain does not drop"):
+        listing = listing.replace("hook output priority -5; policy drop;", "hook output priority -5;")
+        v.check_vpn_container(["podman"], "sandbox-ai-vpn-mcp-x", "anon", run=podman)

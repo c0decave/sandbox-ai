@@ -1,6 +1,7 @@
 """The newer pages of the app: approvals, statistics and credentials (images: images_page.py, files: files_page.py)."""
 from __future__ import annotations
 
+import functools
 import json
 import os
 from pathlib import Path
@@ -10,13 +11,14 @@ from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import backend, theme, widgets
+from .approvals_sections import AllowedSection, BlockedSection, ContextHeader, run_for_tab
 from .files import printable
 from .state import choose_folder
-from .i18n import tr
+from .i18n import language as i18n_language, tr
 from .widgets import (
     MONO, SORT_ROLE, AsyncCommand, ask_first, background, bars, compact_combo, confirm, fill, find_row, fit_columns,
     flow, outcome,
@@ -97,6 +99,27 @@ def describe(question):
     return printable(kind)
 
 
+def why_asked(question):
+    """Why QUESTION is asked, in plain words (what the app knows of it: the network settings, a ruleset's rule, a
+    privacy warning, the agent's wish to open a page)."""
+    if isinstance(question, backend.RemoteQuestion):
+        return ""
+    kind = question.get("kind")
+    if kind in ("connect", "dns"):
+        return tr("Asked because the sandbox's network settings do not allow it.")
+    if kind in ("http", "mcp", "tool", "device"):
+        return tr("Asked because rule {rule} of the ruleset {ruleset} asks before it. The network settings do not "
+                  "change that.", rule=shown(question.get("rule", "?"), 80), ruleset=shown(question.get("ruleset", "?"),
+                                                                                            120))
+    if kind == "push":
+        return tr("Asked because the privacy check found warnings in what is pushed.")
+    if kind == "browser":
+        return tr("The agent asks to open this page in your browser.")
+    if kind == "canary":
+        return tr("A decoy file was touched: nothing legitimate uses it. The sandbox waits for you.")
+    return ""
+
+
 def openable_url(text):
     """QUrl of TEXT if it is an http or https URL with a host (what "Open here" opens), else None."""
     url = QUrl(str(text or ""), QUrl.ParsingMode.StrictMode)
@@ -118,9 +141,24 @@ RUN_AT_MOST = ("push", "http", "mcp", "tool", "device")
 SHORTCUTS = {(Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier): "allow",
              (Qt.Key.Key_Enter, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.KeypadModifier): "allow",
              (Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "deny",
-             (Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "block"}
+             (Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "block",
+             # In the list of questions only (PLAIN_KEYS): Enter allows for this run, Delete denies.
+             (Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier): "allow-run",
+             (Qt.Key.Key_Enter, Qt.KeyboardModifier.KeypadModifier): "allow-run",
+             (Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier): "deny-key"}
+PLAIN_KEYS = ("allow-run", "deny-key")  # taken only where the focus is in a list of questions
 MODIFIERS = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier
              | Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.KeypadModifier)
+
+
+def in_question_list(widget):
+    """WIDGET is a list of questions (the page's, the Questions window's) or a part of one (its viewport)."""
+    from PySide6.QtWidgets import QAbstractItemView
+    while widget is not None:
+        if isinstance(widget, QAbstractItemView):
+            return widget.accessibleName() == tr("Open questions")
+        widget = widget.parentWidget()
+    return False
 
 
 def shortcut_of(event):
@@ -159,13 +197,21 @@ def remote_browser(entry):
 def asker(name, record):
     """Which sandbox asks: its run NAME, workspace (~ for HOME) and session, from its run.json RECORD."""
     record = record if isinstance(record, dict) else {}
-    workspace = str(record.get("workspace") or "")
+    session = record.get("session")
+    # Made once per run (every open question's row and label asks again at each poll, every second: HOME was looked up
+    # for each); what it is made of is the key - HOME and the language too, so a change of either shows at once.
+    return _asker(str(name), str(record.get("workspace") or ""), str(session) if session else "",
+                  os.environ.get("HOME"), i18n_language())
+
+
+@functools.lru_cache(maxsize=1024)
+def _asker(name, workspace, session, _home_variable, _language):
     home = str(Path.home())
     if workspace == home or workspace.startswith(home + os.sep):
         workspace = "~" + workspace[len(home):]
     details = [printable(workspace)] if workspace else []
-    if record.get("session"):
-        details.append(tr("session {name}", name=printable(record["session"])))
+    if session:
+        details.append(tr("session {name}", name=printable(session)))
     return f"{printable(name)} ({', '.join(details)})" if details else printable(name)
 
 def context_text(context):
@@ -200,6 +246,7 @@ class QuestionsWindow(QDialog):
         self.page = page
         self.setWindowTitle(tr("Questions of the running sandboxes"))
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        widgets.emergency_shortcut(self)  # (it blocks the window's Ctrl+Shift+X)
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("A sandbox asks while a dialog is open. Answer here, or close this window "
                                         "and answer on the Approvals page.")))
@@ -258,7 +305,11 @@ class QuestionsWindow(QDialog):
         set_enabled(self.block_button, rules["block"] is None, rules["block"])
 
     def shortcut(self, action):
-        button = {"allow": self.allow_button, "deny": self.deny_button, "block": self.block_button}[action]
+        # Enter in the list does what the window's Allow button says (Allow once, or Open here and allow): this window
+        # has no scope box, and Enter allowed for the whole run here while the button beside it said "once" - with
+        # the confirmation's default Allow, Enter twice allowed for the run.
+        button = {"allow": self.allow_button, "allow-run": self.allow_button, "deny": self.deny_button,
+                  "deny-key": self.deny_button, "block": self.block_button}[action]
         if button.isEnabled():
             button.click()
 
@@ -287,7 +338,7 @@ class ApprovalsPage(QWidget):
         super().__init__()
         self.sai = sai
         layout = QVBoxLayout(self)
-        open_box = QGroupBox(tr("Open questions of the running sandboxes, on every host"))
+        open_box = QGroupBox(tr("Questions waiting for your answer, on every host"))
         open_layout = QVBoxLayout(open_box)
         self.url = plain_label()
         font = QFont()
@@ -316,6 +367,13 @@ class ApprovalsPage(QWidget):
         self.open.setAccessibleName(tr("Open questions"))
         self.open.itemSelectionChanged.connect(self.selection_changed)
         open_layout.addWidget(self.open)
+        self.none_waiting = plain_label(tr("Nothing is waiting for an answer."), role="secondary")
+        open_layout.addWidget(self.none_waiting)
+        # Why the selected question is asked, in plain words.
+        self.why = plain_label(selectable=True)
+        self.why.setAccessibleName(tr("Why it is asked"))
+        self.why.hide()
+        open_layout.addWidget(self.why)
         # What the selected question means (resolved names, the run's earlier connections): in a thread.
         self.context = plain_label(role="secondary")
         self.context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -337,15 +395,17 @@ class ApprovalsPage(QWidget):
         self.scope.setAccessibleName(tr("Scope of an allow"))
         self.scope.setToolTip(tr("How long an allow lasts: once, for this run, or always for the project"))
         scope_items(self.scope)
+        self.scope.currentIndexChanged.connect(lambda _=0: self.show_allow_text())
         # Allow takes the scope of the box; Deny is for the run (as the web interface's and the command line's),
         # Deny once only this time; Block always is a deny remembered for the project, asked first.
         self.allow_button = QPushButton(tr("Allow"))
         self.allow_button.setAccessibleName(tr("Allow"))
-        self.allow_button.setToolTip(tr("Allow with the scope chosen (Ctrl+Return)"))
+        self.allow_button.setToolTip(tr("Allow for as long as chosen beside it (Ctrl+Return; Enter in the list "
+                                        "allows for this run)"))
         self.allow_button.clicked.connect(lambda: self.answer("allow"))
         self.deny_button = QPushButton(tr("Deny for this run"))
         self.deny_button.setAccessibleName(tr("Deny for this run"))
-        self.deny_button.setToolTip(tr("Refused; not asked again in this run (Ctrl+Shift+D)"))
+        self.deny_button.setToolTip(tr("Refused; not asked again in this run (Delete, Ctrl+Shift+D)"))
         self.deny_button.clicked.connect(lambda: self.answer("deny"))
         self.deny_once_button = QPushButton(tr("Deny once"))
         self.deny_once_button.setAccessibleName(tr("Deny once"))
@@ -360,7 +420,7 @@ class ApprovalsPage(QWidget):
         # The administrator's max_approval_scope caps the allows (sandbox-ai refuses wider ones anyway); read again
         # at every scan, so a policy changed meanwhile counts.
         self.max_scope = sai.max_scope()
-        scope_label = QLabel(tr("Scope"))
+        scope_label = QLabel(tr("Allow for"))
         scope_label.setBuddy(self.scope)
         # A row that wraps when the window is narrow (in German it made the window 1100 px wide).
         open_layout.addWidget(flow(scope_label, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
@@ -370,15 +430,16 @@ class ApprovalsPage(QWidget):
                  self.block_button)
         for first, second in zip(order, order[1:]):
             QWidget.setTabOrder(first, second)
-        self.message = plain_label()
+        self.message = plain_label(selectable=True)
         open_layout.addWidget(self.message)
         self.remote_note = plain_label(role="secondary")  # hosts that did not answer
         self.remote_note.hide()
         open_layout.addWidget(self.remote_note)
         self.seconds = sai.approval_seconds
-        hint = plain_label(tr("Without an answer within {seconds} seconds a question is refused; a page to open "
-                              "waits until it is answered. A deny lasts at most for the run; “always” is remembered "
-                              "for the project. Allowing a URL opens it in your browser.", seconds=self.seconds))
+        hint = plain_label(tr("Without an answer within {seconds} seconds a question is refused, and the same "
+                              "request is refused at once for 2 minutes, then asked again (Blocked lists it); a page "
+                              "to open waits until it is answered. A deny lasts at most for the run; “always” is "
+                              "remembered for the project.", seconds=self.seconds))
         hint.setEnabled(False)
         open_layout.addWidget(hint)
         history_box = QGroupBox(tr("History"))
@@ -413,7 +474,7 @@ class ApprovalsPage(QWidget):
         self.history_text.hide()
         history_layout.addWidget(self.history_text)
         self.history_token = 0
-        always_box = QGroupBox(tr("Allowed or blocked always (per project)"))
+        always_box = QGroupBox(tr("Allowed or blocked always, per project: the next starts keep to it"))
         always_layout = QVBoxLayout(always_box)
         self.always = table([tr("Project"), tr("Allowed"), tr("Kind")], stretch=0, compact=(2,))
         self.always.setAccessibleName(tr("Allowed or blocked always"))
@@ -438,13 +499,31 @@ class ApprovalsPage(QWidget):
             row.addWidget(widget)
         row.addStretch()
         always_layout.addLayout(row)
-        self.always_message = plain_label(role="secondary")
+        self.always_message = plain_label(role="secondary", selectable=True)
         always_layout.addWidget(self.always_message)
-        split = self.split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(open_box)
-        split.addWidget(history_box)
-        split.addWidget(always_box)
-        layout.addWidget(split, 1)
+        # Which sandbox the page is about (the active tab's, one chosen, all), then its sections: the questions (the
+        # window moves them into a panel of their own, above the page: its tab goes then), what was refused, what
+        # it may reach now, what is remembered for the projects and the answers given.
+        self.active_entry, self.last_runs = None, {}
+        self.header = ContextHeader(sai, sai.approval_seconds)
+        layout.addWidget(self.header)
+        self.blocked = BlockedSection(sai, self.header)
+        self.allowed = AllowedSection(sai, self.header)
+        self.sections = QTabWidget()
+        self.sections.setAccessibleName(tr("Approvals"))
+        self.history_box, self.always_box = history_box, always_box
+        self.section_titles = {}
+        for widget, title in ((open_box, tr("Questions")), (self.blocked, tr("Blocked")),
+                              (self.allowed, tr("Allowed now")), (always_box, tr("Remembered")),
+                              (history_box, tr("History"))):
+            self.section_titles[widget] = title
+            self.sections.addTab(widget, title)
+        self.section_counts = {}
+        self.blocked.counted.connect(lambda count: self.count_section(self.blocked, count))
+        self.allowed.counted.connect(lambda count: self.count_section(self.allowed, count))
+        self.header.changed.connect(self.context_changed)
+        self.sections.currentChanged.connect(lambda _=0: self.section_shown())
+        layout.addWidget(self.sections, 1)
         self.entries, self.questions, self.labels, self.seen, self.history_key = [], {}, {}, set(), None
         self.entry_keys, self.local_pending = [], []
         # The other hosts: {host: [RemoteQuestion]} as last read, why a host did not answer, the reads running
@@ -519,6 +598,7 @@ class ApprovalsPage(QWidget):
         runs here (the registry, files and /proc only), no question folder and no policy is read: there can be no
         question (the widest scope stays as last read; it is read again with the first question)."""
         runs = self.sai.live_runs()
+        self.last_runs = runs  # (read by update_context on the GUI thread: one assignment)
         if not runs:
             return self.sai.approvals_snapshot(runs={}, wait=wait), getattr(self, "max_scope", "once")
         snapshot = self.sai.approvals_snapshot(runs=runs, wait=wait)
@@ -552,6 +632,7 @@ class ApprovalsPage(QWidget):
             self.local_read = None
             self.message.setText(tr("Cannot read the questions: {error}", error=printable(error)))
             return
+        self.update_context()
         pending, answered = result
         read, previous = (pending, answered, self.max_scope), self.local_read
         self.local_read = read
@@ -833,6 +914,50 @@ class ApprovalsPage(QWidget):
         self.project = os.path.realpath(path) if path else None
         self.poll()
 
+    # -- which sandbox the page is about --
+
+    def set_active_tab(self, entry):
+        """The window's active tab (a project's, a session's or a run's entry): Blocked and Allowed now follow it."""
+        self.active_entry = dict(entry) if isinstance(entry, dict) else None
+        self.update_context()
+
+    def update_context(self):
+        runs = dict(getattr(self, "last_runs", {}) or {})
+        if self.header.set_runs(runs, run_for_tab(self.active_entry, runs)):
+            self.context_changed()
+        else:
+            self.header.show_state()
+
+    def context_changed(self):
+        self.header.show_state()
+        # Hidden in the window (another page shown, the window in the tray): read when the page is shown, not at
+        # every switch of the tabs - each was a Blocked read (the newest 4 MiB of every log) and a `sandbox-ai net
+        # show` (a Python start) for a page nobody looked at.
+        if not self.shown_now():
+            self.context_stale = True
+            return
+        self.context_stale = False
+        self.blocked.refresh(force=True)
+        self.allowed.refresh()
+
+    def shown_now(self):
+        """False while the page sits hidden in its window; a page on its own (no window: the tests) always True."""
+        return self.window() is self or self.isVisible()
+
+    def section_shown(self):
+        current = self.sections.currentWidget()
+        if current is self.blocked:
+            self.blocked.refresh()
+        elif current is self.allowed:
+            self.allowed.refresh()
+
+    def count_section(self, widget, count):
+        """A section's tab says how many entries it has."""
+        index = self.sections.indexOf(widget)
+        if index >= 0:
+            title = self.section_titles.get(widget, "")
+            self.sections.setTabText(index, f"{title} ({count})" if count else title)
+
     def of_project(self, record):
         workspace = record.get("workspace") if isinstance(record, dict) else None
         return bool(self.project and workspace and os.path.realpath(str(workspace)) == self.project)
@@ -842,12 +967,15 @@ class ApprovalsPage(QWidget):
         keys = [(host, run, q.get("id")) for host, run, _, q in pending]
         self.project_pending = sum(1 for host, _, record, _ in pending if host == LOCAL and self.of_project(record))
         elsewhere = sum(1 for host, *_ in pending if host != LOCAL)
-        title = tr("Open questions of the running sandboxes, on every host")
+        title = tr("Questions waiting for your answer, on every host")
         if elsewhere:
             title += "  " + tr("({count} on other hosts)", count=elsewhere)
         if self.project_pending:
             title += "  " + tr("({count} of the current project)", count=self.project_pending)
         self.open_box.setTitle(title)
+        if hasattr(self, "none_waiting"):
+            self.none_waiting.setVisible(not pending)
+            self.count_section(self.open_box, len(pending))
         # The questions themselves are taken every time (a host's newer read counts down from its own time left).
         self.questions = {key: (run, q, host) for key, (host, run, _, q) in zip(keys, pending)}
         self.labels = {key: self.label_of(host, run, record, q) for key, (host, run, record, q) in zip(keys, pending)}
@@ -1009,7 +1137,7 @@ class ApprovalsPage(QWidget):
         rules = self.answer_rules(entry)
         widest = self.widest(entry)
         # Another host's page is opened here, where the human is: that host may have no screen at all.
-        self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else tr("Allow"))
+        self.show_allow_text(entry)
         self.allow_button.setAccessibleName(self.allow_button.text())
         set_enabled(self.allow_button, rules["allow"] is None, rules["allow"])
         set_enabled(self.deny_button, rules["deny"] is None, rules["deny"])
@@ -1024,6 +1152,14 @@ class ApprovalsPage(QWidget):
             self.scope.setCurrentIndex(self.scope.findData("once"))
         if self.questions_window is not None:
             self.questions_window.update_buttons()
+
+    def show_allow_text(self, entry=None):
+        """Allow says how long it allows: as the box beside it says (another host's page: Open here and allow)."""
+        entry = self.current() if entry is None else entry
+        self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else
+                                  {"once": tr("Allow once"), "run": tr("Allow for this run"),
+                                   "always": tr("Allow always…")}.get(self.scope.currentData(), tr("Allow")))
+        self.allow_button.setAccessibleName(self.allow_button.text())
 
     def watch_keys(self, root):
         """The keys of the answers are taken from ROOT (the open questions, the Questions window) and every widget in
@@ -1053,6 +1189,8 @@ class ApprovalsPage(QWidget):
         if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and self.keys_on \
                 and isinstance(watched, QWidget):
             action = shortcut_of(event)
+            if action in PLAIN_KEYS and not in_question_list(watched):
+                action = None  # Enter and Delete answer only in a list of questions (a box takes them otherwise)
             target = self.key_target(watched) if action else None
             if target is not None:
                 event.accept()
@@ -1079,12 +1217,21 @@ class ApprovalsPage(QWidget):
             return
 
     def shortcut(self, action):
-        button = {"allow": self.allow_button, "deny": self.deny_button, "block": self.block_button}[action]
+        if action == "allow-run":
+            entry = self.current()
+            if entry is not None and self.allow_button.isEnabled():
+                self.answer("allow", "run" if self.widest(entry) in ("run", "always") else "once")
+            return
+        button = {"allow": self.allow_button, "deny": self.deny_button, "deny-key": self.deny_button,
+                  "block": self.block_button}[action]
         if button.isEnabled():
             button.click()
 
     def selection_changed(self):
         entry = self.current()
+        why = why_asked(entry[1]) if entry else ""
+        self.why.setText(why)
+        self.why.setVisible(bool(why))
         url = backend.question_url(entry[1]) if entry else None
         destination = entry[1].get("url_host") if entry and entry[2] != LOCAL and entry[1].get("kind") == "browser" \
             else None
@@ -1165,6 +1312,8 @@ class ApprovalsPage(QWidget):
         self.update_key_filter()
         if not self.always_loaded:
             self.load_always()
+        if getattr(self, "context_stale", False):  # the sandbox shown changed while the page was hidden
+            self.context_changed()
 
     def hideEvent(self, event):  # noqa: N802
         super().hideEvent(event)
@@ -1430,13 +1579,21 @@ class StatisticsPage(QWidget):
         browse.clicked.connect(self.browse)
         refresh = QPushButton(tr("Refresh"))
         refresh.clicked.connect(lambda: self.refresh_directories())
+        # A report of every run of the log folder shown: statistics, network and the security report (sandbox-ai
+        # report --log-dir DIR), as PDF, HTML or Markdown.
+        self.report_button = QPushButton(tr("Report…"))
+        self.report_button.setAccessibleName(tr("Report"))
+        self.report_button.setToolTip(tr("One report of every run of this log folder: statistics, every destination "
+                                         "and why it was allowed or refused, and a security report of what was not "
+                                         "allowed - as PDF, HTML or Markdown (sandbox-ai report --log-dir)"))
+        self.report_button.clicked.connect(lambda _=False: self.report())
         from PySide6.QtWidgets import QCheckBox
         self.project_folder = QCheckBox(tr("a project folder (its default log folder)"))
         self.project_folder.setToolTip(tr("sandbox-ai logs --project PATH: the log folder the wizard gives that "
                                           "project"))
         self.project_folder.setVisible(False)
         self.project_folder.toggled.connect(lambda _=False: self.load())
-        for widget in (QLabel(tr("Logs")), self.directory, browse, refresh, self.project_folder):
+        for widget in (QLabel(tr("Logs")), self.directory, browse, refresh, self.report_button, self.project_folder):
             top.addWidget(widget)
         top.addStretch()
         layout.addLayout(top)
@@ -1498,6 +1655,7 @@ class StatisticsPage(QWidget):
             self.summary.setText(tr("Type a folder on {host} and press Enter.", host=self.hosts.label()))
             for widget in self.tables.values():
                 fill(widget, [])
+            self.update_report_button()
         else:
             self.refresh_directories()
 
@@ -1539,7 +1697,32 @@ class StatisticsPage(QWidget):
             return
         self.refresh_directories(select=str(folder))
 
+    def report_folder(self):
+        """(log folder, why none): the folder of this machine whose runs Report… covers."""
+        if self.host() != LOCAL:
+            return None, tr("Only for this machine's logs: on {host}, sandbox-ai report there writes it.",
+                            host=self.hosts.label())
+        directory = self.directory.currentData()
+        if not directory or not os.path.isdir(directory):
+            return None, tr("No logs yet: they appear once a sandbox has run with its connection proxy.")
+        return directory, None
+
+    def update_report_button(self):
+        directory, why = self.report_folder()
+        set_enabled(self.report_button, directory is not None, why)
+
+    def report(self):
+        directory, why = self.report_folder()
+        if directory is None:
+            warn(self, tr("Report"), why, modal=False)
+            return None
+        from .reports import make_report
+        return make_report(self, self.sai, Path(directory).name,
+                           tr("A report of every run that logged into {path}.", path=printable(directory)),
+                           log_dir=directory, parts=False, owner=self, source=[self.report_button])
+
     def load(self):
+        self.update_report_button()
         if self.host() != LOCAL:
             self.load_remote()
             return

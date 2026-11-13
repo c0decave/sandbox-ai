@@ -4,6 +4,12 @@
   "id": "radio-sandbox-ai",
   "title": "Radio sandbox-ai",
   "description": "A short radio show about what the agent did today, spoken by a local voice, recorded inside the sandbox; only the provider.",
+  "translations": {
+    "de": {
+      "title": "Radio sandbox-ai",
+      "description": "Eine kurze Radiosendung darüber, was der Agent heute getan hat, gesprochen von einer lokalen Stimme, aufgenommen in der Sandbox; nur der Anbieter."
+    }
+  },
   "category": "fun",
   "agents": [
     "claude",

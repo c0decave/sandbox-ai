@@ -172,6 +172,26 @@ with QtWebEngine segfault the same way in the app itself. Since 0.1.92 the test 
 repeats test_board_dnd.py 15 times under gdb (a crash prints every thread's native stack). Open: if it still
 crashes there, the backtrace in that step is the next lead.
 
+## Your own images: services and bases of variants (2026-11-12, 0.1.94)
+
+Done: `images pull|build-image|list|remove` (pinned by digest/ID, unchecked), `--service` in the sandbox's pod behind
+its firewall and proxy (started after them, before the agent), variants on a base image of yours (`images new
+--base`). Open:
+
+- The live test (`tests/test_services_live.py`, CI job "services") has not run yet: the in-pod start of a service,
+  `--image-volume=tmpfs` and the `:U` volumes, and a variant on python:3.12-slim-bookworm are verified only there.
+  Not yet on macOS (podman machine): the session files bound into a service, volumes in the VM.
+- The web interface shows neither services nor your images (no form for them; a start it makes from a project
+  file with `--service` in its options runs them as the launcher does).
+- No service runs behind Tor (refused): an unreviewed image under Podman's seccomp filter beside a Tor run. If wanted,
+  allow it with the uid checks it already has (tor's uid can never be a service's) and a warning.
+- A service shares the pod's network namespace with the agent: abstract Unix sockets (Xvfb's with `--gui`) and the
+  pod's System V IPC are shared too. `Xvfb -nolisten local` for runs with services would close the display's.
+- A variant's base must be Debian 12 (bookworm): the agent's Containerfiles name bookworm's packages (t64 renames of
+  trixie and Ubuntu 24.04). A base on another release would need its own package list.
+- Image volumes: `--image-volume=tmpfs` (gone with the run); a service with an image VOLUME it needs kept uses
+  `data=PATH,keep=yes`.
+
 ## Every start: names, detach, keep, rebirth (2026-11-04)
 
 Done: `sandbox-ai list|ps` (one registry: runs, sessions, kept starts, MCP

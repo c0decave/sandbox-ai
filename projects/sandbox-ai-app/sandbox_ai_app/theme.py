@@ -782,6 +782,7 @@ QLabel[role="secondary"] {{ color: {c['secondary']}; }}
 QLabel[role="notice-warn"] {{ color: {s['warn']}; }}
 QLabel[role="notice-error"] {{ color: {s['bad']}; font-weight: 600; }}
 QLabel[role="notice-ok"] {{ color: {s['ok']}; }}
+QLineEdit[invalid="true"] {{ border: 1px solid {s['bad']}; }}
 QLabel[role="kpi-value"] {{ font-size: 18pt; font-weight: 700; color: {c['accent'] if t['dark'] else c['title']}; }}
 QLabel#brand {{ font-size: 13pt; font-weight: 700; color: {c['nav_text']}; padding: 10px 12px 6px 12px;
                background: transparent; }}
@@ -1041,6 +1042,11 @@ GLYPHS = {
     "kits": [("rect", (3, 8, 18, 12)), ("poly", [(9, 8), (9, 5), (15, 5), (15, 8)], False), ("line", (3, 13, 21, 13)),
              ("line", (12, 11, 12, 15))],
     "project": [("poly", [(3, 6), (9, 6), (11, 8), (21, 8), (21, 19), (3, 19)], True), ("line", (3, 11, 21, 11))],
+    # The video about a page (beside its (?)), and the app's browser (the header, the Credentials page).
+    "video": [("rect", (3, 5, 18, 14)), ("poly", [(10, 9), (15, 12), (10, 15)], True)],
+    "browser": [("circle", (12, 12, 9)), ("line", (3, 12, 21, 12)),
+                ("poly", [(12, 3), (8.5, 7.5), (8, 12), (8.5, 16.5), (12, 21)], False),
+                ("poly", [(12, 3), (15.5, 7.5), (16, 12), (15.5, 16.5), (12, 21)], False)],
     # The window's own controls (the header bar), for desktops whose window manager shows none.
     "minimize": [("line", (5, 17, 19, 17))],
     "maximize": [("rect", (5, 5, 14, 14)), ("line", (5, 8, 19, 8))],
@@ -1051,6 +1057,13 @@ GLYPHS = {
     "quit": [("line", (6, 6, 18, 18)), ("line", (18, 6, 6, 18))],
     "fold-open": [("poly", [(6, 9), (12, 15), (18, 9)], False)],
     "fold-closed": [("poly", [(9, 6), (15, 12), (9, 18)], False)],
+    # The Files page's panes: HOME, the folder above, list again.
+    "home": [("poly", [(3.5, 11.5), (12, 4), (20.5, 11.5)], False), ("poly", [(6, 10), (6, 20), (18, 20), (18, 10)],
+                                                                      False), ("rect", (10, 14, 4, 6))],
+    "up": [("line", (12, 20, 12, 5)), ("poly", [(6, 11), (12, 5), (18, 11)], False)],
+    "refresh": [("poly", [(17.4, 16.5), (18.9, 13.1), (18.5, 9.4), (16.2, 6.4), (12.7, 5.0), (9.0, 5.7), (6.2, 8.1),
+                          (5.0, 11.6), (5.8, 15.3), (8.4, 18.0), (12.0, 19.0)], False),
+                ("poly", [(9.5, 16.5), (12, 19), (9.5, 21.5)], False)],
     "system": [("circle", (12, 12, 3.5)), ("circle", (12, 12, 8))],
     "hosts": [("rect", (3, 4, 7, 16)), ("rect", (14, 4, 7, 16)), ("dot", (6.5, 8)), ("dot", (17.5, 8)),
               ("line", (10, 14, 14, 14))],

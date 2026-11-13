@@ -1,0 +1,5 @@
+This kit of sandbox-ai contains files of https://github.com/anthropics/knowledge-work-plugins
+at commit 2574e29377c7173d0cecffef29a6ecbd7f8ccb5d (2026-10-27T17:13:08-07:00), unchanged.
+Licence: Apache-2.0, the upstream licence text in LICENSE.
+sandbox-ai chose which files to include (kit.json: "files", "left_out") and added README.md, NOTICE,
+kit.json and the agent folders' markers. Security review: docs/skills-review.md.

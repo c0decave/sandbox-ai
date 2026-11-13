@@ -484,6 +484,10 @@ def build_release(dist, version, trusted=(), signer=None, namespace=NAMESPACE):
             elif relative == "sandbox/release-signers":
                 data = signers.encode()
             member.name = member.name.replace(f"sandbox-ai-{VERSION}", f"sandbox-ai-{version}", 1)
+            # A path over 100 characters (the vendored skills have some) lives in the PAX header, which tarfile
+            # writes back as it was: renamed there too, or the bundle gets two top directories.
+            if "path" in member.pax_headers:
+                member.pax_headers["path"] = member.name
             if data is not None:
                 member.size = len(data)
             target.addfile(member, io.BytesIO(data) if data is not None else None)

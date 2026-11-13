@@ -1,0 +1,35 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "go",
+  "title": "Go",
+  "description": "Go projects: the module proxy and checksum database, Go's downloads and GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Go",
+      "description": "Go-Projekte: der Modul-Proxy und die Prüfsummen-Datenbank, Gos Downloads und GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-github",
+    "--allow-host",
+    "proxy.golang.org",
+    "--allow-host",
+    "sum.golang.org",
+    "--allow-host",
+    "go.dev",
+    "--allow-host",
+    "dl.google.com"
+  ],
+  "notes": [
+    "The toolchain: a release from go.dev/dl unpacked into the sandbox's HOME (kept with the start), or Debian's older golang in an image variant: sandbox-ai images new go --from claude, sandbox-ai images extend go --add-apt golang, sandbox-ai build --variant go, then --image-variant go. A newer toolchain a go.mod asks for comes from the module proxy.",
+    "Modules outside the proxy (private ones, GOPROXY=direct) need their host: --allow-host NAME on the command line.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

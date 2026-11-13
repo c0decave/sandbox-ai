@@ -234,7 +234,11 @@ def test_the_other_pages_are_made_in_idle_time_and_never_under_the_hand(qapp, en
             qapp.processEvents()
             time.sleep(0.01)
         assert w.idle_build is not None
-        # Someone works with the window: nothing is made meanwhile.
+        # Someone works with the window: nothing is made meanwhile. (Marked first: a step of the build already due
+        # when the hand comes may still finish - on a slow CI runner one did - only none after it.)
+        if getattr(w, "input_watch", None) is not None:
+            w.input_watch.last = time.monotonic()
+        qapp.processEvents()
         before = [key for key, _ in ui.PAGES if w.built(key) is not None]
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
@@ -722,3 +726,325 @@ def test_a_secret_is_told_by_its_look_as_before_and_without_an_import_per_value(
             presets.looks_secret(value)
     took = time.perf_counter() - begin
     assert took < 0.5, f"4,000 looks took {took * 1000:.0f} ms (here: about 1.5 ms; before: about 10)"
+
+
+def test_the_owners_of_a_hosts_starts_are_worked_out_in_one_pass(monkeypatch):
+    """Performance round 1 (0.1.94): start_tree.owners asked every start what it reaches once per MCP server (a host
+    with 150 starts and 300 servers: 900,000 calls, 60 ms of the Sandboxes page's every look - on the GUI thread);
+    once per start now, the same owners."""
+    from sandbox_ai_app import start_tree
+    from sandbox_ai_app.backend import Instance
+
+    def session(k):
+        return Instance("session", f"session:s{k}", f"s{k}", run=f"claude-s{k}", session=f"s{k}", agent="claude",
+                        started="2026-11-10T10:00:00Z", state="running",
+                        record={"run": f"claude-s{k}", "mcp_servers": [f"a{k}"], "mcp": [f"b{k}", "shared"]})
+
+    def server(name, **record):
+        return Instance("mcp", f"mcp:{name}", name, run=f"mcp-{name}", mcp=name, agent="mcp",
+                        started="2026-11-10T10:00:00Z", state="running", record=record)
+    found = [i for k in range(150) for i in (session(k), server(f"a{k}", owner_recorded=True),
+                                              server(f"b{k}", owner_recorded=True))]
+    found += [server("shared", owner_recorded=True), server("old")]  # used by all (at their next start); a guess
+    asked = []
+    reached = start_tree.reached
+    monkeypatch.setattr(start_tree, "reached", lambda i: asked.append(i.key) or reached(i))
+    owned = start_tree.owners(found)
+    assert len(asked) == 150, f"what a start reaches was worked out {len(asked)} times"
+    assert owned["mcp:a7"] == ("session:s7", "uses") and owned["mcp:b7"] == ("session:s7", "uses")
+    assert owned["mcp:shared"] == ("session:s0", "uses"), "the first start (in their order) of those that use it"
+    assert owned["mcp:old"] == ("session:s0", "time")
+    assert start_tree.orphans(found, owned) == []
+
+
+def test_a_blocked_list_read_again_unchanged_is_not_filled_again(qapp, monkeypatch):
+    """Performance round 1 (0.1.94): the Blocked list is read every 5 s while it is shown, and was filled again each
+    time (300 rows: about 20 ms of the window's time, the list rebuilt under the mouse). Unchanged: the rows stay,
+    the entries (their actions) are the new ones; changed: filled again."""
+    from sandbox_ai_app import approvals_sections as sections
+
+    class Header:
+        runs = {"claude-a": {"run": "claude-a"}}
+
+        def run(self):
+            return "claude-a"
+    entries = [{"time": f"2026-11-11T10:00:{k:02d}Z", "run": "claude-a", "kind": "network", "what": f"h{k}.org:443",
+                "count": 1, "actions": ["allow-run"]} for k in range(30)]
+    section = sections.BlockedSection(backend.SandboxAI(), Header())
+    section.timer.stop()
+    fills = []
+    original = sections.fill
+    monkeypatch.setattr(sections, "fill", lambda *a, **k: fills.append(1) or original(*a, **k))
+    section.apply(section.generation, [dict(e) for e in entries], None)
+    section.table.selectRow(2)
+    items = [section.table.item(r, 3) for r in range(section.table.rowCount())]
+    again = [{**e, "actions": []} for e in entries]  # the same rows; what may be done changed
+    section.apply(section.generation, again, None)
+    assert len(fills) == 1 and [section.table.item(r, 3) for r in range(section.table.rowCount())] == items
+    assert section.selected()[0]["actions"] == [] and not section.allow_run.isEnabled(), "the new entries count"
+    section.apply(section.generation, [{**entries[0], "count": 5}, *entries[1:]], None)
+    assert len(fills) == 2 and section.table.item(0, 5).text() == "5"
+    section.deleteLater()
+
+
+def test_a_burst_of_log_entries_reaches_the_panel_at_once(qapp, monkeypatch):
+    """Performance round 1 (0.1.94): every log entry went into the panel on its own - a burst of 2,000 (a page that
+    reports a lot, Debug) held the window 0.3 s per panel. The entries logged before the event loop hands them on go
+    together: one insertion per run of a level, one scroll; the text is the same as one by one."""
+    from sandbox_ai_app import applog, logview
+    monkeypatch.setattr(applog, "_listeners", [])
+    monkeypatch.setattr(logview, "_hub", None)
+    panel = logview.LogPanel("DEBUG")
+    batches = []
+    logview.hub().added.connect(lambda entries: batches.append(sum(entry.get("where") == "burst" for entry in entries)))
+    levels = ["INFO", "INFO", "WARNING", "DEBUG", "ERROR"]
+    for k in range(500):
+        logview.hub().receive({"time": "2026-11-11T12:00:00", "level": levels[k % 5], "where": "burst",
+                               "message": f"entry {k}" + ("\nsecond line" if k % 7 == 0 else "")})
+    qapp.processEvents()
+    assert [count for count in batches if count] == [500], batches  # (others may log meanwhile: their threads)
+    text = panel.text.toPlainText()
+    panel.text.clear()
+    for entry in logview.hub().snapshot():
+        panel.append(entry, panel.formats())
+    assert panel.text.toPlainText() == text and text.count("entry ") == 500
+    panel.deleteLater()
+
+
+def test_the_approvals_page_reads_nothing_for_tabs_while_it_is_hidden(qapp, env, monkeypatch):
+    """Performance round 1 (0.1.94): every switch of the window's tabs between projects with a sandbox running started
+    a Blocked read (the newest 4 MiB of every log) and `sandbox-ai net show` (a Python start), also while the
+    Approvals page was not shown. Hidden, it waits: shown, it reads the active tab's sandbox at once."""
+    from sandbox_ai_app import pages
+    one, two = project(env, "one"), project(env, "two")
+    fake_run(env, "claude-one", one)
+    fake_run(env, "claude-two", two)
+    page = pages.ApprovalsPage(backend.SandboxAI(), interval=0, remote_interval=0)
+    page.blocked.timer.stop()
+    deadline = time.monotonic() + 20  # (the page on its own read at once: done first)
+    while (page.blocked.reading is not None or page.allowed.reading is not None) and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    calls, reads = [], []
+    monkeypatch.setattr(page.sai, "call", lambda *argv, **kw: calls.append(argv[:2]) or (0, "{}", ""))
+    approvals = page.sai.module("approvals")
+    monkeypatch.setattr(approvals, "blocked", lambda record, runs: reads.append(record["run"]) or [])
+    stack = QtWidgets.QStackedWidget()
+    other = QtWidgets.QLabel("another page")
+    stack.addWidget(other)
+    stack.addWidget(page)
+    stack.setCurrentWidget(other)
+    stack.show()
+    qapp.processEvents()
+    try:
+        for path in (one, two, one, two):
+            page.set_active_tab({"kind": "project", "path": str(path)})
+            qapp.processEvents()
+        assert calls == [] and reads == [] and page.header.run() == "claude-two"
+        stack.setCurrentWidget(page)
+        deadline = time.monotonic() + 10
+        while (not reads or page.blocked.reading is not None) and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert reads == ["claude-two"] and calls == [("net", "show")]
+        page.set_active_tab({"kind": "project", "path": str(one)})  # shown: at once
+        deadline = time.monotonic() + 10
+        while len(reads) < 2 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert reads[-1] == "claude-one" and len(calls) == 2
+    finally:
+        page.timer.stop()
+        stack.close()
+        stack.deleteLater()
+
+
+def test_the_questions_rows_look_up_home_once_per_run(monkeypatch):
+    """Performance round 2 (0.1.94): every open question's row and label said which sandbox asks at every scan (every
+    second), and each time looked up HOME (100 open questions: a third of the page's time per scan). Made once per run
+    now; another HOME or language shows at once."""
+    from pathlib import Path
+    from sandbox_ai_app import i18n, pages
+    pages._asker.cache_clear()
+    looked = []
+    home = Path.home
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: looked.append(1) or home()))
+    monkeypatch.setenv("HOME", "/home/someone")
+    record = {"workspace": "/home/someone/project", "session": "work"}
+    labels = {pages.asker("claude-a", dict(record)) for _ in range(50)}
+    assert labels == {"claude-a (~/project, session work)"} and len(looked) == 1
+    assert pages.asker("claude-a", {**record, "session": None}) == "claude-a (~/project)"
+    assert pages.asker("claude-a", None) == "claude-a" and pages.asker("claude-a\x1b", {}) == "claude-a\\x1b"
+    monkeypatch.setenv("HOME", "/home/other")
+    assert pages.asker("claude-a", record) == "claude-a (/home/someone/project, session work)"
+    monkeypatch.setattr(i18n, "_language", "de")
+    german = i18n.tr("session {name}", name="work")
+    assert german != "session work" and pages.asker("claude-a", record) == f"claude-a (/home/someone/project, {german})"
+
+
+def test_a_board_step_draws_again_only_what_changed(qapp, tmp_path, monkeypatch):
+    """Performance round 2 (0.1.94): every step of the board (a property, a move, Undo) filled the findings list anew,
+    set the flags of every part of the palette again (each laid the whole list out and drew it again) and set the
+    command line again; and a writable folder was judged twice (read and write: each resolves the path on disk).
+    Now what is unchanged stays (the same list items), every folder is judged once per look, and what changed shows."""
+    from pathlib import Path
+    from sandbox_ai_app import board as B
+    from sandbox_ai_app.board_view import BoardPage
+    for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "runtime"),
+                      ("XDG_DATA_HOME", "data")):
+        monkeypatch.setenv(name, str(tmp_path / sub))
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page = BoardPage(backend.SandboxAI(), lambda *a, **k: None, lambda: {"board_grid": 20})
+    try:
+        for k in range(3):
+            (tmp_path / f"ws{k}").mkdir()
+            page.add_node("workspace", path=str(tmp_path / f"ws{k}"))
+        page.add_node("limits")
+        judged = []
+        sensitive = B.sensitive
+        monkeypatch.setattr(B, "sensitive", lambda path, launcher=None: judged.append(str(path)) or
+                            sensitive(path, launcher))
+        changes = []
+        page.palette.model().dataChanged.connect(lambda *_: changes.append(1))
+        items = [page.findings.item(r) for r in range(page.findings.count())]
+        texts = [item.text() for item in items]
+        preview = page.preview.toPlainText()
+        limits = page.board.first("limits")
+        page.set_prop(limits.id, "--memory", "4g")
+        assert sorted(judged) == sorted(str(tmp_path / f"ws{k}") for k in range(3)), judged
+        assert changes == [], "the palette's parts are set again only when one is taken or free again"
+        assert [page.findings.item(r) for r in range(page.findings.count())] == items
+        assert "--memory 4g" in page.preview.toPlainText() and page.preview.toPlainText() != preview
+        page.undo.undo()
+        assert page.preview.toPlainText() == preview
+        assert [page.findings.item(r).text() for r in range(page.findings.count())] == texts
+        page.add_node("devices")  # a part a board has once: greyed out in the palette
+        assert changes, "the palette shows the part taken"
+        devices = next(page.palette.item(r) for r in range(page.palette.count())
+                       if page.palette.item(r).data(QtCore.Qt.ItemDataRole.UserRole) == "devices")
+        assert not devices.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled
+        page.undo.undo()
+        assert devices.flags() & QtCore.Qt.ItemFlag.ItemIsEnabled
+        workspace = page.board.first("workspace")
+        page.set_prop(workspace.id, "path", str(Path.home()))  # a finding more: the list is filled again
+        assert any("HOME" in page.findings.item(r).text() for r in range(page.findings.count()))
+    finally:
+        page.deleteLater()
+
+
+def test_the_hex_view_finds_the_changed_bytes_as_a_look_at_each_would():
+    """Performance round 2 (0.1.94): switching the editor to hex compared every byte in Python (4 MiB: 150 ms); a
+    block at a time now, each byte only in the blocks that differ - the same offsets."""
+    import random
+    from sandbox_ai_app import file_editor
+    rng = random.Random(5)
+    original = bytes(rng.randrange(256) for _ in range(20000))
+    for _ in range(30):
+        data = bytearray(original)
+        for _ in range(rng.randrange(0, 40)):
+            data[rng.randrange(len(data))] = rng.randrange(256)
+        data = bytes(data[:rng.randrange(len(data) - 100, len(data) + 1)]) + b"x" * rng.randrange(3)
+        expected = {at for at in range(min(len(data), len(original))) if data[at] != original[at]}
+        assert file_editor.changed_bytes(data, original, block=rng.choice((1, 7, 4096))) == expected
+    assert file_editor.changed_bytes(b"", original) == set()
+    assert file_editor.changed_bytes(original, b"abc") == {at for at in range(3) if original[at] != b"abc"[at]}
+
+
+def test_the_start_form_set_at_once_says_one_change(qapp):
+    """Performance round 2 (0.1.94): the Start page's form set as a project's (every switch of the window's tabs) said
+    a change per field - the preview, the warnings and the state kept were worked out again for each, every time
+    looking at all fields (25 times a switch: 47 -> 31 ms a switch). One change is said now, with every field set."""
+    from sandbox_ai_app import ui
+    sai = backend.SandboxAI()
+    form = ui.OptionsForm(sai.options())
+    seen = []
+    try:
+        form.changed.connect(lambda: seen.append((form.values().get("--mount"), form.values().get("--no-proxy"))))
+        values = {**form.values(), "--mount": ["/srv/data"], "--no-proxy": True, "--memory": "2g"}
+        form.set_values(values)
+        assert seen == [(["/srv/data"], True)], "one change said, with every field set already"
+        assert form.labels["--no-proxy"].title.property("role") == "notice-warn"
+        assert form.values()["--memory"] == "2g"
+        form.set_values({**values, "--no-proxy": False})
+        assert len(seen) == 2 and form.labels["--no-proxy"].title.property("role") is None
+        form.widgets["--memory"].setText("3g")  # a field changed by hand: said as before
+        assert len(seen) == 3 and not form.signalsBlocked()
+    finally:
+        form.deleteLater()
+
+
+def test_a_minimised_window_reads_nothing_only_shown(qapp, monkeypatch):
+    """Performance round 2 (0.1.94): a minimised window's pages count as shown (isVisible), so what a page only shows
+    was read again every few seconds for nobody - the Blocked list (the newest 4 MiB of every log, every 5 s), the
+    Terminals page's starts (`sandbox-ai list`, a Python start every 3 s), the Connections log, a host's timeline (SSH),
+    the LLM servers' status. Minimised, their timers read nothing; back on screen, the next tick reads."""
+    from sandbox_ai_app import approvals_sections as sections
+
+    class Header:
+        runs = {"claude-a": {"run": "claude-a"}}
+
+        def run(self):
+            return "claude-a"
+
+        def records(self):
+            return [("claude-a", {"run": "claude-a"})]
+    window = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(window)
+    section = sections.BlockedSection(backend.SandboxAI(), Header())
+    section.timer.stop()
+    layout.addWidget(section)
+    reads = []
+    monkeypatch.setattr(section, "refresh", lambda force=False: reads.append(1))
+    try:
+        window.show()
+        qapp.processEvents()
+        assert widgets.on_screen(section)
+        section.timer.timeout.emit()
+        assert reads == [1]
+        window.showMinimized()
+        qapp.processEvents()
+        assert section.isVisible() and not widgets.on_screen(section), "minimised: shown, not on the screen"
+        section.timer.timeout.emit()
+        assert reads == [1]
+        window.showNormal()
+        qapp.processEvents()
+        section.timer.timeout.emit()
+        assert reads == [1, 1]
+        window.hide()  # (in the tray)
+        assert not widgets.on_screen(section)
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_a_boards_picture_is_drawn_once_for_each_look(qapp, monkeypatch):
+    """Performance round 2 (0.1.94): every opening of the preset gallery drew every preset's picture anew (48 scenes:
+    95 -> 66 ms an opening). Drawn once for each board and look: another theme, language or board is drawn anew."""
+    from sandbox_ai_app import board as B, i18n, preset_gallery, theme
+    monkeypatch.setattr(preset_gallery, "_thumbs", {})
+    drawn = []
+    draw = preset_gallery.draw_thumbnail
+    monkeypatch.setattr(preset_gallery, "draw_thumbnail", lambda *a: drawn.append(1) or draw(*a))
+    board = B.Board()
+    board.add("agent")
+    board.add("proxy")
+    board.add("network")
+    board.layout()
+    first = preset_gallery.thumbnail(board).toImage()
+    assert preset_gallery.thumbnail(board).toImage() == first and len(drawn) == 1
+    assert first.pixelColor(1, 1) == QColor(theme.colors()["canvas"])
+    board.add("workspace", path="{{FOLDER}}")  # another board: drawn
+    preset_gallery.thumbnail(board)
+    assert len(drawn) == 2
+    preset_gallery.thumbnail(board, ratio=2.0)
+    assert len(drawn) == 3
+    monkeypatch.setattr(i18n, "_language", "de")  # its titles in German
+    preset_gallery.thumbnail(board)
+    assert len(drawn) == 4
+    monkeypatch.setattr(theme, "colors", lambda: {**theme.data()["colors"], "canvas": "#123456"})
+    other = preset_gallery.thumbnail(board).toImage()
+    assert len(drawn) == 5 and other.pixelColor(1, 1) == QColor("#123456")

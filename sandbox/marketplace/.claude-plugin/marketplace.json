@@ -34,10 +34,10 @@
       "source": {
         "source": "github",
         "repo": "obra/superpowers",
-        "sha": "22f0b463e7a5e579904dd6211a520321035526f7"
+        "sha": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b"
       },
-      "version": "7.0.2",
-      "description": "Superpowers (Jesse Vincent, MIT): a skills library for disciplined work: brainstorming, writing and executing plans, test-driven development, systematic debugging, code review, git worktrees, subagent-driven development. Its SessionStart hook adds the using-superpowers skill to every session.",
+      "version": "7.0.1",
+      "description": "Superpowers (Jesse Vincent, MIT) 7.0.1: a skills library for disciplined work: brainstorming, writing and executing plans, test-driven development, systematic debugging, code review, git worktrees, subagent-driven development. Its SessionStart hook adds the using-superpowers skill to every session. The built-in kit superpowers brings the same skills as plain skills for Claude, Codex and OpenCode, without the hook.",
       "homepage": "https://github.com/obra/superpowers",
       "license": "MIT",
       "keywords": [
