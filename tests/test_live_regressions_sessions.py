@@ -114,13 +114,26 @@ def test_the_guard_ends_with_its_tmux_session_and_takes_the_relay_along(tmp_path
 def test_firejail_ends_the_sandbox_with_the_guard_of_a_session(monkeypatch):
     """User: "... it keeps running" although the tmux session was gone - Firejail keeps a sandbox for as long as any
     process in it runs (an agent's background process, the relay). A session's sandbox ends with its guard
-    (--deterministic-shutdown, when this Firejail has it); other starts keep Firejail's default."""
+    (--deterministic-shutdown, when this Firejail has it); without SHUTDOWN, Firejail's default."""
     helps = {"text": "  --deterministic-shutdown - terminate orphan processes.\n  --shell=none\n"}
     monkeypatch.setattr(rt.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, helps["text"], ""))
     assert "--deterministic-shutdown" in rt.firejail_command({}, shutdown=True)
     assert "--deterministic-shutdown" not in rt.firejail_command({})
     helps["text"] = "  --shell=none\n"  # an older Firejail: started as before
     assert "--deterministic-shutdown" not in rt.firejail_command({}, shutdown=True)
+
+
+def test_a_run_without_tmux_ends_with_its_agent():
+    """CI (0.1.95, and the nested job since 0.1.94): the nested and the full-stack services tests timed out after the
+    agent's script had printed everything - its `python3 -m http.server ... &` ran on (dash's `kill %1` finds no job
+    without job control; the other script never stopped it), and Firejail's default kept the sandbox, and with it the
+    run, alive for good. A run without tmux ends with its agent, as a session ends with its guard; an attached tmux
+    keeps Firejail's default (a detach must not end the sandbox)."""
+    assert rt.ends_with_its_agent({"tmux": False}) and rt.ends_with_its_agent({})
+    assert rt.ends_with_its_agent({"tmux": "detached"})
+    assert not rt.ends_with_its_agent({"tmux": True})
+    source = Path(rt.__file__).read_text()
+    assert "shutdown=ends_with_its_agent(cfg)" in source  # the supervisor's own Firejail start
 
 
 def stuck_session(tmp_path, env, record=None):

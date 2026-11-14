@@ -145,6 +145,60 @@ def test_mcp_servers_become_stdio_extensions_through_the_bridge():
     assert goose.extensions([], lambda name: []) == {}
 
 
+# CI's first live run (43633858837): `goose run --quiet --text=...` answered (the demo server's version in its output)
+# and the run ended with 143. Goose 1.57.0 closes an extension's stdin and exits at once; its extensions run with
+# PR_SET_PDEATHSIG SIGTERM (crates/goose/src/subprocess.rs, configure_parent_death_signal). The launcher's bridge
+# waits for the server's end to close after that EOF (several relays away), so it is still there when Goose exits and
+# ends by SIGTERM - the last process of the sandbox, and Firejail 0.9.72 exits with the status of the last process to
+# end (sandbox.c, monitor_application) unless --deterministic-exit-code: 128 + 15.
+
+def test_firejail_exits_with_the_agents_own_status():
+    runtime = load("runtime_goose_tests", "sandbox/runtime.py")
+    helps = {"text": "  --deterministic-exit-code - always exit with first child's status code.\n  --shell=none\n"}
+    original = runtime.subprocess.run
+    runtime.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0, helps["text"], "")
+    try:
+        command = runtime.firejail_command({})
+        assert "--deterministic-exit-code" in command
+        assert command.index("--deterministic-exit-code") < command.index(runtime.SUPERVISOR_PYTHON[0])
+        assert "--deterministic-exit-code" in runtime.firejail_command({}, nested=True, shutdown=True)
+        helps["text"] = "  --shell=none\n"  # a Firejail without it: started as before
+        assert "--deterministic-exit-code" not in runtime.firejail_command({})
+    finally:
+        runtime.subprocess.run = original
+
+
+def test_the_bridge_outlives_the_agents_eof_until_the_server_closes(tmp_path):
+    """Why the bridge is still running when Goose exits: after its stdin's EOF it only half-closes the socket and
+    waits for the server's end (runtime.mcp_bridge)."""
+    import socket
+    import threading
+    import time
+    path = str(tmp_path / "server.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(1)
+    accepted = []
+    threading.Thread(target=lambda: accepted.append(listener.accept()[0]), daemon=True).start()
+    bridge = subprocess.Popen([sys.executable, "-I", str(ROOT / "sandbox/runtime.py"), "--internal-mcp-bridge", path],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        bridge.stdin.close()  # the agent's EOF
+        deadline = time.monotonic() + 5
+        while not accepted and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert accepted and accepted[0].recv(10) == b""  # the EOF reached the server's end...
+        time.sleep(0.3)
+        assert bridge.poll() is None  # ...and the bridge still waits for that end to close
+        accepted[0].close()
+        assert bridge.wait(timeout=5) == 0
+    finally:
+        if bridge.poll() is None:
+            bridge.kill()
+            bridge.wait()
+        listener.close()
+
+
 def test_an_api_key_of_a_known_provider_picks_goose_s_provider():
     assert goose.api_provider(ns(api_key=["api.anthropic.com=ANTHROPIC_API_KEY"])) == "anthropic"
     assert goose.api_provider(ns(api_key=["openrouter.ai=OPENROUTER_API_KEY=my_secret"])) == "openrouter"

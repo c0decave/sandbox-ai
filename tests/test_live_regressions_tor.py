@@ -178,11 +178,8 @@ def test_the_users_start_is_waited_for_through_a_stall_and_a_second_attempt(tmp_
     timeline = Timeline(tmp_path, [(1, "bringing up the VPN tor-test (its container, its tunnel and kill switch)")]
                         + [(60 + at, text) for at, text in lines], ready=60 + done + 30)
     out = []
-    sessions.time.sleep, real_sleep = timeline.sleep, sessions.time.sleep
-    try:
-        sessions.wait_ready(tmp_path, SUPERVISOR, timeout=240, follow=0, out=out.append, clock=timeline.clock, bar=False)
-    finally:
-        sessions.time.sleep = real_sleep
+    sessions.wait_ready(tmp_path, SUPERVISOR, timeout=240, follow=0, out=out.append, clock=timeline.clock, bar=False,
+                        sleep=timeline.sleep)
     assert timeline.now >= 60 + done + 30 > 240  # past the 240 s the user's start was given up after
     assert any("trying again (2 of 3)" in line for line in out)
 
@@ -192,13 +189,9 @@ def test_a_supervisor_silent_for_120_s_is_given_up_and_the_message_says_since_wh
     message says so, since when, and the last line (the step it stood at), not "within 240 s"."""
     timeline = Timeline(tmp_path, [(1, "bringing up the VPN tor-test (its container, its tunnel and kill switch)"),
                                    (150, "vpn: tor: bootstrapped 69% (Loading relay descriptors), attempt 1 of 3")])
-    sessions.time.sleep, real_sleep = timeline.sleep, sessions.time.sleep
-    try:
-        with pytest.raises(RuntimeError) as error:
-            sessions.wait_ready(tmp_path, SUPERVISOR, timeout=240, follow=0, out=lambda text: None,
-                                clock=timeline.clock, bar=False)
-    finally:
-        sessions.time.sleep = real_sleep
+    with pytest.raises(RuntimeError) as error:
+        sessions.wait_ready(tmp_path, SUPERVISOR, timeout=240, follow=0, out=lambda text: None, clock=timeline.clock,
+                            bar=False, sleep=timeline.sleep)
     text = str(error.value)
     assert 270 <= timeline.now <= 275
     assert text.startswith("Session did not become ready: it said nothing new for 12")
@@ -209,14 +202,12 @@ def test_a_supervisor_silent_for_120_s_is_given_up_and_the_message_says_since_wh
 def test_a_start_that_goes_on_and_on_ends_at_its_cap_and_says_so(tmp_path):
     lines = [(i * 30, f"vpn: tor: still at 69% (Loading relay descriptors) for {i * 30} s") for i in range(1, 100)]
     timeline = Timeline(tmp_path, lines)
-    sessions.time.sleep, real_sleep = timeline.sleep, sessions.time.sleep
-    try:
-        with pytest.raises(RuntimeError, match=r"it took 1200 s, the longest a start may take \(1200 s\), though it "
-                                               r"still said new steps; its last line: .*still at 69%"):
-            sessions.wait_ready(tmp_path, SUPERVISOR, timeout=120, follow=0, out=lambda text: None,
-                                clock=timeline.clock, bar=False)
-    finally:
-        sessions.time.sleep = real_sleep
+    # The test's own sleep, not time.sleep patched for the whole process: the release build's run had other
+    # threads (left by earlier tests) whose sleeps moved this clock too, and "it took 1200 s" did not match.
+    with pytest.raises(RuntimeError, match=r"it took 1200 s, the longest a start may take \(1200 s\), though it "
+                                           r"still said new steps; its last line: .*still at 69%"):
+        sessions.wait_ready(tmp_path, SUPERVISOR, timeout=120, follow=0, out=lambda text: None, clock=timeline.clock,
+                            bar=False, sleep=timeline.sleep)
 
 
 def test_the_longest_start_follows_the_tor_profiles_settings(monkeypatch):

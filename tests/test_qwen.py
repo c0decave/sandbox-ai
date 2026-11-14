@@ -167,9 +167,22 @@ def test_mcp_servers_go_through_the_bridge():
     args = qwen.mcp_args(["demo", "helper-claude-x", "demo"], lambda name: ["/bridge", name], {"helper-claude-x": 2000})
     config = json.loads(args[1])
     assert args[0] == "--mcp-config" and list(config["mcpServers"]) == ["demo", "helper-claude-x"]
-    assert config["mcpServers"]["demo"] == {"command": "python3", "args": ["/bridge", "demo"]}
+    assert config["mcpServers"]["demo"] == {"command": "python3", "args": ["/bridge", "demo"], "alwaysLoadTools": True}
     assert config["mcpServers"]["helper-claude-x"]["timeout"] == 2000 * 1000
     assert qwen.mcp_args([], lambda name: []) == []
+
+
+def test_the_mcp_servers_tools_are_declared_to_the_model_not_deferred():
+    """CI's first live run (43633858837): the scripted model was offered Qwen Code's own tools and its tool_search /
+    tool_call bridge, never mcp__demo__version - Qwen Code 0.26.4 defers every MCP tool (DiscoveredMCPTool passes
+    shouldDefer=true to BaseDeclarativeTool) and getFunctionDeclarations drops a deferred tool unless its alwaysLoad,
+    which discovery sets from the server config's alwaysLoadTools === true; servers from --mcp-config reach discovery
+    as given (parseMcpConfig, assembleMcpServers). Every --mcp server of the start says so, the helpers' too."""
+    for names in (["demo"], ["demo", "helper-claude-x"]):
+        servers = json.loads(qwen.mcp_args(names, lambda name: ["/bridge", name])[1])["mcpServers"]
+        assert all(server["alwaysLoadTools"] is True for server in servers.values()) and list(servers) == names
+    launched = json.loads(s.mcp_agent_args(s.parse_args(["qwen", "--mcp", "demo"]))[1])["mcpServers"]
+    assert launched["demo"]["alwaysLoadTools"] is True and launched["demo"]["args"] == s.mcp_bridge_args("demo")
 
 
 def test_files_environment_and_plan():

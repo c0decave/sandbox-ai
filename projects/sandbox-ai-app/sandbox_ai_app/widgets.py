@@ -108,8 +108,11 @@ class LoggedLabel(QLabel):
     """A page's status line whose every new text goes into the log (once per change): at INFO - DEBUG for progress
     (a text ending in "…") or a QUIET one, WARNING while it is coloured as an error - from LOG_WHERE (the page).
     What the human read there ("Select files first.", "Cannot open …: Permission denied") can be followed in the
-    log."""
-    log_where, quiet = "app", False
+    log.
+    FITS: as high as its text wraps to at its width, also at the window's smallest size (a word-wrapped label's own
+    minimum is one line: the LLM traffic page's two-line "No LLM traffic recorded yet: ..." was cut to one, CI's
+    fonts 2026-11-14)."""
+    log_where, quiet, fits = "app", False, False
 
     def setText(self, text):  # noqa: N802
         text = str(text)
@@ -120,15 +123,33 @@ class LoggedLabel(QLabel):
                 text.rstrip().endswith(("…", "...")) else "INFO"
             applog.log(level, self.log_where, f"status: {said(text)}")
         super().setText(text)
+        self.fit()
+
+    def fit(self):
+        if not self.fits or not self.isVisible() or self.width() < 50:
+            return  # (laid out yet: a hidden label's width is not its page's, its height for it far too high)
+        need = self.heightForWidth(self.width()) if self.text() and self.wordWrap() else 0
+        if need >= 0 and need != self.minimumHeight():
+            self.setMinimumHeight(need)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt's name
+        super().resizeEvent(event)
+        self.fit()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        self.fit()
 
 
-def plain_label(text="", word_wrap=True, role=None, selectable=False, log=None):
+def plain_label(text="", word_wrap=True, role=None, selectable=False, log=None, fit=False):
     """A label that never interprets its text as HTML (texts from logs and questions come from the agent).
     SELECTABLE: a message, a status or a refusal - its text can be marked and copied (Ctrl+C, its context menu).
-    LOG: the page's name in the log - each new text is logged (LoggedLabel)."""
+    LOG: the page's name in the log - each new text is logged (LoggedLabel). FIT (with LOG): always as high as its
+    wrapped text (LoggedLabel.fits) - a status line below a page's part that takes all the room."""
     label = LoggedLabel() if log else QLabel()
     if log:
         label.log_where = str(log)
+        label.fits = bool(fit)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(word_wrap)
     label.setText(str(text))

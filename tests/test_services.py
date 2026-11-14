@@ -702,7 +702,8 @@ def test_run_command(config, tmp_path, monkeypatch):
     assert "--user 999:1000" in joined and "--memory 512m" in joined and "--pids-limit 256" in joined
     assert f"type=bind,src={tmp_path}/resolv.conf,dst=/etc/resolv.conf,ro,nodev" in joined
     assert f"type=bind,src={tmp_path}/hosts,dst=/etc/hosts,ro,nodev" in joined
-    assert "--tmpfs /data:rw,noexec,nosuid,nodev,size=512m" in joined
+    # The service's user owns its data folder (CI 2026-11-14: redis's /data, 755 in the image, was root's tmpfs).
+    assert "--tmpfs /data:rw,noexec,nosuid,nodev,size=512m,uid=999,gid=1000" in joined
     assert "--env MODE=dev" in joined and "--env HOST_VAR" in joined and "--env PW" in joined
     assert "s3cret" not in joined and "from-host" not in joined  # values only in the environment
     assert env == {"HOST_VAR": "from-host", "PW": "s3cret"}

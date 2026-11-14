@@ -297,6 +297,14 @@ def mcp_servers(names, bridge_args, timeouts=None):
             for name in dict.fromkeys(names)}
 
 
+# With --mcp servers, Hermes' tool search stays off: the servers' tools are offered to the model directly. Hermes
+# v0.22.5 defers every MCP tool (tools/tool_search.py: is_deferrable_tool_name, any tool of an "mcp-" toolset; no
+# per-server exception) behind its tool_search / tool_describe / tool_call bridge whenever one exists, and
+# "off" is the only setting that passes the tools through (should_activate). A model that does not search first -
+# a small local one, the live check's scripted one - never found the servers the start was given. Hermes' curated
+# deferrals of its own cold tools (tools.tool_search.defer) are offered directly as well then.
+MCP_TOOL_SEARCH = {"tools": {"tool_search": {"enabled": "off"}}}
+
 LOOP_SKILL = "sandbox-ai-loop-guard"
 
 
@@ -315,7 +323,7 @@ def managed_config(a, telemetry="off", mcp=None, llm=None):
     for name in names:
         config = merge(config, FEATURES[name].get("config", {}))
     if mcp:
-        config = merge(config, {"mcp_servers": mcp})
+        config = merge(merge(config, {"mcp_servers": mcp}), MCP_TOOL_SEARCH)
     config = merge(config, TELEMETRY_PINNED)  # after the features: never turned on
     if llm:
         skills = llm.get("skills", {}).get("auto_load")

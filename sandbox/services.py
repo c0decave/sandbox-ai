@@ -1089,11 +1089,15 @@ def create_command(a, pod, service, session, l=None, limits=None):
     # The sandbox's own resolver and pinned names: its lookups meet the same DNS (stub, allow-list) as the agent's.
     for name in ("resolv.conf", "hosts"):
         argv += l.mount_option(Path(session) / name, f"/etc/{name}", "ro")
+    uid, _, gid = service["user"].partition(":")  # (numbers: check() made them so)
     for path, kind, volume in data_mounts(a, service):
         if kind == "volume":
             argv += ["--volume", f"{volume}:{path}:rw,nosuid,nodev,U"]
         else:
-            argv += ["--tmpfs", f"{path}:rw,noexec,nosuid,nodev,size={service['memory']}"]
+            # The service's own: the runtime gives a tmpfs the mode of the image's folder but keeps it root's -
+            # redis's /data (755, its user's in the image) was not writable for the service (CI 2026-11-14).
+            argv += ["--tmpfs", f"{path}:rw,noexec,nosuid,nodev,size={service['memory']},uid={int(uid)},"
+                                f"gid={int(gid or uid)}"]
     env = {}
     for item in service.get("env", []):
         if item.get("from_host"):

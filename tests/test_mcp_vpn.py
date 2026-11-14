@@ -857,15 +857,41 @@ def test_the_kill_switch_command_answers_as_the_guard_reads_it():
 
 
 def test_an_mcp_servers_lookups_go_to_the_vpns_resolver():
-    rules = rt.mcp_dns_rules("10.66.0.1")
+    rules = rt.mcp_dns_rules("10.66.0.1", "wg0")
     assert "meta nfproto ipv4 udp dport 53 dnat ip to 10.66.0.1:53" in rules
     assert "meta nfproto ipv4 tcp dport 53 dnat ip to 10.66.0.1:53" in rules
     assert "meta nfproto ipv6 udp dport 53 reject" in rules and "meta nfproto ipv6 tcp dport 53 reject" in rules
     assert f"meta mark {rt.CHECK_MARK:#x} return" in rules  # the runtime's own checks ask the resolvers they name
     with pytest.raises(ValueError):
-        rt.mcp_dns_rules("fd00::1")
+        rt.mcp_dns_rules("fd00::1", "wg0")
+    with pytest.raises(ValueError):
+        rt.mcp_dns_rules("10.66.0.1", 'wg0" accept')
     assert rt.mcp_dns_resolver({"dns": ["fd00::53", "10.64.0.1"]}) == "10.64.0.1"
     assert rt.mcp_dns_resolver({"dns": []}) == rt.FALLBACK_DNS[0]
+
+
+def test_a_redirected_lookup_passes_the_kill_switch_only_through_the_tunnel():
+    """CI's killswitch job (0.1.95, the VPN up for the first time there): an MCP server's lookup at the resolver on
+    the uplink's own network (pasta's, the host's) failed with EPERM. The kill switch's output chain sees the
+    interface of the route chosen before the redirect (the uplink), not the tunnel's it is routed to after it. Its
+    table lets a redirected lookup to the VPN's resolver pass output, and drops it in postrouting - where the
+    interface is the one the packet leaves by - unless that is the tunnel: never past it, with the tunnel gone."""
+    rules = rt.mcp_dns_rules("10.66.0.1", "wg0")
+    kill = [line for line in rules.splitlines() if f"inet {rt.TABLE} " in line]
+    assert kill == [
+        f"add chain inet {rt.TABLE} mcp_dns_tunnel_only {{ type filter hook postrouting priority -5; policy accept; }}",
+        f'add rule inet {rt.TABLE} mcp_dns_tunnel_only ct status dnat ip daddr 10.66.0.1 udp dport 53 oifname != "wg0" '
+        "drop",
+        f'add rule inet {rt.TABLE} mcp_dns_tunnel_only ct status dnat ip daddr 10.66.0.1 tcp dport 53 oifname != "wg0" '
+        "drop",
+        f"insert rule inet {rt.TABLE} output ct status dnat ip daddr 10.66.0.1 udp dport 53 accept",
+        f"insert rule inet {rt.TABLE} output ct status dnat ip daddr 10.66.0.1 tcp dport 53 accept"]
+    # What the output chain lets pass more is exactly what postrouting holds to the tunnel.
+    for proto in ("udp", "tcp"):
+        accepted = f"ct status dnat ip daddr 10.66.0.1 {proto} dport 53"
+        assert any(line.endswith(f'{accepted} oifname != "wg0" drop') for line in kill)
+    # The kill switch stays a kill switch for its check (output, input and forward drop what they do not accept).
+    assert rt.killswitch_problem(rt.killswitch_rules("wg0") + rules) is None
 
 
 class Recorder:
@@ -893,7 +919,7 @@ def test_the_runtime_loads_the_redirect_only_for_an_mcp_servers_container(monkey
     ready = json.loads(out[-1])
     assert ready["event"] == "ready"
     if mcp:
-        assert loaded == [rt.mcp_dns_rules("10.66.0.1")] and ready["tunnel"]["mcp_dns"] == "10.66.0.1"
+        assert loaded == [rt.mcp_dns_rules("10.66.0.1", "wg0")] and ready["tunnel"]["mcp_dns"] == "10.66.0.1"
     else:
         assert loaded == [] and "mcp_dns" not in ready["tunnel"]
 
@@ -1127,8 +1153,9 @@ def test_the_rules_an_mcp_vpn_container_loads_parse():
     """The chains of mcp_dns_rules were called redirect and refuse - nft keywords: every VPN container of an MCP
     server failed at nft -f ("syntax error, unexpected meta"), so no MCP server behind a VPN started (CI's killswitch
     job). Each rule set the VPN container loads goes through nft's own parser here."""
-    for rules in (rt.mcp_dns_rules("10.66.0.1"),
-                  rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)]),
+    killswitch = rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)])
+    for rules in (killswitch + rt.mcp_dns_rules("10.66.0.1", "wg0"),  # (it adds to the kill switch's table)
+                  killswitch,
                   rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)], mask=0xff00, any_marked=True,
                                       tunnel_ipv6=False)):
         errors = nft_syntax_errors(rules)

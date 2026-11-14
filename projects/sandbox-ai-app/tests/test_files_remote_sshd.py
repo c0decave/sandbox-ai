@@ -31,7 +31,9 @@ def free_port():
 
 
 @pytest.fixture
-def sshd(tmp_path):
+def sshd(tmp_path, monkeypatch):
+    # The tests' ssh stubs (home_guard.no_ssh) hand over to the real ssh for this test's own server.
+    monkeypatch.setenv("SANDBOX_AI_TEST_REAL_SSH", "1")
     binary, keygen = sshd_binary(), shutil.which("ssh-keygen")
     if binary is None or keygen is None or shutil.which("ssh") is None or shutil.which("ssh-keyscan") is None:
         pytest.skip("no OpenSSH server here (sshd, ssh, ssh-keygen, ssh-keyscan): install openssh-server")

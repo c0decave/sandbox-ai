@@ -235,3 +235,31 @@ def test_nothing_recorded_yet(window, env, wait):
     assert wait(lambda: "No LLM traffic recorded yet" in page.status.text(), timeout=30)
     assert page.model.rowCount() == 0 and not page.export_button.isEnabled()
     assert Path(page.sai.directory, "llm_traffic.py").is_file()
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_the_status_line_is_never_cut(qapp, window, env, wait, mode):
+    """CI 2026-11-14 (tests/test_layout.py, dark, German, the smallest window): "Noch kein LLM-Verkehr aufgezeichnet:
+    ..." wraps to two lines and had the height of one - the text came in an event (restart) and the page's layout
+    gave the label its height for it only in a later pass; a word-wrapped label's own minimum is one line. The status
+    line is as high as its text at its width as soon as it has the text, whatever its length."""
+    from sandbox_ai_app import theme
+    theme.apply(mode, qapp)
+    try:
+        page = window.traffic
+        window.resize(window.minimumSizeHint())
+        window.show()
+        window.show_page("traffic")
+        assert wait(lambda: "No LLM traffic recorded yet" in page.status.text(), timeout=30)
+        for text in ("x", page.status.text() * 4, "Reading…", page.status.text() * 6, page.status.text()):
+            QtCore.QTimer.singleShot(0, lambda text=text: page.status.setText(text))  # (as restart(): in an event)
+            QtWidgets.QApplication.processEvents()
+            assert page.status.text() == text
+            assert page.status.height() + 2 >= page.status.heightForWidth(page.status.width()), (
+                text[:30], page.status.heightForWidth(page.status.width()), page.status.height())
+            window.resize(window.minimumSizeHint().width(), 1)  # (Qt keeps it at its minimum: no room to spare)
+            QtWidgets.QApplication.processEvents()
+            assert page.status.height() + 2 >= page.status.heightForWidth(page.status.width()), text[:30]
+        assert page.status.height() >= 2 * page.status.fontMetrics().height()  # (wrapped: more than one line)
+    finally:
+        theme.apply("system", qapp)

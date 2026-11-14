@@ -1167,13 +1167,28 @@ def mcp_dns_resolver(tunnel):
     return FALLBACK_DNS[0]
 
 
-def mcp_dns_rules(resolver, mark=CHECK_MARK):
+MCP_DNS_TUNNEL_CHAIN = "mcp_dns_tunnel_only"
+
+
+def mcp_dns_rules(resolver, interface, mark=CHECK_MARK):
     """For the VPN container of an MCP image server (payload "mcp"): every lookup on port 53, whatever resolver the
     server's /etc/resolv.conf names (the one Podman gave the VPN container: pasta's forwarder or the host's own),
-    goes to the VPN's RESOLVER, through the tunnel; one over IPv6 is refused. The runtime's own checks (MARK) keep
-    the resolvers they name. Without it a lookup never left past the tunnel either (the kill switch), but went to a
-    resolver of your own network through the tunnel, or nowhere."""
+    goes to the VPN's RESOLVER, through the tunnel (INTERFACE); one over IPv6 is refused. The runtime's own checks
+    (MARK) keep the resolvers they name. Without it a lookup never left past the tunnel either (the kill switch), but
+    went to a resolver of your own network through the tunnel, or nowhere.
+
+    The kill switch's output chain judges a packet by the interface of the route chosen before the redirect (nft's
+    oifname stays that of the first route through all of the output hook, while the redirect routes it anew): a
+    lookup sent to a resolver on the uplink's own network (pasta's, the host's - CI's killswitch job: "dns lan
+    resolver" failed with EPERM) was refused although it would have gone through the tunnel. So the kill switch's
+    table gets two more rules: its output chain lets a redirected lookup (conntrack: destination NAT) to RESOLVER:53
+    pass, and a postrouting chain of its own - which sees the interface the packet really leaves by - drops such a
+    lookup that would leave by any other interface than INTERFACE (the tunnel gone, its route back on the uplink).
+    Both in the kill switch's table: they never outlive it, nor it them."""
     resolver = ipaddress.IPv4Address(resolver)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", str(interface or "")):
+        raise ValueError(f"not an interface name: {interface!r}")
+    redirected = f"ct status dnat ip daddr {resolver}"
     return "\n".join([
         f"table inet {MCP_DNS_TABLE} {{",
         # (no nft keyword as a chain's name: "redirect" made nft -f fail, and with it every such VPN container)
@@ -1185,7 +1200,12 @@ def mcp_dns_rules(resolver, mark=CHECK_MARK):
         f"  meta mark {int(mark):#x} return",
         "  meta nfproto ipv6 udp dport 53 reject with icmpx type admin-prohibited",
         "  meta nfproto ipv6 tcp dport 53 reject with icmpx type admin-prohibited", " }",
-        "}", ""])
+        "}",
+        f"add chain inet {TABLE} {MCP_DNS_TUNNEL_CHAIN} {{ type filter hook postrouting priority -5; policy accept; }}",
+        f'add rule inet {TABLE} {MCP_DNS_TUNNEL_CHAIN} {redirected} udp dport 53 oifname != "{interface}" drop',
+        f'add rule inet {TABLE} {MCP_DNS_TUNNEL_CHAIN} {redirected} tcp dport 53 oifname != "{interface}" drop',
+        f"insert rule inet {TABLE} output {redirected} udp dport 53 accept",
+        f"insert rule inet {TABLE} output {redirected} tcp dport 53 accept", ""])
 
 
 # What became of the optional wireguard-go when the image was built (Containerfile.vpn writes it).
@@ -1770,7 +1790,7 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None, clock=time.monotoni
                 raise ValueError("a Tailscale profile without an exit node carries only the tailnet; it cannot be "
                                  "an MCP server's way out")
             tunnel["mcp_dns"] = mcp_dns_resolver(tunnel)
-            runner.run(["nft", "-f", "-"], data=mcp_dns_rules(tunnel["mcp_dns"]))
+            runner.run(["nft", "-f", "-"], data=mcp_dns_rules(tunnel["mcp_dns"], tunnel["interface"]))
         emit("ready", out=out, tunnel=tunnel, checks=checks, hosts=hosts)
     except Exception as exc:  # noqa: BLE001 - everything ends as an event the launcher shows
         emit("error", out=out, message=redact(f"{exc}", secret_values(payload)))

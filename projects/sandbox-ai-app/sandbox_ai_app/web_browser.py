@@ -554,22 +554,31 @@ if not L.MISSING:
         def drop_download(self, entry):
             if entry.get("done"):
                 return
-            entry["done"] = True
+            entry["done"] = entry["dropped"] = True
             try:
                 entry["item"].cancel()
             except RuntimeError:
                 pass
+            self.remove_held(entry)
+            if entry in self.downloads:
+                self.downloads.remove(entry)
+
+        @staticmethod
+        def remove_held(entry):
             for path in (entry["held"], Path(str(entry["held"]) + ".download")):
                 try:
                     path.unlink()
                 except OSError:
                     pass
-            if entry in self.downloads:
-                self.downloads.remove(entry)
 
         def download_state(self, entry, state):
             S = QWebEngineDownloadRequest.DownloadState
             if entry.get("done"):
+                if entry.get("dropped") and state in (S.DownloadCompleted, S.DownloadCancelled,
+                                                      S.DownloadInterrupted):
+                    # A cancel is asynchronous: a download that was still being written (accepted, then paused)
+                    # may end - its file written - after the drop removed it (CI: closing the tab left it).
+                    self.remove_held(entry)
                 return
             if state == S.DownloadCompleted and entry.get("folder"):
                 entry["done"] = True

@@ -901,7 +901,7 @@ def failed_start(directory, status, follow=None, said=False):
 
 
 def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=None, out=None, clock=time.monotonic,
-               bar=None, steps=None, cap=None):
+               bar=None, steps=None, cap=None, sleep=None):
     """Until the terminal relay is there (it starts after the tmux session exists): its socket on the host, or
     READY() (macOS: a probe through podman exec). FOLLOW (the size supervisor.log had before the supervisor
     started): meanwhile, what the supervisor says of its start (its "agent-sandbox:" lines: an image pulled, the
@@ -909,8 +909,11 @@ def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=Non
     after QUIET_SECONDS of silence that it still starts, and at the end "ready in N s". BAR (default: standard error
     is a terminal, progress.bar_wanted): a progress bar of the start's STEPS instead (progress.Bar: MCP servers, VPN,
     kits, the sandbox, its terminal), drawn again in place; plain lines in a log or a script. Past TIMEOUT it waits
-    as long as the supervisor says new lines (start_watch: a start through Tor takes minutes), CAP seconds at most."""
+    as long as the supervisor says new lines (start_watch: a start through Tor takes minutes), CAP seconds at most.
+    SLEEP (default time.sleep): the pause between looks - with CLOCK, a test's own time (never time.sleep patched for
+    the whole process: other threads' sleeps moved such a clock too)."""
     socket_path = directory / "tmux" / "attach.sock"
+    sleep = sleep or time.sleep
     # A look at the socket file is a stat: every READY_POLL seconds (it was 0.2 s, ready noticed 0.1 s late on
     # average); READY() of its own (macOS: a podman exec each) as before.
     pause = READY_POLL if ready is None else READY_PROBE_POLL
@@ -980,7 +983,7 @@ def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=Non
                 bar.failed()
             LOG.warning("session", f"{directory.name}: the wait for its start ends ({over}): {watch.why(over)}")
             raise RuntimeError(f"Session did not become ready: {watch.why(over)}; see {directory / 'supervisor.log'}")
-        time.sleep(pause)
+        sleep(pause)
     if told is not None:
         relay()
         if bar is not None:

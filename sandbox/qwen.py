@@ -247,9 +247,14 @@ def experimental_note():
 def mcp_args(names, bridge_args, timeouts=None):
     """Qwen Code's --mcp-config for the --mcp servers NAMES: each the launcher's stdio bridge (BRIDGE_ARGS(name)),
     with its wait for one call from TIMEOUTS ({name: seconds}, the launcher's mcp_tool_timeouts; Qwen Code counts
-    milliseconds); a name not in it keeps Qwen Code's own."""
+    milliseconds); a name not in it keeps Qwen Code's own.
+
+    alwaysLoadTools: the servers' tools are declared to the model directly. Qwen Code 0.26 defers every MCP tool by
+    default (DiscoveredMCPTool is shouldDefer; ToolRegistry.getFunctionDeclarations leaves a deferred tool out unless
+    its alwaysLoad, which discovery takes from the server's alwaysLoadTools): the model saw only the tool_search and
+    tool_call bridge, and a model that does not search first never found the servers the start was given."""
     timeouts = timeouts or {}
-    servers = {name: {"command": "python3", "args": list(bridge_args(name)),
+    servers = {name: {"command": "python3", "args": list(bridge_args(name)), "alwaysLoadTools": True,
                       **({"timeout": timeouts[name] * 1000} if name in timeouts else {})}
                for name in dict.fromkeys(names)}
     return ["--mcp-config", json.dumps({"mcpServers": servers})] if servers else []

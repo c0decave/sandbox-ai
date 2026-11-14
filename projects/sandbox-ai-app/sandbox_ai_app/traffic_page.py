@@ -430,7 +430,7 @@ class TrafficPage(QWidget):
         split.addWidget(right)
         split.setSizes([480, 620])
         layout.addWidget(split, 1)
-        self.status = plain_label(selectable=True, log="traffic")
+        self.status = plain_label(selectable=True, log="traffic", fit=True)
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.sources = []

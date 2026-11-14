@@ -2969,7 +2969,9 @@ def qwen_gets_the_mcp_servers_through_the_bridge(qm):
     run = qm.run("--mcp", "demo")
     command = run.config["command"]
     config = json.loads(command[command.index("--mcp-config") + 1])
+    # alwaysLoadTools: declared to the model, not deferred behind Qwen Code's tool_search (qwen.mcp_args).
     assert config == {"mcpServers": {"demo": {"command": "python3", "args": s.mcp_bridge_args("demo"),
+                                              "alwaysLoadTools": True,
                                               "timeout": s.DEFAULT_MCP_TOOL_TIMEOUT * 1000}}}
 
 

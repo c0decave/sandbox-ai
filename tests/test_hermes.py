@@ -193,6 +193,23 @@ def test_mcp_servers_go_through_the_bridge_without_sampling():
     assert servers["helper-codex-1"]["timeout"] == 2000 and "timeout" not in servers["demo"]
 
 
+def test_the_mcp_servers_tools_are_offered_directly_not_behind_tool_search():
+    """CI's first live run (43633858837): Hermes' main turn offered its own tools and the tool_search / tool_describe /
+    tool_call bridge, never mcp__demo__version (the "tools: []" the check printed was the first request, an /api/show
+    probe). Hermes v0.22.5 defers every tool of an "mcp-" toolset (tools/tool_search.py: is_deferrable_tool_name) as
+    soon as one exists, unless tools.tool_search.enabled is "off" (should_activate; _tri_state reads "off"). With --mcp
+    servers the managed configuration says "off"; without them Hermes' default stays."""
+    bridge = lambda name: ["-I", "bridge", name]  # noqa: E731
+    config = hermes.managed_config(ns(), mcp=hermes.mcp_servers(["demo"], bridge))
+    assert config["tools"] == {"tool_search": {"enabled": "off"}} and list(config["mcp_servers"]) == ["demo"]
+    assert "tools" not in hermes.managed_config(ns())
+    # The launcher's own file, as Hermes' managed scope reads it (JSON is YAML).
+    written = json.loads(s.hermes_files(s.parse_args(["hermes", "--mcp", "demo"]))["hermes/config.yaml"])
+    assert written["tools"]["tool_search"]["enabled"] == "off"
+    assert written["mcp_servers"]["demo"]["args"] == s.mcp_bridge_args("demo")
+    assert "tools" not in json.loads(s.hermes_files(s.parse_args(["hermes"]))["hermes/config.yaml"])
+
+
 def test_the_llm_section_and_the_loop_guards_skill():
     model = {"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "default": "m"},
              "skills": {"auto_load": [hermes.LOOP_SKILL]}, "agent": {"max_turns": 40}}

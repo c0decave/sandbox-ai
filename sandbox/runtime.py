@@ -1796,7 +1796,7 @@ def inner_bootstrap():
             print(f"agent-sandbox: {problem}", file=sys.stderr)
             return 1
         # Built only now: the blacklist names the proxy's directories, which exist from here on.
-        cmd = firejail_command(before, nested=bool(nested), shutdown=cfg.get("tmux") == "detached")
+        cmd = firejail_command(before, nested=bool(nested), shutdown=ends_with_its_agent(cfg))
         child = subprocess.Popen(cmd, env=base_env(), close_fds=True)
         oom_first(child.pid)  # an out-of-memory kill takes the agent's processes before PID 1 (the whole run)
         return wait_child(child)
@@ -2780,13 +2780,30 @@ class MemoryGuard:
         return thread
 
 
+def ends_with_its_agent(cfg):
+    """Whether the sandbox ends with the first process in Firejail (firejail_command's SHUTDOWN): a session's guard
+    (tmux_command detached) and an agent without tmux (--no-tmux: the agent itself). Firejail's default keeps a sandbox
+    for as long as any process in it runs: an agent's (or its script's) background process kept a run without tmux
+    from ever ending - CI's nested and services jobs timed out after the agent's script had ended, its
+    `python3 -m http.server ... &` still serving (dash's `kill %1` finds no job without job control). An attached tmux
+    keeps Firejail's default (its client is the first process: a detach would end the sandbox)."""
+    return cfg.get("tmux") == "detached" or not cfg.get("tmux")
+
+
 def firejail_command(before, nested=False, shutdown=False):
-    """SHUTDOWN (a session's guard, tmux_command detached): the sandbox ends with its guard. Firejail's default keeps
-    it for as long as any process in it runs - an agent's background process, the terminal's relay - and the run
-    went on, shown as running, after its tmux session had ended."""
+    """SHUTDOWN (ends_with_its_agent: a session's guard, an agent without tmux): the sandbox ends with its first
+    process. Firejail's default keeps it for as long as any process in it runs - an agent's background process, the
+    terminal's relay - and the run went on, shown as running, after its tmux session had ended.
+
+    --deterministic-exit-code: the run's exit status is the agent's own (Firejail's first child: the guard, which
+    becomes the agent). Firejail's default is the status of the last process of the sandbox to end (0.9.72
+    sandbox.c, monitor_application) - an MCP bridge that Goose's exit ended with SIGTERM (its extensions get
+    PR_SET_PDEATHSIG SIGTERM) made a one-shot that had answered end with 143."""
     help_text = subprocess.run(["firejail", "--help"], check=True, text=True, capture_output=True).stdout
     command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs",
                NESTED_SECCOMP if nested else "--seccomp"]
+    if "--deterministic-exit-code" in help_text:
+        command.append("--deterministic-exit-code")
     if shutdown and "--deterministic-shutdown" in help_text:
         command.append("--deterministic-shutdown")
     for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR, VM_CONTROL_DIR):

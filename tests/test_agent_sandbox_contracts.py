@@ -811,6 +811,15 @@ def test_firejail_command(scenario, monkeypatch):
         assert json.loads(cmd[-1]) == states()[0]
 
 
+def test_ends_with_its_agent(scenario):
+    if scenario == "happy":  # a session's guard, and an agent without tmux
+        assert rt.ends_with_its_agent({"tmux": "detached"}) and rt.ends_with_its_agent({"tmux": False})
+    elif scenario == "sad":  # an attached tmux: its client is Firejail's first process (a detach must not end it)
+        assert not rt.ends_with_its_agent({"tmux": True})
+    else:  # no tmux key at all (an older session config): the agent itself
+        assert rt.ends_with_its_agent({})
+
+
 def test_base_env(scenario, monkeypatch):
     monkeypatch.setenv("HOST_SECRET_FIXTURE", "must-not-leak")
     if scenario == "edge":

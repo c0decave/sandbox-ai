@@ -14,7 +14,10 @@ import atexit
 import hashlib
 import os
 from pathlib import Path
+import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 
 MARKER = "SANDBOX_AI_TEST_HOME"
@@ -63,6 +66,16 @@ def no_browser(root, environ=os.environ):
 
 
 SSH_COMMANDS = ("ssh", "scp", "sftp")
+# A test that starts an SSH server of its own (the Files page against a real sshd) opts in with this variable: ssh,
+# scp and sftp are then the real ones. Set it for that test only (monkeypatch.setenv), never for a session.
+REAL_SSH = "SANDBOX_AI_TEST_REAL_SSH"
+# Destinations that are this machine: ssh to them passes to the real ssh (a test's own sshd on 127.0.0.1).
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+# ssh's options without and with a value (OpenSSH's getopt string); a test never needs the others.
+_SSH_FLAGS = "46AaCfGgKkMNnqsTtVvXxYy"
+_SSH_VALUED = "BbcDEeFIiJLlmOoPpQRSWw"
+# Options that reach past the destination: forwards, a jump host, stdio forwarding, a tunnel device.
+_SSH_ONWARD = "DJLRWw"
 
 
 def no_ssh(root, environ=os.environ):
@@ -70,19 +83,104 @@ def no_ssh(root, environ=os.environ):
     for real when a test did not fake ssh, and in a sandbox each attempt became a question to the human ("7 Fragen
     zu 192.0.2.11:22 ... ohne Antwort abgelehnt"). The ssh, scp and sftp found first on PATH fail at once with
     ssh's own exit status 255 and write what they were given to ROOT/ssh-calls; a test that fakes ssh puts its own
-    first on PATH."""
+    first on PATH. They hand over to the real ones only for `ssh -G` (prints the configuration, connects nowhere),
+    for ssh to this machine (local_destination(): 127.0.0.1, ::1 or localhost, no jump host, proxy or forward) and
+    while $SANDBOX_AI_TEST_REAL_SSH is 1 (a test with an SSH server of its own)."""
     directory = root / "no-ssh-bin"
     directory.mkdir(exist_ok=True)
     for name in SSH_COMMANDS:
         stub = directory / name
-        # `ssh -G` (print the configuration, connect nowhere) is the real ssh's: a test reads its settings.
-        passthrough = ('for a in "$@"; do [ "$a" = -G ] && { PATH=$(printf %s "$PATH" | sed "s#' + str(directory) +
-                       ':##"); exec ssh "$@"; }; done\n') if name == "ssh" else ""
-        stub.write_text(f'#!/bin/sh\n{passthrough}printf "%s %s\\n" "{name}" "$*" >> "{root}/ssh-calls"\n'
-                        f'echo "{name}: tests reach no real host" >&2\nexit 255\n')
+        stub.write_text("#!/bin/sh\nexec " + " ".join(shlex.quote(str(part)) for part in (
+            sys.executable, "-I", Path(__file__).resolve(), "ssh-stub", name, root, directory)) + ' "$@"\n')
         stub.chmod(0o755)
     environ["PATH"] = f"{directory}{os.pathsep}{environ.get('PATH', '')}"
     return directory
+
+
+def ssh_arguments(args):
+    """ssh's command line as OpenSSH's getopt reads it: ([(option, value or None)], destination or None), or None
+    for an option ssh does not know (refused, never guessed)."""
+    options, destination, index = [], None, 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            if destination is None and index + 1 < len(args):
+                destination = args[index + 1]
+            break
+        if arg.startswith("-") and len(arg) > 1:
+            position = 1
+            while position < len(arg):
+                option = arg[position]
+                if option in _SSH_FLAGS:
+                    options.append((option, None))
+                    position += 1
+                elif option in _SSH_VALUED:
+                    value = arg[position + 1:]
+                    if not value:
+                        index += 1
+                        if index >= len(args):
+                            return None
+                        value = args[index]
+                    options.append((option, value))
+                    break
+                else:
+                    return None
+            index += 1
+        elif destination is None:  # options may follow the destination, as with OpenSSH
+            destination = arg
+            index += 1
+        else:
+            break  # the remote command
+    return options, destination
+
+
+def local_destination(args, real_ssh, run=None):
+    """Whether ssh ARGS reach only this machine: the host ssh would connect to (its configuration applied, read with
+    the real ssh's -G) is 127.0.0.1, ::1 or localhost, and nothing goes on from there (no jump host, ProxyCommand,
+    forward or tunnel)."""
+    parsed = ssh_arguments(args)
+    if parsed is None or parsed[1] is None or any(option in _SSH_ONWARD for option, _ in parsed[0]):
+        return False
+    try:
+        result = (run or subprocess.run)([real_ssh, "-G", *args], capture_output=True, text=True, timeout=15,
+                                         stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    settings = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        settings.setdefault(key.lower(), value.strip())
+    if settings.get("hostname", "").strip("[]").lower() not in LOCAL_HOSTS:
+        return False
+    if any(settings.get(key, "none").lower() != "none" for key in ("proxyjump", "proxycommand")):
+        return False
+    if any(key in settings for key in ("localforward", "remoteforward", "dynamicforward")):
+        return False
+    return settings.get("tunnel", "false").lower() in ("false", "no")
+
+
+def _real_command(name, directory, environ=os.environ):
+    """NAME on PATH without the stubs' DIRECTORY (and earlier stub directories of nested sessions), or None."""
+    path = os.pathsep.join(part for part in environ.get("PATH", "").split(os.pathsep)
+                           if part and not part.endswith("no-ssh-bin") and part != str(directory))
+    return shutil.which(name, path=path)
+
+
+def ssh_stub(name, root, directory, args, environ=os.environ):
+    """The stub of NAME: execs the real command where no_ssh() lets it, otherwise records the call and fails (255)."""
+    real = _real_command(name, directory, environ)
+    if real:
+        parsed = ssh_arguments(args) if name == "ssh" else None
+        if (environ.get(REAL_SSH) == "1"
+                or (parsed is not None and any(option == "G" for option, _ in parsed[0]))
+                or (name == "ssh" and local_destination(args, real))):
+            os.execv(real, [real, *args])
+    with open(Path(root) / "ssh-calls", "a", encoding="utf-8") as calls:
+        calls.write(f"{name} {' '.join(args)}\n")
+    print(f"{name}: tests reach no real host", file=sys.stderr)
+    return 255
 
 
 def login_files(environ=os.environ):
@@ -116,3 +214,7 @@ def changed(before):
     """The paths of BEFORE (fingerprint()) whose contents differ now."""
     now = fingerprint([Path(path) for path in before])
     return sorted(path for path in before if before[path] != now[path])
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["ssh-stub"] and len(sys.argv) >= 5:
+    sys.exit(ssh_stub(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]))

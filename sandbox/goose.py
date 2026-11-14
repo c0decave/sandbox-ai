@@ -56,7 +56,9 @@ FEATURES = {
                 "the bot token of the secret goose_telegram; who may talk to it: goose gateway pair telegram in the "
                 "shell window"},
     "local-inference": {
-        "hosts": ["huggingface.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.huggingface.co",
+        # (Hugging Face's file CDNs are under hf.co: cdn-lfs.huggingface.co and cdn-lfs-us-1.huggingface.co have
+        # no address any more, and a start that pins its hosts failed at their lookup - CI 2026-11-14)
+        "hosts": ["huggingface.co", "cdn-lfs.hf.co", "cdn-lfs-us-1.hf.co", "cdn-lfs-eu-1.hf.co",
                   "cas-bridge.xethub.hf.co"],
         "help": "Goose's built-in llama.cpp: goose local-models search|download fetch GGUF models from Hugging Face "
                 "(the sandbox's processors only: this build has no GPU support); without it, a model server of "
