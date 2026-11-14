@@ -21,6 +21,7 @@ import socket
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit, urlunsplit
+from . import applog
 
 # -- links in rows --
 
@@ -471,8 +472,8 @@ class NameChecks:
         for callback in callbacks:
             try:
                 callback(host, verdict, address)
-            except Exception:  # noqa: BLE001 - one caller's failure is not another's
-                pass
+            except Exception as _exc:  # noqa: BLE001 - one caller's failure is not another's
+                applog.swallowed("terminal_text", "NameChecks.work: one caller's failure is not another's", _exc)
 
 
 def flow_of(url):
@@ -544,6 +545,10 @@ PROVIDERS = {
     "codex": ["api.openai.com", "chatgpt.com", "auth.openai.com"],
     "claude": ["api.anthropic.com", "console.anthropic.com", "claude.ai", "claude.com", "platform.claude.com"],
     "opencode": ["opencode.ai"],
+    "hermes": ["portal.nousresearch.com", "inference-api.nousresearch.com"],
+    "dsh": ["api.deepseek.com", "platform.deepseek.com"],
+    "qwen": ["chat.qwen.ai", "portal.qwen.ai", "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"],
+    "goose": [],  # no maker's model service: --api-key or --llm
 }
 LOGIN_FRONTIER = ("opencode",)  # sandbox-ai login gives these --profile frontier (login.py LOGIN_OPTIONS)
 
@@ -627,7 +632,7 @@ def without_query(url):
 
 # -- which tab runs a login --
 
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 NOT_A_SIGN_IN = frozenset({"--logout", "-L", "--status", "-s"})  # options of `sandbox-ai login` that print no link
 
 

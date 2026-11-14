@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from . import backend, tables, theme
 from .activity_page import detail_text, short_time
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
 from .widgets import MONO, ask_first, background, outcome, plain_label, safe_tooltip, show_text
 
@@ -67,7 +67,7 @@ def process_text(process):
     """One line about the process of an event: name, PIDs, command line, parents; or why it is unknown."""
     if not isinstance(process, dict) or not process or process.get("unknown") is not None:
         why = process.get("unknown") if isinstance(process, dict) else None
-        return tr("unknown ({why})", why=printable(why)) if why else tr("unknown")
+        return tr("unknown ({why})", why=printable_text(why)) if why else tr("unknown")
     text = f"{printable(process.get('comm') or '?')} (pid {printable(process.get('pid', '?'))}"
     if process.get("ns_pid") not in (None, process.get("pid")):
         text += tr(", {pid} in the sandbox", pid=printable(process["ns_pid"]))
@@ -135,7 +135,7 @@ class CanariesView(QWidget):
         top = QHBoxLayout()
         self.refresh_button = QPushButton(tr("Refresh"))
         self.refresh_button.clicked.connect(lambda _=False: self.refresh())
-        self.status = plain_label(role="secondary", selectable=True)
+        self.status = plain_label(role="secondary", selectable=True, log="canaries")
         top.addWidget(self.refresh_button)
         top.addWidget(self.status, 1)
         layout.addLayout(top)
@@ -174,6 +174,9 @@ class CanariesView(QWidget):
         runs.addWidget(plain_label(tr("Run"), word_wrap=False))
         for widget in (self.run_box, self.show_button, self.tokens_button, self.resume_button):
             runs.addWidget(widget)
+        from .widgets import list_menu
+        list_menu(self.tree, lambda: [self.show_button, self.tokens_button, self.resume_button, None,
+                                      self.refresh_button])
         runs.addStretch(1)
         layout.addLayout(runs)
         self.events = []
@@ -254,7 +257,7 @@ class CanariesView(QWidget):
     def run_shown(self, run, tokens, result, error):
         if error is not None:
             self.status.setText(tr("Cannot read the canaries of {run}: {error}", run=printable(run),
-                                   error=printable(error)[:500]))
+                                   error=printable_text(error)[:500]))
             return
         show_text(self, tr("Canaries of {run}", run=printable(run)), run_text(result, tokens), modal=False)
 
@@ -272,7 +275,7 @@ class CanariesView(QWidget):
 
     def resumed(self, run, result, error):
         status, out, err = outcome(result, error)
-        said = printable((out + err).strip()[-500:])
+        said = printable_text((out + err).strip()[-500:])
         self.status.setText(tr("{run} resumed.", run=printable(run)) + (f" {said}" if said else "") if status == 0
                             else tr("Not resumed: {error}", error=said or status))
 
@@ -280,7 +283,7 @@ class CanariesView(QWidget):
         if token != self.token:
             return
         if error is not None:
-            self.status.setText(tr("Cannot read the canary log: {error}", error=printable(error)))
+            self.status.setText(tr("Cannot read the canary log: {error}", error=printable_text(error)))
             return
         self.show_events(events_of(result))
 

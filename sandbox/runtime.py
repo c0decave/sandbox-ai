@@ -12,14 +12,15 @@ import binascii
 import collections
 import contextlib
 import errno
-import fnmatch
 import ctypes
 import fcntl
 import hashlib
+import heapq
 import ipaddress
 import io
 import itertools
 import json
+import math
 import os
 import posixpath
 from pathlib import Path
@@ -62,6 +63,29 @@ def x_socket(display):
     return Path("/tmp/.X11-unix/X" + display[1:])
 
 
+PROC_FD = "/proc/self/fd"
+
+
+def bind_long(server, path):
+    """Bind SERVER to PATH, whose name is too long for a socket (107 bytes on Linux, 104 on macOS): through the
+    directory's descriptor under /proc on Linux, else (macOS) through a short link to the directory made for the
+    moment in the temporary folder."""
+    path = Path(path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if os.path.isdir(PROC_FD):
+            server.bind(f"{PROC_FD}/{directory}/{path.name}")
+            return
+    finally:
+        os.close(directory)
+    links = tempfile.mkdtemp(prefix="sai-", dir=tempfile.gettempdir())
+    try:
+        os.symlink(path.parent, os.path.join(links, "d"))
+        server.bind(os.path.join(links, "d", path.name))
+    finally:
+        shutil.rmtree(links, ignore_errors=True)
+
+
 def listen_unix(socket_path):
     """Listening Unix socket that appears under its name only once it accepts."""
     path = Path(socket_path)
@@ -70,15 +94,35 @@ def listen_unix(socket_path):
     staging = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}")
     staging.unlink(missing_ok=True)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    # Socket paths are limited to 107 bytes; a long directory is reached through its descriptor.
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        server.bind(f"/proc/self/fd/{directory}/{staging.name}" if len(str(staging)) > 100 else str(staging))
-    finally:
-        os.close(directory)
-    server.listen(16)
+        if len(str(staging)) <= 100:
+            server.bind(str(staging))
+        else:
+            bind_long(server, staging)
+        server.listen(16)
+    except BaseException:
+        server.close()
+        raise
     os.replace(staging, path)
     return server
+
+
+# What an accept() may meet while its listener is fine: no descriptor to be had (EMFILE: this process's, ENFILE: the
+# system's), no memory or buffers for one more, a connection gone before it was taken. The loop waits a moment and
+# goes on; any other error (the listener closed) ends it.
+ACCEPT_TRANSIENT = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM, errno.ECONNABORTED,
+                              errno.EPROTO})
+
+
+def accept_transient(exc, pause=0.1, sleep=time.sleep):
+    """True, after PAUSE seconds (no busy loop), when EXC - an accept()'s OSError - is one of ACCEPT_TRANSIENT and the
+    loop should go on; False when it should end (the listener closed or broken, a timeout: not this one's to judge).
+    The accept loops of the supervisor and the relays ended at the first EMFILE for good: the run's control socket
+    (net allow, approvals, workspace add), the agent's hooks, a host port's relay, the terminal's relay."""
+    if isinstance(exc, OSError) and not isinstance(exc, socket.timeout) and exc.errno in ACCEPT_TRANSIENT:
+        sleep(pause)
+        return True
+    return False
 
 
 def read_frames(buffer):
@@ -97,8 +141,126 @@ def attach_relay(socket_path, command):
     """Inside the sandbox: run COMMAND (tmux attach) on its own pty per connection."""
     server = listen_unix(socket_path)
     while True:
-        connection, _ = server.accept()
-        threading.Thread(target=relay_terminal, args=(connection, command), daemon=True).start()
+        try:
+            connection, _ = server.accept()
+        except OSError as exc:
+            if accept_transient(exc):
+                continue
+            raise
+        try:
+            threading.Thread(target=relay_terminal, args=(connection, command), daemon=True).start()
+        except RuntimeError:  # no thread to be had (the sandbox's process limit): this attachment only
+            connection.close()
+            time.sleep(0.1)
+
+
+# --- the terminal's output: whole frames ---------------------------------------------------------------------------
+#
+# A full-screen interface redraws by erasing its rows and writing them again (Ink: Qwen Code, Gemini CLI, Claude
+# Code). tmux 3.3 (Debian 12's, in the images) passes such a frame on in pieces, one per read of the pane (4 KiB),
+# and does not hold them for the application's synchronized update (DEC mode 2026; tmux 3.7 does): a terminal that
+# paints between two pieces shows rows erased and not yet written again - the flicker. The relay therefore sends the
+# tmux client's output in bursts - until it has been quiet for TERMINAL_QUIET, at most TERMINAL_HOLD after its first
+# byte, or TERMINAL_BURST bytes - each burst one synchronized update, so that a terminal with the mode (xterm.js in
+# the app, kitty, WezTerm, foot, Ghostty, iTerm2, Windows Terminal, Alacritty ...) paints it whole; terminals without
+# it ignore the mode. The stream's own updates (tmux's, from its terminal-overrides) are merged into the bursts'.
+# A burst ends only between sequences and characters: the rest of an unfinished one goes with the next burst.
+
+SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[?2026l"
+SYNC_MARK = re.compile(rb"\x1b\[\?2026([hl])")
+CSI_FINAL = re.compile(rb"[\x40-\x7e]")
+ESC_FINAL = re.compile(rb"[\x30-\x7e]")
+TERMINAL_QUIET = 0.005  # s without output: the frame is complete (tmux's pieces of one follow within 1-3 ms)
+TERMINAL_HOLD = 0.025  # s at most from a burst's first byte (steady output still flows, 40 bursts a second)
+TERMINAL_BURST = 256 << 10  # bytes at most in one burst
+TERMINAL_RAW = 1 << 20  # bytes of a sequence that never ends: sent as they are, and no burst is wrapped after them
+
+
+def sequence_end(data, start):
+    """Whether the escape sequence at START (an ESC, the last one in DATA) is complete in DATA."""
+    if start + 1 >= len(data):
+        return False
+    kind = data[start + 1]
+    if kind == 0x5B:  # CSI: parameters and intermediates, then a final byte
+        return CSI_FINAL.search(data, start + 2) is not None
+    if kind == 0x5D:  # OSC: no ESC follows (this is the last), so only BEL can end it here
+        return data.find(b"\x07", start + 2) >= 0
+    if kind in b"P_^X":  # DCS, APC, PM, SOS: end with ESC \ only
+        return False
+    if 0x20 <= kind <= 0x2F:  # intermediates (ESC ( B), then a final byte
+        return ESC_FINAL.search(data, start + 2) is not None
+    return True  # ESC and its final byte
+
+
+def safe_cut(data):
+    """How much of DATA ends outside every escape sequence and UTF-8 character; the rest is still coming."""
+    end = len(data)
+    last = data.rfind(b"\x1b")
+    if last >= 0 and not sequence_end(data, last):
+        end = last
+    start = end
+    while start > 0 and end - start < 3 and 0x80 <= data[start - 1] < 0xC0:
+        start -= 1
+    if start > 0 and data[start - 1] >= 0xC0:
+        lead = data[start - 1]
+        if end - start + 1 < (2 if lead < 0xE0 else 3 if lead < 0xF0 else 4):
+            end = start - 1
+    return end
+
+
+class TerminalBursts:
+    """The tmux client's output gathered into bursts (above): add() what was read, due() is the seconds until the
+    burst goes (None: nothing waits), take() the bytes to send then, finish() the rest at the end."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.pending = bytearray()
+        self.first = self.last = 0.0
+        self.inner = False  # the stream's own synchronized update is open: the burst's stays open with it
+        self.stuck = False  # all that waits is an unfinished sequence: it waits for more output
+        self.wrap = True
+
+    def add(self, data):
+        now = self.clock()
+        if not self.pending:
+            self.first = now
+        self.pending += data
+        self.last, self.stuck = now, False
+
+    def due(self):
+        if not self.pending:
+            return None
+        if len(self.pending) >= TERMINAL_BURST and not self.stuck:
+            return 0
+        deadline = self.last + TERMINAL_HOLD if self.stuck else min(self.last + TERMINAL_QUIET,
+                                                                      self.first + TERMINAL_HOLD)
+        return max(0, deadline - self.clock()) if len(self.pending) < TERMINAL_RAW else 0
+
+    def take(self):
+        now = self.clock()
+        if self.wrap:
+            cut = safe_cut(self.pending)
+            if cut == 0 and len(self.pending) < TERMINAL_RAW and not (self.stuck and now - self.last >= TERMINAL_HOLD):
+                self.stuck = True
+                return b""
+            self.wrap = cut > 0  # a sequence too long or never finished: the stream's state is unknown after it
+        if not self.wrap:
+            data, self.pending = bytes(self.pending), bytearray()
+            return data
+        body, self.pending = bytes(self.pending[:cut]), self.pending[cut:]
+        self.first, self.stuck = now, False
+        marks = SYNC_MARK.findall(body)
+        if marks:
+            self.inner = marks[-1] == b"h"
+            body = SYNC_MARK.sub(b"", body)
+        return SYNC_BEGIN + body + (b"" if self.inner else SYNC_END)
+
+    def finish(self):
+        """Everything left, and the end of a synchronized update still open (the terminal paints again)."""
+        data, self.pending = bytes(self.pending), bytearray()
+        if self.wrap and self.inner:
+            data += SYNC_END
+        return data
 
 
 def relay_terminal(connection, command):
@@ -138,19 +300,26 @@ def relay_terminal(connection, command):
         connection.close()
         return
     os.close(slave)
+    bursts = TerminalBursts()
     try:
         for payload in pending:
             os.write(master, payload)
         while True:
-            ready, _, _ = select.select([connection, master], [], [])
+            # Output waits for the end of its burst; keys and resizes never wait.
+            ready, _, _ = select.select([connection, master], [], [], bursts.due())
             if master in ready:
                 try:
                     data = os.read(master, 65536)
                 except OSError:
                     data = b""  # EIO: the client exited
                 if not data:
+                    connection.sendall(bursts.finish())
                     break
-                connection.sendall(data)
+                bursts.add(data)
+            if bursts.due() == 0:
+                out = bursts.take()
+                if out:
+                    connection.sendall(out)
             if connection in ready:
                 data = connection.recv(65536)
                 if not data:
@@ -203,10 +372,14 @@ def attach_probe(socket_path):
     return 0
 
 
-def attach_client(socket_path, stdin=0, stdout=1):
+ATTACH_SAID = 4096
+
+
+def attach_client(socket_path, stdin=0, stdout=1, said=None):
     """The client of an attach: a dumb byte pipe. Nothing from the sandbox is executed. It runs on the host (Linux),
     or, on macOS, in the container (--internal-attach-client through `podman exec`: the socket is in podman
-    machine's VM, and a Unix socket does not cross its shared folders)."""
+    machine's VM, and a Unix socket does not cross its shared folders). SAID (a bytearray): gets the last
+    ATTACH_SAID bytes received (tmux's last words: "no sessions" when the session it attaches to is gone)."""
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         connect_relay(client, socket_path)
@@ -249,6 +422,9 @@ def attach_client(socket_path, stdin=0, stdout=1):
                 data = client.recv(65536)
                 if not data:
                     break
+                if said is not None:
+                    said += data
+                    del said[:-ATTACH_SAID]
                 view = memoryview(data)
                 while view:
                     view = view[os.write(stdout, view):]
@@ -282,17 +458,67 @@ def shortened(value, budget=None):
     return value
 
 
-def tool_call_record(line):
-    """The log record of a JSON-RPC line from an agent if it calls an MCP tool, else None."""
-    try:
-        message = json.loads(line)
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(message, dict) or message.get("method") != "tools/call":
-        return None
-    params = message.get("params") if isinstance(message.get("params"), dict) else {}
-    return {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "tool": str(params.get("name", ""))[:200],
-            "arguments": McpGateway.arguments(params.get("arguments", {}))}
+FULL_ARGUMENTS_LIMIT = 64 << 10  # bytes of a tool call's arguments a question shows in full (its details)
+FULL_ARGUMENTS_MARGIN = 16 << 10  # read past the limit for the redaction: a credential across the cut is redacted whole
+LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def arguments_window(arguments, limit=FULL_ARGUMENTS_LIMIT):
+    """(window, size) of ARGUMENTS of a tool call: their pretty-printed JSON (exactly this value; a lone surrogate,
+    which JSON allows as "\\ud800", kept as its escape) cut at LIMIT + FULL_ARGUMENTS_MARGIN bytes of UTF-8 (whole
+    when it fits), and the size of the whole text in bytes. What the agent's hook sends of its call (hook_client),
+    and the first half of full_arguments."""
+    text = json.dumps(arguments, indent=2, ensure_ascii=False, default=repr)
+    text = LONE_SURROGATE.sub(lambda found: f"\\u{ord(found.group()):04x}", text)
+    data = text.encode()
+    return data[:limit + FULL_ARGUMENTS_MARGIN].decode("utf-8", "ignore"), len(data)
+
+
+def window_cut(window, size, limit=FULL_ARGUMENTS_LIMIT, values=()):
+    """(text, more) of a call's arguments from their WINDOW and whole SIZE (arguments_window): credentials redacted
+    (redact_text) and VALUES (the run's secrets) as [redacted], before the cut, so that one across it is redacted
+    whole; at most LIMIT bytes of it, and MORE: how many bytes beyond those the call carries (0: TEXT is all of it)."""
+    text = redact_text(window)
+    for value in values:
+        text = text.replace(value, "[redacted]")
+    shown = text.encode()
+    rest = max(0, size - len(window.encode()))
+    if not rest and len(shown) <= limit:
+        return shown.decode(), 0
+    kept = shown[:limit].decode("utf-8", "ignore")
+    return kept, len(shown) - len(kept.encode()) + rest
+
+
+def window_shown(window, size, limit=FULL_ARGUMENTS_LIMIT, values=()):
+    """The text a question's details show of a call's arguments (window_cut): at most LIMIT bytes, and beyond that a
+    line "... truncated: N more bytes", never cut silently. (A call that does not fit is not asked: too_large.)"""
+    return marked(*window_cut(window, size, limit, values))
+
+
+def marked(kept, more):
+    """KEPT, the text shown of a call's arguments, and a line that says the MORE bytes it leaves out (never cut
+    silently)."""
+    if not more:
+        return kept
+    return f"{kept}\n... truncated: {more} more bytes (the call carries them all; shown are the first " \
+           f"{len(kept.encode())})"
+
+
+def too_large_refusal(more, limit=FULL_ARGUMENTS_LIMIT):
+    """Why a call whose arguments are MORE bytes over the LIMIT a question shows in full is refused without a question:
+    the human would allow what they never saw (its tail, where a command may do what its start does not say)."""
+    return (f"its arguments are {more} bytes more than the {limit >> 10} KiB a question shows in full: refused without "
+            "asking, as nobody can approve what they cannot read. Make the call smaller (e.g. write a file in parts), "
+            "or have the human allow it by a rule (decision allow) or allow this tool for the run")
+
+
+def full_arguments(arguments, limit=FULL_ARGUMENTS_LIMIT, values=()):
+    """ARGUMENTS of a tool call as a question's details show them to the human: pretty-printed JSON of exactly the
+    value the call passes on (the relay forwards the message re-encoded from this same value, so the text parses to
+    what the server gets), credentials redacted (redact_text) and VALUES too, at most LIMIT bytes of UTF-8. Beyond
+    that it ends with a line "... truncated: N more bytes", never cut silently. A lone surrogate (JSON allows
+    "\\ud800") is kept as its escape."""
+    return window_shown(*arguments_window(arguments, limit), limit, values)
 
 
 MCP_LINE_LIMIT = 64 << 20  # one JSON-RPC message from the client
@@ -336,11 +562,13 @@ class McpGateway:
     and questions are lines on OUT (stderr): on the host, the supervisor's log reader (mcp.py) writes them
     to mcp-calls.jsonl and into the approvals directory, which this side can only read for the answers."""
 
-    def __init__(self, config=None, out=None, asker=None, taint=None, plain=False):
+    def __init__(self, config=None, out=None, asker=None, taint=None, plain=False, values=()):
         config = config or {}
         # ASKER (the run's broker) and TAINT exist where the run is known: the supervisor's relay. PLAIN: records
-        # as JSON lines (a log file) rather than prefixed lines for the log reader on the host.
+        # as JSON lines (a log file) rather than prefixed lines for the log reader on the host. VALUES: the run's
+        # secret values (the agent has them), [redacted] in records and questions as in the agent's own tool calls'.
         self.asker, self.taint, self.plain = asker, taint, plain
+        self.values = sorted({v for v in values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
         self.server = str(config.get("server") or "")
         self.rules = Ruleset(config.get("rules", []))
         self.approvals = Path(config["approvals"]) if config.get("approvals") else None
@@ -351,6 +579,8 @@ class McpGateway:
         # refused at once until then (time.monotonic(), UNANSWERED_PAUSE), then asked again.
         self.decided, self.asked, self.token = {}, 0, secrets.randbelow(10 ** 9)
         self.cooling = {}
+        # The key of call_digest: a question's file names its call by a digest nobody can test guesses against.
+        self.salt = secrets.token_bytes(32)
         self.who = Attribution()
         # The run's kill switch (sandbox-ai net cut), for a server that reaches the network outside any sandbox of
         # its own (McpRelays.open): CUT() is the cut that holds now, or None.
@@ -407,18 +637,24 @@ class McpGateway:
         text = redact_text(json.dumps(shortened(arguments), ensure_ascii=False, default=repr))
         return text[:2000] + ("..." if len(text) > 2000 else "")
 
+    def hidden(self, text):
+        """TEXT with the run's secret values as [redacted]."""
+        for value in self.values:
+            text = text.replace(value, "[redacted]")
+        return text
+
     def decide(self, tool, arguments, ident, client=None):
         """(allowed, reason) for a call of TOOL, asking the human where a rule says ask; the call is recorded
         with CLIENT, the calling process (see client)."""
         state = self.taint.shown() if self.taint is not None else None
         verdict = self.rules.mcp(self.server, tool, arguments, state)
-        record = {"event": "call", "id": ident, "tool": tool[:200], "arguments": self.arguments(arguments),
+        record = {"event": "call", "id": ident, "tool": tool[:200], "arguments": self.hidden(self.arguments(arguments)),
                   **(client or {}), **({"tainted": state.get("since")} if state and state.get("tainted") else {})}
         if self.rules.mcp_active:
             record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"])
         allowed, reason = verdict["decision"] == "allow", verdict["reason"]
         if verdict["decision"] == "ask":
-            answer = self.ask(tool, record["arguments"], verdict, client)
+            answer = self.ask(tool, record["arguments"], verdict, client, full=arguments)
             record["approval"] = approval_record(answer)
             if answer.get("question"):
                 record["question"] = answer["question"]
@@ -430,11 +666,26 @@ class McpGateway:
         self.emit("sandbox-ai-mcp-call", record)
         return allowed, reason
 
-    def ask(self, tool, arguments, verdict, client=None):
+    def call_digest(self, arguments):
+        """The digest of exactly these ARGUMENTS (keyed with this gateway's salt): the run's broker asks a call with
+        other arguments on its own, never lets it through by the answer to another call's question."""
+        exact = json.dumps(arguments, ensure_ascii=True, default=repr).encode()
+        return hashlib.blake2b(exact, key=self.salt, digest_size=16).hexdigest()
+
+    def ask(self, tool, arguments, verdict, client=None, full=None):
         """The human's answer about a call (kind "mcp"), through the log reader on the host; refused after the
-        timeout. CLIENT: the calling process, shown in the question."""
+        timeout. CLIENT: the calling process, shown in the question. ARGUMENTS: the short form the question's line
+        shows; FULL: the call's arguments themselves, which its details show in full (full_arguments) - a call too
+        large for that is refused, never asked (too_large_refusal) - and whose exact digest binds its question and
+        the refusal while nobody answers it (cooling)."""
+        details, more = {}, 0
+        if full is not None:
+            kept, more = window_cut(*arguments_window(full), values=self.values)
+            details = {"arguments_full": marked(kept, more)}
         if self.asker is not None:  # the run's broker: it asks, waits and remembers answers for the run
-            answer = self.asker("mcp", {"server": self.server, "tool": tool, "arguments": arguments,
+            answer = self.asker("mcp", {"server": self.server, "tool": tool, "arguments": arguments, **details,
+                                        **({"call_digest": self.call_digest(full)} if full is not None else {}),
+                                        **({"too_large": more} if more else {}),
                                         "rule": verdict["rule"], "ruleset": verdict["ruleset"],
                                         "reason": printable_text(verdict["reason"], 1000),
                                         **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(client or {})})
@@ -443,12 +694,15 @@ class McpGateway:
                     "reason": answer.get("reason", "no answer"),
                     **{k: answer[k] for k in ("question", "why") if isinstance(answer.get(k), str)}}
         key = (verdict["ruleset"], verdict["rule"], tool)
+        cools = (*key, self.call_digest(full)) if full is not None else key  # this exact call, as its question showed
         with self.lock:
             if key in self.decided:
                 return self.decided[key]
-            if self.cooling.get(key, (0, None))[0] > time.monotonic():
+            if self.cooling.get(cools, (0, None))[0] > time.monotonic():
                 return {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s to question "
-                        f"{self.cooling[key][1]}; refused without asking for now, then asked again"}
+                        f"{self.cooling[cools][1]}; refused without asking for now, then asked again"}
+            if more:  # its question could not show all of it: refused, never asked
+                return {"decision": "deny", "scope": "once", "reason": too_large_refusal(more)}
             if self.approvals is None:
                 return {"decision": "deny", "scope": "once", "reason": "this server cannot ask (no approvals directory)"}
             if self.asked >= RUN_QUESTIONS:
@@ -456,7 +710,8 @@ class McpGateway:
             self.asked += 1
             ident = f"{int(time.time())}-{self.token}-{self.asked}"
         self.emit("sandbox-ai-mcp-ask", {"id": ident, "kind": "mcp", "timeout": self.timeout, "tool": tool,
-                                         "arguments": arguments, "rule": verdict["rule"], "ruleset": verdict["ruleset"],
+                                         "arguments": arguments, **details,
+                                         "rule": verdict["rule"], "ruleset": verdict["ruleset"],
                                          "reason": printable_text(verdict["reason"], 1000), **(client or {})})
         deadline, answer = time.monotonic() + self.timeout, None
         while time.monotonic() < deadline:
@@ -466,7 +721,7 @@ class McpGateway:
             time.sleep(0.2)
         if answer is None:  # no decision: refused at once for a while, then asked again
             with self.lock:
-                self.cooling[key] = (time.monotonic() + UNANSWERED_PAUSE, ident)
+                self.cooling[cools] = (time.monotonic() + UNANSWERED_PAUSE, ident)
         answer = {**(answer or {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s"}),
                   "question": ident}
         if answer["scope"] in ("run", "always"):
@@ -484,7 +739,7 @@ class McpGateway:
     def answer(self, ident):
         try:
             data = json.loads((self.approvals / f"{ident}.answer").read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         if not isinstance(data, dict) or data.get("decision") not in ("allow", "deny"):
             return {"decision": "deny", "scope": "once", "reason": "unreadable answer"}
@@ -597,10 +852,30 @@ class McpConnection:
             self.reply(ident, result={"content": [{"type": "text", "text": f"sandbox-ai: {reason}"}], "isError": True})
 
     def pump(self):
-        """The server's lines back to the agent until it ends."""
+        """The server's lines back to the agent until it ends; then server_ended."""
         with contextlib.suppress(OSError, ValueError):
             for line in iter(lambda: self.process.stdout.readline(MCP_LINE_LIMIT + 1), b""):
                 self.send(self.server_line(line))
+        self.server_ended()
+
+    def server_ended(self):
+        """The server's output ended (it exited, crashed, or its socket closed): each request still open is answered
+        with an error, and the agent's connection is closed, so the agent sees the server gone (and may start it
+        again) instead of waiting for answers that cannot come. (The relay went on reading the agent's lines: a call
+        in flight when the server crashed waited until the agent's own timeout, and only the agent's next message
+        ended the connection.)"""
+        with self.lock:
+            open_requests, self.pending = self.pending, {}
+        for key, request in open_requests.items():
+            with contextlib.suppress(ValueError, OSError):
+                ident = json.loads(key)
+                if request["method"] == "tools/call":
+                    self.gateway.emit("sandbox-ai-mcp-call", {
+                        "event": "result", "id": ident, "tool": request.get("tool"), "bytes": 0, "is_error": True,
+                        "server_ended": True, "ms": int((time.monotonic() - request["started"]) * 1000)})
+                self.reply(ident, error=(-32000, "sandbox-ai: the MCP server ended before it answered"))
+        with contextlib.suppress(OSError):
+            self.connection.shutdown(socket.SHUT_RDWR)
 
     def server_line(self, line):
         if not self.pending:
@@ -804,8 +1079,11 @@ class McpRelays:
     kill switch as it holds (RuntimeNetwork.cut_view), for the servers whose configuration says "network" (see
     McpGateway.cut_refusal)."""
 
-    def __init__(self, broker=None, taint=None, run_dir=None, upstream_dir=None, log=None, live=False, cut=None):
+    def __init__(self, broker=None, taint=None, run_dir=None, upstream_dir=None, log=None, live=False, cut=None,
+                 secret_values=()):
         self.broker, self.taint, self.live, self.cut = broker, taint, live, cut
+        # The run's secret values: [redacted] in every gateway's records and questions (McpGateway VALUES).
+        self.values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
         self.run_dir, self.upstream_dir = Path(run_dir or MCP_RUN_DIR), Path(upstream_dir or MCP_UPSTREAM_DIR)
         self.log = log or (LOG_DIR / "mcp-calls.jsonl" if LOG_DIR.is_dir() else None)
         self.out, self.relays, self.threads = None, {}, []
@@ -826,7 +1104,7 @@ class McpRelays:
         directory = self.run_dir / name
         directory.mkdir(mode=0o755, parents=True, exist_ok=True)
         gate = McpGateway(config, self.stream(), asker=self.broker.ask if self.broker is not None else None,
-                          taint=self.taint, plain=True)
+                          taint=self.taint, plain=True, values=self.values)
         if config.get("network") is True and self.cut is not None:
             # A server that reaches the network from a container of its own (the launcher says so): the run's kill
             # switch holds for it here, in the relay every request of the agent passes.
@@ -920,9 +1198,11 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
     while True:
         try:
             connection, _ = server.accept()
-        except OSError:
+        except OSError as exc:
             if relay is not None and relay.closed:
                 return 0
+            if accept_transient(exc):
+                continue
             raise
         changed = mounts_changed(mounts)
         if changed:
@@ -974,8 +1254,13 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                                   file=sys.stderr)
                             break
                         session.client_line(line)
-                except (OSError, ValueError, RuntimeError):
-                    pass
+                except (OSError, ValueError, RuntimeError) as exc:
+                    # The connection ends (the agent sees its server go): a record of why, in the MCP log (the
+                    # server's supervisor.log and mcp-calls.jsonl, the run's mcp-calls.jsonl), never the terminal.
+                    with contextlib.suppress(Exception):
+                        gate.emit("sandbox-ai-mcp-call", {"event": "connection-ended",
+                                                          "why": printable_text(redact_text(
+                                                              f"{type(exc).__name__}: {exc}"), 300)})
                 finally:
                     try:
                         with contextlib.suppress(OSError):
@@ -1083,7 +1368,7 @@ NESTED_DIR = Path("/run/sandbox-nested")
 NESTED_USERNS = NESTED_DIR / "userns"
 NESTED_HIDDEN = NESTED_DIR / "hidden"
 NESTED_TOP = 65534  # IDs above it ("nobody" is the highest images use) stand in for the reserved ones
-CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWCGROUP = 0x10000000, 0x00020000, 0x02000000
+CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWCGROUP, CLONE_NEWIPC = 0x10000000, 0x00020000, 0x02000000, 0x08000000
 MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC, MS_REMOUNT, MS_BIND = 1, 2, 4, 8, 32, 4096
 # Firejail's default filter, but what a container engine needs inside its own namespaces: mounting, pivot_root and
 # chroot, a container's host name. They act only on namespaces the agent made (its capabilities count nowhere else);
@@ -1221,13 +1506,34 @@ def nested_sys(libc, root=Path("/sys")):
     return how
 
 
+def nested_ipc(libc, mqueue=Path("/dev/mqueue")):
+    """The agent's own IPC namespace, of its user namespace, and a fresh mqueue for it at MQUEUE (in its mount
+    namespace). crun mounts mqueue for every container, and the kernel lets only a holder of CAP_SYS_ADMIN in the user
+    namespace that owns the IPC namespace do that: the sandbox's is the pod's, where the agent's root is nobody (CI on
+    GitHub's runner: "crun: mount `mqueue` to `dev/mqueue`: Operation not permitted"). Stricter, too: the agent shares
+    no System V IPC with the supervisor's processes (Xvfb offers it no MIT-SHM then: gui_config). Neither is fatal:
+    without them Podman says what it cannot do."""
+    if libc.unshare(CLONE_NEWIPC) != 0:
+        error = ctypes.get_errno()
+        print(f"agent-sandbox: --nested-containers: no IPC namespace of its own ({os.strerror(error)}); containers "
+              "may fail to mount mqueue", file=sys.stderr)
+        return False
+    if Path(mqueue).is_dir():
+        try:
+            libc_mount(libc, "mqueue", mqueue, "mqueue", MS_NOSUID | MS_NODEV | MS_NOEXEC)
+        except OSError as exc:
+            print(f"agent-sandbox: --nested-containers: no mqueue of its own at {mqueue}: {exc}", file=sys.stderr)
+    return True
+
+
 def enter_nested_userns(reserved, path=NESTED_USERNS, libc=None, proc=Path("/proc"), run_dirs=NESTED_RUN_DIRS,
-                        sys_root=Path("/sys")):
+                        sys_root=Path("/sys"), mqueue=Path("/dev/mqueue")):
     """The guard, verified inside Firejail: enter the agent's user namespace (its owner, the sandbox's root, may),
     check that none of RESERVED is mapped in it, then make a mount namespace of that user namespace - where a
-    container engine as its root may mount (its storage, its containers' roots). Every mount of Firejail's is
-    copied into it locked: none can be taken away, a read-only one cannot become writable, and nothing mounted
-    there reaches back (the copy receives, never sends)."""
+    container engine as its root may mount (its storage, its containers' roots) - and an IPC namespace of it
+    (nested_ipc: where it may mount mqueue). Every mount of Firejail's is copied into it locked: none can be taken
+    away, a read-only one cannot become writable, and nothing mounted there reaches back (the copy receives, never
+    sends)."""
     libc = libc or ctypes.CDLL(None, use_errno=True)
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     try:
@@ -1244,6 +1550,7 @@ def enter_nested_userns(reserved, path=NESTED_USERNS, libc=None, proc=Path("/pro
     if libc.unshare(CLONE_NEWNS) != 0:
         error = ctypes.get_errno()
         raise OSError(error, f"--nested-containers: no mount namespace of the agent's own: {os.strerror(error)}")
+    nested_ipc(libc, mqueue)
     for directory in run_dirs:
         with contextlib.suppress(OSError):  # Podman says it itself if it still cannot
             Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -1320,7 +1627,7 @@ def added_writable(registry=None, base=Path("/workspaces"), lstat=os.lstat, stat
     try:
         entries = json.loads(registry.read_text()).get("workspaces")
         holder = lstat(base).st_dev
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return []
     found = []
     for entry in entries if isinstance(entries, list) else []:
@@ -1439,7 +1746,8 @@ def inner_bootstrap():
     except OSError:
         live_mcp = False
     # CUT: the kill switch holds in the relays of the image servers that reach the network (McpGateway.cut_refusal).
-    relays = McpRelays(broker, taint, live=live_mcp, cut=network.cut_view)
+    relays = McpRelays(broker, taint, live=live_mcp, cut=network.cut_view,
+                       secret_values=[env[name] for name in cfg.get("secret_names", []) if name in env])
     guard = threading.Event()
     MemoryGuard(CONTROL_DIR if CONTROL_DIR.is_dir() else None).start(guard)
     try:
@@ -1488,7 +1796,7 @@ def inner_bootstrap():
             print(f"agent-sandbox: {problem}", file=sys.stderr)
             return 1
         # Built only now: the blacklist names the proxy's directories, which exist from here on.
-        cmd = firejail_command(before, nested=bool(nested))
+        cmd = firejail_command(before, nested=bool(nested), shutdown=cfg.get("tmux") == "detached")
         child = subprocess.Popen(cmd, env=base_env(), close_fds=True)
         oom_first(child.pid)  # an out-of-memory kill takes the agent's processes before PID 1 (the whole run)
         return wait_child(child)
@@ -1515,11 +1823,18 @@ def inner_bootstrap():
 
 
 def start_gui(cfg):
-    """Start Xvfb (and x11vnc on a Unix socket) before the agent; fail closed."""
+    """Start Xvfb (and x11vnc on a Unix socket) before the agent; fail closed. cfg "private" (the browser's display,
+    browser_runtime.py: a container that shares the pod's network and IPC namespaces with the agent): no abstract X
+    socket (-nolisten local: the agent would reach it through the shared network namespace) and no SysV shared
+    memory (MIT-SHM off, x11vnc -noshm). "selection": x11vnc passes the clipboard (the viewer decides whether to
+    use it). "no_shm" (--nested-containers: the agent's IPC namespace is its own, Xvfb's shared memory is out of its
+    reach): no MIT-SHM either."""
     processes = []
+    private = ["-nolisten", "local", "-extension", "MIT-SHM"] if cfg.get("private") else \
+        ["-extension", "MIT-SHM"] if cfg.get("no_shm") else []
     try:
         processes.append(subprocess.Popen(DROP_ALL + ["Xvfb", cfg["display"], "-screen", "0", cfg["screen"],
-                                                      "-nolisten", "tcp"],
+                                                      "-nolisten", "tcp", *private],
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         deadline = time.monotonic() + 15
         while not x_socket(cfg["display"]).exists():
@@ -1534,7 +1849,10 @@ def start_gui(cfg):
             errors = tempfile.TemporaryFile()
             processes.append(subprocess.Popen(DROP_ALL + ["x11vnc", "-display", cfg["display"], "-unixsock",
                                                           str(VNC_DIR / "vnc.sock"), "-rfbport", "0", "-forever",
-                                                          "-shared", "-nopw", "-quiet", "-nosel"],
+                                                          "-shared", "-nopw", "-quiet",
+                                                          *([] if cfg.get("selection") else ["-nosel"]),
+                                                          *(["-noshm"] if cfg.get("private") or cfg.get("no_shm")
+                                                            else [])],
                                               stdout=subprocess.DEVNULL, stderr=errors))
             wait_for_unix_listener(VNC_DIR / "vnc.sock", processes[-1], errors, "x11vnc")
     except BaseException:
@@ -2462,10 +2780,15 @@ class MemoryGuard:
         return thread
 
 
-def firejail_command(before, nested=False):
+def firejail_command(before, nested=False, shutdown=False):
+    """SHUTDOWN (a session's guard, tmux_command detached): the sandbox ends with its guard. Firejail's default keeps
+    it for as long as any process in it runs - an agent's background process, the terminal's relay - and the run
+    went on, shown as running, after its tmux session had ended."""
     help_text = subprocess.run(["firejail", "--help"], check=True, text=True, capture_output=True).stdout
     command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs",
                NESTED_SECCOMP if nested else "--seccomp"]
+    if shutdown and "--deterministic-shutdown" in help_text:
+        command.append("--deterministic-shutdown")
     for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR, VM_CONTROL_DIR):
         if private.is_dir():
             command.append(f"--blacklist={private}")
@@ -2499,20 +2822,61 @@ def base_env():
             "XDG_CACHE_HOME": "/root/.cache"}
 
 
+# The server's options, set before the session starts (after any tmux.conf, so these win):
+# - escape-time 10 ms (tmux 3.5's default; 3.3 waits 500 ms after Esc, which an agent's interface feels as lag);
+# - the terminal's synchronized update (DEC mode 2026) for every terminal: tmux 3.3 knows only iTerm2's older form
+#   and sends none to the others, so its redraws (attach, resize, a window switch) reached the terminal in pieces.
+#   The form is tmux 3.4's own "sync" feature; a terminal without the mode ignores it. The trailing "\;" is tmux's
+#   escape of the terminfo "%;" (an argument ending in ";" would end the command).
+TMUX_OPTIONS = ("set-option", "-s", "escape-time", "10", ";",
+                "set-option", "-sa", "terminal-overrides", ",*:Sync=\\E[?2026%?%p1%{1}%-%tl%eh%\\;", ";")
+
+
+# A session's end, for the host (in TMUX_DIR, the session's tmux/ folder there): AGENT_EXIT, written by the agent's
+# tmux window when the agent exits ("STATUS SECONDS-SINCE-THE-EPOCH"), and TMUX_ENDED, written by the guard once the
+# tmux session is gone ({"status": the agent's exit status or null, "seconds": how long the agent ran or null}).
+# Written inside the sandbox: the host reads them as the sandbox's word (sessions.tmux_ended), never as more.
+AGENT_EXIT = f"{TMUX_DIR}/agent-exit"
+TMUX_ENDED = f"{TMUX_DIR}/ended"
+
+
 def tmux_command(command, detached=False):
     """tmux session: the agent in window 0, a sandboxed bash in window 1.
 
-    Detached (named sessions): the guard keeps the sandbox alive for as long
-    as the tmux session exists, so clients can attach and detach."""
-    tmux = ["tmux", "-u", "new-session", *(["-d"] if detached else []), "-s", "sandbox", "-n", "agent", "-c", "/work",
-            shlex.join(command), ";", "new-window", "-d", "-n", "shell", "-c", "/work", "bash"]
+    Detached (named sessions): the guard keeps the sandbox alive for as long as the tmux session exists, so clients
+    can attach and detach - and no longer: once it is gone (the agent and the shell window ended) the guard ends the
+    terminal's relay, records the end (TMUX_ENDED: the agent's exit status, how long it ran), says it in the log and
+    ends, and with it the sandbox (Firejail's --deterministic-shutdown: firejail_command). The relay was left running
+    before, and kept the sandbox - shown as running, its attach answering tmux's "no sessions" - alive for good."""
+    agent = shlex.join(command)
+    if detached:  # the agent's exit status and when, for the guard's account of the end
+        agent += f'; printf "%s %s" "$?" "$(date +%s)" > {AGENT_EXIT}'
+    tmux = ["tmux", "-u", *TMUX_OPTIONS, "new-session", *(["-d"] if detached else []), "-s", "sandbox", "-n", "agent",
+            "-c", "/work", agent, ";", "new-window", "-d", "-n", "shell", "-c", "/work", "bash"]
     if not detached:
         return tmux
     # Terminals attach through a byte relay started here, inside Firejail: a
     # host-side tmux client could be told by the agent's server to run commands.
     relay = shlex.join([*SUPERVISOR_PYTHON, "/sandbox/runtime.py", "--internal-attach-relay", ATTACH_SOCKET])
-    return ["sh", "-c", f"{shlex.join(tmux)} && ({relay} &) && "
-                        "while tmux has-session -t sandbox 2>/dev/null; do sleep 1; done"]
+    return ["sh", "-c", f"""{shlex.join(tmux)} || exit $?
+begun=$(date +%s)
+{relay} &
+relay=$!
+while tmux has-session -t sandbox 2>/dev/null; do sleep 1; done
+kill "$relay" 2>/dev/null
+status=null seconds=null exited=
+read -r exited at 2>/dev/null < {AGENT_EXIT}
+case "$exited$at" in ''|*[!0-9]*) ;; *) status=$exited seconds=$((at - begun)) ;; esac
+if [ "$status" = null ]; then
+  echo "agent-sandbox: the terminal's tmux session has ended without the agent's exit status (tmux, or the agent's \
+window, was ended); the sandbox ends" >&2
+else
+  echo "agent-sandbox: the agent exited with status $status after $seconds s, and the shell window closed: the \
+terminal's tmux session has ended; the sandbox ends" >&2
+fi
+printf '{{"status": %s, "seconds": %s}}\n' "$status" "$seconds" > {TMUX_ENDED}
+wait "$relay" 2>/dev/null
+exit 0"""]
 
 
 def inner_guard(before):
@@ -2555,7 +2919,12 @@ PEEK_TIMEOUT = 1.0
 IDLE_TIMEOUT = 3600
 ZERO_ID = re.compile(rb"0{40}|0{64}")
 HTTP_PORTS = (80, 443)       # other protocols there are refused: they would only hide HTTP from the checks
-LEADING_CRLF = re.compile(rb"^(?:\r\n)+")
+# Empty lines before a request line, which servers skip: CRLF, and also a bare LF or CR (nginx, Node and others skip
+# those too), so that none of them hides a request from the checks.
+LEADING_CRLF = re.compile(rb"^[\r\n]+")
+# The start of an HTTP request: a method in capitals, or in any case before an origin-form target (Go's net/http and
+# others take "post /x" for a request; a method's case is no way past the rules, which compare it in capitals).
+HTTP_START = re.compile(rb"[A-Z]{3,10} \S|[A-Za-z]{3,10} [/*]")
 OPENSSL_CONFIG = """\
 [req]
 distinguished_name = dn
@@ -2651,13 +3020,30 @@ def server_certificate(run_dir, host):
         host = host.rstrip(".").lower()
         san = f"DNS:{host}"
     path = run_dir / "certs" / f"{host}.pem"
-    if not path.exists():
-        temporary = path.with_name(f".{host}.{threading.get_ident()}.pem")
-        run_openssl(["req", "-x509", "-new", "-key", str(run_dir / "leaf.key"), "-out", str(temporary), "-days", "30",
-                     "-subj", f"/CN={host[:64]}", "-config", str(run_dir / "openssl.cnf"), "-extensions", "leaf",
-                     "-CA", str(run_dir / "ca.pem"), "-CAkey", str(run_dir / "ca.key")], san=san)
-        os.replace(temporary, path)
+    if path.exists():
+        return path
+    # One openssl run per host: the connections a program opens at once to a host new to the run (a browser's six,
+    # an agent's parallel requests) each made the same certificate, an openssl process apiece; the others wait for it.
+    with _CERTIFICATES_LOCK:
+        making = _CERTIFICATES_MADE.setdefault(str(path), threading.Lock())
+    try:
+        with making:
+            if not path.exists():
+                temporary = path.with_name(f".{host}.{threading.get_ident()}.pem")
+                run_openssl(["req", "-x509", "-new", "-key", str(run_dir / "leaf.key"), "-out", str(temporary),
+                             "-days", "30", "-subj", f"/CN={host[:64]}", "-config", str(run_dir / "openssl.cnf"),
+                             "-extensions", "leaf", "-CA", str(run_dir / "ca.pem"), "-CAkey", str(run_dir / "ca.key")],
+                            san=san)
+                os.replace(temporary, path)
+    finally:
+        with _CERTIFICATES_LOCK:
+            if _CERTIFICATES_MADE.get(str(path)) is making:
+                del _CERTIFICATES_MADE[str(path)]  # (only those being made are kept: the names are endless)
     return path
+
+
+_CERTIFICATES_LOCK = threading.Lock()
+_CERTIFICATES_MADE = {}  # the path of a certificate being made: the lock its other callers wait at
 
 
 HOST_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)*"
@@ -2716,13 +3102,13 @@ def first_bytes_state(data):
     record, of an HTTP method or of an SSH banner (a client that sends those piece by piece is waited
     for, never waved through as something else)."""
     data = LEADING_CRLF.sub(b"", data)  # servers skip empty lines before a request line (RFC 9112 2.2)
-    if not data or data == b"\r":
+    if not data:
         return "more"
     if data[0] == 0x16:
         return "more" if client_hello_sni(data)[0] == "partial" else "complete"
     if len(data) < 4 and b"SSH-".startswith(data):
         return "more"
-    if re.fullmatch(rb"[A-Z]{1,10}", data):
+    if re.fullmatch(rb"[A-Za-z]{1,10} ?", data):  # a method (in any case), and its space, without a target yet
         return "more"
     return "complete"
 
@@ -2846,11 +3232,99 @@ def redact_headers(headers):
     return [[name, "[redacted]" if SECRET_HEADER.search(name) else redact_text(value)] for name, value in headers]
 
 
-def redact_text(text):
-    for (pattern, replacement), needs in zip(SECRET_TEXT, SECRET_TEXT_NEEDS):
+def redact_text(text, anchored=None):
+    """TEXT with SECRET_TEXT's matches replaced, pattern after pattern. A long text (ANCHORED None: longer than
+    REDACT_ANCHORED) is searched only where a match can begin (SECRET_TEXT_STARTS, anchored_sub) - with the same
+    result: a pattern's sub() tried every position in one call of the regex engine, which holds the GIL throughout
+    (the LLM traffic log's thread redacting a 3 MB record held up every connection of the proxy for 80 ms at a time)."""
+    anchored = len(text) > REDACT_ANCHORED if anchored is None else anchored
+    for index, ((pattern, replacement), needs) in enumerate(zip(SECRET_TEXT, SECRET_TEXT_NEEDS)):
         if needs(text):
-            text = pattern.sub(replacement, text)
+            starts = SECRET_TEXT_STARTS[index](text) if anchored and SECRET_TEXT_STARTS[index] else None
+            text = pattern.sub(replacement, text) if starts is None else \
+                anchored_sub(pattern, replacement, text, starts)
     return text
+
+
+REDACT_ANCHORED = 2048  # characters: a longer text is searched where its matches can begin (redact_text)
+# What [a-z_] takes under re.I (the names of SECRET_TEXT[1]): ASCII letters, "_" and four letters beyond ASCII.
+NAME_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_İıſK")
+# Letters re.I takes for ASCII letters that str.lower() does not make them (İ also lowers into two characters).
+LOWER_UNLIKE_IGNORECASE = ("İ", "ı", "ſ")
+
+
+def anchored_sub(pattern, replacement, text, starts):
+    """pattern.sub(replacement, text) where every match of PATTERN in TEXT begins at one of STARTS (ascending
+    positions, repeats allowed): tried only there, in order, each from the end of the match before. The same
+    matches as sub()'s search, which tries each position in turn with match()'s rules (^ and \\b look at the whole
+    text); none of SECRET_TEXT matches an empty text."""
+    pieces, done = [], 0
+    for start in starts:
+        if start < done:
+            continue
+        match = pattern.match(text, start)
+        if match:
+            pieces += (text[done:start], match.expand(replacement))
+            done = match.end()
+    if not pieces:
+        return text
+    pieces.append(text[done:])
+    return "".join(pieces)
+
+
+def found_at(text, *literals):
+    """The positions of LITERALS in TEXT, ascending (repeats where two begin at one place)."""
+    def each(literal):
+        place = text.find(literal)
+        while place >= 0:
+            yield place
+            place = text.find(literal, place + 1)
+    return heapq.merge(*(each(literal) for literal in literals))
+
+
+def names_starts(text):
+    """Where SECRET_TEXT[1] can begin: at \\b, then [a-z_]* up to a "=" (its lookahead) - so only where the run of
+    NAME_CHARACTERS before a "=" begins (inside a run there is no \\b: they are all word characters)."""
+    for equals in found_at(text, "="):
+        start = equals
+        while start and text[start - 1] in NAME_CHARACTERS:
+            start -= 1
+        if start < equals:
+            yield start
+
+
+def lowered_starts(*words):
+    """Where a re.I pattern beginning with one of WORDS (lower case ASCII) can begin: where str.lower() of the text has
+    one; None (search everything) for a text with a letter lower() does not fold as re.I does."""
+    def starts(text):
+        if any(letter in text for letter in LOWER_UNLIKE_IGNORECASE):
+            return None
+        lowered = text.lower()
+        return found_at(lowered, *words) if len(lowered) == len(text) else None
+    return starts
+
+
+def window_starts(literal, before, after=0):
+    """Where a pattern can begin that has LITERAL from BEFORE to AFTER characters after its beginning."""
+    def starts(text):
+        last = -1
+        for place in found_at(text, literal):
+            for start in range(max(last + 1, place - before, 0), place - after + 1):
+                yield start
+                last = start
+    return starts
+
+
+# Where each of SECRET_TEXT can begin, for a long text (None: its sub() is quick already - it begins with a literal).
+SECRET_TEXT_STARTS = (
+    None,
+    names_starts,
+    lowered_starts("bearer", "basic", "token"),
+    window_starts("://", 21, 1),  # [a-z][a-z0-9+.-]{0,20} before it
+    None,
+    window_starts("-u", 2),  # (?:^|\s) and the first "-" of --user before it
+    lambda text: found_at(text, "sk-", "gh", "github_pat_", "glpat-", "xox", "AKIA", "eyJ"),
+)
 
 
 def body_record(data, total, headers, limit):
@@ -3009,6 +3483,50 @@ def no_delay(sock):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
 
+def wait_ready(read, write=(), timeout=None):
+    """select.select(READ, WRITE, [], TIMEOUT)[:2] for descriptors of any number: select() refuses those of 1024
+    and above (FD_SETSIZE) with ValueError, which a busy proxy reaches (four descriptors per connection: both sides
+    and their duplicates for the kill switch), so that from then on every new connection failed. A peer's end, an
+    error or a closed descriptor counts as readable, as with select(): the next recv() tells which."""
+    poller, wanted = select.poll(), {}
+    for objects, mask in ((read, select.POLLIN | select.POLLPRI), (write, select.POLLOUT)):
+        for item in objects:
+            fd = item if isinstance(item, int) else item.fileno()
+            if fd < 0:
+                raise ValueError("file descriptor cannot be a negative integer")
+            wanted.setdefault(fd, [0, []])
+            wanted[fd][0] |= mask
+            wanted[fd][1].append((item, mask))
+    for fd, (mask, _) in wanted.items():
+        poller.register(fd, mask)
+    milliseconds = None if timeout is None else max(0, math.ceil(timeout * 1000))
+    readable, writable = [], []
+    for fd, events in poller.poll(milliseconds):
+        broken = events & (select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        for item, mask in wanted.get(fd, (0, ()))[1]:
+            if mask & select.POLLOUT:
+                if events & select.POLLOUT or broken:
+                    writable.append(item)
+            elif events & (select.POLLIN | select.POLLPRI) or broken:
+                readable.append(item)
+    return readable, writable
+
+
+def peer_done(sock):
+    """True once SOCK's peer has closed (or shut down) its sending side, even while bytes it sent are still unread
+    (POLLRDHUP, Linux; elsewhere False: the caller waits as before). A peek at the first bytes cannot see that end
+    itself: it reads the same bytes again and again."""
+    flag = getattr(select, "POLLRDHUP", 0)
+    if not flag:
+        return False
+    try:
+        poller = select.poll()
+        poller.register(sock.fileno(), flag)
+        return any(events & (flag | select.POLLHUP | select.POLLERR) for _, events in poller.poll(0))
+    except (OSError, ValueError):
+        return True
+
+
 def send_all(sock, data):
     """sendall that also works on a non-blocking (TLS) socket. A peer that takes nothing for IDLE_TIMEOUT
     seconds (a zero window) raises socket.timeout, an OSError: a broken connection to the callers."""
@@ -3027,7 +3545,7 @@ def send_all(sock, data):
             deadline = time.monotonic() + IDLE_TIMEOUT  # progress: the idle time starts again
             continue
         remaining = deadline - time.monotonic()
-        if remaining <= 0 or not any(select.select(*waiting, [], remaining)[:2]):
+        if remaining <= 0 or not any(wait_ready(*waiting, remaining)):
             raise socket.timeout(f"the peer took nothing for {IDLE_TIMEOUT} s")
 
 
@@ -3043,7 +3561,7 @@ def relay(left, right, counts, idle=IDLE_TIMEOUT, grace=30):
         while open_:
             ready = [s for s in open_ if isinstance(s, ssl.SSLSocket) and s.pending()]
             if not ready:
-                ready = select.select(list(open_), [], [], idle if len(open_) == 2 else grace)[0]
+                ready = wait_ready(list(open_), (), idle if len(open_) == 2 else grace)[0]
                 if not ready:
                     return  # idle too long
             for sock in ready:
@@ -3754,13 +4272,17 @@ def llm_request(entry, api, document, turns=None, now=None):
                 next((holder for *_, holder in reversed(history) if holder), None)
             if target is not None:
                 llm_add_note(target, text)
+                done["note"] = {"text": text, "holder": target}  # for the LLM traffic log (llm_changes)
             elif api == "messages" and isinstance(document.get("messages"), list):
                 document["messages"].append({"role": "user", "content": text})
+                done["note"] = {"text": text, "appended": True}
             elif api == "chat" and isinstance(document.get("messages"), list):
                 document["messages"].append({"role": "user", "content": text})
+                done["note"] = {"text": text, "appended": True}
             elif api == "responses" and isinstance(document.get("input"), list):
                 document["input"].append({"type": "message", "role": "user",
                                           "content": [{"type": "input_text", "text": text}]})
+                done["note"] = {"text": text, "appended": True}
             if level == "block":
                 llm_pause_tools(document, api, entry.get("kind"))
             done["loop"] = {"action": "paused tools" if level == "block" else "note", "kind": kind,
@@ -3771,10 +4293,11 @@ def llm_request(entry, api, document, turns=None, now=None):
     return done
 
 
-def llm_body(head, parts, headers, entry, api, turns=None):
+def llm_body(head, parts, headers, entry, api, turns=None, keep=False):
     """(HEAD, PARTS, record) of a request to the --llm endpoint: its JSON body read (at most LLM_BODY_LIMIT, plain
     only) and rewritten by llm_request, its framing made a Content-Length; a body it cannot read passes as it came
-    (the record says why)."""
+    (the record says why). KEEP (the LLM traffic log): the record also holds the "document" as sent and "before",
+    llm_snapshot of it as the agent sent it."""
     encoding = (header(headers, "content-encoding") or "identity").strip().lower()
     content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
     if encoding != "identity" or not (content_type == "application/json" or content_type.endswith("+json")):
@@ -3793,7 +4316,10 @@ def llm_body(head, parts, headers, entry, api, turns=None):
         return head, iter(raw), {"skipped": "not valid JSON"}
     if not isinstance(document, dict):
         return head, iter(raw), {"skipped": "not a JSON object"}
+    before = llm_snapshot(document) if keep else None
     done = llm_request(entry, api, document, turns)
+    if keep:
+        done = {**done, "document": document, "before": before, "size": total}
     if not done["params"] and not done["loop"] and not done.get("boost"):
         return head, iter(raw), done
     body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -3962,6 +4488,766 @@ def repeated_block(text, repeats, span=LLM_TEXT_SPAN, periods=LLM_TEXT_PERIOD):
     return None
 
 
+# --- the LLM traffic log: what an agent and its model exchange --------------------------------------------------------
+#
+# llm-traffic-TIME-RUN.jsonl beside the connection log, one record per model request: the request as it went upstream
+# (after the relay's changes, which the record lists), the answer put together from its stream, status, times and
+# sizes. "llm" (the default): the requests to the --llm endpoint; "all": also every other model API request the proxy
+# opens (the agent's cloud provider, after TLS inspection); "off": none. The proxy, which runs as its own user and
+# cannot write the log directory, hands each record over a pipe to the supervisor (LlmTrafficFile), which writes the
+# file (0600) and rotates it. Nothing of a request's headers is kept; credentials are redacted like the connection
+# log's; a record over its limit is shortened (long strings cut, then the oldest messages) and says "truncated".
+
+LLM_TRAFFIC_MODES = ("off", "llm", "all")
+LLM_TRAFFIC_RECORD = 4 << 20            # bytes of one record by default (--llm-traffic-limit)
+LLM_TRAFFIC_RECORD_RANGE = (64 << 10, 64 << 20)
+LLM_TRAFFIC_PART = 64 << 20             # the file is rotated at this size
+LLM_TRAFFIC_PARTS = 4                   # rotated parts kept per run (NAME.1 the newest of them); older ones go
+LLM_TRAFFIC_QUEUE = 8                   # records waiting for the proxy's writer thread; more are counted as lost
+LLM_TRAFFIC_QUEUE_BYTES = 96 << 20      # and the request bodies they hold together (one alone is always taken)
+LLM_TRAFFIC_ENV = "SANDBOX_AI_TRAFFIC_FD"  # the pipe's end the proxy writes to
+LLM_TRAFFIC_CALLS = 256                 # tool calls of one answer kept
+LLM_CONVERSATION_KEYS = ("messages", "input", "prompt", "system", "instructions", "tools")
+# A credential in JSON inside a string of the record (a tool call's arguments, a result: \"api_key\": \"...\"), which
+# SECRET_TEXT's first pattern (unescaped quotes) does not see.
+LLM_ESCAPED_SECRET = re.compile(
+    r'(\\"[A-Za-z0-9_-]*(?:token|secret|passw|api_?key|apikey|authorization|credential|session|cookie|code_verifier'
+    r'|private|signature)[A-Za-z0-9_-]*\\"\s*:\s*)\\"(?:[^"\\]|\\[^"])*\\"', re.I)
+
+
+def llm_usage_merge(usage, value):
+    """Add the token counters of a usage object VALUE to USAGE (the largest value of each wins: streams repeat them;
+    the details' cached and reasoning tokens flattened); USAGE."""
+    if not isinstance(value, dict):
+        return usage
+    for key in USAGE_KEYS:
+        number = value.get(key)
+        if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
+            usage[key] = max(usage.get(key, 0), number)
+    for detail in ("input_tokens_details", "output_tokens_details", "prompt_tokens_details",
+                   "completion_tokens_details"):
+        if isinstance(value.get(detail), dict):
+            llm_usage_merge(usage, value[detail])
+    return usage
+
+
+class LlmAnswer:
+    """A model API's answer put together from its body as it comes - server-sent events or one JSON document (gzip or
+    deflate undone; NDJSON too): text, reasoning, tool calls with their arguments, finish reason, usage, model, id.
+    API: "chat", "completions", "responses" or "messages". Each text is kept up to LIMIT characters (then
+    "truncated"); a body that is no answer is kept as its text (an error page)."""
+
+    def __init__(self, api, limit=LLM_TRAFFIC_RECORD, encoding=None):
+        encoding = (encoding or "identity").strip().lower()
+        self.api, self.limit = api, limit
+        self.inflate = zlib.decompressobj(47) if encoding in ("gzip", "x-gzip", "deflate") else None
+        self.unreadable = None if encoding in ("identity", "gzip", "x-gzip", "deflate") else f"compressed ({encoding})"
+        self.pending, self.body, self.sse, self.events, self.received = b"", b"", None, 0, 0
+        self.start = b""  # the first bytes, as they are: what a body that holds no event was (an error page)
+        self.parts, self.sizes = {"text": [], "reasoning": []}, {"text": 0, "reasoning": 0}
+        self.calls, self.finish_reason, self.usage = {}, None, {}
+        self.model, self.ident, self.error, self.truncated = None, None, None, False
+
+    # -- reading --
+
+    def feed(self, payload):
+        """Read PAYLOAD (the next bytes of the body as they came over the wire)."""
+        if self.unreadable or not payload:
+            return
+        if self.inflate is not None:
+            try:
+                payload = self.inflate.decompress(payload, 4 * self.limit + 65536)
+            except zlib.error:
+                self.unreadable = "damaged compression"
+                return
+        self.received += len(payload)
+        if len(self.start) < 65536:
+            self.start += payload[:65536 - len(self.start)]
+        if self.sse is None:
+            start = (self.pending + payload).lstrip()
+            if not start:
+                self.pending += payload
+                return
+            self.sse = not start.startswith((b"{", b"["))
+            payload, self.pending = self.pending + payload, b""
+        if not self.sse:
+            if len(self.body) < self.limit:
+                self.body += payload[:self.limit - len(self.body)]
+            if self.received > self.limit:
+                self.truncated = True
+            return
+        self.pending += payload
+        if b"\n" not in payload and len(self.pending) > self.limit:  # one line larger than a record: skipped
+            self.pending, self.truncated = b"", True
+            return
+        *lines, self.pending = self.pending.split(b"\n")
+        for line in lines:
+            self.line(line)
+
+    def line(self, line):
+        line = line.strip()
+        if line.startswith(b"data:"):
+            line = line[5:].strip()
+        if not line.startswith(b"{"):
+            return
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            return
+        if isinstance(event, dict):
+            self.events += 1
+            self.event(event)
+
+    def add(self, kind, text):
+        if not isinstance(text, str) or not text:
+            return
+        room = self.limit - self.sizes[kind]
+        if room <= 0:
+            self.truncated = True
+            return
+        if len(text) > room:
+            text, self.truncated = text[:room], True
+        self.parts[kind].append(text)
+        self.sizes[kind] += len(text)
+
+    def call(self, key, ident=None, name=None, arguments=None, replace=False):
+        """The tool call KEY (its place in the answer): its id and name set where given, ARGUMENTS appended (or put in
+        place of what came before with REPLACE)."""
+        slot = self.calls.get(key)
+        if slot is None:
+            if len(self.calls) >= LLM_TRAFFIC_CALLS:
+                self.truncated = True
+                return
+            slot = self.calls[key] = {"id": None, "name": None, "arguments": ""}
+        if isinstance(ident, str) and ident:
+            slot["id"] = ident[:200]
+        if isinstance(name, str) and name:
+            slot["name"] = name[:200]
+        if arguments is not None and not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        if isinstance(arguments, str):
+            if replace:
+                slot["arguments"] = ""
+            room = self.limit - len(slot["arguments"])
+            if len(arguments) > room:
+                arguments, self.truncated = arguments[:max(0, room)], True
+            slot["arguments"] += arguments
+
+    def meta(self, value):
+        if not isinstance(value, dict):
+            return
+        if isinstance(value.get("model"), str) and not self.model:
+            self.model = value["model"][:200]
+        if isinstance(value.get("id"), str) and not self.ident:
+            self.ident = value["id"][:200]
+        if isinstance(value.get("usage"), dict):
+            llm_usage_merge(self.usage, value["usage"])
+        if value.get("error") and self.error is None:
+            error = value["error"]
+            self.error = error if isinstance(error, dict) else {"message": str(error)[:4000]}
+
+    def event(self, event):
+        """One event of a stream, or the whole answer of one that was not streamed."""
+        self.meta(event)
+        if self.api in ("chat", "completions") or "choices" in event:
+            self.chat(event)
+        elif self.api == "messages":
+            self.messages(event)
+        else:
+            self.responses(event)
+
+    @staticmethod
+    def content(value):
+        """The text of a content field: a string, or a list of parts with text."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "".join(part["text"] if isinstance(part, dict) and isinstance(part.get("text"), str)
+                           else part if isinstance(part, str) else "" for part in value)
+        return ""
+
+    def chat(self, event):
+        for position, choice in enumerate(event.get("choices") or []):
+            if not isinstance(choice, dict):
+                continue
+            index = choice.get("index", position)
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else \
+                choice.get("message") if isinstance(choice.get("message"), dict) else {}
+            self.add("text", self.content(delta.get("content")))
+            if isinstance(choice.get("text"), str):  # the completions API
+                self.add("text", choice["text"])
+            for key in ("reasoning_content", "reasoning", "thinking"):
+                if isinstance(delta.get(key), str):
+                    self.add("reasoning", delta[key])
+            if isinstance(delta.get("refusal"), str):
+                self.add("text", delta["refusal"])
+            for number, call in enumerate(delta.get("tool_calls") or []):
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                self.call((index, call.get("index", number)), call.get("id"), function.get("name"),
+                          function.get("arguments"))
+            if isinstance(delta.get("function_call"), dict):  # the older single function call
+                self.call((index, "function"), None, delta["function_call"].get("name"),
+                          delta["function_call"].get("arguments"))
+            if choice.get("finish_reason"):
+                self.finish_reason = str(choice["finish_reason"])[:100]
+
+    def messages(self, event):
+        kind = event.get("type")
+        if kind == "message_start" and isinstance(event.get("message"), dict):
+            self.meta(event["message"])
+        elif kind == "message" or (kind is None and isinstance(event.get("content"), list)):  # not streamed
+            for index, block in enumerate(event.get("content") or []):
+                self.block(index, block)
+            if event.get("stop_reason"):
+                self.finish_reason = str(event["stop_reason"])[:100]
+        elif kind == "content_block_start":
+            self.block(event.get("index", 0), event.get("content_block"))
+        elif kind == "content_block_delta" and isinstance(event.get("delta"), dict):
+            delta = event["delta"]
+            if isinstance(delta.get("text"), str):
+                self.add("text", delta["text"])
+            elif isinstance(delta.get("thinking"), str):
+                self.add("reasoning", delta["thinking"])
+            elif isinstance(delta.get("partial_json"), str):
+                self.call(event.get("index", 0), arguments=delta["partial_json"])
+        elif kind == "message_delta":
+            delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+            if delta.get("stop_reason"):
+                self.finish_reason = str(delta["stop_reason"])[:100]
+
+    def block(self, index, block):
+        if not isinstance(block, dict):
+            return
+        kind = block.get("type")
+        if kind == "text":
+            self.add("text", block.get("text"))
+        elif kind == "thinking":
+            self.add("reasoning", block.get("thinking"))
+        elif kind == "redacted_thinking":
+            self.add("reasoning", "[redacted thinking]")
+        elif kind in ("tool_use", "server_tool_use"):
+            given = block.get("input")
+            self.call(index, block.get("id"), block.get("name"), given if isinstance(given, dict) and given else "")
+
+    def responses(self, event):
+        kind = str(event.get("type") or "")
+        if kind in ("response.created", "response.in_progress") and isinstance(event.get("response"), dict):
+            self.meta(event["response"])
+        elif kind in ("response.output_text.delta", "response.refusal.delta"):
+            self.add("text", event.get("delta"))
+        elif kind in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            self.add("reasoning", event.get("delta"))
+        elif kind == "response.output_item.added" and isinstance(event.get("item"), dict):
+            item = event["item"]
+            if item.get("type") in ("function_call", "custom_tool_call"):
+                self.call(item.get("id") or event.get("output_index"), item.get("call_id"), item.get("name"),
+                          item.get("arguments", item.get("input")) or "")
+        elif kind in ("response.function_call_arguments.delta", "response.custom_tool_call_input.delta"):
+            self.call(event.get("item_id") or event.get("output_index"), arguments=event.get("delta"))
+        elif kind in ("response.function_call_arguments.done", "response.custom_tool_call_input.done"):
+            self.call(event.get("item_id") or event.get("output_index"),
+                      arguments=event.get("arguments", event.get("input")), replace=True)
+        elif kind in ("response.completed", "response.incomplete", "response.failed", "response.done") and \
+                isinstance(event.get("response"), dict):
+            self.whole_response(event["response"])
+        elif kind == "error":
+            self.error = {key: event.get(key) for key in ("code", "message", "param") if event.get(key)} or \
+                {"message": "error"}
+        elif event.get("object") == "response" or isinstance(event.get("output"), list):  # not streamed
+            self.whole_response(event)
+
+    def whole_response(self, response):
+        """A Responses API answer as a whole (the stream's last event carries it): what it holds wins over the
+        deltas read before (the same again, put together by the server)."""
+        self.meta(response)
+        details = response.get("incomplete_details") if isinstance(response.get("incomplete_details"), dict) else {}
+        if response.get("status") or details.get("reason"):
+            self.finish_reason = str(details.get("reason") or response.get("status"))[:100]
+        output = response.get("output")
+        if not isinstance(output, list) or not output:
+            return
+        self.parts, self.sizes, self.calls = {"text": [], "reasoning": []}, {"text": 0, "reasoning": 0}, {}
+        for index, item in enumerate(output):
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type")
+            if kind == "message":
+                for part in item.get("content") or []:
+                    if isinstance(part, dict):
+                        self.add("text", part.get("refusal") if part.get("type") == "refusal" else part.get("text"))
+            elif kind == "reasoning":
+                for part in [*(item.get("summary") or []), *(item.get("content") or [])]:
+                    if isinstance(part, dict):
+                        self.add("reasoning", part.get("text"))
+            elif kind in ("function_call", "custom_tool_call"):
+                self.call(item.get("id") or index, item.get("call_id"), item.get("name"),
+                          item.get("arguments", item.get("input")) or "", replace=True)
+            elif isinstance(kind, str) and kind.endswith("_call"):  # the server's own tools (web search ...)
+                self.call(item.get("id") or index, item.get("id"), kind,
+                          item.get("action") if isinstance(item.get("action"), dict) else "", replace=True)
+
+    # -- the result --
+
+    def result(self):
+        """{"text", "reasoning", "tool_calls" [{"id", "name", "arguments"}], "finish_reason", "usage", "model", "id",
+        "streamed", "events", "error", "unreadable", "truncated"}: the keys with something to say ("streamed"
+        always)."""
+        if self.pending.strip():
+            self.line(self.pending)
+            self.pending = b""
+        if self.sse is False and self.body:
+            try:
+                whole = json.loads(self.body)
+            except (ValueError, RecursionError):
+                for line in self.body.split(b"\n"):  # NDJSON (one event per line), or no JSON at all
+                    self.line(line)
+            else:
+                if isinstance(whole, dict):
+                    self.events += 1
+                    self.event(whole)
+            self.body = b""
+        if not self.events and self.start.strip():
+            self.error = self.error or {"body": self.start.decode("utf-8", "replace")}
+        found = {"text": "".join(self.parts["text"]), "reasoning": "".join(self.parts["reasoning"]),
+                 "tool_calls": [dict(call) for call in self.calls.values() if call["name"] or call["arguments"]],
+                 "finish_reason": self.finish_reason, "usage": dict(self.usage), "model": self.model,
+                 "id": self.ident, "events": self.events, "error": self.error, "unreadable": self.unreadable,
+                 "truncated": self.truncated}
+        return {"streamed": bool(self.sse),
+                **{key: value for key, value in found.items() if value not in (None, "", [], {}, False, 0)}}
+
+
+def llm_snapshot(document):
+    """What the relay may change in a request DOCUMENT, before it does: every field but the conversation's (a copy:
+    llm_apply_params changes "extra_params" in place), and how many tools it had (None: no list of tools)."""
+    small = {key: value for key, value in document.items() if key not in LLM_CONVERSATION_KEYS}
+    try:
+        small = json.loads(json.dumps(small, default=str))
+    except (ValueError, RecursionError):
+        small = {}
+    return {"fields": small, "tools": len(document["tools"]) if isinstance(document.get("tools"), list) else None}
+
+
+def llm_changes(before, document, done):
+    """[change] the relay made to a request: each field it set or changed ({"field", "from", "to", "why"}; no "from"
+    when the agent had not set it; WHY "parameter" - the endpoint's or the start's -, "boost" after a cut answer,
+    "loop guard"), the tools it took away, the loop guard's note ({"field": "messages", "note", "where", "message"}).
+    BEFORE: llm_snapshot of the document as the agent sent it; DONE: what llm_request returned."""
+    if not isinstance(before, dict) or not isinstance(document, dict):
+        return []
+    fields, changes, missing = before.get("fields") or {}, [], object()
+    boosted = set((done or {}).get("boost") or ())
+    for key in sorted(set(fields) | {k for k in document if k not in LLM_CONVERSATION_KEYS}, key=str):
+        old, new = fields.get(key, missing), document.get(key, missing)
+        if key == "extra_params" and isinstance(new, dict) and (old is missing or isinstance(old, dict)):
+            inner = {} if old is missing else old
+            for name in sorted(set(inner) | set(new), key=str):
+                if inner.get(name, missing) != new.get(name, missing):
+                    change = {"field": f"extra_params.{name}", "why": "boost" if name in boosted else "parameter"}
+                    if name in inner:
+                        change["from"] = inner[name]
+                    if name in new:
+                        change["to"] = new[name]
+                    changes.append(change)
+            continue
+        if old == new:
+            continue
+        change = {"field": key, "why": "loop guard" if key == "tool_choice" else "boost" if key in boosted
+                  else "parameter"}
+        if old is not missing:
+            change["from"] = old
+        if new is not missing:
+            change["to"] = new
+        changes.append(change)
+    if before.get("tools") is not None and not isinstance(document.get("tools"), list):
+        changes.append({"field": "tools", "from": f"{before['tools']} tools", "why": "loop guard",
+                        "note": "taken away for this answer"})
+    note = (done or {}).get("note")
+    if isinstance(note, dict) and note.get("text"):
+        changes.append({"field": "messages", "why": "loop guard", "note": note["text"],
+                        "where": "a new message" if note.get("appended") else "the result of a tool call",
+                        **({"message": note["message"]} if isinstance(note.get("message"), int) else {})})
+    return changes
+
+
+def llm_items(document, api):
+    """(system, [items]) of a request DOCUMENT: Anthropic's "system" or the Responses API's "instructions", and the
+    messages (chat, messages), input items (responses; a string as one) or prompts (completions)."""
+    if not isinstance(document, dict):
+        return None, []
+    if api == "responses":
+        items = document.get("input")
+        return document.get("instructions"), [items] if isinstance(items, str) else \
+            items if isinstance(items, list) else []
+    if api == "completions":
+        prompt = document.get("prompt")
+        return None, prompt if isinstance(prompt, list) else [prompt] if prompt is not None else []
+    messages = document.get("messages")
+    return document.get("system"), messages if isinstance(messages, list) else []
+
+
+def llm_digest(value):
+    """A short digest of VALUE (key order and spacing do not count)."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+                          .encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def llm_digests(document, api, note=None):
+    """[digest]: the system part's, then each message's, as the agent sent them (the loop guard's NOTE taken out
+    again, a message it added left out): a later request of the same conversation begins with the same ones, so that
+    what is new in it can be told (sandbox-ai llm traffic)."""
+    system, items = llm_items(document, api)
+    if isinstance(note, dict) and note.get("appended") and items:
+        items = items[:-1]
+    holder = note.get("holder") if isinstance(note, dict) else None
+    restore, container, key = None, None, None
+    if holder:
+        container, key = holder
+        value, text = container.get(key), str(note.get("text"))
+        if isinstance(value, str) and value.endswith("\n\n" + text):
+            container[key], restore = value[:-len(text) - 2], value
+        elif isinstance(value, list) and value and (value[-1] == text or (
+                isinstance(value[-1], dict) and value[-1].get("text") == text)):
+            container[key], restore = value[:-1], value
+    try:
+        return [llm_digest(system if system is not None else "")] + [llm_digest(item) for item in items]
+    finally:
+        if restore is not None:
+            container[key] = restore
+
+
+def llm_note_message(document, api, holder):
+    """The index of the message (input item) of DOCUMENT that holds HOLDER (where the loop guard's note went), or
+    None."""
+    if not holder:
+        return None
+    container = holder[0]
+    for index, item in enumerate(llm_items(document, api)[1]):
+        if item is container or (isinstance(item, dict) and isinstance(item.get("content"), list) and
+                                 any(part is container for part in item["content"])):
+            return index
+    return None
+
+
+def llm_cut_strings(value, cap, depth=0):
+    """VALUE with every string longer than CAP cut (how much, said at its end)."""
+    if isinstance(value, str):
+        return value if len(value) <= cap else value[:cap] + f"…[sandbox-ai: {len(value) - cap} characters cut]"
+    if depth > 64:
+        return "[sandbox-ai: nested too deep]"
+    if isinstance(value, dict):
+        return {key: llm_cut_strings(item, cap, depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        return [llm_cut_strings(item, cap, depth + 1) for item in value]
+    return value
+
+
+def compact_json(value, depth=4):
+    """json.dumps(VALUE, ensure_ascii=False, separators=(",", ":"), default=str), its objects and arrays down to DEPTH
+    levels put together from one dumps() per member: the same text, without one call that holds the GIL for all of
+    it (a record of the LLM traffic log, 3 MB, took 35 ms in one; the proxy's connections waited meanwhile)."""
+    if depth and isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + compact_json(item, depth - 1)
+                              for key, item in value.items()) + "}"
+    if depth and isinstance(value, (list, tuple)):
+        return "[" + ",".join(compact_json(item, depth - 1) for item in value) + "]"
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def llm_traffic_line(record, limit):
+    """(line, truncated): RECORD as one JSON line (bytes, no newline) of at most LIMIT bytes. Too long: its long
+    strings cut (64 KiB, then shorter), then the oldest messages of the request left out (the first kept: an
+    instruction), at last the request itself; "truncated" then says how (a list, also when the answer was cut)."""
+    def dump(value):
+        return compact_json(value).encode("utf-8", "replace")
+    how = list(record.get("truncated")) if isinstance(record.get("truncated"), list) else \
+        ["answer"] if record.get("truncated") else []
+    try:
+        line = dump(record)
+    except (ValueError, RecursionError):
+        line, record = None, {**record, "request": {"omitted": "not serialisable"}}
+        how.append("request")
+    if line is not None and len(line) <= limit:
+        return (line, False) if not how else (dump({**record, "truncated": how}), True)
+    shrunk = record
+    for cap in (65536, 16384, 4096, 1024, 256):
+        try:
+            shrunk = {**record, **{key: llm_cut_strings(record[key], cap) for key in ("request", "response", "changes")
+                                   if key in record}}
+            line = dump({**shrunk, "truncated": how + ["long strings"]})
+        except (ValueError, RecursionError):
+            continue
+        if len(line) <= limit:
+            return line, True
+    request = shrunk.get("request") if isinstance(shrunk.get("request"), dict) else {}
+    for key in ("messages", "input"):
+        items = request.get(key)
+        if not isinstance(items, list) or len(items) < 3:
+            continue
+        drop = 1
+        while True:
+            kept = {**request, key: [items[0], {"sandbox_ai_omitted": f"{drop} older items"}, *items[1 + drop:]]}
+            line = dump({**shrunk, "request": kept, "truncated": how + ["long strings", "older messages"]})
+            if len(line) <= limit:
+                return line, True
+            if drop >= len(items) - 1:
+                break
+            drop = min(len(items) - 1, drop * 2)
+    kept = {key: value for key, value in shrunk.items() if key not in ("request", "response")}
+    kept["request"] = {"omitted": "too large for one record"}
+    answer = shrunk.get("response") if isinstance(shrunk.get("response"), dict) else {}
+    kept["response"] = llm_cut_strings(answer, max(256, limit // 8))
+    line = dump({**kept, "truncated": how + ["request"]})
+    if len(line) > limit:
+        line = dump({**{key: kept[key] for key in ("version", "n", "time", "run", "source", "endpoint", "host", "api",
+                                                  "model", "status", "ms") if key in kept},
+                     "truncated": how + ["everything"]})
+    return line, True
+
+
+def llm_request_document(data, total, encoding):
+    """(document, None) of a request body captured - DATA, of TOTAL bytes in all, ENCODING its Content-Encoding -, or
+    (None, why it cannot be read)."""
+    encoding = (encoding or "identity").strip().lower()
+    if total > len(data):
+        return None, f"larger than {max(1, len(data) >> 20)} MiB"
+    if encoding in ("gzip", "x-gzip", "deflate"):
+        try:
+            data = zlib.decompressobj(47).decompress(data, LLM_BODY_LIMIT + 1)
+        except zlib.error:
+            return None, "damaged compression"
+        if len(data) > LLM_BODY_LIMIT:
+            return None, f"larger than {LLM_BODY_LIMIT >> 20} MiB unpacked"
+    elif encoding != "identity":
+        return None, f"compressed ({encoding})"
+    try:
+        document = json.loads(data)
+    except (ValueError, RecursionError):
+        return None, "not valid JSON"
+    return (document, None) if isinstance(document, dict) else (None, "not a JSON object")
+
+
+class LlmTraffic:
+    """The proxy's side of the LLM traffic log: what is recorded (CONFIG: {"mode", "record_limit", "run", "session"}),
+    each exchange made into its record in a thread of its own (never in the connection's: a record of megabytes is
+    redacted there) and written to FD, the pipe to the supervisor's LlmTrafficFile. SECRETS() gives the proxy's own
+    credentials, which never appear. At most LLM_TRAFFIC_QUEUE records wait; more are counted, and the next record
+    written says how many were lost ("lost_before")."""
+
+    def __init__(self, config, fd, secrets=lambda: ()):
+        self.mode = config.get("mode") if config.get("mode") in LLM_TRAFFIC_MODES else "llm"
+        low, high = LLM_TRAFFIC_RECORD_RANGE
+        limit = config.get("record_limit")
+        self.limit = min(high, max(low, limit)) if isinstance(limit, int) and not isinstance(limit, bool) \
+            else LLM_TRAFFIC_RECORD
+        self.run, self.session, self.fd, self.secrets = config.get("run"), config.get("session"), fd, secrets
+        self.lock = threading.Condition()
+        self.queue, self.number, self.lost, self.closed, self.queued = collections.deque(), 0, 0, False, 0
+        self.thread = threading.Thread(target=self.serve, daemon=True, name="llm-traffic")
+        self.thread.start()
+
+    def wants(self, llm, method, path):
+        """"llm", "provider" or None: whether a request of METHOD to PATH is recorded (LLM: it goes to the --llm
+        endpoint)."""
+        if self.mode == "off" or str(method).upper() != "POST":
+            return None
+        if llm:
+            return "llm"
+        return "provider" if self.mode == "all" and is_model_request(path) and llm_api(path) else None
+
+    def submit(self, item):
+        """Hand ITEM (an exchange: see record) to the writer thread; False when it had to be dropped."""
+        size = item.get("size") if isinstance(item.get("size"), int) else 0
+        with self.lock:
+            if self.closed or len(self.queue) >= LLM_TRAFFIC_QUEUE or (
+                    self.queue and self.queued + size > LLM_TRAFFIC_QUEUE_BYTES):
+                self.lost += 1
+                return False
+            self.number += 1
+            item["n"] = self.number
+            self.queued += size
+            self.queue.append(item)
+            self.lock.notify()
+            return True
+
+    def close(self, timeout=5):
+        """Write what waits, then stop the thread (at most TIMEOUT seconds)."""
+        with self.lock:
+            self.closed = True
+            self.lock.notify()
+        self.thread.join(timeout)
+
+    def serve(self):
+        while True:
+            with self.lock:
+                while not self.queue and not self.closed:
+                    self.lock.wait()
+                if not self.queue:
+                    return
+                item, lost, self.lost = self.queue.popleft(), self.lost, 0
+                self.queued -= item.get("size") if isinstance(item.get("size"), int) else 0
+            try:
+                view = memoryview(self.line(item, lost))
+                while view:
+                    view = view[os.write(self.fd, view):]
+            except Exception as exc:  # noqa: BLE001 - a record that fails never stops the next one
+                with self.lock:
+                    self.lost += lost + 1
+                with contextlib.suppress(Exception):
+                    print(f"agent-sandbox: the LLM traffic log lost a record ({type(exc).__name__})",
+                          file=sys.stderr, flush=True)
+
+    def record(self, item, lost=0):
+        """The record of the exchange ITEM: {"time", "source", "endpoint", "host", "url", "api", "document" (the
+        request as sent, a dict) or "raw" ((data, total, encoding) of its body), "before" (llm_snapshot), "done" (what
+        the relay did), "answer" (an LlmAnswer), "status", "ms", "first_byte_ms", "bytes_out", "bytes_in", "loop",
+        "error", "n"}."""
+        api = item.get("api")
+        document, unread = item.get("document"), None
+        if document is None and item.get("raw") is not None:
+            document, unread = llm_request_document(*item["raw"])
+        done = item.get("done") or {}
+        note = done.get("note") if isinstance(done.get("note"), dict) else None
+        if note is not None and document is not None:
+            note = {**note, "message": llm_note_message(document, api, note.get("holder"))}
+            done = {**done, "note": note}
+        answer = item["answer"].result() if item.get("answer") is not None else {}
+        model = (document or {}).get("model")
+        record = {"version": 1, "n": item.get("n"), "time": item.get("time"), "run": self.run,
+                  **({"session": self.session} if self.session else {}), "source": item.get("source"),
+                  "endpoint": item.get("endpoint"), "host": item.get("host"),
+                  "url": item.get("url"), "api": api,
+                  "model": model[:200] if isinstance(model, str) else answer.get("model"),
+                  "stream": bool(document.get("stream")) if document is not None else answer.get("streamed"),
+                  "status": item.get("status"), "ms": item.get("ms"), "first_byte_ms": item.get("first_byte_ms"),
+                  "bytes_out": item.get("bytes_out"), "bytes_in": item.get("bytes_in")}
+        if document is not None:
+            record["digests"] = llm_digests(document, api, note)
+            record["request"] = document
+        else:
+            record["request"] = {"unread": unread or "no body"}
+        changes = llm_changes(item["before"], document, done) if item.get("before") is not None else []
+        if changes:
+            record["changes"] = changes
+        if done.get("skipped"):
+            record["relay_skipped"] = done["skipped"]
+        record["response"] = {key: value for key, value in answer.items() if key != "truncated"}
+        for key in ("loop", "error"):
+            if item.get(key):
+                record[key] = item[key]
+        if answer.get("truncated"):
+            record["truncated"] = ["answer"]
+        if lost:
+            record["lost_before"] = lost
+        return record
+
+    def line(self, item, lost=0):
+        """ITEM's record as the line written: shortened to the limit, redacted (the connection log's patterns, the
+        proxy's own credentials by value)."""
+        line, _ = llm_traffic_line(self.record(item, lost), self.limit)
+        text = redact_text(line.decode("utf-8", "replace"))
+        if '\\"' in text:
+            text = LLM_ESCAPED_SECRET.sub(r'\1\\"[redacted]\\"', text)
+        for value in self.secrets() or ():
+            text = text.replace(value, "[redacted]")
+        return (text + "\n").encode("utf-8", "replace")
+
+
+class LlmTrafficFile:
+    """The supervisor's side of the LLM traffic log: the lines the proxy writes to the pipe READ_FD, appended to PATH
+    (0600, never through a link), which is rotated at PART bytes (PATH.1 the newest older part, at most PARTS of
+    them; older ones are deleted). A line longer than LINE_LIMIT is dropped (counted in lost). serve() runs until the
+    proxy closes its end."""
+
+    def __init__(self, read_fd, path, part=LLM_TRAFFIC_PART, parts=LLM_TRAFFIC_PARTS, line_limit=None):
+        self.read_fd, self.path, self.part, self.parts = read_fd, Path(path), part, parts
+        self.line_limit = line_limit or (LLM_TRAFFIC_RECORD_RANGE[1] + (1 << 20))
+        self.fd, self.size, self.lost = None, 0, 0
+
+    def open(self):
+        if self.fd is None:
+            self.fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW |
+                              getattr(os, "O_CLOEXEC", 0), 0o600)
+            self.size = os.fstat(self.fd).st_size
+
+    def rotate(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        for number in range(self.parts, 0, -1):
+            older = self.path.with_name(f"{self.path.name}.{number}")
+            if number == self.parts:
+                with contextlib.suppress(FileNotFoundError):
+                    older.unlink()
+            else:
+                with contextlib.suppress(FileNotFoundError):
+                    os.replace(older, self.path.with_name(f"{self.path.name}.{number + 1}"))
+        with contextlib.suppress(FileNotFoundError):
+            if self.parts:
+                os.replace(self.path, self.path.with_name(f"{self.path.name}.1"))
+            else:
+                self.path.unlink()
+
+    def write(self, line):
+        """Append LINE (one record with its newline); False when it could not be written (counted in lost)."""
+        try:
+            self.open()
+            if self.size and self.size + len(line) > self.part:
+                self.rotate()
+                self.open()
+            view = memoryview(line)
+            while view:
+                view = view[os.write(self.fd, view):]
+            self.size += len(line)
+            return True
+        except OSError:
+            self.lost += 1
+            return False
+
+    def serve(self):
+        # PENDING grows in place and is searched only where it is new (what was there holds no line end), the lines
+        # taken from it cut off once per read: a record of 16 MB comes in 64 KB reads of the pipe, and each read
+        # copied and searched all of it again (4.7 s for one such record).
+        pending, skipping = bytearray(), False
+        try:
+            while True:
+                try:
+                    data = os.read(self.read_fd, 1 << 20)
+                except InterruptedError:
+                    continue
+                except OSError:
+                    break
+                if not data:
+                    break
+                start, searched = 0, len(pending)
+                pending += data
+                while True:
+                    end = pending.find(b"\n", max(start, searched))
+                    if end < 0:
+                        break
+                    line, start = bytes(pending[start:end + 1]), end + 1
+                    if skipping:
+                        skipping = False
+                        continue
+                    if len(line) > self.line_limit:
+                        self.lost += 1
+                        continue
+                    self.write(line)
+                del pending[:start]
+                if len(pending) > self.line_limit:
+                    pending, skipping = bytearray(), True
+                    self.lost += 1
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(self.read_fd)
+            if self.fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self.fd)
+                self.fd = None
+
+
 API_KEY_HEADERS = LLM_KEY_HEADERS + ("private-token",)  # GitLab's own
 
 
@@ -4046,7 +5332,7 @@ def added_api_keys(path=None):
         return _added_api_keys["entries"]
     try:
         document = json.loads(Path(path).read_text()[:1 << 20])
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         document = {}
     entries = checked_api_keys(document.get("api_keys") if isinstance(document, dict) else None)
     _added_api_keys.update(stamp=stamp, entries=entries)
@@ -4171,6 +5457,7 @@ def handshake_abandoned(exc):
 
 class ProxyServer:
     """Connections of one sandbox run; one thread per connection."""
+    traffic = None  # the LLM traffic log (LlmTraffic), when the run keeps one (proxy_main)
 
     def __init__(self, config, log_fd, checker=None, run_dir=PROXY_RUN, destination=original_destination,
                  upstream=None, asker=None, who=None, connect=None):
@@ -4224,7 +5511,26 @@ class ProxyServer:
             line = line.replace(value, "[redacted]")
         line = (line + "\n").encode()
         with self.lock:
-            os.write(self.log_fd, line)
+            # A record that cannot be written (the disk of the run's logs full, a quota) is counted and the
+            # connection goes on: the log raised into the connection's thread, which then ended with a traceback
+            # instead of closing the agent's side (a kept-alive connection hung), every connection while the disk
+            # stayed full. The first record written again says how many were lost.
+            lost = getattr(self, "lost_records", 0)
+            if lost:
+                gap = json.dumps({"time": record["time"], "event": "log-gap", "lost": lost,
+                                  "reason": "records not written (the disk was full or not writable)"})
+                line = (gap + "\n").encode() + line
+            try:
+                view = memoryview(line)
+                while view:
+                    view = view[os.write(self.log_fd, view):]
+                self.lost_records = 0
+            except OSError as exc:
+                self.lost_records = lost + 1
+                if not lost:
+                    with contextlib.suppress(Exception):
+                        print(f"agent-sandbox: the connection log cannot be written ({exc.strerror or exc}); "
+                              "records are counted until it can", file=sys.stderr, flush=True)
 
     def own_secrets(self):
         """The credentials the proxy adds itself (--llm keys and header secrets, --token-proxy tokens), longest first,
@@ -4349,7 +5655,7 @@ class ProxyServer:
                         self.local_taint = None  # the supervisor's record is newer: it decides (untaint included)
             except FileNotFoundError:
                 self.taint_state = {"tainted": False}
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 pass
             state = self.taint_state if isinstance(self.taint_state, dict) else {"tainted": False}
             if self.local_taint and not state.get("tainted"):
@@ -4386,14 +5692,16 @@ class ProxyServer:
                 mtime = path.stat().st_mtime_ns
                 if mtime != self.rules_mtime:
                     written = json.loads(path.read_text())
-                    sources = written.get("rulesets", []) if isinstance(written, dict) else written
+                    if not isinstance(written, dict):
+                        raise ValueError("not {rulesets, pinned}")
+                    sources = written.get("rulesets", [])
                     pinned = dict(self.rules_pinned)
-                    if isinstance(written, dict) and isinstance(written.get("pinned"), dict):
+                    if isinstance(written.get("pinned"), dict):
                         for name, addresses in written["pinned"].items():  # names allowed during the run
                             pinned.setdefault(name, addresses)
                     self._rules = Ruleset([*sources, *self.rules_extra], pinned, self.rules_providers)
                     self.rules_mtime = mtime
-            except (OSError, ValueError, TypeError, AttributeError):
+            except (OSError, ValueError, TypeError, AttributeError, RecursionError):
                 pass
         return self._rules
 
@@ -4408,7 +5716,7 @@ class ProxyServer:
                 mtime = self.allow_file.stat().st_mtime_ns
                 if mtime != self.allow_mtime:
                     self.config["allow"], self.allow_mtime = json.loads(self.allow_file.read_text()), mtime
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 pass
         return self.config.get("allow", {})
 
@@ -4610,7 +5918,7 @@ class ProxyServer:
             if not first:
                 # Nothing yet: either the server speaks first (SMTP, SSH, databases), or the client waits on
                 # purpose. Whoever speaks first decides; a late client is classified like a prompt one.
-                ready = select.select([client, upstream], [], [], IDLE_TIMEOUT)[0]
+                ready = wait_ready([client, upstream], (), IDLE_TIMEOUT)[0]
                 if client in ready:
                     first = self.peek(client, wait=PEEK_TIMEOUT)
                     if not self.passthrough_allowed(first, address, port, record):
@@ -4622,8 +5930,8 @@ class ProxyServer:
                 else:
                     return
             spoken = LEADING_CRLF.sub(b"", first)
-            if first and not server_first and first[:1] != b"\x16" and not re.match(rb"[A-Z]{3,10} \S", spoken) \
-                    and self.ssh_refused(address, port) and select.select([upstream], [], [], PEEK_TIMEOUT)[0]:
+            if first and not server_first and first[:1] != b"\x16" and not HTTP_START.match(spoken) \
+                    and self.ssh_refused(address, port) and wait_ready([upstream], (), PEEK_TIMEOUT)[0]:
                 # Where SSH is refused, the server's first bytes count too: an SSH server sends its banner at once,
                 # whatever the client sent first (a junk line before its own banner, which some servers skip).
                 upstream.settimeout(PEEK_TIMEOUT)
@@ -4661,7 +5969,7 @@ class ProxyServer:
                               "ms": int((time.monotonic() - started) * 1000)})
                     return
                 self.intercept(client, upstream, name, address, record, started, port)
-            elif re.match(rb"[A-Z]{3,10} \S", LEADING_CRLF.sub(b"", first)) and \
+            elif HTTP_START.match(LEADING_CRLF.sub(b"", first)) and \
                     not LEADING_CRLF.sub(b"", first).startswith(b"PRI * HTTP/2"):
                 origin = f"[{address}]:{port}" if ":" in address else f"{address}:{port}"
                 self.exchange(Stream(client), client, upstream, "http", origin, record)
@@ -4744,8 +6052,8 @@ class ProxyServer:
                 return data
             if not data and elapsed >= wait:
                 return b""
-            if data and elapsed >= wait + complete:
-                return data
+            if data and (elapsed >= wait + complete or peer_done(client)):
+                return data  # (incomplete: refused as such) - a client that went away never sends the rest
             if data:
                 time.sleep(0.05)
 
@@ -4803,7 +6111,7 @@ class ProxyServer:
         # (a protocol where it greets first). Nothing is passed on before that is decided.
         greeting = b""
         while True:
-            ready = [agent] if agent.pending() else select.select([agent, server], [], [], IDLE_TIMEOUT)[0]
+            ready = [agent] if agent.pending() else wait_ready([agent, server], (), IDLE_TIMEOUT)[0]
             if not ready:
                 return
             if agent in ready:
@@ -4824,8 +6132,7 @@ class ProxyServer:
         if agent in ready:
             def decided(data):
                 data = LEADING_CRLF.sub(b"", data)
-                return len(data) >= 16 or b" " in data or b"\r\n" in data or \
-                    (bool(data) and data != b"\r" and not re.fullmatch(rb"[A-Z]+", data))
+                return len(data) >= 16 or bool(data) and first_bytes_state(data) == "complete"
             agent.settimeout(30)
             with contextlib.suppress(socket.timeout, ssl.SSLError, OSError):
                 while not decided(stream.buffer) and stream.fill():
@@ -4840,7 +6147,7 @@ class ProxyServer:
         if request.startswith(b"PRI * HTTP/2"):
             self.log({**record, "event": "denied", "reason": "HTTP/2 was not negotiated"})
             return
-        if re.match(rb"[A-Z]{3,10} \S", request):
+        if HTTP_START.match(request):
             self.exchange(stream, agent, server, "https", name or address, record)
             return
         if stream.buffer and (port in HTTP_PORTS or self.has_http_rules(address)):
@@ -4939,9 +6246,10 @@ class ProxyServer:
                 return early, AMBIGUOUS
         return early, Ruleset.body(data, headers)
 
-    def http_ask(self, verdict, method, url, host, path, body, asked_by=None):
+    def http_ask(self, verdict, method, url, host, path, body, asked_by=None, exact=None):
         """The human's answer to a request an ask rule holds (kind "http"); without approvals it is refused.
-        ASKED_BY: the process and sandbox of the connection, shown in the question."""
+        ASKED_BY: the process and sandbox of the connection, shown in the question. EXACT: what else makes the
+        request this one (its target as sent, its Host header), for the digest beside URL and BODY."""
         if self.asker is None:
             return {"decision": "deny", "scope": "once", "reason": "asking is off (--ask off or no approvals)"}
         details = {"rule": verdict["rule"], "ruleset": verdict["ruleset"], "method": printable_text(method, 20),
@@ -4950,6 +6258,11 @@ class ProxyServer:
                    **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(asked_by or {})}
         if isinstance(body, (dict, list)):
             details["body"] = printable_text(redact_text(json.dumps(shortened(body), default=repr)), 1000)
+        # The digest of exactly this request (keyed: nobody can test guesses against a question's file): a request
+        # with another query or body made while this one is asked gets a question of its own, never this answer.
+        salt = self.__dict__.setdefault("ask_salt", secrets.token_bytes(32))
+        exact_text = json.dumps([method, url, host, path, body, exact], ensure_ascii=True, default=repr).encode()
+        details["call_digest"] = hashlib.blake2b(exact_text, key=salt, digest_size=16).hexdigest()
         return self.asker("http", details)
 
     @staticmethod
@@ -4967,7 +6280,7 @@ class ProxyServer:
         if stream.buffer or pending(client):
             return True
         try:
-            ready = select.select([client, upstream], [], [], IDLE_TIMEOUT if timeout is None else timeout)[0]
+            ready = wait_ready([client, upstream], (), IDLE_TIMEOUT if timeout is None else timeout)[0]
         except (OSError, ValueError):
             return False
         # The client first: its request goes on. Else the server spoke unasked - its close, a TLS close_notify, or a
@@ -5026,12 +6339,41 @@ class ProxyServer:
                               "reason": "tunnels through another proxy would hide what passes",
                               "request": {"headers": redact_headers(headers)}})
                     return
+                held = self.allow().get("cut")
+                if scheme == "https" and "api" in cut_modes(held):
+                    # The kill switch at "api": the handshake named one of the model API's hosts (cut_name_allows), and
+                    # so must each request's Host header - a front end routes by it, so another site behind the same
+                    # one (domain fronting) is no model API. Without a Host header the verified name stands.
+                    given = header(headers, "host")
+                    found = host_authority(given) if given is not None else (origin.lower().rstrip("."), None)
+                    destination = str(record.get("destination", ""))
+                    if found is None or not cut_name_allows(held, destination.rsplit(":", 1)[0].strip("[]"),
+                                                            destination.rsplit(":", 1)[-1], found[0]):
+                        reason = cut_reason(held) + " (its Host header names none of the model API's hosts)"
+                        message = f"sandbox-ai: {reason}\n".encode()
+                        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                                 + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
+                        self.log({**record, "event": "denied", "method": printable_text(method, 20),
+                                  "host_header": printable_text(given, 300), "reason": reason,
+                                  "request": {"headers": redact_headers(headers)}})
+                        return
+                # A protocol switch makes the rest of the connection bytes the proxy only relays: WebSockets (their
+                # handshake is checked like any request) are the one switch allowed. An h2c upgrade would carry every
+                # later request as HTTP/2, past the rules and the push check, so any other Upgrade is taken off the
+                # wire (the client goes on in HTTP/1.1) and a server that switches anyway is cut off below.
+                upgrades = [token.strip().lower() for name, value in headers if name.lower() == "upgrade"
+                            for token in value.split(",")]
+                websocket = upgrades == ["websocket"]
+                if upgrades and not websocket:
+                    head = re.sub(rb"(?im)^(?:upgrade|http2-settings)[ \t]*:[^\r\n]*\r\n", b"", head)
                 # Where the request really goes: the server the proxy verified, with the path from the request
                 # line. Never the agent's Host header.
                 path = normal_path(target)
                 checked = f"{scheme}://{origin}{path}"
                 entry = {**record, "event": "http", "method": method, "url": redact_text(url),
                          **({"host_header": claim} if claim else {})}
+                if upgrades and not websocket:
+                    entry["upgrade_removed"] = printable_text(", ".join(upgrades), 200)
                 current["entry"] = entry
                 destination = str(record.get("destination", "")).rsplit(":", 1)[0].strip("[]") or None
                 parts, facts = None, None
@@ -5057,7 +6399,8 @@ class ProxyServer:
                     if ruled["decision"] == "ask":
                         answer = self.http_ask(ruled, method, redact_text(url), authority,
                                                facts["paths"][0] or "/", facts["body"],
-                                               {**self.asked_by(record), **({"host_header": claim} if claim else {})})
+                                               {**self.asked_by(record), **({"host_header": claim} if claim else {})},
+                                               exact=[target, header(headers, "host")])
                         entry["approval"] = approval_record(answer)
                         if answer.get("decision") != "allow":
                             refusal = not_approved(answer, ruled["reason"])
@@ -5107,9 +6450,13 @@ class ProxyServer:
                     if method.upper() == "POST" else None
                 llm_kind = llm_api(path) if llm_target is not None else None
                 stream_guard = None
+                # The LLM traffic log (--llm-traffic): this request and its answer, recorded once it ends.
+                wanted = self.traffic.wants(llm_kind is not None, method, path) if self.traffic is not None else None
+                done = {}
                 if llm_kind:
                     turns = self.__dict__.setdefault("llm_turns", LlmTurns())
-                    head, parts, done = llm_body(head, parts, headers, llm_target, llm_kind, turns)
+                    head, parts, done = llm_body(head, parts, headers, llm_target, llm_kind, turns,
+                                                 keep=wanted is not None)
                     if done.get("params"):
                         entry["llm_params"] = done["params"]
                     if done.get("boost"):
@@ -5122,6 +6469,10 @@ class ProxyServer:
                     if loop.get("enabled", True) and loop.get("text"):
                         stream_guard = LlmStreamGuard(llm_kind, loop["text"])
                         head = identity_head(head)  # the guard reads the answer as it comes
+                if wanted:
+                    current["traffic"] = self.traffic_item(wanted, llm_target, llm_kind or llm_api(path), origin,
+                                                           url, headers, done, started)
+                    head = identity_head(head)  # an answer in br or zstd could not be read for the record
                 before = head
                 head, llm = llm_head(self.config.get("llm"), scheme, origin, port, path, head, target)
                 if llm:
@@ -5152,16 +6503,23 @@ class ProxyServer:
                 for raw in pending:
                     send_all(upstream, raw)
                     sent += len(raw)
+                traffic = current.get("traffic")
                 for raw, payload in parts:
                     send_all(upstream, raw)
                     sent += len(raw)
                     captured.add(payload)
+                    if traffic is not None and "chunks" in traffic and traffic["total"] < LLM_BODY_LIMIT:
+                        traffic["chunks"].append(payload[:LLM_BODY_LIMIT - traffic["total"]])
+                        traffic["total"] += len(payload)
+                    elif traffic is not None and "chunks" in traffic:
+                        traffic["total"] += len(payload)
                 entry["request"] = {"headers": redact_headers(headers),
                                     "body": body_record(captured.data, captured.total, headers, limit)}
                 while True:
                     reply = replies.head()
                     if reply is None:
                         entry.update(error="the server closed the connection without an answer")
+                        self.traffic_submit(current, entry)
                         self.log(entry)
                         current.pop("entry", None)
                         return
@@ -5170,6 +6528,15 @@ class ProxyServer:
                         status = int(status_line.split(" ")[1])
                     except (IndexError, ValueError):
                         raise ValueError("malformed HTTP status line") from None
+                    if status == 101 and not (websocket and (header(reply_headers, "upgrade") or "").strip().lower()
+                                              == "websocket"):
+                        entry.update(event="denied", status=status, request={"headers": redact_headers(headers)},
+                                     response={"headers": redact_headers(reply_headers)},
+                                     reason="the server switched to another protocol than WebSocket (its "
+                                            "requests would pass the proxy unchecked)")
+                        self.log(entry)
+                        current.pop("entry", None)
+                        return
                     if facts is not None:
                         self.observe(facts)  # before the agent sees a byte of the answer
                     if added:  # a server that echoes what the proxy added gives the agent stars
@@ -5181,6 +6548,11 @@ class ProxyServer:
                 advert = method.upper() == "GET" and path.endswith("/info/refs") and \
                     "service=git-receive-pack" in urllib.parse.unquote(target)
                 usage = UsageScanner() if is_model_request(path) else None
+                answer_read = None
+                if traffic is not None:
+                    traffic["first_byte_ms"] = int((time.monotonic() - started) * 1000)
+                    answer_read = traffic["answer"] = LlmAnswer(traffic["api"], self.traffic.limit,
+                                                                header(reply_headers, "content-encoding"))
                 inflate = None
                 key = checked.rsplit("/info/refs", 1)[0]
                 answer = Capture(ADVERT_LIMIT if advert else limit)
@@ -5207,6 +6579,8 @@ class ProxyServer:
                     send_all(client, raw)
                     received += len(raw)
                     answer.add(payload)
+                    if answer_read is not None:
+                        answer_read.feed(payload)
                     if stream_guard is not None and payload and stream_guard.feed(payload):
                         cut = stream_guard.tripped
                         note = (f"\n\n{LLM_NOTE} The answer was stopped here: {cut}. Do not repeat it; go on "
@@ -5240,6 +6614,7 @@ class ProxyServer:
                                                       "body": body_record(answer.data[:limit], answer.total,
                                                                           reply_headers, limit)},
                              bytes_out=sent, bytes_in=received, ms=int((time.monotonic() - started) * 1000))
+                self.traffic_submit(current, entry)
                 self.log(entry)
                 current.pop("entry", None)
                 if cut:
@@ -5265,9 +6640,48 @@ class ProxyServer:
                 # that closes once it has what it wanted), never only as a bare error.
                 if current.get("entry") is not None:
                     current["entry"].setdefault("error", f"{type(exc).__name__}: {exc}")
+                    self.traffic_submit(current, current["entry"])
                     self.log(current["entry"])
                     return
                 raise
+
+    def traffic_item(self, source, target, api, origin, url, headers, done, started):
+        """The LLM traffic log's start of an exchange (LlmTraffic.record): what is known before it goes upstream. The
+        relay's DONE gives the document as sent; without one (a body it did not read, another server's request) the
+        body is kept as it goes out (at most LLM_BODY_LIMIT bytes) and read afterwards."""
+        now = time.time()
+        item = {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z",
+                "source": source, "endpoint": target.get("name") if isinstance(target, dict) else None,
+                "host": origin, "url": redact_text(url), "api": api, "started": started}
+        done = dict(done or {})
+        document, before = done.pop("document", None), done.pop("before", None)
+        item["size"] = done.pop("size", 0)
+        item["done"] = done
+        if document is not None:
+            item.update(document=document, before=before)
+        else:
+            item.update(chunks=[], total=0, encoding=header(headers, "content-encoding"))
+        return item
+
+    def traffic_submit(self, current, entry):
+        """The exchange of CURRENT, now over, handed to the LLM traffic log with what ENTRY (its connection log record)
+        says of it: status, time, sizes, the loop guard's work, an error."""
+        item = current.pop("traffic", None)
+        if item is None or self.traffic is None:
+            return
+        chunks = item.pop("chunks", None)
+        if chunks is not None:
+            item["raw"] = (b"".join(chunks), item.pop("total", 0), item.pop("encoding", None))
+            item["size"] = len(item["raw"][0])
+        started = item.pop("started", None)
+        item.update(status=entry.get("status"), bytes_out=entry.get("bytes_out"), bytes_in=entry.get("bytes_in"),
+                    ms=entry.get("ms") if entry.get("ms") is not None else
+                    int((time.monotonic() - started) * 1000) if started is not None else None)
+        if entry.get("llm_loop"):
+            item["loop"] = entry["llm_loop"]
+        if entry.get("error"):
+            item["error"] = entry["error"]
+        self.traffic.submit(item)
 
     @staticmethod
     def refused_body(client, stream, parts, headers, limit):
@@ -5386,7 +6800,7 @@ class ProxyServer:
         """The checker's next line (b"" once it ended), or None if none came by DEADLINE (monotonic)."""
         fd = self.checker.stdout.fileno()
         while b"\n" not in self.checker_buffer:
-            if not select.select([fd], [], [], max(0.0, deadline - time.monotonic()))[0]:
+            if not wait_ready([fd], (), max(0.0, deadline - time.monotonic()))[0]:
                 return None
             chunk = os.read(fd, 65536)
             if not chunk:
@@ -5473,6 +6887,10 @@ def proxy_main(log_fd, ready_fd, ask_fd=None, asking=True):
         threading.Thread(target=exit_on_eof, args=(sys.stdin.buffer,), daemon=True).start()
     channel = AskChannel(socket.socket(fileno=ask_fd)) if ask_fd is not None else None
     server = ProxyServer(config, log_fd, checker, run_dir=PROXY_RUN, asker=channel if asking else None, who=channel)
+    traffic_fd = os.environ.get(LLM_TRAFFIC_ENV, "")
+    if isinstance(config.get("traffic"), dict) and traffic_fd.isdigit():
+        # The LLM traffic log: records go to the supervisor over this pipe (it writes the log directory).
+        server.traffic = LlmTraffic(config["traffic"], int(traffic_fd), server.own_secrets)
     server.serve(listeners)
     # Freed memory back to the system every half minute, its TLS contexts dropped if it grows large anyway (the
     # supervisor's guard; no records: this user writes no control directory).
@@ -5494,13 +6912,17 @@ def start_proxy(cfg, broker=None, who=None, taint=None):
     log_fd = os.open(LOG_DIR / cfg["log"], flags, 0o600) if LOG_DIR.is_dir() else os.open(os.devnull, os.O_WRONLY)
     ready_r, ready_w = os.pipe()
     mine, theirs = socket.socketpair() if broker is not None or who is not None or taint is not None else (None, None)
+    traffic = start_traffic_log(cfg)
     try:
         ask = [str(theirs.fileno()), *([] if broker is not None else ["--no-ask"])] if theirs else []
+        env = {**base_env(), **({LLM_TRAFFIC_ENV: str(traffic)} if traffic is not None else {})}
         # stdin is how the proxy is stopped: it runs as its own user, which the supervisor may not signal
         # (Podman gives it no CAP_KILL); it exits when the pipe closes.
         process = subprocess.Popen([*SUPERVISOR_PYTHON, "/sandbox/runtime.py", "--internal-proxy", str(log_fd),
-                                    str(ready_w), *ask], pass_fds=(log_fd, ready_w, *([theirs.fileno()] if theirs else [])),
-                                   env=base_env(), stdin=subprocess.PIPE)
+                                    str(ready_w), *ask],
+                                   pass_fds=(log_fd, ready_w, *([theirs.fileno()] if theirs else []),
+                                             *([traffic] if traffic is not None else [])),
+                                   env=env, stdin=subprocess.PIPE)
         os.close(ready_w)
         ready_w = -1
         deadline = time.monotonic() + 30
@@ -5518,10 +6940,32 @@ def start_proxy(cfg, broker=None, who=None, taint=None):
             os.close(ready_w)
         if theirs is not None:
             theirs.close()
+        if traffic is not None:
+            os.close(traffic)  # the proxy's end: the supervisor's writer reads until the proxy closes it
     if mine is not None:
         threading.Thread(target=serve_asks, args=(mine, broker, who, taint), daemon=True).start()
     trust_session_ca()
     return process
+
+
+def start_traffic_log(cfg, directory=None):
+    """The LLM traffic log of a run whose proxy keeps one (CFG["traffic"], the file's name in the log directory): a
+    pipe whose read end a thread of the supervisor writes to the file (LlmTrafficFile); the write end, for the proxy,
+    is returned (None: no log, or no log directory). Never fails the start: a problem is said and there is no log."""
+    name = cfg.get("traffic") if isinstance(cfg, dict) else None
+    directory = Path(directory) if directory is not None else LOG_DIR
+    if not isinstance(name, str) or not re.fullmatch(r"llm-traffic-[A-Za-z0-9._-]{1,200}\.jsonl", name) or \
+            not directory.is_dir():
+        return None
+    try:
+        read_fd, write_fd = os.pipe()
+    except OSError as exc:
+        print(f"agent-sandbox: no LLM traffic log this run: {exc.strerror or exc}", file=sys.stderr)
+        return None
+    os.set_inheritable(write_fd, False)
+    writer = LlmTrafficFile(read_fd, directory / name)
+    threading.Thread(target=writer.serve, daemon=True, name="llm-traffic-file").start()
+    return write_fd
 
 
 def trust_session_ca(bundles=SYSTEM_BUNDLES, mount=None):
@@ -6024,6 +7468,45 @@ class Ruleset:
         self.matchers = {id(rule): ("*" in rule["host"], frozenset(rule["host"]),
                                     tuple(pattern[1:] for pattern in rule["host"] if pattern.startswith("*.")))
                          for source in self.sources for rule in source["http"]}
+        # And per source, which of its HTTP rules (their places) a name or an address can bring in (http_rules): a
+        # request meets the rules of its own hosts, not every rule of a ruleset of 2000 (each was held against it,
+        # 0.5 ms of every request).
+        self.http_index = [self.index_http(source["http"]) for source in self.sources]
+
+    @staticmethod
+    def index_http(rules):
+        """{"every", "names", "suffixes", "addresses"} of RULES (their places in it): the rules for every host ("*"),
+        those for a NAME, those for names ending in a SUFFIX (*.example: ".example"), those for a pinned address."""
+        every, names, suffixes, addresses = [], {}, {}, {}
+        for place, rule in enumerate(rules):
+            if "*" in rule["host"]:
+                every.append(place)
+            for pattern in rule["host"]:
+                names.setdefault(pattern, []).append(place)
+                if pattern.startswith("*."):
+                    suffixes.setdefault(pattern[1:], []).append(place)
+            for address in rule["addresses"]:
+                addresses.setdefault(address, []).append(place)
+        return {"every": every, "names": names, "suffixes": suffixes, "addresses": addresses}
+
+    def http_rules(self, number, facts):
+        """The HTTP rules of source NUMBER that apply to the request FACTS (applies), in their order: looked up by the
+        request's names and address instead of compared one by one. A name ends in a suffix exactly where the
+        suffix is the name from one of its dots on."""
+        index, names, places = self.http_index[number], facts["names"], set()
+        if names:
+            places.update(index["every"])
+            for name in names:
+                places.update(index["names"].get(name, ()))
+                if index["suffixes"]:
+                    dot = name.find(".")
+                    while dot >= 0:
+                        places.update(index["suffixes"].get(name[dot:], ()))
+                        dot = name.find(".", dot + 1)
+        if facts["address"] is not None:
+            places.update(index["addresses"].get(facts["address"], ()))
+        rules = self.sources[number]["http"]
+        return [rules[place] for place in sorted(places)]
 
     # -- checking a ruleset --
 
@@ -6583,11 +8066,6 @@ class Ruleset:
                             "what": f"the MCP tool {tool} of {server}"}
         return None
 
-    def mcp_taint_active(self):
-        """Some rule holds only in tainted runs, or some MCP tool is a source: the per-run relay is needed."""
-        return any(any("server" in entry for entry in source.get("untrusted", [])) or
-                   any(rule.get("when") for rule in source["mcp"]) for source in self.sources)
-
     def untrusted_agent_tool(self, agent, tool):
         """The source that marks the results of the agent's own TOOL untrusted (seen by its hooks), or None."""
         for source in self.sources:
@@ -6688,8 +8166,8 @@ class Ruleset:
 
     def needs_body(self, facts):
         """A rule with a body condition may decide the request FACTS: the proxy reads the body first."""
-        return any("body" in rule and self.applies(rule, facts) and self.route(rule, facts, facts["methods"])
-                   is not False for source in self.sources for rule in source["http"])
+        return any("body" in rule and self.route(rule, facts, facts["methods"]) is not False
+                   for number in range(len(self.sources)) for rule in self.http_rules(number, facts))
 
     def applies(self, rule, facts):
         names = facts["names"]
@@ -6739,7 +8217,7 @@ class Ruleset:
         shown_host = facts["claimed"] or facts["server"]
         # The rules that apply to the request, in their order, once: a rule that does not apply matches nothing
         # (http_match), so only these are held against it.
-        applied = [[rule for rule in source["http"] if self.applies(rule, facts)] for source in self.sources]
+        applied = [self.http_rules(number, facts) for number in range(len(self.sources))]
         applying = [source["name"] for source, rules in zip(self.sources, applied) if any(
             "*" not in rule["host"] for rule in rules)]
         if applying and facts["claimed"] and not facts["literal"] and facts["claimed"] != facts["server"]:
@@ -6877,10 +8355,6 @@ class Ruleset:
     @property
     def devices_active(self):
         return any(source["devices"] or source["defaults"]["devices"] != "allow" for source in self.sources)
-
-    def device_asks(self):
-        return any(source["defaults"]["devices"] == "ask" or any(r["decision"] == "ask" for r in source["devices"])
-                   for source in self.sources)
 
     @classmethod
     def device_field(cls, rule, key, facts):
@@ -7046,6 +8520,7 @@ def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout
         if not isinstance(tool, str) or not tool:
             raise ValueError("the hook message names no tool")
         arguments = message.get("tool_input", message.get("args"))
+        exact = arguments  # as the agent will run it (OpenCode's own names): what its question shows
         if agent == "opencode":
             tool = OPENCODE_TOOLS.get(tool, tool)
             if isinstance(arguments, dict):
@@ -7056,12 +8531,18 @@ def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout
                    "cwd": message.get("cwd") if isinstance(message.get("cwd"), str) else "",
                    "session_id": str(message.get("session_id", message.get("sessionID", "")))[:100],
                    "tool_use_id": str(message.get("tool_use_id", message.get("callID", "")))[:100]}
-        if not pre:
+        if pre:
+            # The call as it will run, for its question (HookServer.decide): its first 64 KiB and more (a value too
+            # large for the rules too), the whole size, and a digest of all of it that binds an answer to this call.
+            window, size = arguments_window(exact)
+            request.update(input_window=window, input_size=size, input_digest=hashlib.sha256(
+                json.dumps(exact, ensure_ascii=True, default=repr).encode()).hexdigest())
+        else:
             request["input"] = None  # recorded at PreToolUse already
             request["result_bytes"] = size if isinstance(size, int) and not isinstance(size, bool) else \
                 len(json.dumps(result, default=repr)) if result is not None else None
         line = (json.dumps(request, ensure_ascii=False, default=repr) + "\n").encode()
-        if len(line) > HOOK_LIMIT:
+        if len(line) > HOOK_LIMIT:  # (the window stays: it is bounded)
             line = (json.dumps({**request, "input": {"sandbox-ai": "too large", "length": len(line)}}) + "\n").encode()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
@@ -7130,7 +8611,7 @@ def kit_hook(agent, timeout, command, stdin=None, stdout=None, stderr=None, chec
             return refuse("the kit hook's answer is too large to be checked")
         try:
             answer = json.loads(out.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return refuse("the kit hook's answer names updatedInput but is no JSON the rules can check")
         specific = answer.get("hookSpecificOutput") if isinstance(answer, dict) else None
         found = [place["updatedInput"] for place in (answer, specific)
@@ -7139,7 +8620,7 @@ def kit_hook(agent, timeout, command, stdin=None, stdout=None, stderr=None, chec
             return refuse("the kit hook's updatedInput is no object")
         try:
             message = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             message = None
         for value in found:
             if not isinstance(message, dict):
@@ -7160,6 +8641,8 @@ class HookServer:
     def __init__(self, rules, broker=None, taint=None, log=None, secret_values=()):
         self.rules, self.broker, self.taint, self.log = rules, broker, taint, log
         self.values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
+        # The key of call_digest: a question's file names its call by a digest nobody can test guesses against.
+        self.salt = secrets.token_bytes(32)
         self.lock, self.ready = threading.Lock(), threading.Event()  # ready: listening, open to the agent
 
     @staticmethod
@@ -7207,7 +8690,10 @@ class HookServer:
             if self.broker is None:
                 answer = {"decision": "deny", "reason": f"{verdict['reason']}; asking is off"}
             else:
+                full, digest, more = self.call(message, arguments)
                 approval = self.broker.ask("tool", {"agent": agent, "tool": tool, "arguments": record["input"],
+                                                   "arguments_full": full, "call_digest": digest,
+                                                   **({"too_large": more} if more else {}),
                                                    "rule": verdict["rule"], "ruleset": verdict["ruleset"],
                                                    "reason": printable_text(verdict["reason"], 1000),
                                                    **({"taint": verdict["taint"]} if verdict.get("taint") else {})})
@@ -7224,6 +8710,47 @@ class HookServer:
             record["reason"] = answer["reason"]
         self.write(record)
         return answer
+
+    def call(self, message, arguments):
+        """(full, digest, more) of the call of hook MESSAGE, for its question: its arguments in full as the agent will
+        run them (the hook's window of them, arguments_window: a value too large for the rules is in it too; without
+        one, ARGUMENTS as the rules see them), redacted and bounded (window_cut) - the keyed digest of exactly that
+        call (call_digest): the input the rules saw, the window shown and the hook's digest of all of it - and MORE,
+        the bytes of it the question cannot show (beyond FULL_ARGUMENTS_LIMIT, or known to the rules only by their
+        length): a call with MORE is refused, never asked (too_large_refusal)."""
+        window, size = message.get("input_window"), message.get("input_size")
+        unknown = 0
+        if not isinstance(window, str) or isinstance(size, bool) or not isinstance(size, int) or \
+                len(window.encode("utf-8", "surrogatepass")) > FULL_ARGUMENTS_LIMIT + FULL_ARGUMENTS_MARGIN:
+            window, size = arguments_window(arguments)
+            unknown = self.unknown_bytes(arguments)  # a value the rules saw only as "too large": not in this text
+        window = LONE_SURROGATE.sub(lambda found: f"\\u{ord(found.group()):04x}", window)
+        kept, more = window_cut(window, size, values=self.values)
+        more += unknown
+        full = marked(kept, more)
+        exact = message.get("input_digest") if isinstance(message.get("input_digest"), str) else ""
+        return full, self.call_digest([arguments, window, size, exact[:128]]), more
+
+    @staticmethod
+    def unknown_bytes(value, depth=0):
+        """How many characters of VALUE (a call's arguments as the rules see them) are known to them only by their
+        length: strings over HOOK_VALUE_LIMIT ({"sandbox-ai": "too large", "length": N}); 1 for one nested too deep."""
+        if depth > 40:
+            return 1
+        if isinstance(value, dict):
+            if value.get("sandbox-ai") == "too large" and set(value) <= {"sandbox-ai", "length"}:
+                length = value.get("length")
+                return length if isinstance(length, int) and not isinstance(length, bool) and length > 0 else 1
+            return sum(HookServer.unknown_bytes(v, depth + 1) for v in value.values())
+        if isinstance(value, list):
+            return sum(HookServer.unknown_bytes(v, depth + 1) for v in value)
+        return 0
+
+    def call_digest(self, call):
+        """The digest of exactly this CALL (keyed with this server's salt): the run's broker asks a call with other
+        arguments on its own, never lets it through by the answer to another call's question."""
+        data = json.dumps(call, ensure_ascii=True, default=repr).encode()
+        return hashlib.blake2b(data, key=self.salt, digest_size=16).hexdigest()
 
     def text(self, arguments):
         text = McpGateway.arguments(arguments)
@@ -7252,7 +8779,9 @@ class HookServer:
                 connection, _ = server.accept()
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as exc:
+                if accept_transient(exc):
+                    continue
                 break
             try:
                 threading.Thread(target=self.answer, args=(connection,), daemon=True).start()
@@ -7409,7 +8938,9 @@ class PortRelay:
         while True:
             try:
                 connection, _ = listener.accept()
-            except OSError:
+            except OSError as exc:
+                if accept_transient(exc):
+                    continue
                 return  # closed: the relay was revoked or the run ends
             if not self.slots.acquire(blocking=False):
                 connection.close()  # RELAY_CONNECTIONS open already
@@ -7922,6 +9453,33 @@ def port_open(port, timeout=1.0):
     return False
 
 
+BROWSER_CA = "browser-ca.pem"  # browser.CA_FILE
+
+
+def share_browser_ca(directory, ca_dir=None):
+    """The run's CA certificate (the connection proxy's, CA_DIR/ca.pem: never its key) into the run's DIRECTORY,
+    where the launcher reads it for the browser's container (--browser; browser.read_ca). True when it was there to
+    share (none without the proxy)."""
+    source = Path(ca_dir or CA_DIR) / "ca.pem"
+    try:
+        data = source.read_bytes()
+    except OSError:
+        return False
+    if b"PRIVATE KEY" in data or b"-----BEGIN CERTIFICATE-----" not in data:
+        return False
+    target = Path(directory) / BROWSER_CA
+    temporary = target.with_name(f".{BROWSER_CA}.{os.getpid()}.tmp")
+    try:
+        temporary.write_bytes(data)
+        temporary.chmod(0o644)
+        os.replace(temporary, target)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        return False
+    return True
+
+
 def await_services(services, directory=None, opened=None, clock=time.monotonic, sleep=time.sleep):
     """Before the agent runs: the services SERVICES ([{"name", "ready": PORT or None, "timeout": seconds}], config.json
     "services") started by the launcher and ready (see SERVICES_GO). None when they are, else what went wrong (the
@@ -7930,6 +9488,8 @@ def await_services(services, directory=None, opened=None, clock=time.monotonic, 
         return None
     directory = Path(directory or CONTROL_DIR)
     opened = opened or port_open
+    if any(isinstance(service, dict) and service.get("ca") for service in services):
+        share_browser_ca(directory)  # the browser's container trusts the proxy's CA (browser.py)
     try:
         (directory / SERVICES_GO).touch(mode=0o600)
     except OSError as exc:
@@ -7943,7 +9503,7 @@ def await_services(services, directory=None, opened=None, clock=time.monotonic, 
             if clock() > deadline:
                 return f"the services were not started within {SERVICES_START_SECONDS} s"
             sleep(0.1)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return "the launcher's answer about the services cannot be read"
     if not isinstance(answer, dict) or answer.get("ok") is not True:
         error = answer.get("error") if isinstance(answer, dict) else None
@@ -8012,7 +9572,7 @@ def starting_cuts(network, directory=None):
         waiting = json.loads((directory / CUT_STARTING).read_text())
     except FileNotFoundError:
         return None
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise RuntimeError(f"the cuts asked for while this run started cannot be read ({exc}); it does not "
                            "start") from None
     if not isinstance(waiting, list) or not all(isinstance(request, dict) for request in waiting):
@@ -8327,7 +9887,7 @@ class RunRules:
         pins = {**extra, **self.pinned}  # the start's names keep their addresses
         Ruleset(composed, pins, self.providers)  # compiles, or the reload is refused (RuleError)
         with self.lock:
-            # The proxy reads {"rulesets", "pinned"} (a bare list: a supervisor before 0.1.92 wrote that).
+            # The proxy reads {"rulesets", "pinned"} (ProxyServer.rules).
             write_new(self.path, json.dumps({"rulesets": composed, "pinned": extra}), 0o644)
             self.current, self.reloaded = composed, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return {**self.shown(), "not_reloaded": sorted(
@@ -8487,7 +10047,9 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
             connection, _ = listener.accept()
         except socket.timeout:
             continue
-        except OSError:
+        except OSError as exc:
+            if accept_transient(exc):
+                continue
             break
         fds = []
         with connection:
@@ -8557,12 +10119,13 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                 if request.get("op") == "cut":
                     # `sandbox-ai net cut`: the kill switch. It only takes away, so neither the policy nor the security
                     # mode holds it back.
-                    mode = request.get("mode")
-                    if mode is not None and (not isinstance(mode, str) or mode not in (*CUT_MODES, "off")):
+                    # (cut, not mode: MODE is the run's security mode, which every later request is held to)
+                    cut = request.get("mode")
+                    if cut is not None and (not isinstance(cut, str) or cut not in (*CUT_MODES, "off")):
                         raise ValueError(f"the kill switch's modes: {', '.join(CUT_MODES)} or off")
                     if cuts_ready is not None:
                         cuts_ready.wait(CUT_START_SECONDS)
-                    answer = {"ok": True, **network.set_cut(mode, request.get("by", "self"),
+                    answer = {"ok": True, **network.set_cut(cut, request.get("by", "self"),
                                                             clear=request.get("clear") is True)}
                     with contextlib.suppress(OSError):
                         connection.sendall((json.dumps(answer) + "\n").encode())
@@ -8717,6 +10280,21 @@ class ApprovalBroker:
             return kind, json.dumps([str(details.get(k, "")) for k in ("ruleset", "rule", "agent", "tool")])
         return kind, str(details.get("destination") or details.get("name") or details.get("url") or "")
 
+    @staticmethod
+    def slot(kind, details, key):
+        """The open question a request waits for: its KEY (what an answer for the run covers, key()), and for a tool
+        call its exact arguments too (call_digest): a call with other arguments made while one is asked gets a
+        question of its own - the human allows what the question shows, never another call by the same answer."""
+        if kind in ("mcp", "tool", "http") and details.get("call_digest"):
+            return (*key, str(details["call_digest"]))
+        return key
+
+    @staticmethod
+    def cools(kind, key, slot):
+        """What a question nobody answered refuses for a while (cooling): for a tool call (mcp, tool) that exact call
+        (its SLOT), as its question was bound to it - another call of the tool is asked on its own; else its KEY."""
+        return slot if kind in ("mcp", "tool") else key
+
     def blocked(self, kind, details):
         if kind == "dns":
             return str(details.get("name", "")).lower() in self.blocked_hosts
@@ -8733,15 +10311,21 @@ class ApprovalBroker:
         if self.blocked(kind, details):
             return {"decision": "deny", "scope": "run", "reason": "blocked always for this project"}
         key = self.key(kind, details)
+        slot = self.slot(kind, details, key)
+        cools = self.cools(kind, key, slot)
         with self.lock:
             if key in self.decided:
                 return self.remembered(self.decided[key])
-            cooling = self.cooling.get(key)
+            cooling = self.cooling.get(cools)
             if cooling is not None:
                 if self.clock() < cooling["until"]:
                     return cooling["answer"]  # not answered a moment ago: refused at once, not asked again yet
-                del self.cooling[key]
-            waiting = self.pending.get(key)
+                del self.cooling[cools]
+            more = details.get("too_large") if kind in ("mcp", "tool") else None
+            if isinstance(more, int) and not isinstance(more, bool) and more > 0:
+                # Its question could not show all of it: refused, never asked (an answer for the run still covers it).
+                return {"decision": "deny", "scope": "once", "reason": too_large_refusal(more)}
+            waiting = self.pending.get(slot)
             if waiting is None:
                 below = str(details.get("wildcard")) if kind == "dns" and details.get("wildcard") else None
                 if below is not None:
@@ -8755,8 +10339,8 @@ class ApprovalBroker:
                     self.counter += 1
                 self.serial += 1
                 ident = f"{int(time.time())}-{self.run_token}-{self.serial}"
-                waiting = self.pending[key] = {"id": ident, "event": threading.Event(), "answer": None,
-                                               "wildcard": below is not None}
+                waiting = self.pending[slot] = {"id": ident, "event": threading.Event(), "answer": None,
+                                                "wildcard": below is not None, "slot": slot}
                 if kind == "connect":  # shown in the question: what "Allow always" will remember
                     details = {**details, "remembers": self.remembers(details)}
                 try:
@@ -8765,7 +10349,7 @@ class ApprovalBroker:
                     threading.Thread(target=self._wait, args=(key, kind, details, waiting), name="approval-wait",
                                      daemon=True).start()
                 except (OSError, RuntimeError) as exc:  # no space, no more threads: refused, not asked
-                    self.pending.pop(key, None)
+                    self.pending.pop(slot, None)
                     return {"decision": "deny", "scope": "once", "reason": f"could not ask: {exc}"}
         if not wait:
             return None
@@ -8779,7 +10363,7 @@ class ApprovalBroker:
         path = self.directory / f"{ident}.answer"
         try:
             answer = json.loads(path.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         if not isinstance(answer, dict) or answer.get("decision") not in ("allow", "deny"):
             return {"decision": "deny", "scope": "once", "reason": "unreadable answer"}
@@ -8807,8 +10391,8 @@ class ApprovalBroker:
                 # its timeout, and the question is open no more (it would hold one of OPEN_QUESTIONS for good, and
                 # every later ask of it would wait in vain).
                 with self.lock:
-                    if self.pending.get(key) is waiting:
-                        self.pending.pop(key, None)
+                    if self.pending.get(waiting["slot"]) is waiting:
+                        self.pending.pop(waiting["slot"], None)
                 waiting["answer"] = waiting["answer"] or {"decision": "deny", "scope": "once",
                                                           "reason": "the answer could not be handled"}
                 waiting["event"].set()
@@ -8837,9 +10421,10 @@ class ApprovalBroker:
         if kind == "connect" and answer["decision"] == "allow" and answer["scope"] == "always":
             remember = details.get("remembers") or self.remembers(details)
         with self.lock:
-            self.pending.pop(key, None)
+            self.pending.pop(waiting["slot"], None)
             if unanswered:
-                self.cooling[key] = {"until": self.clock() + self.pause, "kind": kind, "question": waiting["id"],
+                cools = self.cools(kind, key, waiting["slot"])  # (a tool call: only that call, as its question)
+                self.cooling[cools] = {"until": self.clock() + self.pause, "kind": kind, "question": waiting["id"],
                                      "details": self.shown_details(details), "answer": {
                                          **answer, "reason": f"no answer within {self.timeout} s to question "
                                                              f"{waiting['id']}; refused without asking until "
@@ -8906,8 +10491,8 @@ class ApprovalBroker:
         if not isinstance(ident, str) or not QUESTION_ID.fullmatch(ident):
             raise ValueError("a question's ID, as sandbox-ai approvals history shows it")
         try:
-            question = json.loads((self.directory / f"{ident}.json").read_text()[:1 << 16])
-        except (OSError, ValueError):
+            question = json.loads((self.directory / f"{ident}.json").read_text()[:1 << 20])
+        except (OSError, ValueError, RecursionError):
             raise ValueError(f"this run asked no question {ident}") from None
         if not isinstance(question, dict) or question.get("id") != ident or question.get("kind") not in DECIDED_KINDS:
             raise ValueError(f"question {ident} is no question this run decides on itself")
@@ -8927,10 +10512,11 @@ class ApprovalBroker:
         ident = request.get("question")
         kind, details = self.question_of(ident)
         key = self.key(kind, details)
+        cools = self.cools(kind, key, self.slot(kind, details, key))
         with self.lock:
-            if key in self.pending:
+            if any(slot[:2] == key for slot in self.pending):  # (a tool call's slot is its key and its arguments)
                 raise ValueError(f"question {ident} is open: answer it (sandbox-ai approvals allow|deny {ident})")
-            was = self.decided.get(key) or (self.cooling.get(key) or {}).get("answer")
+            was = self.decided.get(key) or (self.cooling.get(cools) or {}).get("answer")
         was = {k: was.get(k) for k in ("decision", "scope", "reason")} if was else None
         notes = []
         if action in ("deny", "forget") and was and was.get("decision") == "allow" and was.get("scope") != "once":
@@ -8945,7 +10531,7 @@ class ApprovalBroker:
         if action == "forget":
             with self.lock:
                 self.decided.pop(key, None)
-                self.cooling.pop(key, None)
+                self.cooling.pop(cools, None)
             return {"forgot": was is not None, "was": was, "question": ident, **({"notes": notes} if notes else {})}
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         entry = {"decision": action, "scope": "run", "reason": "answered", "question": ident, "kind": kind,
@@ -8967,7 +10553,8 @@ class ApprovalBroker:
                 notes.append(f"recorded, but the kill switch holds: {cut}")
         with self.lock:
             self.decided[key] = entry
-            self.cooling.pop(key, None)
+            for cooled in [cooled for cooled in self.cooling if cooled[:2] == key]:  # (a tool call's: key + arguments)
+                self.cooling.pop(cooled, None)
         return {"decided": {k: entry[k] for k in ("question", "kind", "decision", "scope", "details")}, "was": was,
                 **({"notes": notes} if notes else {})}
 
@@ -9098,7 +10685,7 @@ def serve_asks(channel, broker, who=None, taint=None):
     for line in reader:
         try:
             message = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(message, dict):
             try:
@@ -9158,7 +10745,7 @@ class AskChannel:
                 try:
                     sent = self.sock.send(view, socket.MSG_DONTWAIT)
                 except (BlockingIOError, InterruptedError):
-                    if not select.select([], [self.sock], [], max(0.0, deadline - time.monotonic()))[1]:
+                    if not wait_ready((), [self.sock], max(0.0, deadline - time.monotonic()))[1]:
                         self.stalled = True
                         return False
                     continue
@@ -9221,7 +10808,9 @@ def browser_relay(socket_path=BROWSER_SOCKET, directory=None, stop=None, wait=BR
             connection, _ = server.accept()
         except socket.timeout:
             continue
-        except OSError:
+        except OSError as exc:
+            if accept_transient(exc):
+                continue
             break
         if not slots.acquire(blocking=False):
             connection.close()  # too many waiting already: this one is refused
@@ -9276,7 +10865,7 @@ def open_request(arguments, socket_path=BROWSER_SOCKET, out=None):
             client.connect(socket_path)
             client.sendall((json.dumps({"url": urls[0]}) + "\n").encode())
             answer = json.loads(client.makefile("r").readline() or "{}")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         print(f"sandbox-ai: cannot reach the host to open the URL ({exc}); open it yourself:\n{urls[0]}", file=out)
         return 1
     print(answer.get("message", "sandbox-ai: asked the human to open the URL"), file=out)
@@ -9406,7 +10995,7 @@ class Canaries:
         directory = Path(directory if directory is not None else CONTROL_DIR)
         try:
             config = json.loads((directory / CANARY_CONFIG).read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         return cls(config, directory, who) if isinstance(config, dict) else None
 
@@ -9630,7 +11219,7 @@ def git_credential(operation, stream=None, out=None, path=None):
     try:
         with open(path or GIT_TOKENS, encoding="utf-8") as tokens:
             logins = json.loads(tokens.read(GIT_CREDENTIAL_LIMIT)).get("logins", [])
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return 0
     for login in logins if isinstance(logins, list) else []:
         if not isinstance(login, dict) or login.get("url") != origin:
@@ -9690,6 +11279,6 @@ if __name__ == "__main__":
             print("sandbox-ai runtime: internal entry point; use sandbox-ai", file=sys.stderr)
             result = 2
         sys.exit(result if result >= 0 else 128 - result)
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError, RecursionError) as exc:
         print(f"agent-sandbox: {exc}", file=sys.stderr)
         sys.exit(1)

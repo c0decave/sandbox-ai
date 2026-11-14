@@ -229,3 +229,23 @@ def test_the_settings_and_the_policy_fit_a_small_laptop(qapp, env, monkeypatch, 
     finally:
         i18n.set_language("en")
         theme.apply("system", qapp)
+
+
+def test_a_row_of_labels_fields_and_buttons_shares_one_middle(qapp):
+    """Design review 0.1.95: in a wrapping row (widgets.flow: the Start page's Agent/Model/Profile, the board's start
+    row, the toolbars) every item stood at the row's top, so a label sat 5 px above the middle of its field and a
+    field 3 px above its button. Now each is centred in its row's height, also in a row that wrapped."""
+    label, combo, button = QtWidgets.QLabel("Agent"), QtWidgets.QComboBox(), QtWidgets.QPushButton("Save as profile…")
+    combo.addItem("claude")
+    wide = QtWidgets.QPushButton("A button that wraps to a second row")
+    holder = widgets.flow(label, combo, button, wide)
+    holder.resize(360, 200)
+    holder.show()
+    qapp.processEvents()
+    try:
+        middles = {name: w.geometry().center().y() for name, w in (("label", label), ("combo", combo),
+                                                                     ("button", button))}
+        assert max(middles.values()) - min(middles.values()) <= 1, middles
+        assert wide.geometry().top() > button.geometry().bottom(), "the long one is in the second row"
+    finally:
+        holder.close()

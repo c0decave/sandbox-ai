@@ -272,7 +272,7 @@ def test_new_creates_the_missing_agent_directories(shipped):
     (kits_dir() / "review/codex/skills").rmdir()
     (kits_dir() / "review/codex").rmdir()
     status, text = run("new", "review")
-    assert status == 0 and "created codex/skills" in text and "(claude, opencode existed)" in text
+    assert status == 0 and "created codex/skills" in text and "(claude, opencode, hermes, dsh, qwen, goose existed)" in text
     status, text = run("new", "solo", "--agent", "opencode")
     assert status == 0 and os.listdir(kits_dir() / "solo") == ["opencode"]
     status, text = run("new", "egm")
@@ -453,7 +453,7 @@ def test_add_skill_from_an_agent_writable_folder_notes_the_snapshot(shipped, tmp
 def test_new_skill_writes_a_valid_template(shipped, capsys):
     run("new", "review")
     status, text = run("new-skill", "review", "lint-fix", "--description", 'Fixes "lint" – ü; use after edits')
-    assert status == 0 and text.count("wrote") == 3
+    assert status == 0 and text.count("wrote") == 7  # claude, codex, opencode, hermes, dsh, qwen, goose
     content = (kits_dir() / "review/claude/skills/lint-fix/SKILL.md").read_text()
     front = content.split("---\n")[1].splitlines()
     assert front[0] == "name: lint-fix"
@@ -480,7 +480,7 @@ def test_remove_skill(shipped, tmp_path, capsys):
     assert status == 0 and not (kits_dir() / "review/codex/skills/a").exists()
     assert (kits_dir() / "review/claude/skills/a").is_dir()
     status, text = run("remove-skill", "review", "a")
-    assert status == 0 and text.count("removed") == 2
+    assert status == 0 and text.count("removed") == 6  # claude, opencode, hermes, dsh, qwen, goose (codex's went before)
     assert run("remove-skill", "review", "a")[0] == 1
     assert run("remove-skill", "review", "b", "--agent", "claude")[0] == 1
     assert run("remove-skill", "review", "..")[0] == 1

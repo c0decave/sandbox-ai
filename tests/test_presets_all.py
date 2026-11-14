@@ -81,6 +81,11 @@ def host(tmp_path_factory):
         (root / sub).mkdir()
         patch.setenv(name, str(root / sub))
     patch.setenv("SANDBOX_AI_SECRETS", "file")
+    # The keys a preset's --api-key names (coding-goose: Anthropic's), kept as a user keeps them: a start refuses a
+    # key that is not there, the dry run too.
+    patch.setenv("SANDBOX_AI_TEST_API_KEY", "sk-ant-not-a-key")
+    assert s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "SANDBOX_AI_TEST_API_KEY"],
+                                             out=lambda line: None) == 0
     for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "WAYLAND_DISPLAY", "GIT_CONFIG_GLOBAL"):
         patch.delenv(name, raising=False)
     patch.setattr(s, "load_policy", lambda path=None: {})
@@ -134,7 +139,7 @@ def host(tmp_path_factory):
     # The images the presets' services name (--service NAME:image=...), as `sandbox-ai images pull --as NAME` records
     # them (pulled, pinned by digest, unchecked).
     images = {}
-    for index, (name, user) in enumerate((("postgres", "999:999"), ("redis", "999:1000"))):
+    for index, (name, user) in enumerate((("postgres", "999:999"), ("redis", "999:1000"), ("web", "101:101"))):
         images[name] = {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + str(index) * 64,
                         "id": "sha256:" + str(index + 5) * 64, "digest": "sha256:" + str(index) * 64, "user": user,
                         "ports": [], "os": {}}
@@ -170,6 +175,8 @@ def sample_values(preset, root, dev, agent, full):
             values[name] = "dri"
         elif "default" in spec:
             values[name] = spec["default"]
+        elif kind == "host" and name == "domain":
+            values[name] = "lab.example.org"  # --allow-domain: a name, never an address
         elif kind == "host":
             values[name] = "192.0.2.44"
         elif kind == "port":
@@ -207,6 +214,10 @@ def network_of(preset, values, agent):
             hosts += s.PRESETS[profile]
         elif flag == "--allow-host":
             hosts.append(value)
+        elif flag == "--allow-domain":
+            hosts += [value, "*." + value]  # the domain and every name below it
+        elif flag == "--api-key":
+            hosts.append(value.split("=", 1)[0])  # the key's host, on TCP/443
         elif flag == "--allow-tcp":
             tcp.append(value)
         elif flag == "--allow-host-port":
@@ -276,9 +287,12 @@ def test_every_preset_with_every_agent(host, capsys, name, agent, full):
     assert_network(plan, network_of(preset, values, agent))
     filled = {**{key: str(spec["default"]) for key, spec in preset.get("values", {}).items() if "default" in spec},
               **values}
+    # The MCP servers: the --mcp ones, the catalog's, and a --helper's (the agent as an MCP server of this run, one per
+    # agent and main workspace).
     assert [entry["name"] for entry in plan.get("mcp", [])] == [
         *[value for value, _ in P.option_values(preset, filled, "--mcp")],
-        *[server.split(":", 1)[-1] for server in preset.get("mcp", [])]]
+        *[server.split(":", 1)[-1] for server in preset.get("mcp", [])],
+        *[s.helper_name(value, plan["workspaces"][0]["host"]) for value, _ in P.option_values(preset, filled, "--helper")]]
     if values.get("llm"):
         assert plan["llm"]["name"] == values["llm"].split(":", 1)[0], plan.get("llm")
     vpn = values.get("tor") or values.get("vpn")
@@ -465,6 +479,96 @@ def test_the_tor_promise_holds_against_the_command_line(host, capsys):
         P.apply([*base, "--vpn-check=warn"], canonical=s.canonical_options)
     applied = P.apply([*base, "--vpn", "anon", "--vpn-check", "stop"], canonical=s.canonical_options)
     assert applied.count("--vpn") == 2 and P.last_value(applied, "--vpn") == "anon"
+
+
+# --- the showcase presets (2026-11-12: "3-6 more showcase presets and the Containerfiles they need") -------------------
+
+SHOWCASES = {"showcase", "showcase-full-stack", "showcase-vpn", "showcase-local-llm", "showcase-second-opinion"}
+
+
+def test_the_showcase_presets_each_show_something_else_and_write_a_report():
+    """Every showcase is a demo (category fun) for every agent, in English and German, with a first task that checks
+    what the start gives and writes a short report into the workspace, and notes that say what to add once."""
+    assert SHOWCASES <= set(PRESETS)
+    reports = set()
+    for name in sorted(SHOWCASES):
+        preset = PRESETS[name]
+        assert preset["category"] == "fun" and tuple(preset["agents"]) == AGENTS, name
+        german = preset["translations"]["de"]
+        assert german["title"].startswith("Schaufenster:") and preset["title"].startswith("Showcase:"), name
+        assert german["description"] and german["description"] != preset["description"], name
+        report = re.search(r"report (?:to|in) (/work/[a-z-]+\.md)", preset["prompt"])
+        assert report, name
+        reports.add(report.group(1))
+        assert preset["notes"], name
+    assert len(reports) == len(SHOWCASES), "a report file of its own each"
+    # each shows another capability
+    options = {name: P.expand(PRESETS[name], sample_values(PRESETS[name], Path("/x"), Path("/dev"), "codex", True),
+                              extras=False) for name in SHOWCASES - {"showcase"}}
+    assert options["showcase-full-stack"].count("--service") == 2
+    assert "--vpn" in options["showcase-vpn"] and "--vpn-check" in options["showcase-vpn"]
+    assert "--llm" in options["showcase-local-llm"] and "loop_guard=on" in options["showcase-local-llm"]
+    assert "--helper" in options["showcase-second-opinion"]
+
+
+def test_the_full_stack_showcase_names_what_it_needs_pinned(host, capsys):
+    """showcase-full-stack: PostgreSQL and nginx as services (Podman), development hosts open, the development image
+    from the recipe django; the images it tells you to add are exact releases (pinned by digest when added), the web
+    server is sandbox-ai's own Containerfile, the recipe is sandbox-ai's; and since neither MCP catalog has a reviewed
+    PostgreSQL or design server, it names none and says so."""
+    _, _, work = host
+    preset = PRESETS["showcase-full-stack"]
+    plan = dry_run(capsys, work, "codex", "showcase-full-stack", {})
+    services = {service["name"]: service for service in plan["services"]}
+    assert set(services) == {"db", "web"}
+    assert services["db"]["reachable_at"] == ["localhost:5432"] and services["db"]["user"] == "999:999"
+    assert services["web"]["reachable_at"] == ["localhost:8080"] and services["web"]["user"] == "101:101"
+    assert all(service["read_only"] and service["unchecked"] for service in services.values())
+    text = "\n".join(preset["notes"] + [spec["hint"] for spec in preset["values"].values()])
+    pulled = re.findall(r"images pull (\S+) --as postgres", text)
+    assert pulled and all(re.fullmatch(r"docker\.io/library/postgres:\d+\.\d+-bookworm", ref) for ref in pulled)
+    assert "images build-image web --builtin showcase-web" in text
+    assert "showcase-web" in s.load_services_module().builtin_images()
+    assert "images recipe django --from AGENT" in text and "--image-variant django" in text
+    assert "django" in s.load_services_module().images_module().RECIPES
+    assert "mcp" not in preset and "--mcp" not in preset["options"]
+    assert "has a reviewed PostgreSQL or design MCP server yet, so this preset names none" in " ".join(preset["notes"])
+    for folder in ("sandbox-ai-mcp", "axross-mcp-hub"):
+        path = ROOT / "projects" / folder / "catalog.json"
+        if path.is_file():  # still none there: the note holds
+            entries = json.loads(path.read_text())["entries"]
+            assert not [e["name"] for e in entries if re.search(r"postgres|figma|design", e["name"], re.I)], folder
+
+
+def test_the_vpn_showcase_takes_any_kind_of_profile(host, capsys):
+    """showcase-vpn: a WireGuard, a Tailscale and a Tor profile alike, the check stopping the run, the tunnel's
+    resolver, one echo host besides the provider."""
+    _, _, work = host
+    for profile, kind in (("home", "wireguard"), ("ts", "tailscale"), ("anon", "tor")):
+        plan = dry_run(capsys, work, "codex", "showcase-vpn", {"vpn": profile})
+        assert plan["vpn"]["profile"] == profile and plan["vpn"]["type"] == kind
+        assert plan["vpn"]["checks"]["on_failure"] == "stop"
+        assert "api.ipify.org" in plan["https_hosts"]
+
+
+def test_the_local_llm_showcase_sets_the_sampling_and_a_strict_loop_guard(host, capsys):
+    _, _, work = host
+    plan = dry_run(capsys, work, "codex", "showcase-local-llm", {"llm": "ollama", "temperature": "0.7"})
+    params = plan["llm"]["params"]
+    assert params["values"] == {"temperature": 0.7, "max_tokens": 8192}
+    assert set(params["forced"]) == {"temperature", "max_tokens"}
+    assert params["loop_guard"]["enabled"] is True
+    assert (params["loop_guard"]["warn"], params["loop_guard"]["block"]) == (2, 4)
+    assert plan["https_hosts"] == [], "nothing but the server"
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("helper", AGENTS)
+def test_the_second_opinion_showcase_gives_any_agent_any_helper(host, capsys, agent, helper):
+    _, _, work = host
+    plan = dry_run(capsys, work, agent, "showcase-second-opinion", {"helper": helper})
+    assert [entry["name"] for entry in plan["mcp"]] == [s.helper_name(helper, plan["workspaces"][0]["host"])]
+    assert_network(plan, network_of(PRESETS["showcase-second-opinion"], {"helper": helper}, agent))
 
 
 def test_an_identity_a_preset_names_is_checked_with_how_to_make_it(host):
@@ -732,3 +836,44 @@ def test_your_own_development_preset_with_its_folders(host, capsys, monkeypatch)
     finally:
         (presets / "own-dev.json").unlink()
         s.load_publish_logins_module().main(["remove", "pypi"], out=lambda line: None)
+
+
+# --- the agents' own presets: "Coding with AGENT" and "AGENT with a local model" for every harness ------------------
+
+def test_every_agent_has_its_coding_and_its_local_model_preset():
+    """Each harness of the launcher (claude, codex, opencode, hermes, dsh, qwen, goose) has both, for it alone; the
+    local one opens only the server (--no-provider-defaults) with the loop guard on. Hermes' local one is the older
+    hermes-local-llm (category llm), not a second copy."""
+    assert set(s.AUTH_TARGETS) == {"claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"}
+    for agent in s.AUTH_TARGETS:
+        coding, local = PRESETS[f"coding-{agent}"], PRESETS[f"{agent}-local-llm"]
+        assert coding["agents"] == [agent] and local["agents"] == [agent], agent
+        assert coding["category"] == "agents" and local["category"] == ("llm" if agent == "hermes" else "agents")
+        assert {"--allow-pypi", "--allow-npm", "--allow-github"} <= set(coding["options"])
+        assert "--no-memory" not in coding["options"] and "--no-provider-defaults" not in coding["options"]
+        assert {"--llm", "--no-provider-defaults", "loop_guard=on"} <= set(local["options"])
+        assert local["values"]["llm"]["kind"] == "llm"
+        for preset in (coding, local):
+            assert preset["translations"]["de"]["title"] and preset["translations"]["de"]["description"]
+    assert P.CATEGORY_INFO["agents"]["title"] == {"en": "Agents", "de": "Agenten"}
+
+
+@pytest.mark.parametrize("agent", ["hermes", "dsh", "qwen", "goose"])
+def test_the_presets_of_the_experimental_agents(host, capsys, monkeypatch, agent):
+    """The ones test_every_preset_with_every_agent leaves out (its agents are claude, codex and opencode): presets
+    check, a dry run (no opt-in: they are only not live-tested yet), and only the network the preset names."""
+    root, dev, work = host
+    for name in sorted(n for n, preset in PRESETS.items() if preset.get("agents") == [agent]):
+        preset = PRESETS[name]
+        for full in (False, True):
+            values = sample_values(preset, root, dev, agent, full)
+            assert P.missing(preset, values, agent) == [], name
+            plan = dry_run(capsys, work, agent, name, values)
+            assert plan["agent"] == agent and plan[agent]["experimental"], name
+            assert_network(plan, network_of(preset, values, agent))
+            if values.get("llm") or "--llm" in preset["options"]:
+                # Read-only: a managed file (/etc/...) or, for Goose, variables that win over its own files.
+                assert plan["https_hosts"] == [] and plan["llm"]["config"].startswith(("/etc/", "environment")), name
+        for other in ("claude", "codex"):
+            with pytest.raises(ValueError, match=f"preset {name} is for"):
+                dry_run(capsys, work, other, name, sample_values(preset, root, dev, agent, False))

@@ -52,6 +52,7 @@ RECORD_LIMIT = 64 << 10      # one record, as JSON
 READ_LIMIT = 16 << 20        # bytes read from one transcript per poll (a longer line is skipped)
 POLL_BUDGET = 64 << 20       # bytes read per poll in all
 JSON_FILE_LIMIT = 4 << 20    # one JSON file of OpenCode's storage
+QUESTION_FILE_LIMIT = 1 << 20  # one question file of the run (approvals.QUESTION_FILE_LIMIT: its arguments in full)
 FILES_LIMIT = 5000           # files looked at per source and poll
 DEPTH_LIMIT = 6
 INTERVAL = 2.0               # seconds between two polls while the sandbox runs
@@ -1720,7 +1721,8 @@ FILE_ACTIONS = {"write": "modified", "create": "created", "delete": "deleted", "
 # The agents' own bookkeeping (transcripts, caches, settings): not what they did to your files.
 OWN_FILES = ("/root/.claude/", "/root/.claude.json", "/root/.codex/", "/root/.local/share/opencode/",
              "/root/.local/state/", "/root/.cache/", "/root/.npm/", "/root/.config/opencode/", "/root/.bun/",
-             "/root/.local/share/claude/", "/tmp/claude-", "/tmp/.X", "/tmp/tmux-")
+             "/root/.local/share/claude/", "/root/.hermes/", "/root/.dsh/", "/root/.qwen/",
+             "/root/.config/goose/", "/root/.local/share/goose/", "/tmp/claude-", "/tmp/.X", "/tmp/tmux-")
 
 
 class FileChanges:
@@ -1923,7 +1925,8 @@ class Approvals:
             answered = f"{ident}.done" in found
             if not answered and not final:
                 continue
-            question = json_object(read_small(self.directory, name, 1 << 16) or b"")
+            # A tool call's question carries its arguments in full (64 KiB, escaped once more): QUESTION_FILE_LIMIT.
+            question = json_object(read_small(self.directory, name, QUESTION_FILE_LIMIT) or b"")
             if question is None:
                 continue
             result = json_object(read_small(self.directory, f"{ident}.done", 1 << 16) or b"") if answered else None

@@ -15,7 +15,7 @@ pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not ba
 SERVERS = [{"name": "ollama", "kind": "ollama", "url": "http://127.0.0.1:11434", "models": ["qwen3-coder:30b"],
             "agents": ["claude", "codex", "opencode"]},
            {"name": "api", "kind": "openai-compatible", "url": "http://192.168.1.21:4000", "models": [],
-            "agents": ["codex", "opencode"]}]
+            "model": "gpt-oss-20b", "agents": ["codex", "opencode"]}]  # (its default model: --llm api starts)
 
 
 @pytest.fixture

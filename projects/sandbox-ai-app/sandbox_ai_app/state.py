@@ -169,8 +169,9 @@ class State(QObject):
         for function in self.collectors:
             try:
                 function()
-            except Exception:  # noqa: BLE001 - a page that is gone: the rest is still written
-                pass
+            except Exception as _exc:  # noqa: BLE001 - a page that is gone: the rest is still written
+                applog.swallowed("state", f"the state of {getattr(function, '__qualname__', function)} is not "
+                                 "collected (a page that is gone?); the rest is still written", _exc)
         try:
             # Compact: a third of the size of an indented text, and made in a tenth of the time (the C encoder; the
             # indented one is Python's own) - on the GUI thread, at each write.

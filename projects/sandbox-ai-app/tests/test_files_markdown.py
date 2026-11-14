@@ -298,3 +298,26 @@ def test_binary_files_are_not_shown_as_markdown(setup, wait):
     assert window.view == "hex" and "Markdown" in window.notice.text() and not window.as_markdown.isEnabled()
     window.close()
     assert os.path.exists(ws / "blob.md")
+
+
+def test_a_text_with_mixed_line_endings_comes_back_from_the_hex_view(docs, wait):
+    """A file with mixed line endings opens as text read-only (the editor could not give it back exactly); after the
+    hex view, the text and the Markdown view came no more ("These bytes are no text the editor can show unchanged"):
+    both were refused, the text view's button greyed out. Unchanged in the hex view, it is the text it was; changed
+    there into bytes the editor cannot show unchanged, it stays in the hex view and says why."""
+    page, ws, host, _ = docs
+    (ws / "mixed.md").write_bytes(b"# Mixed\r\n\nline one\nline two\r\n")
+    page.left.list()
+    settle(page.left)
+    window = page.open_editor(page.left.root, "mixed.md", str(ws / "mixed.md"), "text")
+    editor_of(page, wait)
+    assert window.view == "text" and not window.text_ok and window.text.isReadOnly()
+    assert window.switch("markdown") and window.switch("hex")
+    assert window.as_text.isEnabled() and window.as_markdown.isEnabled()
+    assert window.switch("text") and window.view == "text" and window.text.isReadOnly()
+    assert "line two" in window.text.toPlainText() and window.contents() == (ws / "mixed.md").read_bytes()
+    assert window.switch("hex") and window.switch("markdown") and window.view == "markdown"
+    assert window.switch("hex")
+    window.hex.set_data(window.hex.data().replace(b"one", b"ONE"), False)
+    assert not window.switch("text") and window.view == "hex", "changed in hex: shown there, not as the old text"
+    window.close()

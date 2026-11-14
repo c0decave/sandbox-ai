@@ -67,6 +67,11 @@ CATEGORY_INFO = {
                                           "browsers, memory for the agent.",
                                     "de": "Programmieren an Ihren Projekten: Sprachen und ihre Paket-Registries, "
                                           "Datenbanken, Browser, ein Gedächtnis für den Agenten."}},
+    "agents": {"title": {"en": "Agents", "de": "Agenten"},
+               "description": {"en": "Each coding agent on its own: with its maker's model, PyPI, npm and GitHub, or "
+                                     "with a model on your own server and nothing else.",
+                               "de": "Jeder Coding-Agent für sich: mit dem Modell seines Herstellers, PyPI, npm und "
+                                     "GitHub, oder mit einem Modell auf Ihrem eigenen Server und sonst nichts."}},
     "research": {"title": {"en": "Research & web", "de": "Recherche & Web"},
                  "description": {"en": "Searching and reading the web, with a memory of the case; what comes from the "
                                        "web is untrusted.",
@@ -118,7 +123,7 @@ CATEGORIES = tuple(CATEGORY_INFO)
 DEFAULT_CATEGORY = "other"
 # The categories of earlier versions, still taken (your presets, an extra directory's) and listed where they point.
 LEGACY_CATEGORIES = {"simple": "other", "analysis": "security", "media": "fun"}
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 KEYS = {"format", "version", "id", "title", "description", "category", "agents", "options", "mcp", "rules",
         "values", "prompt", "notes", "needs", "translations"}
 # The languages a preset may give its title and description in besides English ("translations": {"de": {"title":
@@ -134,6 +139,27 @@ REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentia
 # Your own presets (~/.config/sandbox-ai/presets, outside every workspace) are yours alone and never passed on: in them
 # you may also name the folders a start gets. Built-in presets and those of an extra directory may not.
 OWN_ALLOWED = ("--workspace",)
+# Values that only you choose (as in a project's file): the cloud provider's whole conversations recorded after TLS
+# inspection. A preset of yours may set them; one passed on (built-in, an extra directory's - a team's checkout) may
+# not. (The agents' telemetry is always off: an old --telemetry on in any preset is ignored by the launcher.)
+OWN_VALUES = {"--llm-traffic": "all"}
+
+
+def own_values_in(options):
+    """["--llm-traffic all", ...]: the OWN_VALUES among OPTIONS (long forms; "--flag value" or "--flag=value")."""
+    found = []
+    for index, token in enumerate(options):
+        name, equals, value = str(token).partition("=")
+        if name in OWN_VALUES:
+            given = value if equals else (options[index + 1] if index + 1 < len(options) else None)
+            if given == OWN_VALUES[name]:
+                found.append(f"{name} {given}")
+    return found
+
+
+def own_values_problem(found):
+    return (f"{', '.join(dict.fromkeys(found))} is not allowed in a preset that is not yours: only your command line, "
+            "~/.config/sandbox-ai/defaults.json or a preset of your own (~/.config/sandbox-ai/presets) chooses it")
 
 
 def category_of(preset):
@@ -180,6 +206,9 @@ DIRS_LIMIT = 32
 # The launcher sets this to its exposed_before() (the trees sandboxes could write in earlier runs) when it loads
 # this module; elsewhere net.py's launcher gives it, together with the workspaces of running sandboxes.
 EXPOSED_BEFORE = None
+# The launcher's experimental_badge (its EXPERIMENTAL_PARTS, the one list of what has not passed its live test yet):
+# set when the launcher loads this module, else read from it here (experimental).
+EXPERIMENTAL_BADGE = None
 
 
 def defaults_path():
@@ -334,6 +363,10 @@ def problems(document, where="preset", origin=None):
         for name in PLACEHOLDER.findall(option):
             if name not in values:
                 found.append(f"{where}: {{{name}}} is used but not declared in values")
+    options = document.get("options") if isinstance(document.get("options"), list) else []
+    widened = own_values_in(options) if origin != "yours" else []
+    if widened:
+        found.append(f"{where}: {own_values_problem(widened)}")
     rules = document.get("rules")
     if rules is not None and (not isinstance(rules, str) or "/" in rules or not rules.endswith(".json")):
         found.append(f"{where}: rules names a JSON file beside the preset (no path)")
@@ -550,6 +583,20 @@ def prompt_args(preset, agent, values=None):
     if not text:
         return []
     text = PLACEHOLDER.sub(lambda m: (values or {}).get(m.group(1), m.group(0)), text)
+    if agent == "hermes":
+        # Hermes' chat seeds its interactive session with the query on a terminal; the text is the option's own
+        # value (--query=...), so one that starts with "-" stays the task.
+        return ["chat", "--query=" + text]
+    if agent == "qwen":
+        # Qwen Code runs the task and stays interactive; the text is the option's own value.
+        return ["--prompt-interactive=" + text]
+    if agent == "goose":
+        # Goose runs the task and stays interactive (goose run --interactive); the text is the option's own value.
+        return ["run", "--interactive", "--text=" + text]
+    if agent == "dsh":
+        # DSH has no prompt for its web UI: the task runs headless (one task, its answer in the window); a text that
+        # starts with "-" gets a space first, so DSH never reads it as an option.
+        return ["headless", " " + text if text.startswith("-") else text]
     return ["--prompt", text] if agent == "opencode" else [text]
 
 
@@ -826,6 +873,10 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None):
     found = refused_in(options, preset.get("_origin"))
     if found:
         raise ValueError(f"preset {name}: {', '.join(dict.fromkeys(found))} is not allowed in a preset")
+    # As the preset gives them (a value of its own filled in too): what only you choose.
+    widened = own_values_in(options) if preset.get("_origin") != "yours" else []
+    if widened:
+        raise ValueError(f"preset {name}: {own_values_problem(widened)}")
     # CREDENTIAL (the launcher's copies_credential): a --copy of a login file is a login copied in as well.
     copied = copied_logins(options, credential) if credential else []
     if copied:
@@ -850,6 +901,9 @@ def origin_text(preset):
 def describe(preset, out=print):
     out(f"{preset['id']}: {preset['title']}  ({category_text(category_of(preset))}, {origin_text(preset)})")
     out(f"  {preset['description']}")
+    badge = experimental(preset)
+    if badge:
+        out(f"  {experimental_text(badge)}")
     out(f"  agents: {', '.join(preset.get('agents', AGENTS))}")
     if preset.get("options"):
         out(f"  options: {shlex.join(preset['options'])}")
@@ -870,9 +924,25 @@ def describe(preset, out=print):
         out(f"  first task: {preset['prompt']}")
 
 
+def experimental(preset):
+    """The badge of PRESET when it starts something not live-tested yet (the launcher's experimental_badge over its
+    agents and options: {"names"}), else None. A badge only: such a preset is listed and starts like any other."""
+    global EXPERIMENTAL_BADGE
+    if EXPERIMENTAL_BADGE is None:
+        EXPERIMENTAL_BADGE = _module("agent_sandbox").experimental_badge
+    return EXPERIMENTAL_BADGE(preset.get("agents") or AGENTS, preset.get("options") or [])
+
+
+def experimental_text(badge):
+    """BADGE (experimental) in words."""
+    return f"not live-tested yet ({', '.join(badge['names'])})"
+
+
 def public(preset):
+    badge = experimental(preset)
     return ({key: value for key, value in preset.items() if not key.startswith("_")} | {"origin": preset["_origin"]}
-            | ({"directory": preset["_dir"]} if preset.get("_dir") else {}))
+            | ({"directory": preset["_dir"]} if preset.get("_dir") else {})
+            | ({"experimental": badge} if badge else {}))
 
 
 # -- the extra preset directories (defaults.json's preset_dirs) --
@@ -902,15 +972,16 @@ def dirs_report():
 def change_dirs(change, out):
     """Apply CHANGE(list of paths) -> new list to defaults.json through sandbox-ai defaults (checked, atomic)."""
     defaults = _module("defaults_cmd")
-    document, path = defaults.read()
-    current = check_dirs(document.get(DIRS_KEY, []), f"{path}: {DIRS_KEY}")
-    wanted = change(list(current))
-    if wanted:
-        document[DIRS_KEY] = wanted
-    else:
-        document.pop(DIRS_KEY, None)
-    defaults.check(document, path)
-    defaults.write(path, document)
+    with defaults.locked():  # from reading defaults.json to writing it back, as `sandbox-ai defaults set`
+        document, path = defaults.read()
+        current = check_dirs(document.get(DIRS_KEY, []), f"{path}: {DIRS_KEY}")
+        wanted = change(list(current))
+        if wanted:
+            document[DIRS_KEY] = wanted
+        else:
+            document.pop(DIRS_KEY, None)
+        defaults.check(document, path)
+        defaults.write(path, document)
     return path
 
 
@@ -1006,6 +1077,7 @@ def main(argv, out=print):
             if args.json:
                 out(json.dumps([public(preset) for preset in presets.values()], indent=2))
             else:
+                width = max([22, *(len(preset["id"]) for preset in presets.values())])  # (a long id: still a space)
                 for category in CATEGORIES:
                     group = [preset for preset in presets.values() if category_of(preset) == category]
                     if group:
@@ -1013,7 +1085,9 @@ def main(argv, out=print):
                         for preset in sorted(group, key=lambda x: x["id"]):
                             mine = ("  (yours)" if preset["_origin"] == "yours" else
                                     f"  (from {preset['_dir']})" if preset["_origin"] == "extra" else "")
-                            out(f"  {preset['id']:<22} {preset['title']}{mine}")
+                            badge = experimental(preset)
+                            out(f"  {preset['id']:<{width}} {preset['title']}{mine}"
+                                + ("  [not live-tested yet]" if badge else ""))
             for problem in damaged:
                 print(f"sandbox-ai presets: skipped {problem}", file=sys.stderr)
             return 0

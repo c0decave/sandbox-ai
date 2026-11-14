@@ -1134,7 +1134,7 @@ def added_workspaces(config_path):
     Anything unreadable adds nothing: their commits are then in no workspace, and the push is refused."""
     try:
         data = json.loads((Path(config_path).parent / ADDED_PUSH).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     entries = data.get("workspaces") if isinstance(data, dict) else None
     return [{"path": e["path"], "rules": e["rules"]} for e in entries if isinstance(e, dict)

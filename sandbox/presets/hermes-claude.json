@@ -1,0 +1,27 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "hermes-claude",
+  "title": "Hermes with Claude Code as its helper",
+  "description": "Hermes Agent plans and orchestrates, Claude Code works for it as a helper in a sandbox of its own on the same project: Hermes splits the work, hands parts to Claude through MCP, reviews what comes back and keeps what it learns as skills and memory of this project.",
+  "translations": {
+    "de": {
+      "title": "Hermes mit Claude Code als Helfer",
+      "description": "Hermes Agent plant und steuert, Claude Code arbeitet ihm als Helfer in einer eigenen Sandbox auf demselben Projekt zu: Hermes teilt die Arbeit auf, gibt Teile über MCP an Claude, prüft, was zurückkommt, und behält, was es lernt, als Skills und Gedächtnis dieses Projekts."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "hermes"
+  ],
+  "options": [
+    "--helper",
+    "claude"
+  ],
+  "prompt": "You orchestrate this session; Claude Code is your helper, another agent in a sandbox of its own on this same workspace, which you give tasks with its MCP tool ask (continue: true goes on in its last conversation). Work like this until the human says otherwise: plan each task the human gives you in small steps; do the steps you can check quickly yourself; hand larger implementation or review steps to Claude with a precise brief (the files, what done means, what it may change); review what it did (read the diff, run the tests) before you accept it, and give it corrections the same way. One step at a time for Claude. Keep what you learn about this project in your memory. Start by asking the human for the first task.",
+  "notes": [
+    "Hermes needs a model of its own: its Nous Portal login (sandbox-ai login hermes, once), an API key that stays out of the sandbox (--api-key api.anthropic.com=ANTHROPIC_API_KEY, --api-key openrouter.ai=OPENROUTER_API_KEY) or a server of yours with --llm NAME (a helper is then refused: it reaches its own provider, which --llm keeps out).",
+    "Claude Code runs as an MCP server in a sandbox of its own: its own login (sandbox-ai login claude or the host's), its provider's hosts, the same main workspace (/work) - nothing of Hermes' HOME or login. Hermes reaches it only through its tool ask.",
+    "Hermes is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+  ]
+}

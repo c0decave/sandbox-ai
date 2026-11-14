@@ -4,14 +4,19 @@ on each page. A panel at the bottom of the window (on every page; it can be undo
 others), with a level to show from, a filter and Copy / Clear.
 
 Entries come from applog (any thread) through LogHub, which keeps the last MAX_ENTRIES and hands each new one to the
-GUI thread. The panel shows them as plain text (paths and names may be the agent's)."""
+GUI thread. The panel shows them as plain text (paths and names may be the agent's). The entries shown can be narrowed
+to one area (where they come from: board, command, terminal, SandboxesPage...), and "Copy for a bug report" puts the
+end of app.log and launcher.log with the versions on the clipboard, secrets masked (bug_report())."""
 from __future__ import annotations
 
 from collections import deque
+import os
+from pathlib import Path
+import platform
 import threading
 import weakref
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QHBoxLayout, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
@@ -27,6 +32,60 @@ MAX_ENTRIES = 5000
 SHOW_FROM = (("ERROR", N_("Errors")), ("WARNING", N_("Warnings")), ("INFO", N_("Info")), ("DEBUG", N_("Debug")))
 RANK = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "FATAL": 4}
 DEFAULT_LEVEL = "INFO"
+REPORT_LINES = 400  # lines of app.log (and of launcher.log) a bug report takes from their end
+REPORT_READ = 512 << 10  # bytes read from the end of each file for it
+
+
+def area_of(where):
+    """The area of an entry's WHERE, as the log window's area chooser lists it: the component without its function
+    or place ("board", "command", "SandboxesPage", "qt" for "qt.qpa.xcb file.cpp:12", "files_page" for
+    "files_page.Pane.list")."""
+    text = str(where or "").strip()
+    return text.split(" ", 1)[0].split(".", 1)[0] or "app"
+
+
+def file_tail(path, lines=REPORT_LINES, limit=REPORT_READ):
+    """The last LINES lines of the file PATH (at most LIMIT bytes read from its end), or None when it cannot be read."""
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            data = stream.read(limit)
+    except OSError:
+        return None
+    text = data.decode("utf-8", "replace")
+    found = text.splitlines()
+    if size > limit and found:
+        found = found[1:]  # (the first line read is cut)
+    return "\n".join(found[-lines:])
+
+
+def masked(text):
+    """TEXT for a bug report: every secret masked (applog.redact), the home folder said as ~."""
+    text = applog.redact(text)
+    home = str(Path.home())
+    return text.replace(home, "~") if home and home not in ("/", "") else text
+
+
+def bug_report(entries=(), lines=REPORT_LINES):
+    """What "Copy for a bug report" puts on the clipboard: the versions (the app, sandbox-ai, Python, Qt, the
+    system), the end of app.log and of launcher.log (each its last LINES lines) - or, without app.log, the log
+    window's own entries (ENTRIES) - every secret masked and the home folder said as ~."""
+    known = applog.versions()
+    parts = ["sandbox-ai app: bug report", "Versions: " + ", ".join(
+        f"{name} {value}" for name, value in known.items() if name != "sandbox-ai home"),
+        f"System: {platform.platform()}", f"Log: {applog.log_path()}"]
+    app_log = file_tail(applog.log_path(), lines)
+    if app_log is None:
+        app_log = "\n".join(line_of(entry) for entry in list(entries)[-lines:])
+        parts += ["", f"--- the log window's last {lines} entries (app.log could not be read) ---", app_log]
+    else:
+        parts += ["", f"--- app.log, its last {lines} lines ---", app_log]
+    launcher = file_tail(applog.log_path().with_name("launcher.log"), lines)
+    parts += ["", f"--- launcher.log, its last {lines} lines ---", launcher if launcher is not None else
+              "(none: the launcher wrote no log here)"]
+    return masked("\n".join(parts)) + "\n"
 
 
 class LogHub(QObject):
@@ -78,6 +137,32 @@ class LogHub(QObject):
 
 
 _hub = None
+# A message whose line in the log is clicked does something: {its first line: function} (the last LINKS_KEPT) - the
+# Board's "Preparing (2 of 4): ..." opens the terminal tab where it runs.
+LINKS = {}
+LINKS_KEPT = 50
+
+
+def link(message, function):
+    """A click on the line of MESSAGE in a log panel calls FUNCTION() (the last one given for that message)."""
+    key = str(message).split("\n", 1)[0].strip()
+    if not key:
+        return
+    LINKS.pop(key, None)
+    LINKS[key] = function
+    while len(LINKS) > LINKS_KEPT:
+        LINKS.pop(next(iter(LINKS)))
+
+
+def link_of(line):
+    """The function of the message whose line LINE is (a line of the log panel), else None."""
+    text = str(line)
+    for key in reversed(list(LINKS)):
+        if text.endswith(": " + printable_text(key)):
+            return LINKS[key]
+    return None
+
+
 PANELS = weakref.WeakSet()  # every LogPanel alive (each chooses its own level)
 
 
@@ -139,15 +224,28 @@ class LogPanel(QWidget):
         self.filter.setAccessibleName(tr("Filter the log"))
         self.filter.setClearButtonEnabled(True)
         self.filter.textChanged.connect(lambda _t: self.show_all())
+        self.area = QComboBox()
+        self.area.setAccessibleName(tr("Show the area"))
+        self.area.setToolTip(tr("Show only the entries of one area (where they come from: the Board, commands, "
+                                "terminals, a page)"))
+        self.area.addItem(tr("All areas"), None)
+        self.areas = set()
+        self.area.currentIndexChanged.connect(lambda _i: self.show_all())
         copy = QPushButton(tr("Copy"))
         copy.setToolTip(tr("Copy the entries shown"))
         copy.clicked.connect(lambda _=False: QApplication.clipboard().setText(self.text.toPlainText()))
+        report = QPushButton(tr("Copy for a bug report"))
+        report.setToolTip(tr("Copy the end of app.log and launcher.log with the versions, secrets masked, to paste "
+                             "into a bug report"))
+        report.clicked.connect(lambda _=False: self.copy_report())
         clear = QPushButton(tr("Clear"))
         clear.setToolTip(tr("Empty the log window (app.log keeps everything)"))
         clear.clicked.connect(lambda _=False: self.clear())
         bar.addWidget(self.level)
+        bar.addWidget(self.area)
         bar.addWidget(self.filter, 1)
         bar.addWidget(copy)
+        bar.addWidget(report)
         bar.addWidget(clear)
         if detachable:
             window = QPushButton(tr("Own window"))
@@ -161,15 +259,60 @@ class LogPanel(QWidget):
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.text.setMaximumBlockCount(MAX_ENTRIES * 2)
         self.text.setAccessibleName(tr("Log"))
+        self.text.viewport().installEventFilter(self)  # (a click on a line with a link: link())
         layout.addWidget(self.text, 1)
         self.unread_count = 0
         self.watching = False  # the panel is unfolded and visible: nothing counts as unread
         self.hub = hub()
         self.hub.added.connect(self.add)
+        self.note_areas(self.hub.snapshot())
         self.level_changed()
 
     def chosen(self):
         return self.level.currentData() or DEFAULT_LEVEL
+
+    def note_areas(self, entries):
+        """The areas of ENTRIES offered in the area chooser (sorted; the one chosen stays chosen)."""
+        found = {area_of(entry.get("where")) for entry in entries} - self.areas
+        if not found:
+            return
+        self.areas |= found
+        chosen = self.area.currentData()
+        self.area.blockSignals(True)
+        try:
+            while self.area.count() > 1:
+                self.area.removeItem(1)
+            for area in sorted(self.areas, key=str.lower):
+                self.area.addItem(printable_text(area), area)
+            self.area.setCurrentIndex(max(0, self.area.findData(chosen)) if chosen is not None else 0)
+        finally:
+            self.area.blockSignals(False)
+
+    def copy_report(self):
+        """Copy for a bug report: bug_report() on the clipboard; said in the log (how much, not what)."""
+        text = bug_report(self.hub.snapshot())
+        QApplication.clipboard().setText(text)
+        applog.log("INFO", "log", f"a bug report was copied to the clipboard ({len(text.splitlines())} lines, secrets "
+                                  "masked)")
+        return text
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        """A click (no text selected by it) on the line of a message with a link (link()) does what it says."""
+        if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and \
+                watched is self.text.viewport() and not self.text.textCursor().hasSelection():
+            self.click_line(self.text.cursorForPosition(event.position().toPoint()).block().text())
+        return super().eventFilter(watched, event)
+
+    def click_line(self, line):
+        """LINE of the panel clicked: its message's link followed (True), if it has one."""
+        function = link_of(line)
+        if function is None:
+            return False
+        try:
+            function()
+        except Exception as exc:  # noqa: BLE001 - a link that cannot be followed: said, never a crash
+            applog.log("WARNING", "log", f"the link of this line could not be followed: {exc}")
+        return True
 
     def level_changed(self):
         # (debug entries are made while any panel - the docked one, the log window of its own - shows them)
@@ -183,9 +326,12 @@ class LogPanel(QWidget):
         """shows() as a function, with the level and the filter read once (show_all asks it for each of up to
         MAX_ENTRIES entries: reading both widgets for each was most of a redraw - at every key typed into the filter)."""
         least, needle = RANK[self.chosen()], self.filter.text().strip().lower()
+        area = self.area.currentData()
 
         def shows(entry):
             if RANK.get(entry.get("level"), 1) < least:
+                return False
+            if area is not None and area_of(entry.get("where")) != area:
                 return False
             return not needle or needle in line_of(entry).lower()
         return shows
@@ -249,8 +395,10 @@ class LogPanel(QWidget):
 
     def add(self, entries):
         """New ENTRIES (LogHub.added: a list; one entry alone also does)."""
+        entries = [entries] if isinstance(entries, dict) else entries
+        self.note_areas(entries)
         shows = self.shown_by()
-        shown = [entry for entry in ([entries] if isinstance(entries, dict) else entries) if shows(entry)]
+        shown = [entry for entry in entries if shows(entry)]
         if not shown:
             return
         bar = self.text.verticalScrollBar()

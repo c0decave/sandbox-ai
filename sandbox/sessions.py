@@ -41,14 +41,38 @@ import threading
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 PROC = Path("/proc")
 READY_TIMEOUT = 120
+READY_POLL, READY_PROBE_POLL = 0.05, 0.2  # seconds between two looks whether a session's terminal relay is up
 DETACH_GRACE = 3   # seconds the terminal relay may take to go once the agent ended
 ENDING_WAIT = 60   # seconds a supervisor may take to clean up after its agent ended
 # Restarting a stopped session continues the agent's most recent conversation.
-CONTINUE_ARGS = {"claude": ["--continue"], "codex": ["resume", "--last"], "opencode": ["--continue"]}
+CONTINUE_ARGS = {"claude": ["--continue"], "codex": ["resume", "--last"], "opencode": ["--continue"],
+                 "hermes": ["--continue"], "qwen": ["--continue"],
+                 "dsh": [],  # DSH's web UI lists its own sessions (~/.dsh/sessions); a task names one
+                 "goose": ["session", "--resume"]}
 # Agent arguments that run one task and exit; repeating them on a restart would run it again.
-ONE_SHOT_ARGS = {"-p", "--print", "exec", "e", "run"}
+ONE_SHOT_ARGS = {"-p", "--print", "exec", "e", "run", "-z", "--oneshot", "headless"}
+# The same, an agent's own (Qwen Code's long form of -p; OpenCode's --prompt is no task of its own); also NAME=VALUE.
+ONE_SHOT_OPTIONS = {"qwen": {"--prompt"}}
+# Options whose value is the first task of an interactive session (a preset's prompt, presets.prompt_args): dropped
+# with their value on a restart, which would give the agent that task again.
+PROMPT_OPTIONS = {"opencode": {"--prompt"}, "qwen": {"--prompt-interactive", "-i"},
+                  "hermes": {"--query", "-q", "--query-file"}}
 # Options that take a value, per agent; anything not listed counts as a switch.
 VALUE_OPTIONS = {
     "claude": {"--model", "--fallback-model", "--effort", "--add-dir", "--permission-mode", "--allowedTools",
@@ -57,10 +81,25 @@ VALUE_OPTIONS = {
     "codex": {"--model", "-m", "--sandbox", "-s", "--profile", "-p", "--config", "-c", "--cd", "-C",
               "--ask-for-approval", "-a", "--image", "-i", "--add-dir"},
     "opencode": {"--model", "-m", "--agent", "--log-level", "--port", "--hostname"},
+    "hermes": {"--model", "-m", "--provider", "--reasoning", "--toolsets", "-t", "--resume", "-r", "--in",
+               "--skills", "-s", "--usage-file", "--query", "-q", "--query-file", "--image"},
+    "qwen": {"--model", "-m", "--approval-mode", "--resume", "-r", "--session-id", "--prompt", "-p",
+             "--prompt-interactive", "-i", "--mcp-config", "--append-system-prompt", "--system-prompt",
+             "--output-format", "-o", "--include-directories", "--add-dir", "--extensions", "-e", "--auth-type",
+             "--openai-base-url", "--max-session-turns", "--worktree", "--output-style", "--fallback-model"},
+    "dsh": {"--profile", "--patch", "--port", "--host", "--public-url", "--trusted-host", "--tls-cert", "--tls-key",
+            "--session-id", "--from-default-profile"},
+    "goose": {"--name", "-n", "--session-id", "--path", "--system", "--max-tool-repetitions", "--max-turns",
+              "--container", "--with-extension", "--with-streamable-http-extension", "--with-builtin", "--provider",
+              "--model", "--instructions", "-i", "--text", "-t", "--recipe", "--params", "--sub-recipe",
+              "--output-format", "--port", "--host"},
 }
 # Options that pick the conversation themselves; the restart adds its own continue arguments.
 SESSION_OPTIONS = {"claude": {"--continue", "-c", "--resume", "-r", "--session-id"},
-                   "codex": set(), "opencode": {"--continue", "-c", "--session", "-s"}}
+                   "codex": set(), "opencode": {"--continue", "-c", "--session", "-s"},
+                   "hermes": {"--continue", "-c", "--resume", "-r"},
+                   "qwen": {"--continue", "-c", "--resume", "-r", "--session-id"}, "dsh": {"--session-id"},
+                   "goose": {"--resume", "-r", "--name", "-n", "--session-id"}}
 _launcher = None
 _launcher_source = None  # starts.py's launcher() when starts.py loaded this module: one launcher for all of its modules
 _starts = None
@@ -173,7 +212,7 @@ def resolve(name):
                 continue
             try:
                 data = json.loads((directory / "session.json").read_text())
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 data = None
             if data is not None and display(directory.name, data) == name:
                 return directory.name
@@ -221,17 +260,37 @@ def load(name):
     if not path.is_file():
         raise ValueError(f"No session named {printable(name)}")
     data = json.loads(path.read_text())
-    if not isinstance(data, dict):  # valid JSON of another shape is as damaged as a broken file (ValueError)
-        raise ValueError(f"the record of session {printable(name)} is damaged: {path}")
+    if not isinstance(data, dict) or shape_problem(data):  # valid JSON of another shape is as damaged as a broken file
+        raise ValueError(f"the record of session {printable(name)} is damaged"
+                         + (f" ({shape_problem(data)})" if isinstance(data, dict) else "") + f": {path}")
     return data
+
+
+def shape_problem(data):
+    """What makes the session record DATA unusable although it is a JSON object (edited by hand, damaged): resume, copy
+    and report ended with a TypeError on it. None when its fields have their shapes."""
+    if not isinstance(data.get("agent"), str):
+        return "agent is no name"
+    for key in ("options", "agent_args"):
+        if key in data and not (isinstance(data[key], list) and all(isinstance(item, str) for item in data[key])):
+            return f"{key} is no list of words"
+    for key in ("cwd", "workspace", "name", "run", "pod", "podman_url", "backend", "project"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            return f"{key} is no text"
+    return None
 
 
 def save(name, data):
     directory = session_dir(name)
     fd, temporary = tempfile.mkstemp(prefix=".session-", dir=directory)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(data, stream, indent=2)
-    os.replace(temporary, directory / "session.json")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, indent=2)
+        os.replace(temporary, directory / "session.json")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 # What names a start (or says whether it keeps its HOME) rather than configures its sandbox: not saved with its
@@ -278,8 +337,16 @@ def status(name, data):
     still runs the sandbox (lost). An orphaned session is attached to as a running one; `stop` ends its pod and
     records the end, after which it is resumed as any stopped one."""
     if not alive(name, data):
-        return "orphaned" if lost(name, data) else "stopped"
-    return "paused" if (session_dir(name) / "paused").exists() else "running"
+        found = lost(name, data)
+        state = "orphaned" if found else "stopped"
+        why = ("its supervisor is gone, its pod still runs" if found else
+               "its supervisor is gone; Podman did not answer whether its pod runs" if found is None else
+               "its supervisor is gone (no pod of its run runs)")
+    else:
+        state = "paused" if (session_dir(name) / "paused").exists() else "running"
+        why = f"its supervisor (PID {data.get('pid')}) runs" + (", paused" if state == "paused" else "")
+    LOG.changed(("session", name), state, "session", f"{display(name, data)}: {state}: {why}")
+    return state
 
 
 def lost(name, data):
@@ -299,7 +366,7 @@ def ended_run(name, data):
     """exit.json records the end of the session's current run (its launcher, or `stop`, wrote it)."""
     try:
         ended = json.loads((session_dir(name) / "exit.json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False
     return isinstance(ended, dict) and ended.get("run") == current_run(name, data)
 
@@ -351,7 +418,10 @@ def restart_args(data, config_args=(), binary=False):
     if data.get("ready") is False:
         return data["agent_args"]
     base = list(data["agent_args"]) or list(config_args)
-    one_shot = base[:1] in (["exec"], ["e"]) if data["agent"] == "codex" else bool(ONE_SHOT_ARGS & set(base))
+    # (-z TASK and --oneshot=TASK alike: what an option is named counts, with or without its value in one word)
+    named = {arg.split("=", 1)[0] if arg.startswith("-") else arg for arg in base}
+    one_shot = base[:1] in (["exec"], ["e"]) if data["agent"] == "codex" else \
+        bool((ONE_SHOT_ARGS | ONE_SHOT_OPTIONS.get(data["agent"], set())) & named)
     if one_shot:
         return CONTINUE_ARGS[data["agent"]]
     return leading_options(data["agent"], base) + CONTINUE_ARGS[data["agent"]]
@@ -362,12 +432,16 @@ def leading_options(agent, args):
     Conversation-selecting options are dropped; an unknown option right before a positional
     argument is dropped too, since that argument may have been its value."""
     kept, index = [], 0
-    values, sessions = VALUE_OPTIONS[agent], SESSION_OPTIONS[agent]
+    values, sessions, prompts = VALUE_OPTIONS[agent], SESSION_OPTIONS[agent], PROMPT_OPTIONS.get(agent, set())
     while index < len(args):
         arg = args[index]
         if arg == "--" or not arg.startswith("-") or arg == "-":
             break
         name = arg.split("=", 1)[0]
+        if name in prompts:
+            # The first task, with its value (one that starts with "-" too: a preset's "--prompt -fix it").
+            index += 1 if "=" in arg else 2
+            continue
         takes_value = name in values and "=" not in arg
         has_next = index + 1 < len(args) and not args[index + 1].startswith("-")
         if name in sessions:
@@ -474,7 +548,8 @@ def machine_relay_listening(data, runner=None):
         done = (runner or subprocess.run)(launcher().machine_exec(data, ["--internal-attach-probe",
                                                                           launcher().ATTACH_SOCKET], interactive=False),
                                           stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        LOG.debug("session", f"the terminal relay in podman machine's VM gave no answer (pod {data.get('pod')})", exc)
         return False
     return done.returncode == 0
 
@@ -520,7 +595,7 @@ def exit_status(name, data):
     """The exit status of the session's last run (exit.json, written by its launcher), or None."""
     try:
         ended = json.loads((session_dir(name) / "exit.json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(ended, dict) or ended.get("run") != current_run(name, data):
         return None
@@ -557,31 +632,136 @@ def prune(name, locked=False):
         return False
 
 
-def after_attach(name):
-    """The terminal came back from the session NAME: either it detached (the sandbox runs on; a hint how to come
-    back, 0), or the agent ended (wait for the supervisor's cleanup; its exit status)."""
+# tmux's last words when the session a client attaches to is gone: the terminal's relay still answered, the agent's
+# tmux server had no session any more (a guard of an earlier version left the relay running after its session ended).
+TMUX_GONE = re.compile(rb"(?:no sessions|can't find session\b[^\r\n]*|no server running on [^\r\n]*|"
+                       rb"server exited unexpectedly|lost server)\s*\Z")
+TERMINAL_SEQUENCE = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]")
+ENDED_LIMIT = 4096
+
+
+def tmux_gone(said):
+    """SAID (the end of what an attach received) ends with tmux's word that the session it attaches to is gone."""
+    text = TERMINAL_SEQUENCE.sub(b"", bytes(said or b"")[-ENDED_LIMIT:])
+    return TMUX_GONE.search(text) is not None
+
+
+def tmux_ended(name):
+    """The end of the session NAME's tmux session in its current run, as its guard recorded it (runtime.TMUX_ENDED:
+    tmux/ended; that folder is made anew for each run), else None: {"status": the agent's exit status or None,
+    "seconds": how long it ran or None, "seen": "attach" when an attach found it gone (mark_ended), else None}.
+    Written inside the sandbox: read without following a link, at most ENDED_LIMIT bytes, numbers only."""
+    try:
+        fd = os.open(session_dir(name) / "tmux" / "ended", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, ENDED_LIMIT)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        found = json.loads(raw)
+    except (ValueError, RecursionError):
+        found = None
+    found = found if isinstance(found, dict) else {}
+
+    def number(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1 << 31 else None
+    return {"status": number(found.get("status")), "seconds": number(found.get("seconds")),
+            "seen": "attach" if found.get("seen") == "attach" else None}
+
+
+def mark_ended(name):
+    """Record (tmux/ended) that an attach found the session NAME's tmux session gone while its sandbox still runs: the
+    lists show it so (terminal_state "ended") instead of running with a terminal. Never over a file that is there,
+    never through a link."""
+    try:
+        fd = os.open(session_dir(name) / "tmux" / "ended", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return
+    with os.fdopen(fd, "w") as out:
+        json.dump({"status": None, "seconds": None, "seen": "attach"}, out)
+
+
+def ended_why(ended):
+    """Why the tmux session ENDED (tmux_ended) is gone, in words."""
+    if ended.get("seen") == "attach":
+        return "tmux answered that it has no session"
+    if ended.get("status") is None:
+        return "its tmux session ended without the agent's exit status"
+    after = f" after {ended['seconds']} s" if ended.get("seconds") is not None else ""
+    return f"its agent exited with status {ended['status']}{after}, and the shell window closed"
+
+
+def no_agent(name, data, ended):
+    """What to say of the session NAME whose tmux session ENDED (tmux_ended) while its sandbox still runs."""
+    shown = launcher().printable(display(name, data))
+    tail = log_tail(session_dir(name))
+    return (f"{shown} has no agent any more: its tmux session has ended ({ended_why(ended)}), but its sandbox has "
+            f"not ended. End it: sandbox-ai stop {shown}, then continue it: sandbox-ai resume {shown}"
+            + (f". The end of its log:\n{tail}" if tail else ""))
+
+
+def after_attach(name, said=b""):
+    """The terminal came back from the session NAME (SAID: the end of what it received): either it detached (the
+    sandbox runs on; a hint how to come back, 0), or the agent ended (wait for the supervisor's cleanup; said, with
+    why and the end of its log; its exit status), or tmux said that its session is gone while the sandbox runs on
+    (said so, with the end of its log; 1)."""
     data = load(name)
     shown = launcher().printable(display(name, data))
     if not alive(name, data) and lost(name, data):
         print(f"agent-sandbox: detached from {shown}; it runs on without its supervisor. End it with: sandbox-ai stop "
               f"{shown}, then continue it with: sandbox-ai resume {shown}", file=sys.stderr)
         return 0
+    if tmux_ended(name) is None and tmux_gone(said) and alive(name, data) and terminal_listening(name, data):
+        mark_ended(name)  # its relay answered, its tmux session is gone (a guard of an earlier version)
     deadline = time.monotonic() + DETACH_GRACE
-    while alive(name, data) and terminal_listening(name, data):
+    while alive(name, data) and terminal_listening(name, data) and tmux_ended(name) is None:
         if time.monotonic() >= deadline:
             print(f"agent-sandbox: detached from {shown}; it keeps running. Back: sandbox-ai attach {shown}, "
                   f"end it: sandbox-ai stop {shown}", file=sys.stderr)
             return 0
         time.sleep(0.5)
-    deadline = time.monotonic() + ENDING_WAIT
+    ended = tmux_ended(name)
+    deadline = time.monotonic() + (0 if ended and ended["seen"] == "attach" else ENDING_WAIT)
     while alive(name, data) and time.monotonic() < deadline:
         time.sleep(0.2)
     if alive(name, data):
+        if ended is not None:
+            print(f"agent-sandbox: {no_agent(name, data, ended)}", file=sys.stderr)
+            return 1
         print(f"agent-sandbox: {shown} is still cleaning up; see: sandbox-ai list", file=sys.stderr)
         return 0
     result = exit_status(name, data)
+    status = result if result is not None else (ended or {}).get("status")
+    tail = log_tail(session_dir(name)) if ended is None or status or (ended.get("seconds") or 0) < 10 else ""
+    print(f"agent-sandbox: {shown} has ended" + (f": {ended_why(ended)}" if ended else
+                                                 f" (exit status {result})" if result is not None else "")
+          + (f". The end of its log:\n{tail}" if tail else "")
+          + (f"\nContinue it: sandbox-ai resume {shown}" if keeps_home(data) else ""), file=sys.stderr)
     prune(name)
     return result or 0
+
+
+def without_retired_telemetry(options):
+    """OPTIONS without a --telemetry on (-tm on, --telemetry=on), the level gone since 0.1.95."""
+    out, index = [], 0
+    options = list(options)
+    while index < len(options):
+        token = options[index]
+        if token in ("--telemetry", "-tm") and index + 1 < len(options) and options[index + 1] == "on":
+            index += 2
+            continue
+        if token in ("--telemetry=on", "-tm=on"):
+            index += 1
+            continue
+        out.append(token)
+        index += 1
+    return out
 
 
 def run_options(data):
@@ -589,8 +769,10 @@ def run_options(data):
     start kept. A session records the folder that was /work because the directory it started in held a project file
     ("cwd_project"); its runs pass that first and --workspaces-as-given, so that a project file that appears later in
     the saved working directory (one the agent may have written) never takes the session over. A record from before
-    (no "cwd_project") runs as it always did."""
-    options = list(data["options"])
+    (no "cwd_project") runs as it always did. A --telemetry on saved before 0.1.95 is left out: it is ignored
+    anyway, and its note was said already by the start that reads the saved options (not once more by the
+    supervisor, at every resume)."""
+    options = without_retired_telemetry(data["options"])
     if "cwd_project" not in data or "--workspaces-as-given" in options:
         return options
     first = data.get("cwd_project")
@@ -624,7 +806,9 @@ def effective(data):
             _, document = l.load_project_config(a)
             if document:
                 a = l.parse_args(l.merge_config(argv, a, document))
-    except (OSError, ValueError, SystemExit):
+    except (OSError, ValueError, SystemExit) as exc:
+        LOG.info("session", f"{data.get('name')}: its saved options are not read here (its start says why)",
+                 exc if not isinstance(exc, SystemExit) else None)
         return None, None  # the launcher reports the problem when it starts
     return a, document
 
@@ -636,6 +820,8 @@ def services_wait(a):
     for value in getattr(a, "service", None) or []:
         timeout = re.search(r"(?:^|[:,])ready-timeout=([0-9]{1,3})(?:,|$)", str(value))
         total += (int(timeout.group(1)) if timeout else 60) + 30
+    if getattr(a, "browser", None):  # --browser: started like a service (agent, both: ready once DevTools answer)
+        total += 90 + 30
     return min(total, 3600)
 
 
@@ -655,21 +841,91 @@ def progress_module():
     return _progress
 
 
+RELAYED = 300  # characters of a supervisor's line said as its start goes on (wait_ready), at most
 QUIET_SECONDS = 15  # a start that says nothing for so long says that it still starts, and since when
+# Past the time it was given, a start that says nothing new for so long is given up (progress.StartWatch); Tor's
+# bootstrap says its percentage, and every 30 s one that stays, and tries again after 90 s without a new one.
+START_IDLE = 120
 
 
-def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=None, out=None, clock=time.monotonic):
+def start_watch(directory, clock, cap=None):
+    """progress.StartWatch of the start of the session in DIRECTORY (its supervisor.log): it goes on while its
+    supervisor says new lines - steps, Tor's bootstrap percentage - and is given up after START_IDLE seconds without
+    one, or CAP seconds in all (default progress.START_CAP)."""
+    progress = progress_module()
+    return progress.StartWatch(directory / "supervisor.log", clock, idle=START_IDLE, cap=cap or progress.START_CAP)
+
+
+def start_cap(a, timeout):
+    """The longest the start A may take: progress.START_CAP (20 minutes), more when its Tor may take longer by its
+    profile's settings (each attempt of the bootstrap at its longest: vpn.ready_timeout), twice that with MCP servers
+    behind it (each comes up behind a Tor of its own before the agent's). TIMEOUT: the time it is given at first."""
+    extra = 0
+    if getattr(a, "vpn", None):
+        try:
+            vpn = launcher().load_vpn_module()
+            extra = vpn.ready_timeout(vpn.load_profile(a.vpn)) * (2 if getattr(a, "mcp", None) else 1)
+        except Exception as exc:  # noqa: BLE001 - its start says what is wrong with the profile; the cap stays
+            LOG.debug("session", f"the VPN {a.vpn}'s bootstrap settings were not read for the start's wait", exc)
+    return max(progress_module().START_CAP, timeout + extra)
+
+
+def ended_how(status):
+    """A supervisor's exit status in words: "status 1", or "ended by SIGKILL" (Python's -9)."""
+    if isinstance(status, int) and status < 0:
+        try:
+            return f"ended by {signal.Signals(-status).name}"
+        except ValueError:
+            return f"ended by signal {-status}"
+    return f"status {status}"
+
+
+def failed_start(directory, status, follow=None, said=False):
+    """What a start that failed says: its supervisor's status and its lines of this start (from FOLLOW, the size of
+    supervisor.log before it; without FOLLOW the end of the whole log). SAID: its "agent-sandbox:" lines were said
+    as it went on (wait_ready), so only the others follow (Podman's own words) and those that were cut short."""
+    try:
+        with open(directory / "supervisor.log", "rb") as log:
+            log.seek(follow or 0)
+            text = log.read().decode(errors="replace")
+    except OSError:
+        text = ""
+    if said:
+        text = "\n".join(line for line in text.splitlines()
+                         if not line.startswith("agent-sandbox: ") or len(line) - len("agent-sandbox: ") > RELAYED)
+    text = launcher().printable(text[-3000:]).strip()
+    head = f"Session failed to start ({ended_how(status)})"
+    if text:
+        return f"{head}:\n{text}"
+    return f"{head}; what it said is above (its whole log: {directory / 'supervisor.log'})"
+
+
+def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=None, out=None, clock=time.monotonic,
+               bar=None, steps=None, cap=None):
     """Until the terminal relay is there (it starts after the tmux session exists): its socket on the host, or
     READY() (macOS: a probe through podman exec). FOLLOW (the size supervisor.log had before the supervisor
     started): meanwhile, what the supervisor says of its start (its "agent-sandbox:" lines: an image pulled, the
     VPN, MCP servers starting, ...) is said here too (OUT, default standard error; never a secret: progress.scrub),
-    after QUIET_SECONDS of silence that it still starts, and at the end "ready in N s"."""
+    after QUIET_SECONDS of silence that it still starts, and at the end "ready in N s". BAR (default: standard error
+    is a terminal, progress.bar_wanted): a progress bar of the start's STEPS instead (progress.Bar: MCP servers, VPN,
+    kits, the sandbox, its terminal), drawn again in place; plain lines in a log or a script. Past TIMEOUT it waits
+    as long as the supervisor says new lines (start_watch: a start through Tor takes minutes), CAP seconds at most."""
     socket_path = directory / "tmux" / "attach.sock"
+    # A look at the socket file is a stat: every READY_POLL seconds (it was 0.2 s, ready noticed 0.1 s late on
+    # average); READY() of its own (macOS: a podman exec each) as before.
+    pause = READY_POLL if ready is None else READY_PROBE_POLL
     ready = ready or socket_path.exists
     begun = clock()
     deadline = begun + timeout
     told = progress_module().Progress(out=out, clock=clock) if follow is not None else None
+    if bar is None:
+        bar = follow is not None and out is None and progress_module().bar_wanted()
+    if bar is True:
+        bar = progress_module().Bar(steps, clock=clock)
+    elif not bar:
+        bar = None
     position, pending, quiet_since = follow or 0, b"", begun
+    last_step, logged_after = [None], [QUIET_SECONDS]  # for launcher.log's "still starting": 15, 30, 60 s ...
 
     def relay():
         nonlocal position, pending, quiet_since
@@ -685,23 +941,62 @@ def wait_ready(directory, process, timeout=READY_TIMEOUT, ready=None, follow=Non
         for raw in lines:
             text = raw.decode(errors="replace").rstrip("\r")
             if text.startswith("agent-sandbox: "):
-                told.say(progress_module().shown(text[len("agent-sandbox: "):], 300))
+                said = progress_module().shown(text[len("agent-sandbox: "):], RELAYED)
+                last_step[0] = said
+                with LOG.relayed():  # (the supervisor logged it itself)
+                    if bar is not None:
+                        bar.line(said)
+                    else:
+                        told.say(said)
                 quiet_since = clock()
+    if bar is not None:
+        bar.draw()
+    watch = start_watch(directory, clock, cap or max(progress_module().START_CAP, timeout))
     while not ready():
+        watch.look()
         if told is not None:
             relay()
-            if clock() - quiet_since >= QUIET_SECONDS:
-                told.say(f"still starting ({progress_module().seconds(clock() - begun)})…")
+            if bar is not None:
+                bar.tick()
+            elif clock() - quiet_since >= QUIET_SECONDS:
+                with LOG.relayed():  # (launcher.log gets it below, with what the start waits for)
+                    told.say(f"still starting ({progress_module().seconds(clock() - begun)})…")
                 quiet_since = clock()
+        if clock() - begun >= logged_after[0]:
+            logged_after[0] *= 2
+            LOG.info("session", f"{directory.name}: still starting after {int(clock() - begun)} s: waiting for its "
+                                f"terminal ({socket_path.name}); its supervisor (PID {getattr(process, 'pid', None)}) "
+                                f"said last: {last_step[0] or 'nothing yet'}")
         if process.poll() is not None:
-            log = launcher().printable((directory / "supervisor.log").read_text(errors="replace")[-3000:])
-            raise RuntimeError(f"Session failed to start (status {process.returncode}):\n{log}")
-        if clock() > deadline:
-            raise RuntimeError(f"Session did not become ready within {timeout} s; see {directory / 'supervisor.log'}")
-        time.sleep(0.2)
+            if bar is not None:
+                bar.failed()
+            elif told is not None:
+                relay()  # (its last lines too)
+            raise RuntimeError(failed_start(directory, process.returncode, follow,
+                                            said=told is not None and bar is None))
+        over = watch.over(clock() > deadline)
+        if over:
+            if bar is not None:
+                bar.failed()
+            LOG.warning("session", f"{directory.name}: the wait for its start ends ({over}): {watch.why(over)}")
+            raise RuntimeError(f"Session did not become ready: {watch.why(over)}; see {directory / 'supervisor.log'}")
+        time.sleep(pause)
     if told is not None:
         relay()
-        told.ready()
+        if bar is not None:
+            bar.ready()
+        else:
+            told.ready()
+
+
+def start_steps(a):
+    """The steps (progress.PHASES' keys) the start A goes through before its terminal: its MCP servers, its VPN,
+    the kits (unless --no-default-kit and no --kit), the sandbox and its terminal."""
+    if a is None:
+        return None
+    return [*(["mcp"] if getattr(a, "mcp", None) else []), *(["vpn"] if getattr(a, "vpn", None) else []),
+            *(["kits"] if getattr(a, "kit", None) or not getattr(a, "no_default_kit", False) else []),
+            "pod", "terminal"]
 
 
 def clear_stale_pod(name, data):
@@ -722,6 +1017,8 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
     """Start the session's supervisor. A: the merged launcher arguments if the caller has them. EVENT: what the
     history notes (start, rebirth)."""
     directory = session_dir(name)
+    if without_retired_telemetry(data.get("options") or []) != list(data.get("options") or []):
+        launcher().note_telemetry_retired()  # (saved before 0.1.95: said here once; its supervisor never gets it)
     a = a or effective(data)[0]
     if a is not None:
         # pause/stop must reach the sandbox the launcher creates, wherever its settings came from.
@@ -759,19 +1056,29 @@ def launch(name, data, agent_args, a=None, event="rebirth"):
         # Own session: closing the terminal no longer ends the sandbox.
         process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                    start_new_session=True, cwd=data["cwd"])
+    LOG.info("session", f"{display(name, data)}: {event}: its supervisor runs as PID {process.pid} (run {run}, pod "
+                        f"{data['pod']}); its output: {directory / 'supervisor.log'}")
+    LOG.debug("session", f"the supervisor's command: {LOG.command_line(cmd)}")
     data.update(pid=process.pid, pid_start=launcher().process_start(process.pid, PROC), started=now(),
                 pid_ns=liveness().pid_namespace())  # only a process in this PID namespace judges it by its PID
     save(name, data)
     shown = display(name, data)
     starts().record(shown, event, name, run, agent=data["agent"], workspace=data.get("workspace"))
+    begun = time.monotonic()
     try:
-        wait_ready(directory, process, timeout=READY_TIMEOUT + services_wait(a),
+        given = READY_TIMEOUT + services_wait(a)
+        wait_ready(directory, process, timeout=given,
                    ready=(lambda: machine_relay_listening(data)) if launcher().machine_record(data) else None,
-                   follow=follow)
-    except RuntimeError:
+                   follow=follow, steps=start_steps(a), cap=start_cap(a, given))
+    except RuntimeError as exc:
+        LOG.warning("session", f"{shown}: its start failed after {time.monotonic() - begun:.0f} s (supervisor "
+                               f"{'ended with exit status ' + str(process.returncode) if process.poll() is not None else 'still runs'})"
+                               f"; the end of its supervisor.log: {LOG.tail(log_tail(directory))}")
+        LOG.debug("session", f"{shown}: why the wait ended", exc)
         if process.poll() is not None:
             starts().record(shown, "exit", name, run, status=process.returncode)
         raise
+    LOG.info("session", f"{shown}: its terminal is ready after {time.monotonic() - begun:.1f} s")
     if not data.get("ready"):
         data["ready"] = True
         save(name, data)
@@ -819,6 +1126,7 @@ def discard_unready(key):
         return False
     if data.get("ready") or status(key, data) != "stopped":
         return False
+    LOG.info("session", f"{display(key, data)}: not kept, its first start failed")
     shutil.rmtree(session_dir(key), onerror=make_writable_and_retry)
     print(f"agent-sandbox: {launcher().printable(display(key, data))} was not kept: its first start failed (repeat "
           "the start once the reason is fixed)", file=sys.stderr)
@@ -854,13 +1162,22 @@ def start_locked(a, argv, key=None):
     if (directory / "session.json").exists():
         data = load(name)
         state = status(name, data)
+        LOG.info("session", f"{display(name, data)}: start asked while it is {state}")
         if state == "orphaned":
             stop_orphaned(name, data)  # asked to start it again: its pod first (said), then as any stopped one
             data, state = load(name), status(name, load(name))
-        if state != "stopped":
-            raise ValueError(f"Session {launcher().printable(display(name, data))} is {state}; attach with: "
-                             f"sandbox-ai attach {launcher().printable(display(name, data))}")
         shown = launcher().printable(display(name, data))
+        if state == "running" and data.get("agent") == a.agent and not foreground(data) and \
+                sys.stdin.isatty() and sys.stdout.isatty():
+            # Started again while it runs (the app's Start with the name of a running session, a second terminal):
+            # its terminal is opened instead of an error and an exit status of 1 - start() attaches once the lock
+            # is released. A script (no terminal) still gets the error.
+            print(f"agent-sandbox: session {shown} runs already: attaching to it (it keeps the options it was "
+                  "started with)", file=sys.stderr)
+            return 0
+        if state != "stopped":
+            raise ValueError(f"Session {shown} is {state}; attach with: sandbox-ai attach {shown}" if state != "paused"
+                             else f"Session {shown} is paused; continue it with: sandbox-ai resume {shown}")
         if data["agent"] != a.agent:
             raise ValueError(f"Session {shown} belongs to {data['agent']}, not {a.agent}")
         options, agent_args = split_argv(argv)
@@ -887,6 +1204,7 @@ def start_locked(a, argv, key=None):
             "ready": False, "name": a.session if a.session is not None else a.start_name,
             "project": launcher().project_label(a), "keep": keep, "mode": "tmux"}
     claim_name(name, data["name"], data)  # refused if a start of the same name saved its own meanwhile
+    LOG.info("session", f"{data['name']}: a new session of {a.agent} in {directory}")
     return launch(name, data, agent_args, a, event="start")
 
 
@@ -902,18 +1220,142 @@ def attach(name):
               f"but approvals, net allow and workspace add are not. Save your work, then: sandbox-ai stop {shown} && "
               f"sandbox-ai resume {shown}", file=sys.stderr)
     elif state != "running":
-        raise ValueError(f"Session {shown} is {state}; run: sandbox-ai resume {shown}")
+        ended = tmux_ended(name) if state == "stopped" else None  # why its last run ended, when its guard said so
+        raise ValueError(f"Session {shown} is {state}" + (f" ({ended_why(ended)})" if ended else "")
+                         + f"; run: sandbox-ai resume {shown}")
+    ended = tmux_ended(name)
+    if ended is not None and state == "running":  # its tmux session is gone: nothing to attach to
+        raise ValueError(no_agent(name, data, ended))
     # Only terminal bytes cross: the tmux client runs inside the sandbox, so
     # nothing the agent's tmux server requests can execute on the host.
     activity_event(name, "attach")
+    said = bytearray()  # the end of what came (tmux's last words: "no sessions" when its session is gone)
     try:
         if launcher().machine_record(data):
             attach_machine(data)
         else:
-            launcher().attach_client(str(session_dir(name) / "tmux" / "attach.sock"))
+            socket_path = session_dir(name) / "tmux" / "attach.sock"
+            wait_for_terminal(name, data, socket_path, shown)
+            launcher().attach_client(str(socket_path), said=said)
     finally:
         activity_event(name, "detach")
-    return after_attach(name)
+    return after_attach(name, bytes(said))
+
+
+def wait_for_terminal(name, data, socket_path, shown, timeout=READY_TIMEOUT, clock=time.monotonic,
+                      sleep=time.sleep):
+    """Until SOCKET_PATH, the terminal relay of the running session NAME, is there: a session still starting (its
+    image built, its MCP servers or VPN coming up) is running before its terminal is - attaching then said "relay
+    not reachable: No such file or directory" although the session list said running. Waits while its supervisor
+    runs, saying so once - as long as its start goes on (start_watch: a start through Tor takes minutes), TIMEOUT
+    seconds at least; a supervisor that ended meanwhile is said with the end of its log."""
+    if socket_path.exists():
+        return
+    print(f"agent-sandbox: {shown} is still starting; waiting for its terminal (as long as its start goes on)…",
+          file=sys.stderr, flush=True)
+    deadline = clock() + timeout
+    try:
+        cap = start_cap(effective(data)[0], timeout)
+    except Exception:  # noqa: BLE001 - (a session whose options no longer parse: its start says why)
+        cap = None
+    watch = start_watch(session_dir(name), clock, cap)
+    while not socket_path.exists():
+        watch.look()
+        if not alive(name, data):
+            log = ""
+            with contextlib.suppress(OSError):
+                log = "\n".join((session_dir(name) / "supervisor.log").read_text(errors="replace")
+                                 .strip().splitlines()[-8:])
+            raise RuntimeError(f"Session {shown} ended while it started" + (f":\n{log}" if log else ""))
+        over = watch.over(clock() > deadline)
+        if over:
+            raise RuntimeError(f"Session {shown} has no terminal after {int(watch.waited())} s: {watch.why(over)}; "
+                               f"see {session_dir(name) / 'supervisor.log'}")
+        sleep(READY_PROBE_POLL)
+
+
+TERMINAL_PATIENCE = START_IDLE  # seconds a start without its terminal may say nothing before it counts as having none
+
+
+def terminal_state(name, data, clock=time.time):
+    """Whether the running session NAME (DATA: its session.json) has its terminal: ("ready", "") once its terminal
+    relay is there; ("starting", "") while its start goes on - it began less than READY_TIMEOUT ago, or its supervisor
+    wrote to supervisor.log within TERMINAL_PATIENCE seconds (an image built, MCP servers, a VPN coming up); else
+    ("missing", TAIL): it runs without a terminal to attach to, TAIL the last lines of its supervisor.log (starting:
+    the step it is at, start_step); ("ended", TAIL): its tmux session has ended - the agent and its shell window -
+    while its sandbox still runs (tmux_ended). Files only
+    (never Podman, never a process); on a Mac (the relay in podman machine's VM) and for a start in the foreground:
+    ("ready", "")."""
+    if foreground(data) or (sys.platform == "darwin" and data.get("backend") == "podman"
+                            and not data.get("podman_url")):
+        return "ready", ""
+    directory = session_dir(name)
+    if tmux_ended(name) is not None:  # its tmux session is gone, its sandbox not (yet): no agent, nothing to attach
+        return "ended", log_tail(directory)
+    if (directory / "tmux" / "attach.sock").exists():
+        return "ready", ""
+    now_ = clock()
+    try:
+        began = utc_seconds(str(data.get("started") or ""))
+    except (TypeError, ValueError, OverflowError):
+        began = 0
+    try:
+        said = (directory / "supervisor.log").stat().st_mtime
+    except OSError:
+        said = 0
+    if now_ - began < READY_TIMEOUT or now_ - said < TERMINAL_PATIENCE:
+        step = start_step(directory)
+        LOG.changed(("terminal", name), ("starting", step), "session",
+                    f"{display(name, data)}: still starting, no terminal yet (began {now_ - began:.0f} s ago, its "
+                    f"supervisor last wrote {now_ - said:.0f} s ago)" + (f"; at: {step}" if step else ""), "DEBUG")
+        return "starting", step
+    tail = log_tail(directory)
+    LOG.changed(("terminal", name), "missing", "session",
+                f"{display(name, data)}: runs without a terminal to attach to (began {now_ - began:.0f} s ago, its "
+                f"supervisor silent for {now_ - said:.0f} s); the end of its supervisor.log: {LOG.tail(tail)}",
+                "WARNING")
+    return "missing", tail
+
+
+def start_step(directory):
+    """The step a session's start is at: the last of its supervisor's progress lines (progress.PHASES) in its
+    supervisor.log, without the prefix; "" when none was said yet."""
+    found = ""
+    for line in log_tail(directory, lines=40).splitlines():
+        text = line[len("agent-sandbox: "):] if line.startswith("agent-sandbox: ") else ""
+        if text and progress_module().phase_of(text):
+            found = text
+    return found[:200]
+
+
+def utc_seconds(text):
+    """Seconds since the epoch of TEXT (YYYY-MM-DDTHH:MM:SSZ, as now() writes it), else ValueError - without the
+    calendar module (sandbox-ai list, which the app polls, loads nothing heavy: test_performance_cli)."""
+    found = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z", text)  # (time.strptime loads it)
+    if not found:
+        raise ValueError(f"not a time: {text!r}")
+    year, month, day, hour, minute, second = map(int, found.groups())
+    if not (1 <= month <= 12 and 1 <= day <= 31 and hour < 24 and minute < 60 and second < 62):
+        raise ValueError(f"not a time: {text!r}")
+    year -= month <= 2
+    era = year // 400
+    of_era = year - era * 400
+    of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    days = era * 146097 + of_era * 365 + of_era // 4 - of_era // 100 + of_year - 719468
+    return days * 86400 + hour * 3600 + minute * 60 + second
+
+
+def log_tail(directory, lines=8, limit=2000):
+    """The last LINES lines of DIRECTORY's supervisor.log (printable, at most LIMIT characters), "" when there is none."""
+    try:
+        with open(directory / "supervisor.log", "rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 16384))
+            text = log.read().decode(errors="replace")
+    except OSError:
+        return ""
+    kept = [launcher().printable(line.rstrip()) for line in text.splitlines() if line.strip()][-lines:]
+    return "\n".join(kept)[-limit:]
 
 
 def attach_machine(data, runner=None):
@@ -1431,19 +1873,25 @@ def stop_locked(name, timeout):
     # The supervisor forwards SIGTERM and runs the normal cleanup, including
     # pod removal and the Claude credential write-back. State stays on disk.
     # It may end by itself between the look above and the signal: then there is nothing left to stop.
+    LOG.info("session", f"{shown}: stop: SIGTERM to its supervisor (PID {data.get('pid')}; it was {state})")
+    begun = time.monotonic()
     with contextlib.suppress(ProcessLookupError):
         os.kill(data["pid"], signal.SIGTERM)
     deadline = time.monotonic() + timeout
     while alive(name, data) and time.monotonic() < deadline:
         time.sleep(0.2)
     if alive(name, data):
+        LOG.warning("session", f"{shown}: its supervisor did not end within {timeout} s of SIGTERM: killed, its pod "
+                               "removed here")
         with contextlib.suppress(ProcessLookupError):
             os.kill(data["pid"], signal.SIGKILL)
         time.sleep(0.5)
         try:
             clear_stale_pod(name, data)  # only this session's own, labelled pod
         except (ValueError, subprocess.CalledProcessError) as exc:
+            LOG.warning("session", f"{shown}: its pod could not be removed", exc)
             print(f"agent-sandbox: {exc}", file=sys.stderr)
+    LOG.info("session", f"{shown}: stopped after {time.monotonic() - begun:.1f} s")
     print(f"agent-sandbox: session {shown} stopped; state kept in {session_dir(name)}", file=sys.stderr)
     return 0
 
@@ -1457,6 +1905,7 @@ def stop_orphaned(name, data, timeout=30):
     pod, run = data["pod"], current_run(name, data)
     url = parsed(data).podman_url
     found = liveness().pods(url, fresh=True)
+    LOG.info("session", f"{shown}: stop of an orphaned session (its pod {pod})")
     if found is None:
         raise ValueError(f"Podman does not answer: {shown} cannot be stopped now (its pod is {pod})")
     labels = (found.get(pod) or {}).get("labels") or {}
@@ -1493,6 +1942,9 @@ def delete_locked(name, yes):
     shown = launcher().printable(display(name, data))
     if status(name, data) != "stopped":
         raise ValueError(f"Stop session {shown} before deleting it")
+    if lost(name, data) is None:  # "stopped" only because Podman did not say: its pod may still use this HOME
+        raise ValueError(f"Podman does not answer: whether {shown} still runs in its pod cannot be told, so it is "
+                         "not deleted; try again once Podman answers (or stop it first)")
     if not yes:
         raise ValueError(f"Deleting removes {session_dir(name)} including its HOME; repeat with --yes")
     home = session_dir(name) / "home"
@@ -1556,8 +2008,11 @@ def rows():
                 data = json.loads((directory / "session.json").read_text())
                 result.append([display(directory.name, data), data["agent"], data["backend"],
                                status(directory.name, data), data["workspace"], data["created"]])
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
                 if (directory / "session.json").exists():
+                    LOG.changed(("session damaged", directory.name), True, "session",
+                                f"{directory.name}: listed as damaged: its session.json is not read", "WARNING")
+                    LOG.debug("session", f"{directory.name}: why", exc)
                     result.append([directory.name, "?", "?", "damaged", "-", "-"])
     return result
 
@@ -1743,7 +2198,7 @@ def remote_session(host, name, run):
         return ABSENT if "No session named" in (stderr or "") + (stdout or "") else None
     try:
         plan = json.loads(stdout)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return None
     if not isinstance(plan, dict) or not isinstance(plan.get("options"), list):
         return None

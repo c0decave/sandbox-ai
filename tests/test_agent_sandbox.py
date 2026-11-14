@@ -205,13 +205,14 @@ class SandboxTests(unittest.TestCase):
 
     def test_codex_uses_verified_external_sandbox_by_default(self):
         a = s.parse_args(["codex", "--", "exec", "task"])
-        self.assertEqual(s.agent_command(a, "codex"), ["codex", "--sandbox", "danger-full-access", "exec", "task"])
+        self.assertEqual(s.agent_command(a, "codex"), ["codex", "--sandbox", "danger-full-access",
+                                                       *s.codex_telemetry_args("off"), "exec", "task"])
 
     def test_explicit_codex_sandbox_selection_is_preserved(self):
         for args in [["exec", "--sandbox", "read-only", "task"], ["-s", "workspace-write", "exec", "task"], ["--sandbox=read-only", "exec", "task"], ["exec", "--dangerously-bypass-approvals-and-sandbox", "task"]]:
             with self.subTest(args=args):
                 a = s.parse_args(["codex", "--", *args])
-                self.assertEqual(s.agent_command(a, "codex"), ["codex", *args])
+                self.assertEqual(s.agent_command(a, "codex"), ["codex", *s.codex_telemetry_args("off"), *args])
 
     def test_codex_flags_are_not_added_to_custom_binary_or_other_agents(self):
         for agent, options, binary in [("codex", ["--binary", "/usr/bin/python3"], "/usr/bin/python3"), ("opencode", [], "opencode"), ("claude", [], "claude")]:
@@ -220,7 +221,8 @@ class SandboxTests(unittest.TestCase):
                 self.assertEqual(s.agent_command(a, binary), [binary, "--version"])
 
     def test_dangerously_skip_permissions_per_agent(self):
-        expected = {"codex": ["codex", "--dangerously-bypass-approvals-and-sandbox", "exec", "task"],
+        expected = {"codex": ["codex", "--dangerously-bypass-approvals-and-sandbox", *s.codex_telemetry_args("off"),
+                              "exec", "task"],
                     "claude": ["claude", "--dangerously-skip-permissions", "exec", "task"],
                     "opencode": ["opencode", "exec", "task"]}
         for agent, command in expected.items():

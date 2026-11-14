@@ -12,7 +12,10 @@ What is shown may have been written by an agent, so it is untrusted:
 - an image beside the file is read through the pane's files.Root like every other file (relative to open folders,
   never through a symbolic link, never above the root - and for a file of a sandbox's folder shown in the host pane,
   never outside that folder: ImageSource's top), in a thread, at most IMAGE_LIMIT bytes and IMAGE_PIXELS pixels, at
-  most IMAGES of them; Reload reads them again;
+  most IMAGES of them and IMAGES_PIXELS pixels together; Reload reads them again; an SVG image that names anything
+  but a part of itself is not shown (Qt's SVG reader would read the files it names, past the Root: svg_refers);
+- what Qt cannot lay out in time is not rendered: the rendering ends before the line that goes past LIST_ITEMS list
+  items, TABLE_ROWS table rows or LONG_RUN characters without a space, and says so (renderable);
 - a link is never followed inside the viewer: "#heading" scrolls there, a relative link to another Markdown file of
   the same root opens that file in a viewer of its own, an http(s) link opens in the browser only after the human
   said so (the window asks, naming the URL); anything else is named, not opened.
@@ -22,6 +25,8 @@ from __future__ import annotations
 import base64
 import posixpath
 import re
+import threading
+import time
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRect, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import (
@@ -39,8 +44,20 @@ SUFFIXES = (".md", ".markdown", ".mdown", ".mkd")
 FEATURES = QTextDocument.MarkdownFeature.MarkdownDialectGitHub | QTextDocument.MarkdownFeature.MarkdownNoHTML
 IMAGE_LIMIT = 8 << 20  # bytes of one image
 IMAGE_PIXELS = 40_000_000  # pixels of one image (a small file may say it is huge)
+# Pixels of all the images of one document together (its views, until Reload): each one bounded, a small PNG of
+# 36 million pixels named 200 times ("big.png?1", "./big.png", ...) was decoded 200 times - 28 GB.
+IMAGES_PIXELS = 100_000_000
 IMAGES = 200  # images of one document that are read
 RENDER_DELAY = 300  # ms: the live preview follows the typing after this pause
+# What Qt lays out in time (renderable): it numbers each item of a list and lays out each row of a table in time that
+# grows with the list or table (20,000 items: 16 s, 20,000 rows: 24 s), and wraps a line without a space in time that
+# grows with its square (1 MB: over a minute) - a file an agent wrote held up the window. The rendering stops before
+# the line that goes past one of these (Edit shows the whole text).
+LIST_ITEMS = 3000
+TABLE_ROWS = 2000
+LONG_RUN = 100_000  # characters without a space (file_editor's Wrap lines too)
+LONG_WORD = re.compile(r"(?<!\S)\S{%d}" % LONG_RUN)  # (from where a run begins only: never quadratic)
+LIST_ITEM = re.compile(r"^[ \t>]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
 REMOTE = ("http", "https", "ftp", "ftps", "ws", "wss", "smb", "sftp", "ssh")
 
 
@@ -87,6 +104,39 @@ def with_footnotes(text):
     return "\n".join(lines), [name for name, _ in notes]
 
 
+def renderable(text):
+    """(the part of TEXT rendered, why the rest is not - or "") - see LIST_ITEMS: the lines before the one that goes
+    past LIST_ITEMS list items or TABLE_ROWS lines of tables (outside fenced code), or holds LONG_RUN characters without a
+    space."""
+    if not LONG_WORD.search(text) and text.count("|") < TABLE_ROWS and text.count("\n") < LIST_ITEMS:
+        return text, ""  # (most texts: nothing to count)
+    items = rows = 0
+    fence, lines = None, text.split("\n")
+    for number, line in enumerate(lines):
+        why = ""
+        if len(line) >= LONG_RUN and LONG_WORD.search(line):
+            why = tr("a line of more than {count} characters without a space", count=LONG_RUN)
+        opened = FENCE.match(line)
+        if fence is not None:
+            if opened and opened.group(1)[0] == fence[0] and len(opened.group(1)) >= len(fence):
+                fence = None
+        elif opened:
+            fence = opened.group(1)
+        elif LIST_ITEM.match(line):
+            items += 1
+            if items > LIST_ITEMS:
+                why = tr("lists of more than {count} items", count=LIST_ITEMS)
+        elif "|" in line:
+            rows += 1
+            if rows > TABLE_ROWS:
+                why = tr("tables of more than {count} rows", count=TABLE_ROWS)
+        if why:
+            return "\n".join(lines[:number]), tr(
+                "Only the first {count} of {total} lines are rendered: more would hold up the window ({why}). The "
+                "text shows them all.", count=number, total=len(lines), why=why)
+    return text, ""
+
+
 # -- fenced code --
 
 KEYWORDS = set("""and as assert async await break case catch class const continue def default del delete do elif else
@@ -100,20 +150,28 @@ TOKENS = re.compile(r"""(?P<comment>\#.*$|//.*$|--\s.*$)|(?P<string>"(?:\\.|[^"\
 
 class CodeHighlighter(QSyntaxHighlighter):
     """Colours in fenced code blocks (any language: comments, strings, numbers, common keywords), in the look's
-    colours."""
+    colours - made once a rendering (MarkdownView.render forgets them: a look chosen since is taken then)."""
+    formats = None
+
+    def colours(self):
+        """{kind: QTextCharFormat} in the look's colours. (Made anew for every line of code, they were most of the
+        time a rendering took: a code block of 150,000 lines held up the window for 4 s.)"""
+        if self.formats is None:
+            self.formats = {}
+            for kind, name in (("comment", "muted"), ("string", "ok"), ("number", "warn"), ("word", "accent")):
+                fmt = QTextCharFormat()
+                fmt.setForeground(QColor(theme.color(name) if name != "accent" else theme.colors().get(
+                    "accent", theme.color("warn"))))
+                if kind == "word":
+                    fmt.setFontWeight(QFont.Weight.Bold)
+                self.formats[kind] = fmt
+        return self.formats
 
     def highlightBlock(self, text):  # noqa: N802
         block = self.currentBlock()
         if not block.blockFormat().hasProperty(QTextFormat.Property.BlockCodeFence):
             return
-        formats = {}
-        for kind, name in (("comment", "muted"), ("string", "ok"), ("number", "warn"), ("word", "accent")):
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(theme.color(name) if name != "accent" else theme.colors().get(
-                "accent", theme.color("warn"))))
-            if kind == "word":
-                fmt.setFontWeight(QFont.Weight.Bold)
-            formats[kind] = fmt
+        formats = self.colours()
         for found in TOKENS.finditer(text):
             kind = found.lastgroup
             if kind == "word" and found.group() not in KEYWORDS:
@@ -140,18 +198,83 @@ def placeholder(text, palette=None):
     return image
 
 
-def decode(data):
-    """A QImage of DATA (bytes), or (None, why): never more than IMAGE_PIXELS pixels are decoded."""
+# What an SVG image may hold (svg_refers): Qt's SVG reader reads the files its <image> elements name, by their paths on
+# this computer - past the pane's Root, its links and its top -, so only an SVG that names nothing but parts of itself
+# ("#id", url(#id)) is shown; one with an entity declared, an encoding in which ASCII's letters are other bytes, or a
+# NUL (UTF-16: the names were not seen) is not either.
+SVG_NAMES = re.compile(rb"""href\s*=\s*(["'])(.*?)\1""", re.IGNORECASE | re.DOTALL)
+SVG_URLS = re.compile(rb"""url\s*\(\s*["']?\s*(?!#)""", re.IGNORECASE)
+SVG_ENCODING = re.compile(rb"""<\?xml[^>]*?encoding\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+ASCII_ENCODINGS = {b"utf-8", b"utf8", b"us-ascii", b"ascii", b"iso-8859-1", b"latin1", b"latin-1"}
+SVG_FORMATS = (b"svg", b"svgz")
+
+
+def svg_refers(data):
+    """Whether the SVG DATA (bytes, not compressed) may name another file (see SVG_NAMES)."""
+    if b"\0" in data or re.search(rb"<!ENTITY|@import", data, re.IGNORECASE) or SVG_URLS.search(data):
+        return True
+    declared = SVG_ENCODING.search(data[:1024])
+    if declared and declared.group(1).strip().lower().replace(b"_", b"-") not in ASCII_ENCODINGS:
+        return True
+    return any(not value.startswith(b"#") for _quote, value in SVG_NAMES.findall(data))
+
+
+def unpacked(data):
+    """DATA as it is - or, compressed with gzip (an .svgz), unpacked: at most IMAGE_LIMIT bytes (None beyond, or when it
+    does not unpack)."""
+    if not data.startswith(b"\x1f\x8b"):
+        return data
+    import zlib
+    unpacker = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        found = unpacker.decompress(data, IMAGE_LIMIT + 1)
+    except zlib.error:
+        return None
+    return found if len(found) <= IMAGE_LIMIT and not unpacker.unconsumed_tail else None
+
+
+def decode(data, budget=None):
+    """A QImage of DATA (bytes), or (None, why): never more than IMAGE_PIXELS pixels are decoded - nor more than
+    BUDGET["left"] (the pixels all the images of a document may still take: taken from it, under BUDGET["lock"]). An
+    SVG that may name other files is not decoded (svg_refers)."""
     buffer = QBuffer()
     buffer.setData(QByteArray(data))
     buffer.open(QIODevice.OpenModeFlag.ReadOnly)
     reader = QImageReader(buffer)
+    if bytes(reader.format().data()).lower() in SVG_FORMATS or data.startswith(b"\x1f\x8b"):
+        plain = unpacked(data)
+        if plain is None:
+            return None, tr("too big")
+        if svg_refers(plain):
+            return None, tr("refers to other files")
+        if plain is not data:  # (an .svgz: read as the SVG it holds - what was looked at)
+            buffer.close()
+            buffer.setData(QByteArray(plain))
+            buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+            reader = QImageReader(buffer)
+            if bytes(reader.format().data()).lower() not in SVG_FORMATS:
+                return None, tr("not an image")
     size = reader.size()
-    if size.isValid() and size.width() * size.height() > IMAGE_PIXELS:
+    pixels = size.width() * size.height() if size.isValid() else 0
+    if pixels > IMAGE_PIXELS:
         return None, tr("too big")
+    if budget is not None:
+        with budget["lock"]:  # (taken before it is decoded: the views of one window read at the same time)
+            if pixels > budget["left"]:
+                return None, tr("too big")
+            budget["left"] -= pixels
     image = reader.read()
+    found = image.width() * image.height() if not image.isNull() else 0
+    if budget is not None and found != pixels:  # (what it took: a size not told before, or no image)
+        with budget["lock"]:
+            if found - pixels > budget["left"]:
+                budget["left"] += pixels
+                return None, tr("too big")
+            budget["left"] -= found - pixels
     if image.isNull():
         return None, tr("not an image")
+    if found > IMAGE_PIXELS:
+        return None, tr("too big")
     return image, None
 
 
@@ -164,6 +287,12 @@ class ImageSource:
         # (the host pane's root is "/": a Markdown file the agent wrote in its folder, viewed there, showed any image of
         # the host's its "../../.." named - only those of the sandbox's folder now)
         self.top = "/".join(part for part in top.split("/") if part)
+        self.budget, self.lock = None, threading.Lock()  # (the pixels its images may still take: decode, forget)
+
+    def forget(self):
+        """Reload: the images are read anew - the pixels of those read before count no more."""
+        with self.lock:
+            self.budget = None
 
     def within(self, joined):
         """Whether the path JOINED (relative to the root, normalised) lies below TOP."""
@@ -189,12 +318,18 @@ class ImageSource:
     def read_later(self, names, done, owner=None):
         """read(NAMES) in a thread (never on the GUI thread: a slow or hung file system holds up no window);
         DONE(result, error) on the GUI thread."""
-        return background(self.read, list(names), owner=owner, timeout=60, done=done)
+        # (a remote root's: no time limit as a whole - its requests have theirs; an image far away took longer than 60 s
+        # and was said not to be there while it was still being read)
+        return background(self.read, list(names), owner=owner, done=done,
+                          timeout=None if getattr(self.root, "remote", False) else 60)
 
     def read(self, names):
         """{name: QImage or why not} for the local and data: images NAMES (Root.read_file; runs in read_later's
         thread)."""
-        found = {}
+        with self.lock:  # (a read begun before a Reload takes from what was left then)
+            if self.budget is None:
+                self.budget = {"left": IMAGES_PIXELS, "lock": threading.Lock()}
+            budget, found = self.budget, {}
         for name in list(names)[:IMAGES]:
             kind, where = self.kind(name)
             try:
@@ -212,7 +347,7 @@ class ImageSource:
                     data = result.data
                 else:
                     continue
-                image, why = decode(data)
+                image, why = decode(data, budget)
                 found[name] = image if image is not None else why
             except (OSError, ValueError) as exc:
                 found[name] = printable(exc)
@@ -268,6 +403,9 @@ class MarkdownView(QWidget):
         layout.addWidget(self.split, 1)
         self.status = plain_label(role="secondary", word_wrap=False)
         layout.addWidget(self.status)
+        self.notice = plain_label(role="secondary")  # (renderable: why only a part is rendered)
+        self.notice.hide()
+        layout.addWidget(self.notice)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(RENDER_DELAY)
@@ -286,30 +424,44 @@ class MarkdownView(QWidget):
         self.markdown = text
         bar = self.browser.verticalScrollBar()
         where = bar.value()
-        shown, notes = with_footnotes(text)
+        began = time.monotonic()
+        part, why = renderable(text)
+        self.notice.setText(why)
+        self.notice.setVisible(bool(why))
+        shown, notes = with_footnotes(part)
+        self.highlighter.formats = None  # (the look's colours of now)
         self.browser.document().setMarkdown(shown, FEATURES)
         self.read_outline(notes)
         bar.setValue(where)
+        # The live preview waits for a pause in the typing at least twice as long as a rendering takes: a big text's
+        # rendering (a second or more) after every pause of RENDER_DELAY left the typing stuck most of the time.
+        self.timer.setInterval(max(RENDER_DELAY, int(2000 * (time.monotonic() - began))))
         self.read_missing()
 
     def read_outline(self, notes=()):
         self.outline.clear()
         self.anchors = {}
+        # (the number each name goes on from: counted up from 1 past every heading of that name before, 20,000
+        # headings of one name held up the window for half a minute; and each paragraph compared with every note's
+        # name, 10,000 footnotes for 15 s)
+        numbers, notes = {}, set(notes)
         block = self.browser.document().begin()
         while block.isValid():
             level = block.blockFormat().headingLevel()
             text = block.text()
             if level:
                 key = slug(text)
-                number, unique = 1, key
+                number, unique = numbers.get(key, 1), key
                 while unique in self.anchors:  # (GitHub numbers headings of the same name)
                     unique, number = f"{key}-{number}", number + 1
+                numbers[key] = number
                 self.anchors[unique] = block.position()
                 item = QListWidgetItem("    " * (level - 1) + text)
                 item.setData(Qt.ItemDataRole.UserRole, block.position())
                 self.outline.addItem(item)
-            for name in notes:
-                if text.startswith(f"[{name}] "):
+            if notes and text.startswith("[") and "] " in text:
+                name = text[1:text.index("] ")]
+                if name in notes:
                     self.anchors.setdefault(f"fn-{name}", block.position())
             block = block.next()
 
@@ -373,6 +525,8 @@ class MarkdownView(QWidget):
         """Read every image again at the next rendering (Reload: an image changed on disk kept its old picture)."""
         self.images, self.asked, self.too_many = {}, set(), None
         self.generation += 1
+        if self.source is not None:
+            self.source.forget()
 
     def read_missing(self):
         """Read (in a thread) the images asked for that are not read yet; render again once they are."""

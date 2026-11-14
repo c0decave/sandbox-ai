@@ -13,7 +13,7 @@ from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QUrl  # noqa:
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from PySide6.QtGui import QColor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from sandbox_ai_app import backend, board as B, help_view, presets, theme, widgets  # noqa: E402
+from sandbox_ai_app import backend, board as B, help_view, presets, short_notices, theme, widgets  # noqa: E402
 from sandbox_ai_app.board_view import MIME_PART, NODE_H, NODE_W  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
@@ -182,7 +182,7 @@ def test_a_preset_file_is_imported(page, tmp_path, monkeypatch):
     assert [key for key, _ in page.drop_choices([str(path)])] == ["preset-board", "preset"]
     assert page.drop_paths([str(path)], QPointF(0, 0)) == "preset"
     mine = presets.load_mine(sai)[0]
-    assert [p.id for p in mine] == ["my-locked"] and "Imported as your preset" in widgets.SHOWN[-1][1]
+    assert [p.id for p in mine] == ["my-locked"] and "Imported as your preset" in short_notices.SHOWN[-1][1]
     monkeypatch.setattr(page, "choose_drop", lambda choices, point=None: "preset-board")
     page.drop_paths([str(path)], QPointF(0, 0))
     assert "--offline" in page.preview.toPlainText(), "the board is built from the preset"

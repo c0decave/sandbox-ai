@@ -24,6 +24,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 os.environ["SANDBOX_AI_APP_LANGUAGE"] = "en"
+# The launcher's dry runs ask Podman for no image (the tests' starts name images nobody built here; as the core
+# tests' conftest does).
+os.environ.setdefault("SANDBOX_AI_MCP_NO_IMAGE_CHECK", "1")
 
 try:  # noqa: SIM105 - must happen before a QApplication is created
     import PySide6.QtWebEngineWidgets  # noqa: F401
@@ -147,6 +150,71 @@ def no_modifiers_held():
     widget = QtWidgets.QWidget()
     QTest.keyRelease(widget, Qt.Key.Key_Shift)
     widget.deleteLater()
+
+
+def started_here(pid):
+    """Whether process PID was started by this test session: it has the session's HOME (home_guard moved it to a
+    temporary folder of its own; what the tests start inherits it, detached or not). False if its environment cannot
+    be read (gone, another user's)."""
+    try:
+        environ = Path(f"/proc/{int(pid)}/environ").read_bytes().split(b"\0")
+    except (OSError, ValueError):
+        return False
+    return ("HOME=" + os.environ.get("HOME", "")).encode() in environ
+
+
+@pytest.fixture(autouse=True)
+def only_this_sessions_launchers(monkeypatch):
+    """The Sandboxes page lists every sandbox-ai launcher process of the account it does not know ("Not registered"):
+    run beside another test session (the core suite's launchers, another checkout's app tests) or a real sandbox,
+    a test that expects no row, or one, found theirs too. The tests see the launchers they started themselves."""
+    if "sandbox_ai_app.backend" not in sys.modules or sys.platform != "linux":
+        yield
+        return
+    backend = sys.modules["sandbox_ai_app.backend"]
+    original = backend.launcher_processes
+
+    def ours(agents=backend.AGENTS, proc=Path("/proc"), info=None):
+        found = original(agents, proc, info)
+        if info is not None or Path(proc) != Path("/proc"):
+            return found  # a process table of the test's own (procinfo on a Mac, a fake /proc)
+        return [entry for entry in found if started_here(entry[0])]
+    monkeypatch.setattr(backend, "launcher_processes", ours)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_mouse_buttons_held():
+    """QTest's double click on a widget (mouseDClick) leaves its button as the application's mouse buttons (offscreen,
+    for the rest of the process): later code that waits while a button is held - a floating panel given back to the
+    window manager once no drag runs (MainWindow.settle_floating) - waited for a drag that never ends, and a test of it
+    failed or not by the order the tests ran in. A release through the window system after each test lets go."""
+    yield
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6 import QtWidgets
+    from PySide6.QtCore import QPoint, Qt
+    app = QtWidgets.QApplication.instance()
+    if app is None or QtWidgets.QApplication.mouseButtons() == Qt.MouseButton.NoButton:
+        return
+    from PySide6.QtGui import QWindow
+    from PySide6.QtTest import QTest
+    window = QWindow()
+    window.resize(4, 4)
+    for button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+        if QtWidgets.QApplication.mouseButtons() & button:
+            QTest.mouseRelease(window, button, Qt.KeyboardModifier.NoModifier, QPoint(1, 1))
+    app.processEvents()
+    window.destroy()
+
+
+@pytest.fixture(autouse=True)
+def short_notices_on():
+    """Short notices are shown in every test (a window made from settings with them off switched them off for the
+    whole process: short_notices.set_enabled is the app's, not a window's)."""
+    yield
+    if "sandbox_ai_app.short_notices" in sys.modules:
+        sys.modules["sandbox_ai_app.short_notices"].set_enabled(True)
 
 
 @pytest.fixture(autouse=True)

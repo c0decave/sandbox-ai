@@ -62,6 +62,20 @@ import time
 import urllib.parse
 
 HERE = Path(__file__).resolve().parent
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 STATIC = HERE / "web"
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
                 "i18n.js": "text/javascript; charset=utf-8",
@@ -75,7 +89,16 @@ START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")  # a start's name or
 NEW_START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # a name given to a start (SESSION_NAME)
 MCP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 APPROVAL_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")  # never a leading "-": read as an option there
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+# The agents of the commands that take fewer: sandbox-ai login (login.AGENTS), plugins (plugins.py) and team
+# (team.AGENTS); a terminal for another one is refused here, not opened to fail there.
+LOGIN_AGENTS = ("claude", "codex", "opencode", "hermes", "qwen")
+PLUGIN_AGENTS = TEAM_AGENTS = ("claude", "codex", "opencode")
+
+
+def agent_words(agents=AGENTS):
+    """"agent is claude, codex or opencode": the refusal naming AGENTS."""
+    return f"agent is {', '.join(agents[:-1])} or {agents[-1]}"
 MIN_PASSWORD = 12
 SCRYPT = {"n": 1 << 15, "r": 8, "p": 1}
 TOTP_PERIOD, TOTP_DIGITS = 30, 6
@@ -227,6 +250,8 @@ def load_users():
         document = json.loads(path.read_text())
     except FileNotFoundError:
         return {}
+    except RecursionError:  # (nested deeper than Python reads: damaged)
+        raise ValueError(f"{path}: not valid JSON (nested too deeply)") from None
     except (OSError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}") from None
     if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(document.get("users"), dict):
@@ -375,11 +400,6 @@ class Sessions:
             return None
         return session
 
-    def drop_user(self, user):
-        with self.lock:
-            for key in [k for k, s in self.items.items() if s["user"] == user]:
-                del self.items[key]
-
 
 # --- what the browser may ask for ---------------------------------------------------------------------------
 
@@ -409,6 +429,9 @@ def asks_allow(args):
 
 
 NEWER = (
+    ((0, 1, 95), "mcp catalog --json", lambda a: a[:2] == ["mcp", "catalog"] and "--json" in a),
+    ((0, 1, 95), "mcp add --env NAME=VALUE and NAME@SECRET", lambda a: a[:2] == ["mcp", "add"] and any(
+        x.startswith("--env=") and re.search(r"[=@]", x[len("--env="):]) for x in a)),
     ((0, 1, 80), "--ask allow", asks_allow),
     ((0, 1, 78), "approvals allow --no-open", lambda a: a[:2] == ["approvals", "allow"] and "--no-open" in a),
     ((0, 1, 78), "wizard trust --list, --show and --digest", lambda a: a[:2] == ["wizard", "trust"] and any(
@@ -676,7 +699,7 @@ def kit_agents(body, many=True):
     values = strings(body.get("agents", []), "agents", 3) if many else (
         [body["agent"]] if body.get("agent") is not None else [])
     if not all(value in AGENTS for value in values):
-        raise Refused(400, "an agent is claude, codex or opencode")
+        raise Refused(400, "an " + agent_words())
     return [f"--agent={value}" for value in dict.fromkeys(values)]
 
 
@@ -723,7 +746,7 @@ MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot
 SIZE_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
 NET_PRESETS = ("pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm")  # agent_sandbox.PRESETS (a test agrees)
 NETWORK = re.compile(r"[0-9A-Fa-f:.]{2,45}(?:/[0-9]{1,3})?")
-BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}")  # codex, claude, opencode, all, team, vpn, tor or a variant
+BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}(?:@[a-z]{1,20})?")  # (NAME@AGENT: that agent's variant NAME)  # codex, claude, opencode, hermes, dsh, qwen, goose, all, team, cairn, vpn, tor, browser or a variant
 HOOK_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 HOOK_EVENT = re.compile(r"[A-Z][A-Za-z]{1,40}")
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
@@ -808,6 +831,17 @@ def catalog_name(prefix, given=()):
         return printable(mcp.catalog_label(given[int(numbered[1])]))[:300]
     source = dict(mcp.CATALOGS).get(prefix)
     return printable(mcp.catalog_label(source))[:300] if source else printable(str(prefix))[:300]
+
+
+def mcp_env_spec(value):
+    """One variable of `mcp add --env` checked as the command checks it (mcp.parse_env_spec): NAME (that host's
+    environment's, else its secret NAME), NAME=VALUE (a value that is no secret: one line, at most 1024 characters,
+    nothing of a secret's name or shape) or NAME@SECRET (that host's secret SECRET). 400 with its words otherwise."""
+    try:
+        module("mcp").parse_env_spec(value, "a variable")
+    except ValueError as exc:
+        raise Refused(400, printable(str(exc))[:600]) from None
+    return value
 
 
 def catalog_sources(body):
@@ -897,12 +931,13 @@ NEEDS_CONFIRM = {
 TERMINAL_CONFIRM = ("login-logout", "kit-hooks-trust")
 # The order of protection (weakest first) that decides whether a default is lowered: any step down needs a confirm.
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")
-TELEMETRY_ORDER = ("on", "off", "strict")
+TELEMETRY_ORDER = ("off", "strict")  # telemetry is always off: no on (an old one on a host counts as off)
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
 # The keys of defaults.json (agent_sandbox.DEFAULTS_KEYS but "version"; tests/test_web.py checks they agree): any
 # other key is refused before anything reaches a host.
-DEFAULT_KEYS = ("canaries", "desktop_notifications", "keep_days", "loop_guard", "mode", "name_style", "preset_dirs",
-                "safeguard_mute", "subnet", "subnet6", "telemetry")
+DEFAULT_KEYS = ("canaries", "desktop_notifications", "keep_days", "llm_traffic", "llm_traffic_limit", "loop_guard",
+                "mode", "name_style", "preset_dirs", "safeguard_mute", "subnet", "subnet6", "telemetry")
+LLM_TRAFFIC_MODES = ("off", "llm", "all")  # runtime.LLM_TRAFFIC_MODES: llm_traffic's values
 DESKTOP_NOTIFICATIONS = ("all", "alarms", "none")  # agent_sandbox.DESKTOP_NOTIFICATIONS
 NAME_STYLES = ("codename", "project")  # agent_sandbox.NAME_STYLES: name_style's values
 
@@ -954,6 +989,9 @@ class FanOut:
             found = {"error": str(exc)}
         except Exception as exc:  # noqa: BLE001 - one host's failure is that host's error, not the page's
             found = {"error": printable(f"{type(exc).__name__}: {exc}")[:600]}
+        LOG.changed(("webui host", name), "error" in found, "webui",
+                    f"{name}: " + (f"asking it failed: {found['error']}" if "error" in found else "answers"),
+                    "WARNING" if "error" in found else "DEBUG")
         found.update(at=self.clock(), seen=self.wall())
         with self.lock:
             # A host forgotten meanwhile (its entry changed: forget()) keeps nothing of what the old one answered.
@@ -1290,7 +1328,7 @@ class Api:
             raise self.failed(host, args, status, out, err)
         try:
             return json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise self.failed(host, args, status, out, err) from None
 
     def done(self, host, args, timeout=120, input=None):
@@ -1516,7 +1554,7 @@ class Api:
             status, out, err = self.run(hosts.LOCAL, install_argv(name, choice), install_route_timeout())
             try:
                 result = json.loads(out)
-            except ValueError:
+            except (ValueError, RecursionError):
                 result = None
             if not isinstance(result, dict):
                 result = None
@@ -1736,11 +1774,11 @@ class Api:
     @staticmethod
     def live_server(body):
         """The server BODY names for mcp attach|detach --live, as (its argv before START, what the question names):
-        {"server": NAME} (sandbox-ai mcp list) or {"helper": AGENT} (claude, codex or opencode as a helper), one of
+        {"server": NAME} (sandbox-ai mcp list) or {"helper": AGENT} (one of AGENTS as a helper), one of
         them; never a leading "-" (read as an option there)."""
         server, helper = body.get("server"), body.get("helper")
         if (server is None) == (helper is None):
-            raise Refused(400, "name the server (server: NAME) or a helper agent (helper: claude, codex or opencode)")
+            raise Refused(400, f"name the server (server: NAME) or a helper agent (helper: {', '.join(AGENTS)})")
         if helper is not None:
             if helper not in AGENTS:
                 raise Refused(400, f"a helper is one of {', '.join(AGENTS)}")
@@ -2078,7 +2116,7 @@ class Api:
         for line in out.splitlines():
             try:
                 record = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(record, dict):
                 records.append(record)
@@ -2226,7 +2264,7 @@ class Api:
             status, out, err = self.run(params["host"], ["kits", "list", "--json"], 60)
             try:
                 existing = {kit.get("name") for kit in json.loads(out).get("kits", []) if kit.get("kind") == "user"}
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, RecursionError):
                 existing = set()
             if name not in existing:
                 first = self.done(params["host"], ["kits", "new", "--", name], 60)["output"] + "\n"
@@ -2352,7 +2390,7 @@ class Api:
         status, out, err = self.run(host, ["doctor", "--json", *extra], timeout)
         try:
             return json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
         if status != 0 and not out.strip() and "--json" in (err or ""):  # argparse: unrecognized arguments: --json
             status, out, err = self.run(host, ["doctor", *extra], timeout)
@@ -2443,7 +2481,7 @@ class Api:
         name = params["name"]
         agent = body.get("agent")
         if agent not in (None, *AGENTS) or name.startswith("-"):
-            raise Refused(400, "agent is claude, codex or opencode")
+            raise Refused(400, agent_words())
         status, out, err = self.run(params["host"], ["llm", "check", name, *(["--agent", agent] if agent else [])],
                                     90)
         return {"ok": status == 0, "output": printable((out + err).strip()[-4000:])}
@@ -2473,10 +2511,17 @@ class Api:
                 value is False or isinstance(value, str)
                 or isinstance(value, list) and all(isinstance(item, str) for item in value)):
             raise Refused(400, "canaries is false, a list of categories, all or none")
+        if key == "telemetry" and value is not None and value not in TELEMETRY_ORDER:
+            raise Refused(400, "telemetry is off or strict: the agents' telemetry is always off (there is no on)")
         if key == "name_style" and value is not None and value not in NAME_STYLES:
             raise Refused(400, f"name_style is {' or '.join(NAME_STYLES)}")
         if key == "desktop_notifications" and value is not None and value not in DESKTOP_NOTIFICATIONS:
             raise Refused(400, f"desktop_notifications is {', '.join(DESKTOP_NOTIFICATIONS)}")
+        if key == "llm_traffic" and value is not None and value not in LLM_TRAFFIC_MODES:
+            raise Refused(400, f"llm_traffic is {', '.join(LLM_TRAFFIC_MODES)}")
+        if key == "llm_traffic_limit" and value is not None and not (
+                isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 64):
+            raise Refused(400, "llm_traffic_limit is a number of MiB from 1 to 64")
         if key == "loop_guard" and value is not None:
             # The launcher's own check (llm.check_loop): a value it refuses would stop every start on that host.
             try:
@@ -2490,7 +2535,7 @@ class Api:
         # nothing (the safeguards still refuse, and every record stays listed): no step down to confirm. Fewer desktop
         # notifications are one (lowered_default): "none" silences a canary's alarm while the app is closed.
         if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute", "loop_guard"):
-            weakest = {"mode": MODE_ORDER[0], "telemetry": TELEMETRY_ORDER[0]}.get(key)
+            weakest = {"mode": MODE_ORDER[0]}.get(key)
             if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
             lowered = self.lowered_default(params["host"], key, value)
@@ -2563,6 +2608,8 @@ class Api:
         order = MODE_ORDER if key == "mode" else TELEMETRY_ORDER
         default = DEFAULT_MODE if key == "mode" else DEFAULT_TELEMETRY
         before, after = values.get(key, default), default if value is None else value
+        if key == "telemetry" and before == "on":  # gone since 0.1.95: the launcher ignores it, so it is off
+            before = "off"
         if after not in order:
             raise Refused(400, f"{key} is one of {', '.join(order)}")
         if before not in order:
@@ -2659,10 +2706,53 @@ class Api:
         return self.done(params["host"], ["mcp", "stop", name], 120)
 
     def mcp_catalog(self, params, body):
-        """sandbox-ai mcp catalog [--catalog FILE_OR_URL]...: its lines (the command has no --json) read as
-        [{"entry", "prefix", "name", "network", "title", "published", "signature"}]; "problems": the catalogs it
-        could not read (its stderr), "output": what it printed."""
-        status, out, err = self.run(params["host"], ["mcp", "catalog", *catalog_sources(body)], 120)
+        """sandbox-ai mcp catalog --json [--catalog FILE_OR_URL]...: [{"entry", "prefix", "name", "network", "title",
+        "published", "signature", "catalog", "env": [{name, description, secret, required}]}] - the variables each
+        entry declares, for the add form; "problems": the catalogs it could not read. A host before 0.1.95 has no
+        --json: its lines are read then (mcp_catalog_lines, without variables)."""
+        sources = catalog_sources(body)
+        try:
+            status, out, err = self.run(params["host"], ["mcp", "catalog", "--json", *sources], 120)
+        except Refused as exc:
+            if exc.code != "host-too-old":
+                raise
+            return self.mcp_catalog_lines(params, body, sources)
+        if status != 0:
+            raise self.failed(params["host"], ["mcp", "catalog"], status, out, err)
+        try:
+            printed = json.loads(out)
+        except (ValueError, RecursionError):
+            raise self.failed(params["host"], ["mcp", "catalog"], status, out, err) from None
+        printed = printed if isinstance(printed, dict) else {}
+        entries = []
+        for item in printed.get("entries") if isinstance(printed.get("entries"), list) else []:
+            if not (isinstance(item, dict) and isinstance(item.get("prefix"), str) and isinstance(item.get("name"), str)
+                    and MCP_ENTRY.fullmatch(f"{item['prefix']}:{item['name']}")):
+                continue
+            hosts = [str(host) for host in item.get("hosts") if isinstance(host, str)] \
+                if isinstance(item.get("hosts"), list) else []
+            network = " ".join([str(item.get("network") or "none"), ",".join(hosts)]).strip()
+            variables = [{"name": v["name"], "description": printable(" ".join(str(v.get("description") or "")
+                                                                              .split()))[:500],
+                          "secret": v.get("secret") is True, "required": v.get("required") is True}
+                         for v in (item.get("env") if isinstance(item.get("env"), list) else [])
+                         if isinstance(v, dict) and isinstance(v.get("name"), str)
+                         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", v["name"])]
+            entries.append({"entry": f"{item['prefix']}:{item['name']}", "prefix": item["prefix"],
+                            "name": item["name"], "network": printable(network)[:300],
+                            "title": printable(" ".join(str(item.get("title") or "").split()))[:300],
+                            "published": item.get("published") is True,
+                            "signature": item.get("signature") if item.get("signature") in ("good", "bad") else "none",
+                            "catalog": printable(item["catalog"])[:300] if isinstance(item.get("catalog"), str)
+                            else catalog_name(item["prefix"], body.get("catalogs") or []),
+                            "env": variables[:64]})
+        problems = printed.get("problems") if isinstance(printed.get("problems"), list) else []
+        return {"entries": entries, "problems": [printable(str(line))[:600] for line in problems][:20],
+                "output": ""}
+
+    def mcp_catalog_lines(self, params, body, sources):
+        """The catalog as a host before 0.1.95 prints it: `mcp catalog`'s lines read as entries without variables."""
+        status, out, err = self.run(params["host"], ["mcp", "catalog", *sources], 120)
         if status != 0:
             raise self.failed(params["host"], ["mcp", "catalog"], status, out, err)
         entries = []
@@ -2674,7 +2764,7 @@ class Api:
                                 "title": printable(match["title"]), "published": not match["unpublished"],
                                 "signature": {"signed": "good", "SIGNATURE BAD": "bad"}.get(match["signature"],
                                                                                            "none"),
-                                "catalog": catalog_name(match["prefix"], body.get("catalogs") or [])})
+                                "catalog": catalog_name(match["prefix"], body.get("catalogs") or []), "env": []})
         return {"entries": entries, "problems": [printable(line)[:600] for line in (err or "").splitlines()
                                                  if line.strip()][:20],
                 "output": printable(out.strip()[-20000:])}
@@ -2701,8 +2791,8 @@ class Api:
             args.append(f"--mount={target}={source}:{mode}")
             if mode == "rw":
                 writable.append(source)
-        for value in strings(body.get("env", []), "env", 16):
-            args.append(f"--env={secret_name(value)}")
+        for value in strings(body.get("env", []), "env", 64):
+            args.append(f"--env={mcp_env_spec(value)}")
         if body.get("network") not in (None, ""):
             if body["network"] not in ("none", "full"):
                 raise Refused(400, "network is none or full")
@@ -2938,7 +3028,7 @@ class Api:
             args.append(f"--value={key}={one_line(value, key)}")
         agent = body.get("agent")
         if agent not in (None, "", *AGENTS):
-            raise Refused(400, "agent is claude, codex or opencode")
+            raise Refused(400, agent_words())
         args += [f"--agent={agent}"] if agent else []
         return self.checked(params["host"], [*args, name])
 
@@ -3027,7 +3117,7 @@ class Api:
         status, out, err = self.run(params["host"], [*args, *paths], 300)
         try:
             found = json.loads(out) if status in (0, 1, 2) else None
-        except ValueError:
+        except (ValueError, RecursionError):
             found = None
         if not (isinstance(found, list) and found and all(isinstance(entry, dict) for entry in found)):
             if status not in (0, 1, 2) or found is None and status != 2:
@@ -3132,8 +3222,8 @@ class Api:
     def team_post(self, params, body):
         """team post NAME AGENT TASK: a task for a member, from you (after "--": a task is never an option)."""
         name, agent, task = self.team_name(params["name"]), body.get("agent"), body.get("task")
-        if agent not in AGENTS:
-            raise Refused(400, "agent is claude, codex or opencode")
+        if agent not in TEAM_AGENTS:
+            raise Refused(400, agent_words(TEAM_AGENTS))
         if not (isinstance(task, str) and task.strip() and len(task) <= 8000
                 and all(c in "\n\t" or c.isprintable() for c in task)):
             raise Refused(400, "the task is text of at most 8000 characters (lines and tabs, no other control "
@@ -3155,7 +3245,7 @@ class Api:
     @staticmethod
     def image_target(value):
         if not (isinstance(value, str) and BUILD_TARGET.fullmatch(value)):
-            raise Refused(400, "an image is an agent (claude, codex, opencode) or a variant's name (1-30 of a-z, "
+            raise Refused(400, f"an image is an agent ({', '.join(AGENTS)}) or a variant's name (1-30 of a-z, "
                                "0-9, '_', '.' and '-')", code="bad-name", params={"what": "image"})
         return value
 
@@ -3236,7 +3326,7 @@ class Api:
         """images new NAME --from AGENT [--empty] --json: a variant (localhost/AGENT-sandbox-NAME)."""
         name, agent = self.image_target(body.get("name")), body.get("from")
         if agent not in AGENTS or name in AGENTS:
-            raise Refused(400, "a variant has a name of its own and comes from claude, codex or opencode")
+            raise Refused(400, f"a variant has a name of its own and comes from {', '.join(AGENTS)}")
         return self.json_of(params["host"], ["images", "new", name, f"--from={agent}",
                                              *(["--empty"] if flag(body, "empty") else []), "--json"], 60, ok=(0,))
 
@@ -3244,7 +3334,7 @@ class Api:
         """images recipe media|tor --from AGENT [--as VARIANT]: a variant with a ready extension."""
         recipe, agent, variant = body.get("recipe"), body.get("from"), body.get("as")
         if recipe not in IMAGE_RECIPES or agent not in AGENTS:
-            raise Refused(400, f"recipe is {' or '.join(IMAGE_RECIPES)}, from claude, codex or opencode")
+            raise Refused(400, f"recipe is {' or '.join(IMAGE_RECIPES)}, from {', '.join(AGENTS)}")
         extra = [] if variant in (None, "") else [f"--as={self.image_target(variant)}"]
         return self.done(params["host"], ["images", "recipe", recipe, f"--from={agent}", *extra], 60)
 
@@ -3316,7 +3406,7 @@ def terminal_command(query, runner=None):
     if kind == "start":
         agent = query.get("agent")
         if agent not in AGENTS:
-            raise Refused(400, "agent is claude, codex or opencode")
+            raise Refused(400, agent_words())
         args = [agent]
         if query.get("name"):
             args += ["--name", new_start_name(query["name"])]
@@ -3389,8 +3479,8 @@ def tool_command(kind, query, runner=None):
     shows them and asks again) or revoked, the demo device. Every value is checked; nothing starts with "-"."""
     if kind == "login":
         agent = query.get("agent")
-        if agent not in AGENTS:
-            raise Refused(400, "agent is claude, codex or opencode")
+        if agent not in LOGIN_AGENTS:
+            raise Refused(400, agent_words(LOGIN_AGENTS))
         logout = {"1": True, "0": False, None: False, "": False}.get(query.get("logout"), "bad")
         if logout == "bad":
             raise Refused(400, "logout is 1 or 0")
@@ -3404,8 +3494,8 @@ def tool_command(kind, query, runner=None):
         return ["wizard", "edit", clean_path(path, "path")] if path else ["wizard", "new"]
     if kind == "plugins":
         agent = query.get("agent") or "claude"
-        if agent not in AGENTS:
-            raise Refused(400, "agent is claude, codex or opencode")
+        if agent not in PLUGIN_AGENTS:
+            raise Refused(400, agent_words(PLUGIN_AGENTS))
         update = {"1": True, "0": False, None: False, "": False}.get(query.get("update"), "bad")
         if update == "bad":
             raise Refused(400, "update is 1 or 0")
@@ -3420,21 +3510,23 @@ def tool_command(kind, query, runner=None):
     if kind == "build":
         target = query.get("target")
         if not (isinstance(target, str) and BUILD_TARGET.fullmatch(target)):
-            raise Refused(400, "target is codex, claude, opencode, all, team, vpn, tor or a variant's name")
+            raise Refused(400, "target is codex, claude, opencode, hermes, dsh, qwen, goose, all, team, cairn, vpn, tor, browser or a "
+                                "variant's name")
         only = {"1": True, "0": False, None: False, "": False}.get(query.get("extension_only"), "bad")
         if only == "bad" or only and target in ("team", "vpn", "tor"):
             raise Refused(400, "extension_only is 1 or 0, and not for team, vpn or tor")
         # --pin VERSION (one agent's own version), --uv TAG, --node IMAGE (the base images): as build checks them
         pin, uv, node = (query.get(key) or "" for key in ("pin", "uv", "node"))
         if pin and not (re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", pin) and target in AGENTS):
-            raise Refused(400, "pin is X.Y.Z, for one agent's image (claude, codex or opencode)")
+            raise Refused(400, f"pin is X.Y.Z, for one agent's image ({', '.join(AGENTS)})")
         if uv and not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}", uv) or \
                 node and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./:@_-]{0,255}", node):
             raise Refused(400, "uv is an image tag, node an image name (with a tag or an @sha256 digest)")
         if (uv or node) and target in ("vpn", "tor"):
             raise Refused(400, "uv and node are for the agents' images, not vpn or tor")
         more = [*(["--pin", pin] if pin else []), *(["--uv", uv] if uv else []), *(["--node", node] if node else [])]
-        return ["build", *more, *(["--extension-only"] if only else []), target]
+        return ["build", *more, *(["--extension-only"] if only else []), *(["--variant"] if "@" in target else []),
+                target]
     if kind == "trust-hooks":
         kit = query.get("kit")
         if not (isinstance(kit, str) and KIT_NAME.fullmatch(kit)):
@@ -3455,14 +3547,14 @@ def tool_command(kind, query, runner=None):
             raise Refused(400, "a team's name is 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit",
                           code="bad-name", params={"what": "team"})
         agents = (query.get("agents") or "").split(",")
-        if not 2 <= len(agents) <= 3 or len(set(agents)) != len(agents) or not set(agents) <= set(AGENTS):
+        if not 2 <= len(agents) <= 3 or len(set(agents)) != len(agents) or not set(agents) <= set(TEAM_AGENTS):
             raise Refused(400, "agents: two or three of claude, codex and opencode, comma-separated; the first leads")
         workspace = query.get("workspace") or ""
         if not workspace.startswith(("/", "~")) or "\0" in workspace:  # never the service's own directory (team's ".")
             raise Refused(400, "the shared workspace is an absolute path (or ~/...)")
         try:
             options = strings(json.loads(query.get("options") or "[]"), "options")
-        except ValueError:
+        except (ValueError, RecursionError):
             raise Refused(400, "options is a JSON list of strings") from None
         # Every member's /work is the team's workspace (team.py passes --workspaces-as-given itself from 0.1.78 on;
         # a remote host of that version whose team.py is older gets it here).
@@ -3755,6 +3847,10 @@ class Service:
         try:
             status, out_headers, data = self.respond(method, target, headers, body, address, seen)
         except Exception as exc:  # noqa: BLE001 - an error nobody expected: a 500 with its kind, never no answer
+            LOG.error("webui", f"{method} {urllib.parse.urlsplit(target).path} failed unexpectedly (500)", exc)
+            LOG.debug("webui", "where: " + " <- ".join(
+                f"{Path(frame.filename).name}:{frame.lineno} {frame.name}"
+                for frame in reversed(__import__("traceback").extract_tb(exc.__traceback__)[-6:])))
             with contextlib.suppress(Exception):
                 audit("error", address=address, method=method, path=urllib.parse.urlsplit(target).path,
                       why=f"{type(exc).__name__}: {printable(exc)[:300]}")
@@ -3808,15 +3904,21 @@ class Service:
                 return self.json(200, {"ok": True}, [("Set-Cookie", self.set_cookie("", 0))])
             result = self.api.dispatch(method, path, data)
             if method != "GET":
+                LOG.info("webui", f"{session['user']} from {address}: {method} {path}: done")
                 audit("action", user=session["user"], address=address, method=method, path=path,
                       body=redacted(data))
             return self.json(200, result)
         except Refused as exc:
+            LOG.log("INFO" if method != "GET" else "DEBUG", "webui",
+                    f"{session['user'] if session else 'nobody logged in'} from {address}: {method} {path}: refused "
+                    f"({exc.status}): {printable(exc)[:300]}")
             if method != "GET" and session is not None:
                 audit("refused", user=session["user"], address=address, method=method, path=path, why=str(exc))
             return self.error(exc.status, str(exc), confirm=exc.confirm, code=exc.code, params=exc.params)
-        except (OSError, ValueError) as exc:  # what no route turned into a Refused: an answer all the same
+        # What no route turned into a Refused: an answer all the same.
+        except (OSError, ValueError, RecursionError) as exc:
             why = printable(f"{type(exc).__name__}: {exc}")[:600]
+            LOG.warning("webui", f"{method} {path} failed (500): {why}")
             with contextlib.suppress(OSError):
                 audit("failed", user=session and session["user"], address=address, method=method, path=path, why=why)
             return self.error(500, f"the service could not do that: {why}")
@@ -4461,24 +4563,24 @@ def serve(listen=DEFAULT_LISTEN, hostnames=(), cert=None, key=None, out=print, r
     out(f"  certificate SHA-256 {fingerprint(cert)}")
     if ready:
         ready(server)
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        # SIGTERM (systemd, kill) and SIGHUP (its terminal closed) end it as Ctrl-C does, through the clean-up
+        # below: they ended the process at once, and listen.json stayed with its port (the launcher refused
+        # --allow-host-port for that port while another process had the PID).
+        def ended(signum, _frame):
+            raise SystemExit(128 + signum)
+        previous = {sig: signal.signal(sig, ended) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         server.serve_forever()
     finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
         with contextlib.suppress(OSError):
             if json.loads(listen_file().read_text()).get("pid") == os.getpid():
                 listen_file().unlink()
         module("approvals").end_heartbeat()  # no page here watches the questions any more
         server.server_close()
-
-
-def web_port():
-    """The port the running service listens on (None: none runs), for the launcher's check."""
-    try:
-        record = json.loads(listen_file().read_text())
-        os.kill(int(record["pid"]), 0)
-        return int(record["port"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
 
 
 # --- the command line -------------------------------------------------------------------------------------

@@ -257,6 +257,11 @@ def bwrap_args(definition, environ=None):
             "--ro-bind", rootfs["path"], "/", "--proc", "/proc", "--dev", "/dev",
             "--size", str(tmp_bytes(definition.get("tmp", "64m"))), "--tmpfs", "/tmp", "--cap-drop", "ALL",
             "--clearenv"]
+    if definition.get("pid1") == "server":
+        # The server is PID 1 of its PID namespace and reaps its children itself: no reaper of bwrap's there holding
+        # the MCP connection's stdin and stdout, which every process of the server could open through /proc/1/fd
+        # (mcp.py's PID1_VALUES; the definition was checked there).
+        args.insert(args.index("--unshare-pid") + 1, "--as-pid-1")
     if definition.get("network", "none") == "full":
         # The resolver slirp4netns answers at (10.0.2.3), as pasta gives the image servers theirs.
         args += ["--ro-bind", resolv_conf(), "/etc/resolv.conf"]
@@ -308,18 +313,27 @@ def args_pipe(args):
     return read
 
 
+def bwrap_environment():
+    """The environment bwrap itself starts with: the PATH that finds it, nothing else (see run)."""
+    return {"PATH": os.environ.get("PATH") or os.defpath}
+
+
 def run(definition, environ=None):
     """One instance: bwrap with the arguments through --args; for network "full" with slirp4netns attached to its
     network namespace (the outside network, never the host's loopback). Its stdin and stdout stay the MCP
     connection the bridge gave this process. Returns bwrap's exit status."""
     import json
     args = args_pipe(bwrap_args(definition, environ))
+    # bwrap's own process is PID 1 of the server's PID namespace and keeps the environment it was started with (every
+    # process of the server reads it at /proc/1/environ; --clearenv empties only the command's): PATH alone, never
+    # the launcher's environment with its API keys. What the server needs goes through --setenv in the args pipe.
+    bare = bwrap_environment()
     if definition.get("network", "none") != "full":
-        os.execvp("bwrap", ["bwrap", "--args", str(args), *entrypoint(definition)])
+        os.execvpe("bwrap", ["bwrap", "--args", str(args), *entrypoint(definition)], bare)
     info_r, info_w = os.pipe()
     ready_r, ready_w = os.pipe()
     child = subprocess.Popen(["bwrap", "--info-fd", str(info_w), "--args", str(args), *entrypoint(definition)],
-                             pass_fds=(info_w, args))
+                             pass_fds=(info_w, args), env=bare)
     os.close(info_w)
     os.close(args)
     slirp = None
@@ -333,7 +347,7 @@ def run(definition, environ=None):
         ready_w = None
         os.read(ready_r, 1)
         return child.wait()
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, RecursionError):
         child.kill()
         child.wait()
         return 125

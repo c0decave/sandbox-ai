@@ -1108,3 +1108,48 @@ def test_copying_an_upload_folder_never_runs_git_of_a_folder_above(tmp_path):
     target.mkdir()
     helper.cmd_copy(str(upload), str(target))
     assert (target / "sandbox" / "x.py").read_text() == "x" and not marker.exists()
+
+
+def test_install_from_a_checkout_of_another_user_skips_sockets_and_ignored_files(tmp_path, monkeypatch):
+    """Live use (2026-11-14), `./install.sh --from .` as root in the user's checkout: "OSError: [Errno 6] No such
+    device or address: 'CHECKOUT/.tt/core/pytest-of-root/.../open.sock'". git refused the
+    checkout of another user (dubious ownership), the copy fell back to every file, ignored ones and a socket too.
+    git is asked with the checkout as a safe directory, and a fallback copies regular files only."""
+    import socket
+    helper = installer_helper()
+    checkout, target = tmp_path / "c", tmp_path / "target"
+    (checkout / "sandbox").mkdir(parents=True)
+    (checkout / "sandbox" / "x.py").write_text("x")
+    (checkout / ".gitignore").write_text(".tt/\n")
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    (checkout / ".tt").mkdir()
+    (checkout / ".tt" / "big.log").write_text("ignored")
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(checkout / ".tt" / "s.sock"))
+    os.mkfifo(checkout / "sandbox" / "pipe")
+    # git is told the checkout is safe (root in a user's checkout: else "dubious ownership" and no listing).
+    asked = []
+    real_run = subprocess.run
+
+    def run(command, *args, **kwargs):
+        asked.append(command)
+        return real_run(command, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", run)
+    target.mkdir()
+    helper.cmd_copy(str(checkout), str(target))
+    monkeypatch.setattr(subprocess, "run", real_run)
+    assert any("safe.directory=" + str(checkout) in " ".join(map(str, c)) for c in asked if "ls-files" in c)
+    assert (target / "sandbox" / "x.py").read_text() == "x"
+    assert not (target / ".tt").exists(), "git's listing was used: ignored files stay out"
+    assert not (target / "sandbox" / "pipe").exists()
+    # git failing (a broken repository, or a git that refuses): the fallback copies regular files only.
+    import shutil as sh
+    sh.rmtree(checkout / ".git")
+    (checkout / ".git").write_text("gitdir: /nonexistent\n")
+    sh.rmtree(target)
+    target.mkdir()
+    helper.cmd_copy(str(checkout), str(target))
+    assert (target / "sandbox" / "x.py").exists() and not (target / ".tt" / "s.sock").exists()
+    assert not (target / "sandbox" / "pipe").exists()
+    server.close()

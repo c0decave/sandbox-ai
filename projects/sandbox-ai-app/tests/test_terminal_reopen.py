@@ -1,7 +1,7 @@
 """Terminals after a restart of the app (user report 2026-11-12: "the sessions keep running in tmux, but the app's
 terminal tabs are gone - wouldn't it make sense to show them again?"): the tabs of running starts are kept in the
 app's state in their order; at the next start a tab is attached again to each of them - and, with the setting
-reopen_terminals (on by default), to every other session in tmux that runs here and on the hosts whose terminals
+reopen_terminals (off by default since live use: a closed tab stays closed), to every other session in tmux that runs here and on the hosts whose terminals
 were open. Nothing is ever started (only `sandbox-ai attach NAME`), a session that ended meanwhile is left out and
 said. A start in a tab gets SANDBOX_AI_APP_TAB, which sandbox-ai records (list --json "app_tab"): that is how its
 tab is found again. Real terminal tabs (offscreen QtWebEngine with a stand-in xterm.js) and a stand-in sandbox-ai."""
@@ -144,7 +144,8 @@ def test_a_session_that_ended_meanwhile_is_left_out_and_said(terminal, stub_web,
 def test_the_setting_decides_and_nothing_kept_reads_nothing(terminal, stub_web, sai, tmp_path, monkeypatch, wait):
     page = terminal.TerminalsPage(stub_web, sai=sai)
     page.store = state.State(tmp_path / "state.json")
-    assert backend.setting("reopen_terminals") is True, "on by default"
+    assert backend.setting("reopen_terminals") is False, "off by default: a tab closed stays closed"
+    monkeypatch.setitem(backend.SETTINGS, "reopen_terminals", True)
     sai.listed = [running("idle")]
     done = []
     assert page.reopen(done=lambda opened, skipped: done.append(opened))  # the setting: every session here

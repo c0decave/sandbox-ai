@@ -10,6 +10,11 @@ meet the sandbox's firewall and connection proxy: a destination that answers whe
 The base: python:3.12-slim-bookworm as the base of a variant of claude (sandbox-ai images new pybase --from claude --base
 ...; sandbox-ai build pybase): the variant's sandbox has that image's Python and the agent, and its firewall holds.
 
+The showcase preset showcase-full-stack: PostgreSQL 17.6 and sandbox-ai's own nginx (images build-image --builtin
+showcase-web) with the preset's --service values, reached by the agent (nginx passing /app/ to the agent's server);
+and the image recipe django built (its lockfiles' hashes against PyPI and npm) and used against that PostgreSQL
+(SANDBOX_AI_SKIP_DJANGO_BUILD=1 leaves it out).
+
 Needs Podman, the claude image (sandbox-ai build claude) and the network for Docker Hub; the image and the references
 can be given: SANDBOX_AI_LIVE_IMAGE, SANDBOX_AI_SERVICE_REF (default docker.io/library/redis:7-alpine),
 SANDBOX_AI_BASE_REF (default docker.io/library/python:3.12-slim-bookworm; SANDBOX_AI_SKIP_BASE_BUILD=1 leaves the
@@ -68,6 +73,16 @@ def sandbox_ai(env, *args, timeout=1800):
     return subprocess.run([str(ROOT / "sandbox-ai"), *args], env=env, capture_output=True, text=True, timeout=timeout)
 
 
+def json_of(done, what):
+    """The JSON a command (DONE, a CompletedProcess) printed, else a failure that shows what it printed on both
+    streams (a bare JSONDecodeError said nothing of why: podman's own lines came before the JSON)."""
+    try:
+        return json.loads(done.stdout)
+    except ValueError as exc:
+        pytest.fail(f"{what}: no JSON on standard output ({exc}); exit {done.returncode}\n"
+                    f"STDOUT:\n{(done.stdout or '')[-3000:]}\nSTDERR:\n{(done.stderr or '')[-3000:]}")
+
+
 # The agent: PING the service at localhost:6379, then wait while the test looks into the service's container.
 AGENT = r"""
 python3 -I - <<'EOF'
@@ -112,7 +127,7 @@ def wait_for_container(label, timeout=180):
 def test_a_service_is_reached_by_the_agent_and_stays_behind_the_firewall(tmp_path, own_config):
     pulled = sandbox_ai(own_config, "images", "pull", SERVICE_REF, "--as", "redis", "--json")
     assert pulled.returncode == 0, pulled.stderr
-    entry = json.loads(pulled.stdout)
+    entry = json_of(pulled, "images pull --json")
     assert "@sha256:" in entry["image"] and entry["reviewed"] is False and "UNCHECKED" in pulled.stderr
     fi = load_fake_internet()
     address = host_address()
@@ -135,8 +150,8 @@ def test_a_service_is_reached_by_the_agent_and_stays_behind_the_firewall(tmp_pat
         try:
             container = wait_for_container("sandbox-ai.service=cache")
             assert container, "the service's container never ran"
-            inspect = json.loads(subprocess.run([PODMAN, "inspect", container], capture_output=True,
-                                                text=True).stdout)[0]
+            inspect = json_of(subprocess.run([PODMAN, "inspect", container], capture_output=True, text=True),
+                              f"podman inspect {container}")[0]
             looks = {}
             for name, argv in (
                     ("status", ["cat", "/proc/self/status"]),
@@ -204,4 +219,135 @@ def test_a_variant_on_a_base_image_of_yours(tmp_path, own_config):
     assert found.get("outside") == "refused", report
     assert "UNCHECKED" in done.stderr, report
     removed = sandbox_ai(own_config, "images", "remove", "pybase")
+    assert removed.returncode == 0, removed.stderr
+
+
+# --- the showcase preset showcase-full-stack: its two services, and its development image --------------------------
+
+POSTGRES_REF = os.environ.get("SANDBOX_AI_POSTGRES_REF", "docker.io/library/postgres:17.6-bookworm")
+
+
+def showcase_services(images):
+    """The --service values of the preset showcase-full-stack, with IMAGES ({value: image name}) filled in."""
+    preset = json.loads((ROOT / "sandbox/presets/showcase-full-stack.json").read_text())
+    options = preset["options"]
+    found = []
+    for index, option in enumerate(options):
+        if option == "--service":
+            value = options[index + 1]
+            for key, name in images.items():
+                value = value.replace("{" + key + "}", name)
+            found += ["--service", value]
+    assert len(found) == 4 and "{" not in "".join(found)
+    return found
+
+
+# The agent beside the two services: PostgreSQL answers its protocol at localhost:5432 (an SSLRequest gets "N" or
+# "S"); nginx serves its own page at localhost:8080 and passes /app/ to a server of the agent's at 127.0.0.1:8000.
+SHOWCASE_AGENT = r"""
+mkdir -p /tmp/site && echo showcase-backend-answers > /tmp/site/hello.txt
+cd /tmp/site && python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 &
+python3 -I - <<'EOF'
+import socket, struct, time, urllib.request
+with socket.create_connection(("127.0.0.1", 5432), timeout=10) as connection:
+    connection.sendall(struct.pack("!ii", 8, 80877103))
+    print("RESULT postgres", connection.recv(1).decode())
+time.sleep(2)
+direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # localhost: never through a proxy variable
+for name, url in (("page", "http://localhost:8080/"), ("app", "http://localhost:8080/app/hello.txt")):
+    try:
+        with direct.open(url, timeout=10) as answer:
+            print("RESULT", name, answer.status, answer.read().decode().replace("\n", " ")[:300])
+    except Exception as exc:
+        print("RESULT", name, "failed", exc)
+EOF
+sleep 20
+"""
+
+
+def test_the_full_stack_showcases_services(tmp_path, own_config):
+    """showcase-full-stack's services for real: PostgreSQL 17.6 pulled and pinned, sandbox-ai's own nginx Containerfile
+    built with images build-image --builtin showcase-web (its FROM pinned by digest, no network for its RUN steps), both
+    started with the preset's own --service values beside the agent: the agent reaches both, nginx runs as 101 with no
+    capabilities, and passes /app/ to the agent's server."""
+    pulled = sandbox_ai(own_config, "images", "pull", POSTGRES_REF, "--as", "postgres")
+    assert pulled.returncode == 0, pulled.stderr
+    built = sandbox_ai(own_config, "images", "build-image", "web", "--builtin", "showcase-web", "--json")
+    assert built.returncode == 0, built.stdout[-3000:] + built.stderr[-3000:]
+    entry = json_of(built, "images build-image --json")
+    assert entry["builtin"] == "showcase-web" and "@sha256:" in entry["from"][0]["pinned"]
+    assert entry["build_network"] is False and entry["reviewed"] is False
+    work = tmp_path / "work"
+    work.mkdir()
+    command = [str(ROOT / "sandbox-ai"), "claude", "--image", IMAGE, "--workspace", str(work), "--no-config",
+               "--no-auth", "--no-tmux", "--no-keep", "--ask", "off",
+               *showcase_services({"postgres": "postgres", "web": "web"}),
+               "--binary", "/bin/sh", "--", "-c", SHOWCASE_AGENT]
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True, env=own_config)
+    status = ""
+    try:
+        container = wait_for_container("sandbox-ai.service=web")
+        if container:
+            status = subprocess.run([PODMAN, "exec", container, "cat", "/proc/1/status"], capture_output=True,
+                                    text=True, timeout=60).stdout
+        stdout, stderr = process.communicate(timeout=900)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=60)
+        pytest.fail(f"the sandbox timed out\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=60)
+    report = f"exit {process.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}\nSTATUS:\n{status}"
+    found = results(stdout)
+    assert process.returncode == 0, report
+    assert found.get("postgres") in ("N", "S"), report
+    assert found.get("page", "").startswith("200 ") and "sandbox-ai showcase" in found["page"], report
+    assert found.get("app", "").strip() == "200 showcase-backend-answers", report
+    assert container, "the web server's container never ran\n" + report
+    caps = {line.split(":")[0]: line.split()[1] for line in status.splitlines() if line.startswith("Cap")}
+    assert caps.get("CapEff") == "0000000000000000", report
+    uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+    assert uid_line.split()[1:3] == ["101", "101"], report
+
+
+DJANGO_AGENT = r"""
+echo "RESULT psql $(psql postgresql://dev:dev@localhost:5432/shop -tAc 'select 6*7' 2>&1 | tail -1)"
+/opt/django/venv/bin/python -I - <<'EOF'
+import django, psycopg
+with psycopg.connect("postgresql://dev:dev@localhost:5432/shop") as connection:
+    print("RESULT django", django.get_version(), psycopg.__version__, connection.execute("select 1").fetchone()[0])
+EOF
+echo "RESULT admin $(django-admin --version 2>&1)"
+echo "RESULT tsc $(tsc --version 2>&1)"
+"""
+
+
+@pytest.mark.skipif(bool(os.environ.get("SANDBOX_AI_SKIP_DJANGO_BUILD")), reason="SANDBOX_AI_SKIP_DJANGO_BUILD")
+def test_the_django_recipe_builds_and_reaches_the_showcases_database(tmp_path, own_config):
+    """The image recipe django built for real (sandbox-ai images recipe django --from claude; sandbox-ai build django):
+    the hashes of requirements.txt and package-lock.json hold against PyPI and npm, and the variant's Django, psycopg
+    (on Debian's libpq), psql and tsc work, against the showcase's PostgreSQL service."""
+    made = sandbox_ai(own_config, "images", "recipe", "django", "--from", "claude")
+    assert made.returncode == 0, made.stdout + made.stderr
+    built = sandbox_ai(own_config, "build", "django", timeout=3600)
+    assert built.returncode == 0, built.stdout[-4000:] + built.stderr[-4000:]
+    pulled = sandbox_ai(own_config, "images", "pull", POSTGRES_REF, "--as", "postgres")
+    assert pulled.returncode == 0, pulled.stderr
+    work = tmp_path / "work"
+    work.mkdir()
+    done = subprocess.run([str(ROOT / "sandbox-ai"), "claude", "--image-variant", "django", "--workspace", str(work),
+                           "--no-config", "--no-auth", "--no-tmux", "--no-keep", "--ask", "off",
+                           *showcase_services({"postgres": "postgres", "web": "web"})[:2],
+                           "--binary", "/bin/sh", "--", "-c", DJANGO_AGENT],
+                          capture_output=True, text=True, timeout=900, env=own_config)
+    found = results(done.stdout)
+    report = f"exit {done.returncode}\nSTDOUT:\n{done.stdout}\nSTDERR:\n{done.stderr}"
+    assert done.returncode == 0, report
+    assert found.get("psql") == "42", report
+    assert found.get("django", "").startswith("5.2.18 3.3.6 1"), report
+    assert found.get("admin") == "5.2.18" and found.get("tsc") == "Version 6.0.3", report
+    removed = sandbox_ai(own_config, "images", "remove", "django")
     assert removed.returncode == 0, removed.stderr

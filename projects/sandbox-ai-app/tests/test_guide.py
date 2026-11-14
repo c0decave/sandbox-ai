@@ -64,9 +64,10 @@ def test_every_question_is_about_what_its_node_owns(sai):
 SAMPLES = {"path": "/home/u/src/app", "source": "/home/u/data", "dest": "/mnt/data", "--state-dir": "/home/u/sb",
            "--kit": ["egm", "mine"], "model": "opus", "effort": "high", "--rules": ["/home/u/rules.json"],
            "--no-inspect": ["pinned.example.org"], "--git-token-env": ["https://github.com=GH_TOKEN"],
-           "name": "demo", "--llm": "local", "--allow-host": ["api.example.org"], "--vpn": "work",
+           "name": "demo", "--llm": "local", "--allow-host": ["api.example.org"],
+           "--allow-domain": ["example.org"], "--vpn": "work",
            "--device": ["/dev/kvm"], "--memory": "4g", "--cpus": "2", "--pids": "1024", "--gui-vnc": "/home/u/vnc",
-           "--log-dir": "/home/u/logs", "--image-variant": "gpu", "image": "redis"}
+           "--log-dir": "/home/u/logs", "--image-variant": "gpu", "image": "redis", "--browser-profile": "session"}
 
 
 def sample(question):

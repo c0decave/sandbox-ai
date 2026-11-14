@@ -446,8 +446,131 @@ def test_build_refuses_what_an_agent_can_write_and_runs_without_network(config, 
     assert "--trust-agent-written" not in handed[1] and "--build-network" not in handed[1]
 
 
+NGINX = {"Id": "sha256:" + "e" * 64, "Digest": DIGEST, "RepoDigests": [f"docker.io/library/nginx@{DIGEST}"],
+         "Config": {}, "Os": "linux", "Architecture": "amd64"}
+
+
+def test_the_builtin_containerfiles_are_pinned_and_run_as_a_service_can(config):
+    """sandbox-ai's own Containerfiles (sandbox/service-images/NAME), for the showcase presets' services: each FROM an
+    exact release (no floating tag: build-image pins it by digest when it is built), no ENTRYPOINT that needs root, a
+    numeric USER that is none of the firewall's own, and only files of its own folder copied in. showcase-web: nginx
+    1.28.0 as user 101 on port 8080 with its pid and temporary files in /tmp (the tmpfs a read-only root gets), a page
+    of its own at / and /app/ passed to the agent's Django at localhost:8000."""
+    found = sv.builtin_images()
+    assert "showcase-web" in found and all(description for description in found.values())
+    for name in found:
+        folder = sv.BUILTIN_IMAGES / name
+        text = (folder / "Containerfile").read_text()
+        external = sv.external_images(text)
+        assert external, name
+        for _, ref in external:
+            parsed = sv.parse_reference(ref)
+            assert parsed["domain"] == "docker.io" and parsed["tag"], ref  # the registry written out
+            assert sv.re.fullmatch(r"\d+\.\d+\.\d+(-[a-z0-9.]+)?", parsed["tag"]), f"{ref}: an exact release"
+        lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
+        assert not [line for line in lines if line.split()[0] in ("ENTRYPOINT", "CMD", "VOLUME", "ADD")], name
+        users = [line.split()[1] for line in lines if line.split()[0] == "USER"]
+        assert users and sv.re.fullmatch(r"[0-9]+:[0-9]+", users[-1]), name
+        assert int(users[-1].split(":")[0]) not in (0, 1, 2), "none of the firewall's own users"
+        for line in lines:
+            if line.split()[0] == "COPY":
+                for source in line.split()[1:-1]:
+                    assert not source.startswith("--") and (folder / source).is_file(), (name, line)
+    conf = (sv.BUILTIN_IMAGES / "showcase-web" / "nginx.conf").read_text()
+    assert "listen 8080;" in conf and "pid /tmp/nginx.pid;" in conf and "proxy_pass http://127.0.0.1:8000/;" in conf
+    assert not sv.re.search(r"^\s*user\s", conf, sv.re.M), "no user directive: the master runs as 101 already"
+    for path in ("client_body_temp_path", "proxy_temp_path", "fastcgi_temp_path", "uwsgi_temp_path", "scgi_temp_path"):
+        assert f"{path} /tmp/" in conf, path
+    text = (sv.BUILTIN_IMAGES / "showcase-web" / "Containerfile").read_text()
+    assert "FROM docker.io/library/nginx:1.28.0-alpine" in text and "USER 101:101" in text
+
+
+class Talkative(Podman):
+    """Podman as it talks: `podman pull` prints the image's ID and `podman build` its steps on its standard output -
+    wherever the caller points it (stdout=), else this process's own standard output (file descriptor 1), as a child
+    that inherits it would."""
+
+    def __call__(self, argv, **kwargs):
+        verb = argv[1] if len(argv) > 1 else ""
+        if verb in ("pull", "build") and not kwargs.get("capture_output"):
+            target = kwargs.get("stdout")
+            descriptor = 1 if target is None else target if isinstance(target, int) else target.fileno()
+            os.write(descriptor, (f"{'e' * 64}\n" if verb == "pull" else
+                                  "STEP 1/2: FROM docker.io/library/nginx\nSTEP 2/2: RUN true\nCOMMIT\n").encode())
+        return super().__call__(argv, **kwargs)
+
+
+def test_json_output_is_json_alone_while_podman_talks(config, monkeypatch, capfd):
+    """`images pull|build-image --json`: standard output holds the JSON alone; what podman prints there itself (the
+    pulled image's ID, the build's steps) goes to standard error (CI: json.loads of `images pull --json` failed with
+    "Expecting value: line 1 column 1", podman's own lines before the JSON)."""
+    monkeypatch.setattr(im, "podman", lambda *args, **kwargs: ["podman"])
+    podman = Talkative({"docker.io/library/redis:7-alpine": REDIS, f"docker.io/library/redis@{DIGEST}": REDIS,
+                        "docker.io/library/nginx:1.28.0-alpine": NGINX}, FILES)
+    assert im.main(["pull", "redis:7-alpine", "--as", "cache", "--json"], run=podman) == 0
+    captured = capfd.readouterr()
+    assert json.loads(captured.out)["name"] == "cache", captured.out
+    assert "e" * 64 in captured.err and "UNCHECKED" in captured.err, "podman's own output is still shown"
+    assert im.main(["build-image", "web", "--builtin", "showcase-web", "--json"], run=podman) == 0
+    captured = capfd.readouterr()
+    assert json.loads(captured.out)["name"] == "web", captured.out
+    assert "STEP 1/2" in captured.err
+    # Without --json podman's lines go to standard error as well: standard output is the command's answer.
+    assert im.main(["pull", "redis:7-alpine", "--as", "again"], run=podman) == 0
+    captured = capfd.readouterr()
+    assert "e" * 64 not in captured.out and "again = " in captured.out
+
+
+def test_build_image_builtin_builds_sandbox_ais_own_containerfile(config, monkeypatch):
+    """`images build-image NAME --builtin TEMPLATE`: sandbox-ai's own Containerfile (and its folder as the context),
+    pinned and recorded as any of yours (unchecked, by its ID); --file and --builtin exclude each other, one is needed,
+    an unknown template is refused with the list; `sandbox-ai images build-image` hands --builtin on."""
+    podman = Podman({"docker.io/library/nginx:1.28.0-alpine": NGINX}, FILES)
+    built = {}
+    original = podman.__call__
+
+    def watch(argv, **kwargs):
+        if argv[1] == "build":
+            built["text"] = Path(argv[argv.index("--file") + 1]).read_text()
+            built["argv"] = argv
+        return original(argv, **kwargs)
+    lines = []
+    monkeypatch.setattr(im, "podman", lambda *args, **kwargs: ["podman"])
+    assert sv.main(["build-image", "web", "--builtin", "showcase-web"], out=lines.append, run=watch) == 0
+    assert f"FROM docker.io/library/nginx@{DIGEST}" in built["text"] and "--network=none" in built["argv"]
+    assert built["argv"][-1] == str(sv.BUILTIN_IMAGES / "showcase-web")
+    entry = sv.read_registry()["web"]
+    assert entry["kind"] == "built" and entry["containerfile"] == str(sv.BUILTIN_IMAGES / "showcase-web/Containerfile")
+    assert entry["from"] == [{"ref": "docker.io/library/nginx:1.28.0-alpine",
+                              "pinned": f"docker.io/library/nginx@{DIGEST}"}]
+    assert entry["reviewed"] is False and any("UNCHECKED" in line for line in lines)
+    with pytest.raises(ValueError, match="no Containerfile showcase-nope of sandbox-ai; there are: .*showcase-web"):
+        sv.main(["build-image", "x", "--builtin", "showcase-nope"], run=watch)
+    with pytest.raises(ValueError, match="no Containerfile ../showcase-web of sandbox-ai"):
+        sv.main(["build-image", "x", "--builtin", "../showcase-web"], run=watch)
+    with pytest.raises(ValueError, match="--builtin builds in its own folder: no --context"):
+        sv.main(["build-image", "x", "--builtin", "showcase-web", "--context", "/tmp"], run=watch)
+    for argv in (["build-image", "x"], ["build-image", "x", "--file", "F", "--builtin", "showcase-web"]):
+        with pytest.raises(SystemExit):
+            sv.main(argv, run=watch)
+    handed = []
+    original_main = sv.main
+    sv.main = lambda argv, **kwargs: handed.append(argv) or 0
+    try:
+        assert im.main(["build-image", "web", "--builtin", "showcase-web", "--replace"]) == 0
+        assert im.main(["build-image", "y", "--file", "F"]) == 0
+    finally:
+        sv.main = original_main
+    assert handed[0][:4] == ["build-image", "web", "--builtin", "showcase-web"] and "--replace" in handed[0]
+    assert handed[1][:4] == ["build-image", "y", "--file", "F"] and "--builtin" not in handed[1]
+    with pytest.raises(SystemExit):
+        im.main(["build-image", "x", "--file", "F", "--builtin", "showcase-web"])
+    # A built-in image is added again (pinned anew) the way it was added.
+    assert sv.add_again("web", entry) == "sandbox-ai images build-image web --builtin showcase-web --replace"
+
+
 def test_base_problem():
-    good = {"os": {"ID": "debian", "VERSION_CODENAME": "bookworm"}, "platform": "linux/amd64"}
+    good ={"os": {"ID": "debian", "VERSION_CODENAME": "bookworm"}, "platform": "linux/amd64"}
     assert sv.base_problem(good) is None
     assert "Debian 12" in sv.base_problem({**good, "os": {"ID": "ubuntu", "VERSION_ID": "24.04"}})
     assert "unknown" in sv.base_problem({**good, "os": {}})

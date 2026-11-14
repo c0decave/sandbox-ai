@@ -17,10 +17,11 @@ from __future__ import annotations
 import os
 
 from . import backend
-from .files import printable
+from .files import printable, printable_text
 from .host_choice import host_label, on_host
 from .i18n import N_, tr
 from . import project_trust as PT
+from .short_notices import short_notice
 from .widgets import ask_first, background, inform, warn
 
 LOCAL = "local"
@@ -61,7 +62,7 @@ def review_and_trust(parent, sai, host, path, done=None, source=None, say_truste
 
     def reviewed(result, error):
         if error is not None:
-            warn(parent, tr(TITLE), on_host(host, printable(str(error))))
+            warn(parent, tr(TITLE), on_host(host, printable_text(str(error))))
             done(False, None)
             return
         shown, defaults, baseline = result
@@ -100,12 +101,12 @@ def review_and_trust(parent, sai, host, path, done=None, source=None, say_truste
     def trusted(where, document, result, error):
         status, out, err = result if error is None else (1, "", str(error))
         if status != 0:
-            warn(parent, tr("Not trusted"), on_host(host, printable((err or out).strip()[-1500:]) or tr(
+            warn(parent, tr("Not trusted"), on_host(host, printable_text((err or out).strip()[-1500:]) or tr(
                 "Failed (exit status {status}).", status=status)))
             done(False, document)
             return
-        inform(parent, tr("Project configuration"), tr("Trusted on {host}: {path}", host=label,
-                                                       path=printable(where)), modal=False)
+        short_notice(parent, tr("Project configuration"), tr("Trusted on {host}: {path}", host=label,
+                                                             path=printable(where)))
         done(True, document)
 
     background(work, owner=parent, source=source, timeout=210, done=reviewed)
@@ -123,12 +124,12 @@ def review_here(parent, sai, path, done, source=None, say_trusted=False):
             done(False, None)
             return
         if error is not None:
-            warn(parent, tr("No project configuration"), printable(str(error)))
+            warn(parent, tr("No project configuration"), printable_text(str(error)))
             done(False, None)
             return
         if not review.usable:
             warn(parent, tr("This project configuration cannot be used"),
-                 "\n".join(printable(problem) for problem in review.problems), details=review.text())
+                 "\n".join(printable_text(problem) for problem in review.problems), details=review.text())
             done(False, None)
             return
         if review.trusted:
@@ -144,11 +145,11 @@ def review_here(parent, sai, path, done, source=None, say_trusted=False):
         try:
             sai.trust_project(review)
         except (OSError, ValueError) as exc:
-            warn(parent, tr("Not trusted"), printable(exc))
+            warn(parent, tr("Not trusted"), printable_text(exc))
             done(False, review.document)
             return
-        inform(parent, tr("Project configuration"), tr("Trusted on {host}: {path}", host=host_label(LOCAL),
-                                                       path=printable(review.path)), modal=False)
+        short_notice(parent, tr("Project configuration"), tr("Trusted on {host}: {path}", host=host_label(LOCAL),
+                                                             path=printable(review.path)))
         done(True, review.document)
 
     background(sai.review_project, directory, owner=parent, source=source, timeout=90, done=reviewed)

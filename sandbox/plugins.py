@@ -817,7 +817,7 @@ def marketplaces(agent=None, name=None):
     errors, notes = [], {a: [] for a in k.AGENTS}
     declared = {a: kit_declarations(a, errors) for a in ("claude", "opencode")}
     listed = []
-    claude_config = codex_file = opencode_file = None
+    claude_config = codex_file = None
     if agent in (None, "claude"):
         listed += claude_marketplaces(declared["claude"], notes["claude"])
         claude_config = str(claude_home())

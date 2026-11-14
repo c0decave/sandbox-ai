@@ -5,6 +5,7 @@ lists and the series' files only, or nothing is installed."""
 import hashlib
 import http.server
 import importlib.util
+import os
 import io
 from pathlib import Path
 import shutil
@@ -18,7 +19,9 @@ import pytest
 from sandbox_ai_app import videos as V
 
 ROOT = Path(__file__).resolve().parents[3]  # the sandbox-ai checkout
-REAL = Path("/work/videos-0.1.94")  # the rendered series, where it was made (not in Git)
+# A rendered series to check against the storyboard (not in Git): SANDBOX_AI_VIDEOS_DIR names it, e.g. /work/videos-0.1.95
+# before a release; without it only the storyboard is checked (an older series lacks the pages added since).
+REAL = Path(os.environ.get("SANDBOX_AI_VIDEOS_DIR") or "/nonexistent-rendered-series")
 
 
 # -- WebVTT --

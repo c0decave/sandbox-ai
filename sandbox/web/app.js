@@ -21,7 +21,7 @@ const state = {
   // safeguards: the records seen per host (the first look only notes them), every other poll asks the host
   safeguardsSeen: new Set(), safeguardsPrimed: new Set(), safeguardTick: 0, safeguardsNotifier: null, safeguardMuted: {},
 };
-const AGENTS = ["claude", "codex", "opencode"];
+const AGENTS = ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"];
 const PAGES = [
   ["starts", N_("Starts and sessions")], ["approvals", N_("Approvals")], ["terminals", N_("Terminals")],
   ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["safeguards", N_("Safeguards")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
@@ -1838,6 +1838,22 @@ function presetTitle(p) {
   return String((own && own.title) || (p && p.title) || "");
 }
 
+// A preset that starts something not live-tested yet (presets list --json "experimental", from the launcher's one
+// list EXPERIMENTAL_PARTS): {names}, else null. A badge only: listed and started like any other.
+function presetExperimental(p) {
+  const badge = p && p.experimental && typeof p.experimental === "object" ? p.experimental : null;
+  return badge && Array.isArray(badge.names) ? badge : null;
+}
+
+function experimentalText(badge) {
+  return t("Not live-tested yet: {names}", { names: badge.names.filter(n => typeof n === "string").join(", ") });
+}
+
+function experimentalBadge(p) {
+  const badge = presetExperimental(p);
+  return badge ? el("span", { class: "badge experimental", title: experimentalText(badge) }, t("not live-tested yet")) : null;
+}
+
 // Whether a preset's VPN value must name a Tor profile (the tor preset's: its name or label says Tor).
 function torValue(key, spec) { return key === "tor" || /\bTor\b/.test(String((spec && spec.label) || "")); }
 
@@ -1915,7 +1931,7 @@ async function drawStartForm(card, heading, host) {
     const { of, groups } = presetGroups(presetCategories, usable);
     for (const [key, label] of groups) {
       const group = usable.filter(p => of(p) === key).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-      if (group.length) preset.append(el("optgroup", { label }, group.map(p => el("option", { value: p.id }, `${p.id}: ${presetTitle(p)}`))));
+      if (group.length) preset.append(el("optgroup", { label }, group.map(p => el("option", { value: p.id, title: presetExperimental(p) ? experimentalText(presetExperimental(p)) : null }, `${p.id}: ${presetTitle(p)}${presetExperimental(p) ? ` (${t("not live-tested yet")})` : ""}`))));
     }
     const still = usable.some(p => p.id === was);
     preset.value = still ? was : "";
@@ -2444,7 +2460,7 @@ function resourcesCard(main, s) {
   const mcpTable = el("table", {}, el("caption", { class: "sr-only" }, t("MCP servers of {where}", { where })), head([t("Server"), ""]), mcpBody);
   const mcpChoice = el("select", { id: "mcp-live-server" });
   const mcpActions = el("div", { class: "row" });
-  const helperOf = (server) => { const m = /^helper-(claude|codex|opencode)-[0-9a-f]{8}$/.exec(server); return m ? m[1] : null; };
+  const helperOf = (server) => { const m = /^helper-(claude|codex|opencode|hermes|dsh|qwen|goose)-[0-9a-f]{8}$/.exec(server); return m ? m[1] : null; };
   const which = (value) => (value.startsWith("helper:") ? { helper: value.slice("helper:".length) } : { server: value });
   const shownServer = (body) => (body.helper ? t("{agent} as a helper", { agent: body.helper }) : body.server);
   const restartAgent = () => {
@@ -2700,7 +2716,13 @@ function approvalRow(q, view) {
   // a host whose sandbox-ai cannot allow it without opening a browser there (before 0.1.78): nothing is opened here
   const tooOld = browser && url && typeof q.host_too_old === "string" ? el("div", { class: "hint status-bad" },
     t("sandbox-ai {version} on {host} cannot allow this without opening a browser there: update it on the page Hosts (Update, or Update from this machine's copy).", { version: q.host_too_old, host })) : null;
-  const question = el("td", {}, q.question, link ? el("div", {}, link) : null, destination, refused, tooOld,
+  // A tool call's arguments in full, as the call will send them (approvals list --json "details"): open by itself
+  // where the question's line shortens them, scrollable, as text (never markup).
+  const details = typeof q.details === "string" && q.details ? el("details", { class: "call-arguments", open: q.details_whole === false },
+    el("summary", {}, t("The call's arguments in full")),
+    el("div", { class: "hint" }, t("As the call will send them (pretty-printed JSON; credentials redacted).")),
+    el("pre", { class: "mono", tabindex: 0, "aria-label": t("The call's arguments in full") }, q.details)) : null;
+  const question = el("td", {}, q.question, details, link ? el("div", {}, link) : null, destination, refused, tooOld,
     q.url_truncated ? el("div", { class: "hint" }, t("the URL was cut")) : null,
     q.always ? el("div", { class: "hint" }, q.always) : null,
     !allowable && q.allow_refused ? el("div", { class: "hint" }, t("cannot be allowed: {why}", { why: String(q.allow_refused) })) : null);
@@ -4129,9 +4151,9 @@ pages.safeguards = async (main, known) => {
 };
 // What lowers the protection of every later start on a host is asked first, in place, naming the host; Cancel puts
 // the control back. Lowering is any step down from what the host has now: the mode (lax < low < medium < high <
-// paranoid), the agents' telemetry (on < off < strict), fewer canary categories. The service compares the same way
+// paranoid), the agents' telemetry (off < strict; it is always off), fewer canary categories. The service compares the same way
 // (GET /api/policy gives the order) and wants the confirmation as well.
-const ORDER = { mode: ["lax", "low", "medium", "high", "paranoid"], telemetry: ["on", "off", "strict"] };
+const ORDER = { mode: ["lax", "low", "medium", "high", "paranoid"], telemetry: ["off", "strict"] };
 
 function lowers(key, before, after) {
   const order = (state.policy && state.policy.order && Array.isArray(state.policy.order[key]) && state.policy.order[key]) || ORDER[key];
@@ -4166,15 +4188,15 @@ pages.settings = async (main) => {
     }
     confirmIn(asking, text, t("Yes, lower it"), async () => { if (await save(key, value, true) === true) accept(); else revert(); }, { onCancel: revert, trigger: control });
   };
-  let telemetryNow = values.telemetry || "off", modeNow = values.mode || "medium";
+  // an old "on" (gone since 0.1.95: the launcher ignores it) is shown as off
+  let telemetryNow = values.telemetry === "strict" ? "strict" : "off", modeNow = values.mode || "medium";
   const telemetry = el("select", { id: "telemetry" },
-    [["off", N_("off: no usage statistics, error reports, feedback or update checks (recommended)")], ["strict", N_("strict: also no other calls than the model's")], ["on", N_("on: the agents' own settings")]]
+    [["off", N_("off: no usage statistics, error reports, feedback or update checks (recommended)")], ["strict", N_("strict: also no other calls than the model's")]]
       .map(([v, label]) => el("option", { value: v, selected: telemetryNow === v }, t(label))));
   const telemetryAsk = el("div", { class: "row" });
   telemetry.addEventListener("change", () => {
     const value = telemetry.value;
-    const text = value === "on" ? t("Turn the agents' telemetry on for every later start on {host}? Their usage statistics, error reports and update checks reach their vendors again.", { host })
-      : t("Make the agents' telemetry {level} instead of {now} for every later start on {host}? Fewer of their own calls are held back.", { level: value, now: telemetryNow, host });
+    const text = t("Make the agents' telemetry {level} instead of {now} for every later start on {host}? Fewer of their own calls are held back.", { level: value, now: telemetryNow, host });
     change(telemetry, telemetryAsk, lowers("telemetry", telemetryNow, value), text,
       "telemetry", value === "off" ? null : value, () => { telemetry.value = telemetryNow; }, () => { telemetryNow = value; });
   });
@@ -4745,6 +4767,8 @@ const ATTACH_WHY = {
   mcp: N_("an MCP server sandbox: it has no terminal of its own"),
   stopped: N_("does not run"),
   damaged: N_("damaged: see sandbox-ai list on its host"),
+  "no-terminal": N_("runs without its terminal: its start did not make one (its supervisor.log says why); stop it and start it again"),
+  ended: N_("no agent any more: its tmux session has ended (the agent and its shell window), its sandbox has not; stop it, then resume it"),
 };
 
 function attachWhy(s) {
@@ -5099,7 +5123,21 @@ pages.mcp = async (main) => {
   const entry = el("input", { id: "mcp-entry", class: "mono", placeholder: "hub:binwalk" });
   const as = el("input", { id: "mcp-as", class: "mono", placeholder: t("the entry's name") });
   const mounts = el("textarea", { id: "mcp-mounts", rows: 2, class: "mono", placeholder: "/mnt/samples=/home/you/samples:ro" });
-  const env = el("input", { id: "mcp-env", class: "mono", placeholder: "VT_API_KEY" });
+  // its variables as `mcp add --env` takes them, one per line; the catalog's descriptions of the entry's (Add…)
+  const env = el("textarea", { id: "mcp-env", rows: 3, class: "mono", placeholder: t("NAME, NAME=VALUE or NAME@SECRET") });
+  const envHelp = el("div", { id: "mcp-env-help", class: "hint" });
+  const showVariables = (variables) => {
+    clear(envHelp);
+    const list = Array.isArray(variables) ? variables.filter(v => v && typeof v.name === "string") : [];
+    envHelp.append(t("One per line: NAME (that host's environment, else its secret NAME), NAME=VALUE (a value that is no secret) or NAME@SECRET (that host's secret SECRET)."));
+    if (!list.length) return;
+    envHelp.append(el("ul", {}, list.map(v => el("li", {}, el("span", { class: "mono" }, v.name),
+      v.description ? ` - ${v.description}` : "",
+      ` (${[v.required ? t("required") : t("optional"), v.secret ? t("a secret: NAME or NAME@SECRET, never a value") : t("a value with NAME=VALUE")].join(", ")})`))));
+    // the required ones by name, where nothing was typed yet
+    if (!env.value.trim()) env.value = list.filter(v => v.required).map(v => v.name).join("\n");
+  };
+  showVariables([]);
   const network = el("select", { id: "mcp-network" }, el("option", { value: "" }, t("as the entry says")), ["none", "full"].map(n => el("option", { value: n }, n)));
   const memory = el("input", { id: "mcp-memory", placeholder: "512m" }), pids = el("input", { id: "mcp-pids", type: "number", min: 1, placeholder: "128" });
   const backend = el("select", { id: "mcp-add-backend" }, el("option", { value: "" }, t("Podman when it is there")), ["podman", "bwrap", "both"].map(b => el("option", { value: b }, b)));
@@ -5115,11 +5153,11 @@ pages.mcp = async (main) => {
       el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, x.network), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
         el("td", {}, typeof x.catalog === "string" ? x.catalog : ""),
         el("td", { class: x.signature === "good" ? "status-ok" : "status-fail" }, t(SIGNED[x.signature] || N_("unsigned"))),
-        el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
+        el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; env.value = ""; showVariables(x.env); entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
   });
   const add = (event) => {
     clear(addStatus);
-    const body = { entry: entry.value.trim(), as: as.value.trim(), env: wordsOf(env.value), network: network.value, memory: memory.value.trim(), pids: pids.value.trim(),
+    const body = { entry: entry.value.trim(), as: as.value.trim(), env: linesOf(env.value), network: network.value, memory: memory.value.trim(), pids: pids.value.trim(),
       catalogs: wordsOf(catalogs.value), no_pull: noPull.checked, backend: backend.value, vpn: vpn.value.trim(), unsigned: unsigned.checked, mounts: [] };
     for (const line of linesOf(mounts.value)) {
       const match = /^([^=]+)=([^:]+)(?::(ro|rw))?$/.exec(line);
@@ -5159,7 +5197,7 @@ pages.mcp = async (main) => {
     el("span"), el("button", { onclick: showCatalog }, t("Show the catalog"))), catalogBox),
   el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "mcp-entry" }, t("Catalog entry")), entry, el("label", { for: "mcp-as" }, t("Name for --mcp")), as,
-    el("label", { for: "mcp-mounts" }, t("Mounts (one per line)")), mounts, el("label", { for: "mcp-env" }, t("Variables (secrets it names)")), env,
+    el("label", { for: "mcp-mounts" }, t("Mounts (one per line)")), mounts, el("label", { for: "mcp-env" }, t("Variables (one per line)")), el("div", {}, env, envHelp),
     el("label", { for: "mcp-network" }, t("Network")), network, el("label", { for: "mcp-memory" }, t("Memory")), memory, el("label", { for: "mcp-pids" }, t("Processes")), pids,
     el("label", { for: "mcp-add-backend" }, t("Backend")), backend, el("label", { for: "mcp-add-vpn" }, t("VPN profile")), vpn,
     el("label", { for: "mcp-no-pull" }, t("The image is there already")), noPull, el("label", { for: "mcp-unsigned" }, t("Also from an unsigned catalog")), unsigned,
@@ -5412,7 +5450,9 @@ pages.presets = async (main) => {
     const inputs = Object.entries(values).map(([key, spec]) => [key, el("input", { id: `preset-value-${key}`, class: "mono", placeholder: spec && spec.default !== undefined ? String(spec.default) : "" }), spec]);
     const agent = el("select", { id: "preset-agent" }, el("option", { value: "" }, t("any agent")), AGENTS.map(a => el("option", { value: a }, a)));
     const result = el("div", { class: "wide" });
+    const badge = presetExperimental(found) || presetExperimental(p);
     clear(detail).append(el("div", { class: "card" }, el("h2", {}, `${found.id || p.id}: ${found.title || ""}`), el("p", {}, found.description || ""),
+      badge ? el("p", { class: "hint" }, experimentalText(badge)) : null,
       el("pre", {}, JSON.stringify(found, null, 2)),
       el("div", { class: "form" }, inputs.map(([key, input, spec]) => [el("label", { for: input.id }, (spec && spec.label) || key), input]),
         el("label", { for: "preset-agent" }, t("Agent")), agent,
@@ -5423,7 +5463,7 @@ pages.presets = async (main) => {
   };
   if (list instanceof Error) main.append(errorNotice(list));
   else main.append(table([t("Preset"), t("Title"), t("Origin"), ""], (Array.isArray(list) ? list : []).filter(p => p && p.id).map(p =>
-    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, presetTitle(p)), el("td", {}, p.origin || ""), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
+    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, presetTitle(p), experimentalBadge(p) ? " " : null, experimentalBadge(p)), el("td", {}, p.origin || ""), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
   // the extra preset directories (defaults.json preset_dirs)
   const dirsBox = el("div");
   main.append(el("h2", {}, t("Preset directories")), dirsBox);
@@ -5573,7 +5613,7 @@ pages.teams = async (main) => {
 
 // Images and tools: the images (sandbox-ai images) with their extensions and variants (packages, files, a
 // Containerfile fragment; checked, changed, removed), a build in a terminal, the demo device.
-const BUILD_TARGETS = ["claude", "codex", "opencode", "all", "team", "vpn", "tor"];
+const BUILD_TARGETS = ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose", "all", "team", "cairn", "vpn", "tor", "browser"];
 const IMAGE_STATES = { current: N_("current"), outdated: N_("extension changed: rebuild"), "base-changed": N_("base rebuilt: rebuild"),
   invalid: N_("extension has errors"), "not-built": N_("not built") };
 const IMAGE_TARGET = /^[a-z0-9][a-z0-9_.-]{0,29}$/;
@@ -5695,10 +5735,10 @@ pages.images = async (main) => {
     extendStatus, el("span"), extendRow),
   el("p", { class: "hint" }, t("Each change is checked on that host (no FROM, no setuid, nothing the sandbox's setup relies on); then build the image."))));
   // a new variant, empty or from the agent's extension, or from a recipe
-  const variantName = el("input", { id: "image-new-name", class: "mono", placeholder: "data", pattern: "[a-z0-9][a-z0-9_.-]{0,29}" });
+  const variantName = el("input", { id: "image-new-name", class: "mono", placeholder: "data", pattern: "(?=.{1,30}$)[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*" });
   const variantFrom = el("select", { id: "image-new-from" }, AGENTS.map(a => el("option", { value: a }, a)));
   const empty = el("input", { id: "image-new-empty", type: "checkbox" });
-  const recipe = el("select", { id: "image-recipe" }, [["media", N_("media: ffmpeg, PulseAudio, espeak-ng, Piper …")], ["tor", N_("tor: torsocks, torbrowser-launcher")]].map(([v, label]) => el("option", { value: v }, t(label))));
+  const recipe = el("select", { id: "image-recipe" }, [["media", N_("media: ffmpeg, PulseAudio, espeak-ng, Piper …")]].map(([v, label]) => el("option", { value: v }, t(label))));
   const recipeAs = el("input", { id: "image-recipe-as", class: "mono", placeholder: t("the recipe's name") });
   const variantStatus = el("div", { class: "wide" });
   const variant = (path, body, done) => async (ev) => busy(ev.target, async () => {

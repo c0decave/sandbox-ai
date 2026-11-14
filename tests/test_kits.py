@@ -29,7 +29,7 @@ k = load("kits_for_tests", "sandbox/kits.py")
 plugins = load("plugins_for_tests", "sandbox/plugins.py")
 doctor = load("doctor_for_kits_tests", "sandbox/doctor.py")
 wizard = load("wizard_for_kits_tests", "sandbox/wizard.py")
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes")
 
 
 @pytest.fixture(autouse=True)
@@ -1219,3 +1219,20 @@ def test_superpowers_is_offered_pinned_with_a_built_in_kit_but_not_by_default():
     assert not (k.BUILTIN_KITS / "superpowers/claude/marketplaces.json").exists()
     assert "superpowers@sandbox-ai" not in json.loads((k.TEMPLATES / "claude/marketplaces.json").read_text())["plugins"]
     assert all("superpowers" in k.builtin_kits(agent) for agent in AGENTS)
+
+
+def test_the_sandbox_ai_skill_says_the_same_to_every_agent():
+    """The copies of the built-in sandbox-ai skill differ only in the agent's memory line and a section of the agent's
+    own (Hermes in this sandbox): Hermes' copy was made before --allow-domain and --browser and lacked both."""
+    def body(agent):
+        lines = (k.BUILTIN / agent / "skills/sandbox-ai/SKILL.md").read_text().splitlines()
+        kept, own = [], False
+        for line in lines:
+            if line.startswith("## "):
+                own = line.endswith(" in this sandbox")
+            if not own and k.MEMORY_FILE[agent][1] not in line:
+                kept.append(line.rstrip())
+        return kept
+    reference = body("claude")
+    for agent in k.AGENTS:
+        assert body(agent) == reference, agent

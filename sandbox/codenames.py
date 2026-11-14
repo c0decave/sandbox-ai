@@ -42,7 +42,7 @@ ANIMALS = (
     "cicada", "clam", "cockatoo", "cod", "condor", "cow", "coyote", "crab", "crane", "cricket", "crow", "cuckoo",
     "curlew", "deer", "dingo", "dodo", "dolphin", "donkey", "dormouse", "duck", "dugong", "eagle", "eel", "egret",
     "eland", "elephant", "elk", "emu", "ermine", "falcon", "ferret", "finch", "firefly", "fish", "flamingo",
-    "flounder", "fox", "frog", "gazelle", "gerbil", "gibbon", "giraffe", "goat", "goldfish", "goose", "gopher",
+    "flounder", "fox", "frog", "gazelle", "gerbil", "gibbon", "giraffe", "goat", "goldfish", "gopher",
     "gorilla", "grouse", "gull", "guppy", "hamster", "hare", "hawk", "hedgehog", "heron", "herring", "hippo",
     "horse", "ibex", "ibis", "iguana", "jackdaw", "jay", "kakapo", "kangaroo", "kestrel", "kiwi", "koala", "koi",
     "krill", "ladybug", "lamb", "lark", "lemming", "lemur", "leopard", "limpet", "lion", "llama", "lobster", "loon",

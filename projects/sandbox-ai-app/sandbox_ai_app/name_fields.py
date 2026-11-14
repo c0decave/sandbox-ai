@@ -17,7 +17,7 @@ import weakref
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QComboBox, QCompleter, QMenu, QToolButton
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .widgets import background, safe_tooltip
 
@@ -94,7 +94,7 @@ def names_of(sai, kind, host, done):
     _waiting[waiting] = [done]
 
     def finished(result, error):
-        names, problem = (result, None) if error is None else (None, printable(str(error))[-200:] or "?")
+        names, problem = (result, None) if error is None else (None, printable_text(str(error))[-200:] or "?")
         if error is None and _generation.get((kind, host), 0) == generation:
             _kept[key] = (_weak(sai), generation, time.monotonic(), names, None)
         for callback in _waiting.pop(waiting, []):

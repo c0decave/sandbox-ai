@@ -1,7 +1,9 @@
 """The Files page's Properties dialog: name, path, type, size (a folder's - of several items the sum - counted at once
 in a thread with its progress shown, bounded like a delete, links never followed; Stop, and closing the dialog, cancel
 it), owner and group, the permission bits as checkboxes (changed where they may be: never on a link, no set-ID or
-sticky bit below a sandbox's folder), the times and where a link points (shown, not followed).
+sticky bit below a sandbox's folder; Apply goes item by item as a job of the page - its Cancel, and closing the dialog,
+stop it before the next one; one cancelled while the file system does not answer is waited for by the next Apply, and
+what it set once it answered is known), the times and where a link points (shown, not followed).
 
 Everything is read through the pane's files.Root (lstat relative to open directories) and changed through it
 (Root.chmod_entry). The grid of checkboxes follows the idea of axross's ui/permissions_dialog.py
@@ -50,9 +52,18 @@ class PropertiesDialog(QDialog):
     change (the page lists its panes again). OWNER(ROOT, ITEMS, FOLDERS?): Owner… for the items shown here (never the
     pane's folder of the moment: it may show another one by then)."""
 
-    def __init__(self, parent, root, items, folder_text, untrusted, changed=None, owner=None, infos=None):
+    def __init__(self, parent, root, items, folder_text, untrusted, changed=None, owner=None, infos=None,
+                 agents=frozenset(), busy=None, job=None):
         super().__init__(parent)
         self.root, self.items, self.untrusted, self.on_changed, self.owner_dialog = root, items, untrusted, changed, owner
+        # BUSY(): a job of the page runs (a copy, move or delete) - Apply waits for it, as the page's own Permissions
+        # (it changed the bits in the middle of a copy: this window's button is never greyed out)
+        self.busy = busy
+        # JOB(root, work(cancelled), done, text): Apply as a job of the page (FilesPage.root_job - its busy bar, its
+        # buttons and keys greyed out, Cancel): on a file system that hangs, or a remote system, it went on in a thread
+        # of its own, and a copy, move or delete started meanwhile worked on what it changed
+        self.job = job
+        self.agents = frozenset(agents or ())  # (st_dev, st_ino) of the sandboxes' folders: Root.chmod_entry's AGENTS
         self.cancel_event = threading.Event()  # set when the dialog closes: every count ends
         self.stop_event = threading.Event()  # the count running now (Stop)
         self.counting, self.progress, self.applying = False, None, False
@@ -68,6 +79,9 @@ class PropertiesDialog(QDialog):
             # gave True - still reading - and the dialog took it for what was read, a TypeError)
             infos = ([], [tr("Read in the background first (files_page.on_root).")])
         self.infos, problems = list(infos[0]), list(infos[1])
+        # (a sandbox's folder itself among the items - ~/projects/ws seen from ~/projects: the agent's, as what is in it)
+        untrusted = self.untrusted = untrusted or any(
+            (getattr(info, "st_dev", None), getattr(info, "st_ino", None)) in self.agents for _, _, info, _ in self.infos)
         single = len(self.infos) == 1
         first = self.infos[0] if self.infos else None
         title = printable(first[0] or folder_text) if single else tr("{count} items", count=len(self.infos))
@@ -105,6 +119,9 @@ class PropertiesDialog(QDialog):
         self.timer = QTimer(self)
         self.timer.setInterval(PROGRESS_INTERVAL)
         self.timer.timeout.connect(self.show_progress)
+        self.late_timer = QTimer(self)  # (an Apply cancelled while the file system did not answer: late())
+        self.late_timer.setInterval(PROGRESS_INTERVAL)
+        self.late_timer.timeout.connect(self.late)
         form.addRow(tr("Size"), size_row)
         if self.infos:
             info = first[2]
@@ -173,7 +190,7 @@ class PropertiesDialog(QDialog):
         self.note = plain_label("\n".join(why + problems), role="secondary")
         layout.addWidget(self.note)
         self.note.setVisible(bool(why or problems))  # (in the dialog first: no window of its own for a moment)
-        self.message = plain_label(selectable=True)
+        self.message = plain_label(selectable=True, log="files")
         layout.addWidget(self.message)
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -236,29 +253,68 @@ class PropertiesDialog(QDialog):
         nobody could enter any more)."""
         if not self.changeable or self.applying:  # (one at a time: on a slow file system it goes on in a thread)
             return False
+        if self.busy is not None and self.busy():
+            self.message.setText(tr("Wait until the copy, move or delete running now has finished (or cancel it)."))
+            return False
+        if self.late_timer.isActive() and self.late() and (self.pending["done"] or self.chosen_mode() == self.mode):
+            # (the Apply before has ended since and late() had not come yet: what it set is known first - this one took
+            # the items' bits for unchanged, and late() then said its own result was the one before's. One that changed
+            # nothing goes on to this Apply: it returned, unsaid - the click was lost)
+            return False
+        before = getattr(self, "pending", None)
+        if before is not None and not before["ended"].is_set():
+            # (cancelled on a file system that hangs: the page was given back, the change still waits - each Apply again
+            # left one more thread waiting for good, and set the bits beside the one before once it answered)
+            self.message.setText(tr("The change of the permissions before still waits for the file system (one that "
+                                    "hangs?): Apply again once it has answered."))
+            return False
         self.applying = True
         set_enabled(self.apply_button, False)
-        mode, root, items, special = self.chosen_mode(), self.root, list(self.infos), not self.untrusted
+        # (a remote system whose files count as an agent's by now - its box ticked while the dialog was open: as one)
+        mode, root, items, agents = self.chosen_mode(), self.root, list(self.infos), self.agents
+        special = not self.untrusted and not getattr(root, "agents", False)
         changed = mode ^ self.mode  # the bits whose boxes were changed
         modes = dict(getattr(self, "modes", None) or {relative: stat.S_IMODE(info.st_mode)
                                                        for _, relative, info, _ in self.infos})
+        closed = self.cancel_event  # (closing the dialog stops it before the next item: it has no time limit)
+        self.message.setText(tr("Changing the permissions of {count} item(s)…", count=len(items)))
 
-        def work():
-            problems, done, set_ = [], 0, {}
-            for name, relative, _, _ in items:
-                wanted = (modes[relative] & ~changed) | (mode & changed)
-                try:
-                    root.chmod_entry(relative, wanted, special=special)
-                    set_[relative] = wanted
-                    done += 1
-                except (OSError, ValueError) as exc:
-                    problems.append(f"{printable(name)}: {printable(exc)}")
-            return done, problems, set_
+        # What this Apply set, as it goes (PENDING["set"]; ENDED once it is over): one cancelled while the file system
+        # did not answer may still take effect - the dialog learns it then (late), and the next Apply waits for it.
+        # STARTED: the change began (one refused before it - LOCAL_STUCK steps waiting, a job begun meanwhile - never
+        # does: it was taken for one that still waits, and every Apply after it was refused for good).
+        pending = self.pending = {"ended": threading.Event(), "set": {}, "done": 0, "mode": mode, "started": False}
+
+        def work(cancelled=lambda: False):
+            pending["started"] = True
+            problems, set_ = [], pending["set"]
+            try:
+                for name, relative, _, _ in items:
+                    if closed.is_set() or cancelled():
+                        problems.append(tr("Cancelled."))
+                        break
+                    wanted = (modes[relative] & ~changed) | (mode & changed)
+                    try:
+                        root.chmod_entry(relative, wanted, special=special, **({"agents": agents} if agents else {}))
+                        set_[relative] = wanted
+                        pending["done"] += 1
+                    except (OSError, ValueError) as exc:
+                        problems.append(f"{printable(name)}: {printable(exc)}")
+                return pending["done"], problems, dict(set_)
+            finally:
+                pending["ended"].set()
 
         def applied(result, error):
+            answered["done"] = True
             done, problems, set_ = result if error is None else (0, [printable(error)], {})
             if not isValid(self):
                 return False  # (closed meanwhile: a remote root's bits are set in a thread)
+            if not pending["started"]:
+                pending["ended"].set()  # (refused before it began: nothing waits)
+            if error is not None and not pending["ended"].is_set():
+                self.late_timer.start()  # (it still waits for the file system: late() once it has ended)
+            elif error is not None:  # (ended right after it was given up: what it set is known all the same)
+                done, set_ = pending["done"], dict(pending["set"])
             self.applying = False
             self.modes = {**modes, **set_}
             if done:
@@ -268,9 +324,40 @@ class PropertiesDialog(QDialog):
             if self.on_changed is not None:
                 self.on_changed()
             return not problems
-        # (a remote root's in a thread: on_root)
+        answered = {"done": False}
+        if self.job is not None:
+            started = self.job(root, work, applied, tr("Changing the permissions of {count} item(s)…", count=len(items)))
+            if started is False and not answered["done"]:  # (a job of the page began meanwhile: it said so)
+                if not pending["started"]:
+                    pending["ended"].set()
+                self.applying = False
+                self.message.setText(tr("Wait until the copy, move or delete running now has finished (or cancel it)."))
+                self.update_mode()
+            return started
+        # (a remote root's in a thread: on_root - without a time limit: many items far away took longer than 120 s, and
+        # "No answer" gave Apply back while the changes went on; a request without an answer ends its connection itself)
         from .files_page import on_root
-        return on_root(root, work, applied, owner=self)
+        return on_root(root, work, applied, owner=self, timeout=None)
+
+    def late(self):
+        """An Apply given back while the file system did not answer (Cancel) has ended: what it set after all is known
+        (the boxes' bits, the items' own) and said - the dialog took the items' bits for unchanged, and a later Apply
+        set them back, or stayed greyed out where the boxes were turned back."""
+        pending = getattr(self, "pending", None)
+        if pending is None or not pending["ended"].is_set():
+            return False
+        self.late_timer.stop()
+        base = getattr(self, "modes", None) or {relative: stat.S_IMODE(info.st_mode)
+                                                for _, relative, info, _ in self.infos}
+        self.modes = {**base, **pending["set"]}
+        if pending["done"]:
+            self.mode = pending["mode"]
+            self.message.setText(tr("The change of the permissions before took effect once the file system answered: "
+                                    "{count} item(s) changed.", count=pending["done"]))
+            if self.on_changed is not None:
+                self.on_changed()
+        self.update_mode()
+        return True
 
     def count(self):
         """Count the folders' contents in a thread (Root.measure: bounded, links not followed), its progress shown
@@ -305,7 +392,9 @@ class PropertiesDialog(QDialog):
                 if partial:
                     break
             return total, partial
-        background(work, owner=self, timeout=600, done=lambda result, error: self.counted(plain, result, error))
+        # (no time limit: Stop and closing the dialog end it - after 600 s it said "No answer" and offered Compute size
+        # again while it went on, and a second count ran beside it)
+        background(work, owner=self, done=lambda result, error: self.counted(plain, result, error))
         return True
 
     def show_progress(self):

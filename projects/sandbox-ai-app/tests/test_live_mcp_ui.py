@@ -9,7 +9,7 @@ import os
 import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
-from sandbox_ai_app import backend, widgets  # noqa: E402
+from sandbox_ai_app import backend, short_notices, widgets  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -101,7 +101,8 @@ def test_add_mcp_server_to_a_running_start_here_and_restart_the_agent(ui, sai, m
     sai.answers[("mcp", "attach")] = attached("maybe")
     page.add_mcp()
     assert seen[0] == ["fetch (running)", "web (stopped)", "Claude Code as a helper", "Codex as a helper",
-                       "OpenCode as a helper"]
+                       "OpenCode as a helper", "Hermes Agent as a helper", "DeepSeek Harness as a helper",
+                       "Qwen Code as a helper", "Goose as a helper"]  # every agent the launcher takes as --helper
     assert ran(sai, "local", "mcp", "attach") == ("local", "mcp", "attach", "fetch", "api", "--live", "--json")
     assert [action for action, *_ in ui.asked] == ["mcp-attach", "start-restart"]
     assert "reaches the MCP server now. As said there." in ui.asked[1][1], "sandbox-ai's message, as it is"
@@ -163,7 +164,7 @@ def test_remove_mcp_server_from_what_the_start_reaches_now(ui, sai, monkeypatch)
     assert offered[0] == ["fetch", "Claude Code as a helper (helper-claude-0123abcd)"], "only what it reaches now"
     assert ran(sai, "ct1", "mcp") == ("ct1", "mcp", "detach", "--helper", "claude", "api", "--live", "--json")
     assert ui.asked[-1][0] == "mcp-detach" and ui.asked[-1][1].startswith("On ct1: ")
-    assert any("api no longer reaches it" in text for _, text, _ in widgets.SHOWN)
+    assert any("api no longer reaches it" in text for _, text in short_notices.SHOWN)
     # Nothing in its rows: whom `mcp list` there says each server serves.
     sai.asked.clear()
     instance.record = {}

@@ -29,18 +29,20 @@ import re
 import shlex
 import weakref
 
+from . import applog
 from . import backend
 from . import llm_params as LP
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
 
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 LAYOUT_NAME = ".sandbox-ai.board.json"  # node positions only; the options live in .sandbox-ai.json
 LAYOUT_LIMIT = 256 << 10
 # Requests per host, as the launcher checks them (agent_sandbox.HTTP_RULE).
 HTTP_RULE = re.compile(r"(\*\.)?([a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})+) +(\*|[A-Z]{3,10}(?:,[A-Z]{3,10})*) +"
                        r"(/[!-~]{0,500})")
-PRESET_OPTIONS = ("--allow-pypi", "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo")
+PRESET_OPTIONS = ("--allow-pypi", "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo",
+                  "--allow-npm")
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,8 @@ KINDS = {kind.key: kind for kind in (
                                                "--no-plugins"), column=0,
          help=N_("Kits copied into HOME, project memory and plugins")),
     Kind("agent", N_("Agent"), ("--dangerously-skip-permissions", "--local-config", "--env", "--secret-env",
-                                "--api-key"),
+                                "--api-key", "--hermes-enable", "--qwen-enable",
+                                "--goose-enable"),
          required=True, column=1, help=N_("The coding agent and how it runs")),
     Kind("approvals", N_("Approvals and rules"), ("--ask", "--rules"), column=1,
          help=N_("Ask before what the options do not allow; rulesets allow, ask or deny each request and MCP "
@@ -92,7 +95,8 @@ KINDS = {kind.key: kind for kind in (
          help=N_("A model on your own server (sandbox-ai llm): only its address is opened, its key stays with "
                  "the proxy")),
     Kind("network", N_("Network"), ("--profile", *PRESET_OPTIONS, "--frontier", "--no-provider-defaults",
-                                    "--allow-host", "--allow", "--allow-tcp", "--allow-host-port", "--dns",
+                                    "--allow-host", "--allow-domain", "--allow", "--allow-tcp", "--allow-host-port",
+                                    "--dns",
                                     "--nameserver", "--offline", "--egress-all-allow", "--network", "--ip", "--ip6",
                                     "--subnet", "--subnet6"),
          required=True, column=3, help=N_("Where connections may go: hosts, presets, addresses, ports, DNS")),
@@ -105,6 +109,12 @@ KINDS = {kind.key: kind for kind in (
          help=N_("Memory, CPUs, processes and the size of /tmp")),
     Kind("display", N_("Display"), ("--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"), column=0,
          help=N_("A virtual display for GUI programs and browsers")),
+    # The sandbox's own browser (--browser): a container beside the agent, on its network; the app's Browser button
+    # shows it. For you (human), for the agent (agent: Chrome's DevTools in the pod) or both.
+    Kind("browser", N_("Browser"), ("--browser", "--browser-control", "--browser-profile"), column=2,
+         help=N_("A browser in its own container beside the agent (Podman), on the agent's network: firewall, proxy, "
+                 "approvals, kill switch, VPN or Tor. For you (the Browser button shows it), for the agent (it drives "
+                 "it through Chrome's DevTools) or both")),
     Kind("session", N_("Session and tmux"), ("--tmux", "--no-tmux"), column=0,
          help=N_("tmux inside the sandbox (sessions are started from the Start page)")),
     Kind("logs", N_("Logs"), ("--log-dir", "--log-debug"), column=1,
@@ -118,13 +128,14 @@ KINDS = {kind.key: kind for kind in (
 EDGES = {("workspace", "agent"), ("mount", "agent"), ("home", "agent"), ("kits", "agent"), ("agent", "proxy"),
          ("proxy", "network"), ("agent", "mcp"), ("approvals", "proxy"), ("git", "proxy"), ("devices", "agent"),
          ("limits", "agent"), ("display", "agent"), ("session", "agent"), ("logs", "proxy"), ("engine", "agent"),
-         ("vpn", "network"), ("agent", "llm"), ("agent", "service"), ("service", "proxy")}
+         ("vpn", "network"), ("agent", "llm"), ("agent", "service"), ("service", "proxy"), ("browser", "proxy")}
 CONNECTED_ONLY = {"workspace", "mount", "mcp", "service"}
 OWNER = {option: kind.key for kind in KINDS.values() for option in kind.options}
 # Options shown as a property of their own: proxy "enabled" (--no-proxy), workspace "readonly" (--workspace-ro),
 # the workspace, mount and MCP nodes themselves.
 OWNER.update({"--no-proxy": "proxy", "--workspace-ro": "workspace", "--workspace": "workspace", "--mount": "mount",
-              "--mcp": "mcp", "--mcp-limits": "mcp", "--service": "service", "--llm-param": "llm"})
+              "--mcp": "mcp", "--mcp-limits": "mcp", "--mcp-env": "mcp", "--service": "service",
+              "--llm-param": "llm"})
 LIMIT_KEYS = ("memory", "cpus", "pids", "tmp")  # an MCP node's own limits (props "limits"), --mcp-limits NAME:KEY=VALUE,...
 
 
@@ -296,7 +307,7 @@ class Board:
     # The columns of layout(), by role: what configures the agent, the agent and what configures the proxy,
     # the proxy and what the agent talks to, the network. In each column, top to bottom, in this order.
     FLOW = (("workspace", "mount", "home", "kits", "engine", "devices", "limits", "display", "session"),
-            ("agent", "approvals", "git", "logs"), ("mcp", "llm", "service", "proxy", "vpn"), ("network",))
+            ("agent", "approvals", "git", "logs"), ("mcp", "llm", "service", "browser", "proxy", "vpn"), ("network",))
 
     def layout(self, grid=0):
         """Left to right as the connections flow: the agent's files and settings, the agent, the proxy with the
@@ -405,6 +416,13 @@ def from_argv(sai, agent, argv, agent_args=(), workspaces=()):
             board.extra += ["--mcp-limits", str(value)]  # (for a server the board does not use: kept as it was)
         else:
             node.props["limits"] = {**node.props.get("limits", {}), **limits}
+    for value in values.pop("--mcp-env", []) or []:
+        name, spec = parse_mcp_env(value)
+        node = next((n for n in board.of_kind("mcp") if n.props.get("name") == name), None) if spec else None
+        if node is None:
+            board.extra += ["--mcp-env", str(value)]  # (for a server the board does not use: kept as it was)
+        else:
+            node.props["variables"] = with_variable(node.props.get("variables"), spec)
     for spec in values.pop("--service", []) or []:
         board.add("service", **service_props(sai, spec))
     # The LLM node's own parameters for this board's starts (--llm-param KEY=VALUE): props "params" {key: text}.
@@ -434,6 +452,29 @@ def from_argv(sai, agent, argv, agent_args=(), workspaces=()):
     board.extra += unknown
     board.layout()
     return board
+
+
+# Options of the agent part only one agent takes (the launcher refuses them for the others).
+AGENT_ONLY = {"--hermes-enable": "hermes", "--qwen-enable": "qwen", "--goose-enable": "goose",
+              "--local-config": "opencode"}
+
+
+def switch_agent(props, agent):
+    """The agent part's PROPS changed in place to AGENT: what only the agent before took goes (its own options, an
+    effort AGENT does not know, a model alias only the one before has, such as Claude's opus); the rest stays (a
+    model typed in, e.g. a server's, and what every agent takes)."""
+    from .guide import AGENT_EFFORTS, AGENT_MODELS
+    before = props.get("agent", "claude")
+    props["agent"] = agent
+    for option, owner in AGENT_ONLY.items():
+        if owner != agent:
+            props.pop(option, None)
+    if props.get("effort") and props["effort"] not in AGENT_EFFORTS.get(agent, ()):
+        props.pop("effort")
+    model = str(props.get("model") or "")
+    if model and model in AGENT_MODELS.get(before, ()) and model not in AGENT_MODELS.get(agent, ()):
+        props["model"] = ""
+    return props
 
 
 def from_project(sai, document, directory):
@@ -476,6 +517,33 @@ def parse_mcp_limits(value):
     return name, limits
 
 
+MCP_ENV_SPEC = re.compile(r"([A-Za-z_][A-Za-z0-9_]{0,63})(?:=[^\x00-\x1f\x7f]{0,1024}|@[A-Za-z_][A-Za-z0-9_]{0,63})")
+
+
+def parse_mcp_env(value):
+    """(server name, "VAR=VALUE" or "VAR@SECRET") of one --mcp-env NAME:VAR=VALUE|NAME:VAR@SECRET; (name, "") for one
+    that is not of that form (the launcher's check says what is wrong with it)."""
+    name, colon, spec = str(value).partition(":")
+    return name, spec if colon and MCP_ENV_SPEC.fullmatch(spec) else ""
+
+
+def variable_of(spec):
+    """VAR of "VAR=VALUE" or "VAR@SECRET"."""
+    return re.split(r"[=@]", str(spec), maxsplit=1)[0]
+
+
+def with_variable(specs, spec):
+    """The MCP node's own variables SPECS (props "variables": ["VAR=VALUE", "VAR@SECRET"]) with SPEC in place of what
+    they said of its variable."""
+    kept = [s for s in specs or [] if isinstance(s, str) and variable_of(s) != variable_of(spec)]
+    return [*kept, spec]
+
+
+def mcp_env_values(name, specs):
+    """--mcp-env's values of server NAME with its own variables SPECS (["VAR=VALUE", "VAR@SECRET"])."""
+    return [f"{name}:{spec}" for spec in specs or [] if isinstance(spec, str) and MCP_ENV_SPEC.fullmatch(spec)]
+
+
 def mcp_limits_value(name, limits):
     """--mcp-limits' value of server NAME with LIMITS ({memory, cpus, pids}; those not set left out), or None."""
     given = [f"{key}={limits[key]}" for key in LIMIT_KEYS if str(limits.get(key, "")).strip()]
@@ -498,7 +566,8 @@ def services_module(sai):
     """sandbox-ai's services.py (its parser and checks), or None for a sandbox-ai without services."""
     try:
         module = sai.module("services") if sai is not None else None
-    except Exception:  # noqa: BLE001 - an older or unreadable installation: the board keeps the text as it is
+    except Exception as _exc:  # noqa: BLE001 - an older or unreadable installation: the board keeps the text as it is
+        applog.swallowed("board", "services_module: an older or unreadable installation: the board keeps the te…", _exc)
         return None
     return module if module is not None and hasattr(module, "parse_spec") and hasattr(module, "spec_text") else None
 
@@ -513,7 +582,7 @@ def service_props(sai, spec):
         try:
             return dict(module.parse_spec(str(spec)))
         except ValueError as exc:
-            return {"name": name, "raw": str(spec), "error": printable(str(exc))}
+            return {"name": name, "raw": str(spec), "error": printable_text(str(exc))}
     return {"name": name, "raw": str(spec)}
 
 
@@ -577,9 +646,12 @@ def service_problems(sai, board, user_images=None):
             try:
                 module.parse_spec(service_spec(props))
             except ValueError as exc:
-                add(printable(str(exc)), node)
+                add(printable_text(str(exc)), node)
                 continue
-        if user_images is not None and props.get("image") not in user_images:
+        if not str(props.get("image") or "").strip():
+            add(tr("Choose the image of the service {name}: one of your images (Images page, Your images).",
+                   name=printable(props["name"])), node)
+        elif user_images is not None and props.get("image") not in user_images:
             add(tr("{image} is none of your images: add it (Images page, Your images), or choose another.",
                    image=printable(props.get("image") or "?")), node)
         if props["name"] in names:
@@ -602,7 +674,8 @@ def launcher_knows(sai, option):
     """Whether this sandbox-ai's launcher has OPTION (an older one has no --model or --effort)."""
     try:
         return sai is not None and option in _options(sai)
-    except Exception:  # noqa: BLE001 - a launcher that does not load knows nothing
+    except Exception as _exc:  # noqa: BLE001 - a launcher that does not load knows nothing
+        applog.swallowed("board", "launcher_knows: a launcher that does not load knows nothing", _exc)
         return False
 
 
@@ -622,7 +695,7 @@ def values(board, sai=None):
                 found[option] = found[option] + [v for v in value if str(v).strip()]
             elif isinstance(value, bool):
                 found[option] = found.get(option, False) or value
-            elif value not in (None, ""):
+            elif value not in (None, "") and not backend.retired(option, value):  # an old --telemetry on: off
                 found[option] = value
     workspaces = [n for n in board.included() if n.kind == "workspace" and str(n.props.get("path", "")).strip()]
     if workspaces:
@@ -640,6 +713,11 @@ def values(board, sai=None):
               if n.kind == "mcp" and n.props.get("name") and isinstance(n.props.get("limits"), dict)]
     if any(limits):
         found["--mcp-limits"] = [value for value in limits if value]
+    # An MCP node's own variables (this board's; the server's own are the default): --mcp-env NAME:VAR=VALUE|VAR@SECRET
+    variables = [value for n in board.included() if n.kind == "mcp" and n.props.get("name")
+                 for value in mcp_env_values(n.props["name"], n.props.get("variables"))]
+    if variables:
+        found["--mcp-env"] = variables
     services = [service_spec(n.props) for n in board.included() if n.kind == "service" and n.props.get("name")]
     if services:
         found["--service"] = services
@@ -674,7 +752,7 @@ def to_argv(sai, board, workspaces=True):
     agent, found, _ = values(board, sai)
     if not workspaces:
         found.pop("--workspace", None)
-    return backend.argv_from_values(list(options.values()), found) + list(board.extra)
+    return backend.argv_from_values(list(options.values()), found) + backend.without_retired(board.extra)
 
 
 def document_argv(board):
@@ -733,11 +811,12 @@ def check_argv(sai, board, local=True):
     own, argv, result, index = set(project_servers(board)), launcher_argv(sai, board, local), [], 0
     while index < len(argv):
         item = argv[index]
-        if item in ("--mcp", "--mcp-limits") and index + 1 < len(argv) and \
+        if item in ("--mcp", "--mcp-limits", "--mcp-env") and index + 1 < len(argv) and \
                 (argv[index + 1] if item == "--mcp" else argv[index + 1].partition(":")[0]) in own:
             index += 2
             continue
-        if item.startswith(("--mcp=", "--mcp-limits=")) and item.partition("=")[2].partition(":")[0] in own:
+        if item.startswith(("--mcp=", "--mcp-limits=", "--mcp-env=")) and \
+                item.partition("=")[2].partition(":")[0] in own:
             index += 1
             continue
         result.append(item)
@@ -761,10 +840,32 @@ def file_start_argv(sai, board):
     _, found, _ = values(board, sai)
     workspaces = list(found.get("--workspace", []))
     forbidden = set(sai.launcher.CONFIG_FORBIDDEN) - {"--workspace", "--config", "--no-config", "--"}
-    kept = {name: value for name, value in found.items() if name in forbidden}
+    # (and the values a project file may not hold, which project_document leaves out: --llm-traffic all)
+    kept = {name: value for name, value in found.items() if name in forbidden or backend.project_refused(name, value)}
     argv = backend.argv_from_values(list(_options(sai).values()), kept)
-    argv += [t for t in board.extra if t.split("=", 1)[0] in forbidden]
+    refused, extra = _refused_extra(board.extra)
+    argv += [t for t in extra if t.split("=", 1)[0] in forbidden] + refused
     return argv + (["--workspace", workspaces[0]] if workspaces else [])
+
+
+def _refused_extra(tokens):
+    """([tokens of the values a project file may not hold], [the other tokens]) of a board's extra TOKENS: "--llm-traffic
+    all" and "--llm-traffic=all" (backend.PROJECT_REFUSED_VALUES) apart from the rest; the gone ones (--telemetry on)
+    in neither."""
+    refused, rest, index = [], [], 0
+    tokens = backend.without_retired(tokens)
+    while index < len(tokens):
+        token = tokens[index]
+        name, equals, value = token.partition("=")
+        if equals and backend.project_refused(name, value):
+            refused.append(token)
+        elif not equals and index + 1 < len(tokens) and backend.project_refused(token, tokens[index + 1]):
+            refused += tokens[index:index + 2]
+            index += 1
+        else:
+            rest.append(token)
+        index += 1
+    return refused, rest
 
 
 def command_line(sai, board):
@@ -776,14 +877,16 @@ def command_line(sai, board):
 def project_document(sai, board):
     """(.sandbox-ai.json document, main workspace) of the board: the first workspace is where the file lives,
     further ones are listed; options a project file may not set are left out (and kept in nothing: the
-    window shows them as problems first)."""
+    window shows them as problems first), and so are values it may not hold (--llm-traffic all: the
+    launcher refuses the file with them; a start from the file gives them on its command line, file_start_argv)."""
     agent, found, agent_args = values(board, sai)
     workspaces = list(found.get("--workspace", []))
     forbidden = set(sai.launcher.CONFIG_FORBIDDEN)
-    kept = {name: value for name, value in found.items() if name not in forbidden}
+    kept = {name: value for name, value in found.items()
+            if name not in forbidden and not backend.project_refused(name, value)}
     options = _options(sai)
     argv = backend.argv_from_values(list(options.values()), kept)
-    argv += [t for t in board.extra if t.split("=", 1)[0] not in forbidden]
+    argv += [t for t in _refused_extra(board.extra)[1] if t.split("=", 1)[0] not in forbidden]
     known = set(getattr(sai.launcher, "CONFIG_KEYS", ()))
     document = {"version": 1, "agent": agent, "options": argv,
                 **{k: v for k, v in board.document_extra.items() if k in known}}
@@ -949,8 +1052,20 @@ def drop(board, markers):
 
 # -- what the board means --
 
+def _domain(value):
+    """The domain --allow-domain VALUE names, as sandbox-ai reads it (its domain_of, without the checks the start
+    makes): lower case, without one leading "*." or "." and one trailing "."."""
+    name = str(value).strip().lower()
+    name = name[2:] if name.startswith("*.") else name[1:] if name.startswith(".") else name
+    return name[:-1] if name.endswith(".") else name
+
+
 def _hosts_of(values_):
-    return [str(h) for h in values_.get("--allow-host", [])]
+    """The --allow-host names, and what each --allow-domain DOMAIN stands for: DOMAIN and *.DOMAIN."""
+    hosts = [str(h) for h in values_.get("--allow-host", [])]
+    for value in values_.get("--allow-domain", []):
+        hosts += [_domain(value), "*." + _domain(value)]
+    return list(dict.fromkeys(hosts))
 
 
 def _host_matches(host, pattern):
@@ -988,6 +1103,10 @@ def problems(sai, board, policy=None, user_images=None):
             add("error", tr("A workspace needs a folder."), node)
         elif "," in path or "\n" in path:
             add("error", tr("A workspace path cannot contain commas or new lines."), node)
+        elif not os.path.isabs(os.path.expanduser(path)) and not PLACEHOLDER.search(path):
+            # (relative to what? the launcher refuses one in a project file; a start resolved it twice)
+            add("error", tr("The workspace {path} is a relative path: give the folder in full (/… or ~/…).",
+                            path=printable(path)), node)
     workspaces = board.of_kind("workspace")
     if len({bool(n.props.get("readonly")) for n in workspaces}) > 1:
         add("warning", tr("Read-only applies to every workspace (--workspace-ro), not to one."), workspaces[0])
@@ -997,7 +1116,8 @@ def problems(sai, board, policy=None, user_images=None):
         if not str(node.props.get("dest", "")).startswith(("/work", "/mnt", "/opt")):
             add("error", tr("A mount goes under /work, /mnt or /opt."), node)
     offline = values_.get("--offline") or "offline" in values_.get("--profile", [])
-    widening = [o for o in ("--allow", "--allow-host", "--allow-tcp", "--allow-host-port", "--frontier", "--dns",
+    widening = [o for o in ("--allow", "--allow-host", "--allow-domain", "--allow-tcp", "--allow-host-port",
+                            "--frontier", "--dns",
                             "--nameserver", "--egress-all-allow", "--network", *PRESET_OPTIONS) if values_.get(o)]
     if offline and (widening or set(values_.get("--profile", [])) - {"offline"}):
         add("error", tr("Offline contradicts the network permissions: {options}.",
@@ -1047,6 +1167,12 @@ def problems(sai, board, policy=None, user_images=None):
         add("warning", tr("The check mode has no effect without a VPN profile."), vpn)
     if values_.get("--local-config") and agent != "opencode":
         add("error", tr("--local-config is for OpenCode only."), agent_node)
+    if values_.get("--hermes-enable") and agent != "hermes":
+        add("error", tr("--hermes-enable is for Hermes only."), agent_node)
+    if values_.get("--qwen-enable") and agent != "qwen":
+        add("error", tr("--qwen-enable is for Qwen Code only."), agent_node)
+    if values_.get("--goose-enable") and agent != "goose":
+        add("error", tr("--goose-enable is for Goose only."), agent_node)
     if values_.get("--tmux") and values_.get("--no-tmux"):
         add("error", tr("tmux cannot be both required and switched off."), board.first("session"))
     if values_.get("--copy-auth") and values_.get("--no-auth"):
@@ -1077,6 +1203,7 @@ def problems(sai, board, policy=None, user_images=None):
             found += _checked(lambda: sai.module("mcp").validated({node.props["name"]: definition},
                                                                    tr("MCP server")), node)
         found += mcp_limit_problems(sai, node)
+        found += mcp_env_problems(sai, node)
     found += llm_param_problems(sai, board)
     found += service_problems(sai, board, user_images)
     found += policy_problems(board, values_, policy or {})
@@ -1110,6 +1237,96 @@ def mcp_limit_problems(sai, node):
     return found
 
 
+MCP_PROBLEMS = re.compile(r"\b\d+ problems with (?:the MCP servers of )?this start\b")
+# An image the start needs that is not built on its host (the launcher asks Podman before anything is made).
+IMAGE_PROBLEM = re.compile(r"The image of (\S+(?: browser)?) \(\S+\) is not built on this host\b")
+MCP_PROBLEM_NAME = re.compile(r"(?:Unknown MCP server: |MCP server |--mcp-(?:limits|mount|env) )([A-Za-z0-9_-]{1,32})")
+
+
+def missing_workspaces(board):
+    """[(node id, folder)] of the board's workspaces (the parts in use, with a folder) that are not there on this
+    machine: made at Start or Apply after a yes, or at once with Create now (a start used to end in "[Errno 2] No such
+    file or directory" for a project folder not made yet)."""
+    found = []
+    for node in board.of_kind("workspace"):
+        path = str(node.props.get("path") or "").strip()
+        if not path or node not in board.included():
+            continue
+        folder = os.path.expanduser(path)
+        if not os.path.isabs(folder):  # (an error of its own: never made below the app's own folder)
+            continue
+        try:
+            there = os.path.isdir(folder)
+        except (OSError, ValueError):
+            there = False
+        if not there and not os.path.lexists(folder):
+            found.append((node.id, folder))
+    return found
+
+
+def missing_problems(missing):
+    """[Problem] of the folders MISSING (missing_workspaces): a warning on each part - it will be created."""
+    return [Problem("warning", tr("The folder {path} does not exist: it will be created (Create now, or at Start or "
+                                  "Apply).", path=printable(folder)), node_id) for node_id, folder in missing]
+
+
+def launcher_problems(board, message):
+    """[Problem] of what the launcher's dry run refused about the board's MCP servers, each problem on its own (the
+    launcher says all of them at once before anything is made: mcp.start_problems), on the MCP part it is about; []
+    when MESSAGE is about something else."""
+    lines = [line.strip() for line in str(message or "").splitlines() if line.strip()]
+    header = next((index for index, line in enumerate(lines) if MCP_PROBLEMS.search(line)), None)
+    if header is not None:
+        items = [line[2:].strip() for line in lines[header + 1:] if line.startswith("- ")]
+    else:
+        last = re.sub(r"^(?:agent-sandbox|sandbox-ai): ", "", lines[-1]) if lines else ""
+        items = [last] if MCP_PROBLEM_NAME.match(last) or IMAGE_PROBLEM.match(last) else []
+    nodes = {n.props.get("name"): n.id for n in board.of_kind("mcp") if n.props.get("name")}
+    agent = board.first("agent")
+    found = []
+    for item in items[:20]:
+        named = MCP_PROBLEM_NAME.match(item)
+        node = nodes.get(named.group(1)) if named else agent.id if IMAGE_PROBLEM.match(item) and agent else None
+        found.append(Problem("error", printable(item)[:800], node))
+    return found
+
+
+# (The launcher names the image store it looked in - Podman's GraphRoot and the user - since a build by root or another
+# user went where the start does not look; never offered for another machine's Podman, "(Podman at URL)": a build here
+# would not reach it. A variant several agents have is NAME@AGENT.)
+BUILD_OFFER = re.compile(r"is not built on this host(?: \(Podman's image store: [^()\n]{1,600}\))? \(nothing is pulled "
+                         r"at a start\): sandbox-ai (build(?: --variant [A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+                         r"(?:@[a-z]{2,16})?| [a-z][a-z0-9-]{0,31}))[ \t]*$", re.M)
+
+
+def build_offers(message):
+    """[[build, ...]] of the image builds the launcher's refusal MESSAGE names (`sandbox-ai build AGENT`, `build
+    --variant NAME`, `build browser`...), each once: Build now runs them."""
+    found = []
+    for words in BUILD_OFFER.findall(str(message or "")):
+        args = words.split()
+        if args not in found:
+            found.append(args)
+    return found
+
+
+def mcp_env_problems(sai, node):
+    """[Problem] of an MCP node's own variables (props "variables": --mcp-env): each checked by sandbox-ai's own rules
+    (mcp.parse_start_env: one line, nothing of a secret's shape or name as a plain value, a secret's name); a
+    sandbox-ai without --mcp-env runs the server with its own variables (said)."""
+    specs = [spec for spec in node.props.get("variables") or [] if isinstance(spec, str) and spec.strip()]
+    if not specs or not node.props.get("name"):
+        return []
+    if sai is not None and not launcher_knows(sai, "--mcp-env"):
+        return [Problem("warning", tr("This sandbox-ai has no --mcp-env: the server runs with its own variables."),
+                        node.id)]
+    found = []
+    for spec in specs:
+        found += _checked(lambda spec=spec: sai.module("mcp").parse_start_env(f"{node.props['name']}:{spec}"),
+                          node) if sai is not None else []
+    return found
+
+
 def llm_param_problems(sai, board):
     """[Problem] of the LLM node's own parameters (props "params"): each checked against this sandbox-ai's catalogue
     (llm.params_catalogue: the names, types and ranges; whether the server's kind takes one is the launcher's check);
@@ -1132,9 +1349,9 @@ def _checked(function, node):
     try:
         function()
     except ValueError as exc:
-        return [Problem("error", printable(str(exc)), node.id if node is not None else None)]
-    except Exception:  # noqa: BLE001 - an older sandbox-ai without the check: the launcher has the last word
-        pass
+        return [Problem("error", printable_text(str(exc)), node.id if node is not None else None)]
+    except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai without the check: the launcher has the last word
+        applog.swallowed("board", "_checked: an older sandbox-ai without the check: the launcher has the last w…", _exc)
     return []
 
 
@@ -1226,7 +1443,8 @@ def sensitive(path, launcher=None):
         try:
             fixed, program_dirs = launcher.private_locations()
             private = list(fixed) + list(program_dirs)
-        except Exception:  # noqa: BLE001 - the parts below still say enough
+        except Exception as _exc:  # noqa: BLE001 - the parts below still say enough
+            applog.swallowed("board", "sensitive: the parts below still say enough", _exc)
             private = []
     for location in private:
         location = Path(location)
@@ -1346,6 +1564,8 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
                 add("reach", "bad", tr("Every host matching {host}", host=printable(host)), network, 15)
             else:
                 add("reach", "info", tr("{host} (HTTPS)", host=printable(host)), network, 1)
+        for value in values_.get("--allow-domain", []):
+            add("reach", "bad", tr("{domain} and every host below it", domain=printable(_domain(value))), network, 15)
         for port in values_.get("--allow-host-port", []):
             ssh = str(port) == "22"
             add("reach", "bad" if ssh else "warn",
@@ -1455,6 +1675,17 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
                                 path=printable(values_["--gui-vnc"])), display, 5)
     if values_.get("--gui-wayland"):
         add("read", "bad", tr("The host's Wayland socket weakens the isolation"), display, 15)
+    browser = board.first("browser")
+    if browser is not None and values_.get("--browser"):
+        control = values_.get("--browser-control") or "human"
+        if control in ("agent", "both"):
+            add("code", "warn", tr("The agent drives the browser (Chrome's DevTools at 127.0.0.1:9222 in the pod)") +
+                ("; " + tr("whatever you sign in to there, the agent can use") if control == "both" else ""),
+                browser, 8 if control == "both" else 5)
+        profile = str(values_.get("--browser-profile") or "fresh")
+        if profile not in ("fresh", "session"):
+            add("write", "warn", tr("The browser keeps its profile (logins, cookies) in {path}", path=printable(profile)),
+                browser, 3)
     devices = board.first("devices")
     for value in values_.get("--device", []):
         add("read", "bad", tr("Host device {path}", path=printable(value)), devices, 15)
@@ -1463,6 +1694,21 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
     if values_.get("--dangerously-skip-permissions"):
         add("code", "info", tr("The agent runs without its own approval prompts (the sandbox stays in force)"),
             agent_node, 3)
+    for value in values_.get("--hermes-enable", []):
+        # Hermes' features each open their own hosts (hermes.py): a messaging platform reaches the agent from outside.
+        level = "warn" if str(value).startswith("gateway:") else "info"
+        add("reach", level, tr("Hermes: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
+    for value in values_.get("--qwen-enable", []):
+        # Qwen Code's features each open their own hosts (qwen.py); its telemetry is never one of them.
+        add("reach", "info", tr("Qwen Code: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 2)
+    for value in values_.get("--goose-enable", []):
+        # Goose's features each open their own hosts (goose.py); its gateway reaches the agent from outside, its
+        # scheduler runs recipes on its own. Its telemetry is never one of them.
+        level = "warn" if str(value).startswith(("gateway:", "scheduler")) else "info"
+        add("reach", level, tr("Goose: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
     # Services: containers of images nobody reviewed, beside the agent (on its network, behind its firewall)
     for node in board.included():
         if node.kind != "service" or not node.props.get("name"):
@@ -1537,6 +1783,8 @@ def server_network(definition):
             reached.append(option[len("--allow-"):])
         elif option in ("--allow-host", "--allow", "--allow-tcp"):
             reached.append(value)
+        elif option == "--allow-domain":
+            reached.append(f"{_domain(value)}, *.{_domain(value)}")
         elif option == "--allow-host-port":
             reached.append(f"localhost:{value}")
         elif option == "--egress-all-allow" or (option == "--profile" and value == "egress-all"):
@@ -1577,7 +1825,8 @@ def mcp_defaults(sai, definition):
         return None
     try:
         return sai.module("mcp").default_limits(definition)
-    except Exception:  # noqa: BLE001 - an older sandbox-ai without limits per server
+    except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai without limits per server
+        applog.swallowed("board", "mcp_defaults: an older sandbox-ai without limits per server", _exc)
         return None
 
 

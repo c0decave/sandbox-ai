@@ -314,7 +314,8 @@ def test_mode_records():
     presets = [f"--allow-{p}" for p in net.launcher().PRESETS]
     for name in ("high", "paranoid"):
         record = mode_record(name)
-        assert record["refuses"] == ["--allow", "--allow-host", "--allow-tcp", "--dns", "--allow-host-port", *presets]
+        assert record["refuses"] == ["--allow", "--allow-host", "--allow-domain", "--allow-tcp", "--dns", "--allow-host-port",
+                                     *presets]
         assert record["origin"] == "--mode" and record["approval_scope"] == {"high": "run", "paranoid": "once"}[name]
     for name in ("lax", "low", "medium"):
         assert mode_record(name)["refuses"] == [] and mode_record(name)["approval_scope"] == "always"
@@ -816,6 +817,35 @@ def test_the_web_interfaces_port_is_never_relayed(sandbox, monkeypatch, capsys):
 def project_file(tmp_path):
     (tmp_path / "app").mkdir(exist_ok=True)
     return tmp_path / "app" / ".sandbox-ai.json"
+
+
+def test_allow_public_only_opens_a_names_public_addresses_and_remembers_it_as_an_approval(sandbox, tmp_path,
+                                                                                          monkeypatch, capsys):
+    """--public-only (the app's Allow on a name the agent looked up and was refused): only the public addresses of
+    the name are opened - it may point at this host or the LAN - none at all is refused; with --keep it is remembered
+    as an approved lookup (approved.json: public addresses at every later start), never as the project's
+    --allow-host."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    mixed = lambda hosts: {host: ["127.0.0.1", "192.168.1.9", "198.51.100.77", "93.184.216.34"]  # noqa: E731
+                           for host in hosts}
+    lines = []
+    assert net.main(["allow", "--allow-host", "rebind.evil.example", "--public-only"], out=lines.append,
+                    resolver=mixed) == 0
+    assert json.loads(sandbox["allow"].read_text())["https"] == ["93.184.216.34/32"]
+    assert "192.168.1.9" not in sandbox["hosts"].read_text() and "127.0.0.1 rebind" not in sandbox["hosts"].read_text()
+    assert any("not opened (not public)" in line for line in lines)
+    private = lambda hosts: {host: ["10.0.0.5"] for host in hosts}  # noqa: E731
+    assert net.main(["allow", "--allow-host", "lan.evil.example", "--public-only"], out=lambda line: None,
+                    resolver=private) == 1
+    assert "non-public" in capsys.readouterr().err
+    assert net.main(["allow", "--allow-host", "rebind.evil.example", "--public-only", "--keep"],
+                    out=lambda line: None, resolver=mixed) == 0
+    assert not project_file(tmp_path).exists() or "rebind" not in project_file(tmp_path).read_text()
+    assert net.approvals_module().approved_for(tmp_path / "app")["hosts"] == ["rebind.evil.example"]
+    for other in (["--allow-tcp", "192.0.2.9:22"], ["--allow-pypi"], ["--dns"]):
+        assert net.main(["allow", "--allow-host", "x.example", "--public-only", *other], out=lambda line: None,
+                        resolver=mixed) == 1
+        assert "--public-only goes with --allow-host" in capsys.readouterr().err
 
 
 def test_allow_keep_writes_the_project_file_and_trusts_it(sandbox, tmp_path, monkeypatch):

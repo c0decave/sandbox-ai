@@ -40,6 +40,24 @@ def test_main_rewrites_only_the_version_line(tmp_path, capsys):
     assert path.read_text() == 'import os\n\n__version__ = "0.2.0"\n\nX = "__version__ = \\"9.9.9\\""\n'
 
 
+def test_the_app_gets_the_same_version(tmp_path, capsys):
+    """Design review 0.1.95: the release of 0.1.94 left the app at 0.1.93 (its status bar said "App 0.1.93 ·
+    sandbox-ai 0.1.94" and its tests/test_version.py failed): the app's __version__ follows sandbox-ai's."""
+    path = write(tmp_path, "0.1.94")
+    app = tmp_path / "__init__.py"
+    app.write_text('"""app."""\n__version__ = "0.1.93"  # the version of sandbox-ai it is released with\n')
+    assert bump.main(["--file", str(path), "--app-file", str(app)]) == 0
+    assert capsys.readouterr().out.strip() == "0.1.95"
+    assert app.read_text() == '"""app."""\n__version__ = "0.1.95"  # the version of sandbox-ai it is released with\n'
+    bump.main(["--file", str(path), "--app-file", str(app), "--set", "0.2.0"])
+    assert '__version__ = "0.2.0"' in app.read_text()
+
+
+def test_repository_app_has_the_version_of_sandbox_ai():
+    app = ROOT / "projects/sandbox-ai-app/sandbox_ai_app/__init__.py"
+    assert bump.APP_LINE.search(app.read_text())[1] == bump.LINE.search((ROOT / "sandbox/agent_sandbox.py").read_text())[1]
+
+
 def test_set_and_show(tmp_path, capsys):
     path = write(tmp_path, "0.1.0")
     bump.main(["--file", str(path), "--set", "0.1.17"])

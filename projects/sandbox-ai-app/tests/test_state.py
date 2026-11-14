@@ -175,10 +175,10 @@ def test_window_page_navigation_and_panels_come_back(window, monkeypatch, qapp):
     window = make_window(monkeypatch)
     window.show()
     window.show_page("statistics")
-    window.toggle_section("Insight")
+    window.toggle_section("Monitoring")
     window.toggle_section("Manage")
     window.toggle_section("Manage")
-    insight = window.section_rows["Insight"][1]
+    insight = window.section_rows["Monitoring"][1]
     assert all(window.nav.isRowHidden(r) for r in insight)
     window.showMaximized()
     qapp.processEvents()
@@ -187,7 +187,7 @@ def test_window_page_navigation_and_panels_come_back(window, monkeypatch, qapp):
         again.show()
         qapp.processEvents()
         assert again.current_page() == "statistics" and again.isMaximized()
-        assert again.collapsed == {"Insight"} and all(again.nav.isRowHidden(r) for r in insight)
+        assert again.collapsed == {"Monitoring"} and all(again.nav.isRowHidden(r) for r in insight)
         assert not any(again.nav.isRowHidden(r) for r in again.section_rows["Manage"][1])
         # A click on a section's header folds it (and unfolds it).
         header = again.nav.item(again.section_rows["Running"][0])
@@ -459,3 +459,10 @@ def test_the_writer_survives_any_error_says_a_failure_once_and_quitting_never_wa
     begin = time.monotonic()
     assert s.flush() is False and time.monotonic() - begin < 5, "quitting gives up on a write that hangs"
     gate.set()
+
+
+def test_a_state_saved_with_the_old_name_insight_folds_monitoring(qapp, tmp_path, monkeypatch):
+    """The section Insight is called Monitoring since 0.1.95: a state that folded Insight folds Monitoring."""
+    import inspect
+    from sandbox_ai_app import ui
+    assert '{"Insight": "Monitoring"}' in inspect.getsource(ui)

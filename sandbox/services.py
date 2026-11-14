@@ -51,8 +51,6 @@ import os
 from pathlib import Path
 import re
 import shlex
-import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -167,12 +165,8 @@ def pinned_reference(parsed, digest):
 
 def default_name(parsed):
     """A name for an image of PARSED: the repository's last part, made a valid name."""
-    base = re.sub(r"[^a-z0-9_.-]", "-", parsed["path"].rsplit("/", 1)[-1].lower()).strip("._-")[:30] or "image"
-    return base if valid_name(base) else f"{base[:26]}-img"
-
-
-def empty_registry():
-    return {"version": 1, "images": {}}
+    base = re.sub(r"[^a-z0-9_.-]", "-", parsed["path"].rsplit("/", 1)[-1].lower())[:30].strip("._-") or "image"
+    return base if valid_name(base) else f"{base[:26].rstrip('._-')}-img"
 
 
 def read_registry(path=None):
@@ -224,6 +218,35 @@ def record_problem(name, record):
     return None
 
 
+_filelock = None
+
+
+def registry_lock():
+    """The lock of a change of the record of your images (filelock.py, user-images.json.lock): `images pull` and
+    `build-image` read it before their pull or build (minutes) and wrote it back whole after it, so of two run at the
+    same time the first one's image was not recorded. A change reads the record anew under it."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock_for_services", HERE / "filelock.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _filelock = loaded
+    images_module().check_location(config_dir(), "Your images' records in")  # (before the lock file is made)
+    return _filelock.locked(registry_path())
+
+
+def record_entry(name, entry, replace):
+    """ENTRY recorded as your image NAME in the record as it is now (another command may have changed it meanwhile);
+    the record it was in before, or None."""
+    with registry_lock():
+        found = read_registry()
+        name_taken(name, found, replace)  # (taken meanwhile by another pull or build of that name)
+        previous = found.get(name)
+        found[name] = entry
+        write_registry(found)
+    return previous
+
+
 def write_registry(found):
     images = images_module()
     images.check_location(config_dir(), "Your images' records in")
@@ -241,9 +264,22 @@ def record(name, found=None):
 
 
 def run_podman(argv, run=None, capture=True, timeout=600, env=None):
+    """ARGV (podman ...) run; its output captured, or with CAPTURE False shown as it goes - on standard error
+    (podman_output): standard output is the command's answer, and with --json the JSON alone."""
     run = run or subprocess.run
-    kwargs = {"capture_output": True, "text": True} if capture else {}
+    kwargs = {"capture_output": True, "text": True} if capture else {"stdout": podman_output()}
     return run(argv, stdin=subprocess.DEVNULL, timeout=timeout, **kwargs, **({"env": env} if env else {}))
+
+
+def podman_output():
+    """Where podman's own output goes when it is shown: standard error. `podman pull` prints the image's ID and
+    `podman build` its steps on standard output, which came before the JSON of `images pull|build-image --json` (CI:
+    "Expecting value: line 1 column 1"). None (inherited) only where standard error has no descriptor."""
+    try:
+        sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    return sys.stderr
 
 
 def inspect_image(image, podman, run=None):
@@ -253,7 +289,7 @@ def inspect_image(image, podman, run=None):
         return None
     try:
         data = json.loads(result.stdout)[0]
-    except (ValueError, IndexError, TypeError):
+    except (ValueError, IndexError, TypeError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -400,9 +436,9 @@ def describe_image(data, podman, image, run=None):
 
 
 def name_taken(name, found, replace):
-    if not valid_name(name):
-        raise ValueError(f"{name!r}: a name is lower-case letters, digits, '.', '_' and '-' (up to 30 characters), and "
-                         f"not one of {', '.join(sorted(images_module().RESERVED))}")
+    if not valid_name(name) or not images_module().taggable(name):
+        raise ValueError(f"{name!r}: a name is {images_module().NAME_RULE}, and not one of "
+                         f"{', '.join(sorted(images_module().RESERVED))}")
     if any(variant == name for variant, _ in images_module().variants()):
         raise ValueError(f"{name} is the name of an image variant (sandbox-ai images new); choose another one")
     if name in found and not replace:
@@ -441,9 +477,7 @@ def pull(ref, name=None, replace=False, podman=None, run=None, out=print):
     image = pinned_reference(parsed, digest)
     entry = {"kind": "pulled", "ref": ref, "image": image, "digest": digest, "reviewed": False,
              "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **describe_image(data, podman, image, run)}
-    previous = found.get(name)
-    found[name] = entry
-    write_registry(found)
+    previous = record_entry(name, entry, replace)
     images_module().remember("pull", name, ref=ref, image=image, id=entry["id"][:19],
                              **({"replaced": previous.get("image")} if previous else {}))
     out(f"sandbox-ai images: {name} = {image}")
@@ -534,21 +568,53 @@ def pin_containerfile(text, pins):
     return "\n".join(lines)
 
 
+# Containerfiles that come with sandbox-ai, for the showcase presets' services: sandbox-ai images build-image NAME
+# --builtin TEMPLATE builds service-images/TEMPLATE/Containerfile in its folder, pinned and recorded as one of yours.
+BUILTIN_IMAGES = HERE / "service-images"
+
+
+def builtin_images():
+    """{template: what it is (the first comment line of its Containerfile)} of sandbox-ai's own Containerfiles."""
+    found = {}
+    if BUILTIN_IMAGES.is_dir():
+        for folder in sorted(BUILTIN_IMAGES.iterdir()):
+            path = folder / "Containerfile"
+            if path.is_file():
+                text = path.read_text(errors="replace")
+                found[folder.name] = next((line.lstrip("#").strip() for line in text.splitlines()
+                                           if line.startswith("#") and line.lstrip("#").strip()), folder.name)
+    return found
+
+
+def builtin_containerfile(template):
+    """The path of sandbox-ai's own Containerfile TEMPLATE; ValueError naming those there are."""
+    found = builtin_images()
+    if template not in found:
+        raise ValueError(f"--builtin {template}: no Containerfile {template} of sandbox-ai; there are: "
+                         f"{', '.join(found) or 'none'}")
+    return BUILTIN_IMAGES / template / "Containerfile"
+
+
 BUILD_NETWORK_NOTE = ("its RUN steps reach the network from this host directly - outside the sandbox's firewall, VPN "
                       "and Tor, with your own address")
 
 
 def build(name, file, context=None, replace=False, podman=None, run=None, out=print, trust_agent_written=False,
-          network=False):
+          network=False, builtin=None):
     """Build your Containerfile FILE (in CONTEXT, default its folder) as your image NAME: each image it takes from
     outside pulled once and pinned by digest in the Containerfile that is built (podman build --pull=never), the
     result recorded by its image ID. A Containerfile or context where a sandbox can write (an agent could have
     changed it) is refused unless TRUST_AGENT_WRITTEN (--trust-agent-written: you reviewed it). Its RUN steps get no
     network (--network=none) unless NETWORK (--build-network: this host's own, outside the sandbox's firewall, VPN
-    and Tor). Returns (name, record)."""
+    and Tor). BUILTIN: the name of one of sandbox-ai's own Containerfiles (service-images) instead of FILE. Returns
+    (name, record)."""
     images = images_module()
     found = read_registry()
     name_taken(name, found, replace)
+    if builtin:
+        if context:
+            raise ValueError("--builtin builds in its own folder: no --context with it")
+        file = builtin_containerfile(builtin)
     path = Path(os.path.abspath(os.path.expanduser(str(file))))
     folder = Path(os.path.abspath(os.path.expanduser(str(context)))) if context else path.parent
     if not folder.is_dir():
@@ -612,10 +678,10 @@ def build(name, file, context=None, replace=False, podman=None, run=None, out=pr
     entry = {"kind": "built", "image": tag, "containerfile": str(path), "context": str(folder),
              "containerfile_sha256": hashlib.sha256(text.encode()).hexdigest(), "from": sources, "reviewed": False,
              "build_network": bool(network), "agent_written": agent_written,
+             **({"builtin": builtin} if builtin else {}),
              "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
              **describe_image(data, podman, str(data.get("Id") or tag), run)}
-    found[name] = entry
-    write_registry(found)
+    record_entry(name, entry, replace)
     images.remember("build-image", name, containerfile=str(path), id=entry["id"][:19],
                     pinned=[source["pinned"] for source in sources])
     out(f"sandbox-ai images: {name} = {tag} ({entry['id'][:19]})")
@@ -637,15 +703,16 @@ def users_of(name):
 
 def remove(name, keep_image=False, podman=None, run=None):
     """Forget your image NAME (and remove its image unless KEEP_IMAGE). Refused while a variant is based on it."""
-    found = read_registry()
-    entry = record(name, found)
-    using = users_of(name)
-    if using:
-        raise ValueError(f"{name} is the base of the variant(s) {', '.join(using)}; give them another base or remove "
-                         "them first (sandbox-ai images extend VARIANT --no-base, or images remove VARIANT)")
+    with registry_lock():
+        found = read_registry()
+        entry = record(name, found)
+        using = users_of(name)
+        if using:
+            raise ValueError(f"{name} is the base of the variant(s) {', '.join(using)}; give them another base or "
+                             "remove them first (sandbox-ai images extend VARIANT --no-base, or images remove VARIANT)")
+        del found[name]
+        write_registry(found)
     notes = []
-    del found[name]
-    write_registry(found)
     if not keep_image:
         podman = podman or images_module().podman()
         result = run_podman([*podman, "image", "rm", entry["image"]], run, timeout=120)
@@ -1069,6 +1136,8 @@ def add_again(name, entry):
     """The command that adds your image NAME (its record ENTRY) again, pinned anew."""
     if entry["kind"] == "pulled":
         return f"sandbox-ai images pull {entry.get('ref') or entry['image']} --as {name} --replace"
+    if entry.get("builtin"):
+        return f"sandbox-ai images build-image {name} --builtin {entry['builtin']} --replace"
     return f"sandbox-ai images build-image {name} --file {entry.get('containerfile')} --replace"
 
 
@@ -1104,10 +1173,35 @@ def prepare(a, l=None, run=None):
             item["value"] = value
 
 
+def members(a):
+    """The containers started beside the agent: the services (--service) and the sandbox's browser (--browser:
+    browser.check made it a service of sandbox-ai's own image)."""
+    browser = getattr(a, "browser_container", None)
+    return [*(getattr(a, "services", None) or []), *([browser] if browser else [])]
+
+
+_browser = None
+
+
+def browser_module():
+    """browser.py (the browser's container: its podman create line), loaded once."""
+    global _browser
+    if _browser is None:
+        spec = importlib.util.spec_from_file_location("browser_for_services", HERE / "browser.py")
+        with LOADING:
+            if _browser is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _browser = loaded
+    return _browser
+
+
 def supervisor_config(a):
-    """What the sandbox's supervisor waits for before the agent starts (runtime.await_services)."""
-    return [{"name": service["name"], "ready": ready_port(service), "timeout": service["ready_timeout"]}
-            for service in getattr(a, "services", None) or []]
+    """What the sandbox's supervisor waits for before the agent starts (runtime.await_services). The browser's entry
+    asks for the run's CA ("ca": the supervisor puts it into the run's directory before the go)."""
+    return [{"name": service["name"], "ready": ready_port(service), "timeout": service["ready_timeout"],
+             **({"ca": True} if service.get("browser") else {})}
+            for service in members(a)]
 
 
 def record_entries(a, pod):
@@ -1218,7 +1312,7 @@ def launch(a, pod, session, alive, l=None, run=None, sleep=time.sleep, out=None,
     started = []
     try:
         limits = enforceable(a, l)  # (in here: whatever fails, the supervisor gets its answer)
-        for service in a.services:
+        for service in members(a):
             for path, kind, volume in data_mounts(a, service):
                 if kind == "volume" and run(l.podman_command(a, "volume", "exists", volume), stdin=subprocess.DEVNULL,
                                             capture_output=True, timeout=60).returncode != 0:
@@ -1229,7 +1323,8 @@ def launch(a, pod, session, alive, l=None, run=None, sleep=time.sleep, out=None,
                         raise ValueError(f"the volume {volume} for {path}: {(made.stderr or '').strip()[-300:]}")
             # Created, initialised (its namespaces made, nothing of the image run: podman init), proven, and only then
             # started: nothing of it ever runs outside the pod's user namespace or the VPN's network namespace.
-            argv, env = create_command(a, pod, service, session, l, limits)
+            argv, env = (browser_module().create_command if service.get("browser") else create_command)(
+                a, pod, service, session, l, limits)
             done = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
                        env={**os.environ, **env})
             if done.returncode != 0:
@@ -1261,7 +1356,7 @@ def launch(a, pod, session, alive, l=None, run=None, sleep=time.sleep, out=None,
                 f"{container_name(pod, service)})")
         answer = {"ok": True, "services": started}
     except Exception as exc:  # noqa: BLE001 - whatever went wrong, the supervisor gets an answer (never waits on)
-        name = next((s["name"] for s in a.services if s["name"] not in started), "?")
+        name = next((s["name"] for s in members(a) if s["name"] not in started), "?")
         answer = {"ok": False, "error": l.printable(f"the service {name} did not start: {exc}")[:600]}
     try:
         write_answer(directory, answer, l)
@@ -1274,11 +1369,11 @@ def collect_logs(a, pod, l=None, run=None):
     """Before the pod goes: each service's output into the log directory (services-NAME.log), when there is one."""
     l = l or launcher()
     run = run or subprocess.run
-    if not getattr(a, "services", None) or not a.log_dir:
+    if not members(a) or not a.log_dir:
         return []
     folder = Path(a.log_dir).expanduser()
     written = []
-    for service in a.services:
+    for service in members(a):
         try:
             done = run(l.podman_command(a, "logs", "--tail", "5000", container_name(pod, service)),
                        stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
@@ -1326,7 +1421,9 @@ def main(argv, out=print, run=None):
     pulling.add_argument("-j", "--json", action="store_true")
     building = sub.add_parser("build-image")
     building.add_argument("name")
-    building.add_argument("-f", "--file", required=True)
+    source = building.add_mutually_exclusive_group(required=True)
+    source.add_argument("-f", "--file")
+    source.add_argument("--builtin", metavar="TEMPLATE")
     building.add_argument("--context")
     building.add_argument("--replace", action="store_true")
     building.add_argument("--trust-agent-written", action="store_true",
@@ -1347,7 +1444,8 @@ def main(argv, out=print, run=None):
     if args.command == "build-image":
         name, entry = build(args.name, args.file, args.context, args.replace, run=run,
                             out=(lambda text: print(text, file=sys.stderr)) if args.json else out,
-                            trust_agent_written=args.trust_agent_written, network=args.build_network)
+                            trust_agent_written=args.trust_agent_written, network=args.build_network,
+                            builtin=args.builtin)
         if args.json:
             out(json.dumps({"name": name, **entry}, indent=2))
         return 0

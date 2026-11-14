@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
-from .files import printable
+from .files import printable, printable_text
 from . import widgets
 from .credential_tab import CredentialTab
 from .i18n import N_, tr
@@ -323,7 +323,7 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
         if value and not fields.get("secret"):
             raise ValueError(tr("A typed key or password needs the name of the secret to keep it as."))
     except ValueError as exc:
-        QMessageBox.warning(parent, tr("New VPN profile"), shown_as_text(printable(exc)))
+        QMessageBox.warning(parent, tr("New VPN profile"), shown_as_text(printable_text(exc)))
         return
     if fields.get("socks") and not ask_first(parent, "vpn-socks", tr("New VPN profile"), on_host(host, tr(
             "A SOCKS port at 127.0.0.1:9050 in every sandbox with {name}: what goes through it passes the connection "
@@ -340,11 +340,11 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
         status, out, err = outcome(result, error)
         # (a background job's outcome: shown without waiting for its OK - widgets.inform)
         if status != 0:
-            widgets.warn(parent, tr("New VPN profile"), printable((err or out).strip()[-1500:]))
+            widgets.warn(parent, tr("New VPN profile"), printable_text((err or out).strip()[-1500:]))
         elif problem is not None:
             widgets.warn(parent, tr("New VPN profile"), tr(
                 "{name} added, but its key was not kept as the secret {secret}: {error}", name=name,
-                secret=fields.get("secret") or "", error=printable(problem)[:300]))
+                secret=fields.get("secret") or "", error=printable_text(problem)[:300]))
         if done:
             done(name if status == 0 else None)
 
@@ -430,7 +430,7 @@ class VpnBox(CredentialTab):
         if token != self.token or host != self.host:
             return
         if error is not None:
-            self.message.setText(tr("{host}: no answer", host=self.host_label(host)) + f" ({printable(error)[:300]})")
+            self.message.setText(tr("{host}: no answer", host=self.host_label(host)) + f" ({printable_text(error)[:300]})")
             self.entries = []
             fill(self.profiles, [])
         else:
@@ -459,7 +459,7 @@ class VpnBox(CredentialTab):
                 return self.sai.vpn_check(name)
             return self.sai.host_run(host, "vpn", "check", name, timeout=CHECK_SECONDS)
         background(work, owner=self, work=True, timeout=CHECK_SECONDS + 30,
-                   done=lambda result, error: self.message.setText(printable("\n".join(
+                   done=lambda result, error: self.message.setText(printable_text("\n".join(
                        part for part in outcome(result, error)[1:] if part).strip()[-1500:])))
 
     def show_profile(self):

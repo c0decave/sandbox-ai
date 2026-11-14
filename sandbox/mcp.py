@@ -22,7 +22,12 @@ A server can also be a container image from an MCP catalog (sandbox-ai-mcp, axro
   {"NAME": {"image": "ghcr.io/...@sha256:...", "network": "none" | "full",
             "mounts": [{"target": "/work", "host": "/abs/path", "mode": "ro"}],
             "env": ["VARIABLE"], "memory": "512m", "cpus": 2, "pids": 128, "description": "...",
-            "source": "...", "vpn": "PROFILE"}}
+            "source": "...", "vpn": "PROFILE",
+            "env_optional": ["VARIABLE"], "env_values": {"FLAG": "1"}, "env_secrets": {"VARIABLE": "SECRET"}}}
+
+Its variables (see "variables" below): "env" required (your environment's, else the secret of that name),
+"env_optional" passed where there is one, "env_values" fixed values that are no secret, "env_secrets" from the
+secret named; `mcp add/set --env NAME`, `--env NAME=VALUE`, `--env NAME@SECRET`, a start's own: --mcp-env.
 
 Such a server runs per connection as `podman run --rm -i` with no capabilities, a read-only root
 and only the network and folders the definition names; agents reach it the same way. With "vpn" (network
@@ -44,7 +49,10 @@ limits: --mcp-limits NAME:memory=2g,cpus=2,pids=512 (the board writes it for an 
 running server has one set of limits, so a start whose limits differ from the defaults gets an instance of its own,
 NAME.HASH (HASH: of its limits) with its own state directory, socket, pod and supervisor; the starts with the same
 limits share it, as the starts with the defaults share NAME. `mcp list` shows the instances and their limits, `mcp stop
-NAME` stops all of them (NAME.HASH: that one).
+NAME` stops all of them (NAME.HASH: that one). A start's own folders (--mcp-mount) and variables (--mcp-env) give
+instances the same way, and so does a server of the start's name that runs with another definition (another
+project's, one changed by mcp set, other MCP rules): the start gets an instance of its own (start_instance), the one
+that runs is left as it is. Everything a start's servers need is checked before anything is made (start_problems).
 
 `mcp attach NAME START` (and `mcp start NAME --for START`, which starts the server as that start starts it)
 connects a server to an agent start that exists: --mcp NAME joins its kept options, checked as its start checks
@@ -76,12 +84,35 @@ from types import SimpleNamespace
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 MCP_NAME_PATTERN = r"[A-Za-z0-9_-]{1,32}"
 PROC = Path("/proc")
 READY_TIMEOUT = 120
-KEYS = {"command", "options", "agent", "workspace", "description"}
+KEYS = {"command", "options", "agent", "workspace", "description", "tool_timeout"}
 IMAGE_KEYS = {"image", "network", "mounts", "env", "memory", "cpus", "pids", "tmp", "description", "source", "vpn",
-              "signed_by", "rootfs", "catalog"}
+              "signed_by", "rootfs", "catalog", "env_optional", "env_values", "env_secrets", "tool_timeout", "pid1"}
+# "pid1": "server" - the server's own process is PID 1 of its container (Podman without --init) or Bubblewrap sandbox
+# (bwrap --as-pid-1) and reaps its children itself. By default catatonit (Podman's --init) or bwrap's reaper is PID 1
+# and holds the MCP connection's stdin and stdout, which every process of the server can open through /proc/1/fd: a
+# server that runs commands (exec) asks for this, so that none of them can write MCP messages to the client.
+PID1_VALUES = ("server",)
+# How long an agent waits for one call of the server (seconds; its "tool_timeout", from its catalog entry or `mcp set
+# --tool-timeout`): a server whose tools run long (exec: commands up to 600 s) says so. The agent's setting, not the
+# server's: nothing of what the server can reach (definition_digest leaves it out).
+TOOL_TIMEOUT_RANGE = (10, 3600)
 LIMIT_KEYS = ("memory", "cpus", "pids", "tmp")
 # An image server's, unless its definition says otherwise. tmp: the size of its /tmp (a tmpfs: memory, counted against
 # the memory limit). A browser keeps its profile, cache, shared memory (--disable-dev-shm-usage) and screenshots
@@ -99,9 +130,8 @@ MOUNT_TARGET = re.compile(r"/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
 RUN_FLAGS = ("--rm", "-i", "--init", "--pull=never", "--log-driver=none", "--cap-drop=ALL",
              "--security-opt=no-new-privileges", "--read-only",
              "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=64m,notmpcopyup")
-# A catalog that sandbox-ai's own tree carries (projects/NAME/catalog.json: a checkout, or what install.sh
-# copied) is read before its published URL: the projects are not all published yet, and the local copy is
-# the one that belongs to this version.
+# The published, signed catalogs are read by default; a copy in sandbox-ai's own tree (projects/NAME/catalog.json, a
+# development checkout's) only with SANDBOX_AI_LOCAL_CATALOGS=1 (default_catalogs).
 LOCAL_CATALOGS = {"mcp": "sandbox-ai-mcp", "hub": "axross-mcp-hub"}
 CATALOGS = (("mcp", "https://raw.githubusercontent.com/c0decave/sandbox-ai-mcp/main/catalog.json"),
             ("hub", "https://raw.githubusercontent.com/c0decave/axross-mcp-hub/main/catalog.json"))
@@ -131,7 +161,8 @@ def launcher():
 
 def forbidden():
     # Server sandboxes never get credentials, sessions, tmux or nested MCP.
-    return launcher().CONFIG_FORBIDDEN + ("--mcp", "--mcp-limits", "--mcp-mount", "--mcp-socket-dir", "--tmux",
+    return launcher().CONFIG_FORBIDDEN + ("--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--mcp-socket-dir",
+                                          "--tmux",
                                           "--copy-auth", "--auth-file",
                                           "--import-codex-auth", "--copy", "--probe", "--binary", "--state-dir",
                                           "--gui-wayland", "--git-token-env", "--git-token-file",
@@ -174,6 +205,8 @@ def validated(servers, source):
             relative.append(f"workspace {workspace}")
         if relative:
             raise ValueError(f"{source}: {name}: use absolute paths (or ~/...), not: {', '.join(relative)}")
+        if "tool_timeout" in definition:
+            checked_tool_timeout(definition["tool_timeout"], f"{source}: {name}")
         result[name] = {**definition, "options": options} if "options" in definition else definition
     return result
 
@@ -210,10 +243,7 @@ def validated_image(definition, where):
         if mode not in ("ro", "rw"):
             raise ValueError(f"{where}: mount mode must be ro or rw")
         targets.add(target)
-    env = definition.get("env", [])
-    if not isinstance(env, list) or not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", v)
-                                            for v in env):
-        raise ValueError(f"{where}: env must be a list of variable names")
+    check_variables(definition, where)
     checked_memory(definition.get("memory", "512m"), where)
     if "cpus" in definition:
         checked_cpus(definition["cpus"], where)
@@ -228,12 +258,59 @@ def validated_image(definition, where):
     for key in ("description", "source", "catalog"):
         if key in definition and not isinstance(definition[key], str):
             raise ValueError(f"{where}: {key} must be text")
+    if "tool_timeout" in definition:
+        checked_tool_timeout(definition["tool_timeout"], where)
+    if "pid1" in definition:
+        checked_pid1(definition["pid1"], where)
     if "vpn" in definition:
         if not isinstance(definition["vpn"], str) or not re.fullmatch(launcher().VPN_PROFILE_NAME, definition["vpn"]):
             raise ValueError(f"{where}: vpn must name a VPN profile (sandbox-ai vpn list)")
         if definition.get("network", "none") != "full":
             raise ValueError(f"{where}: a VPN needs network full (without network nothing would use it)")
     return definition
+
+
+def checked_tool_timeout(value, where="tool_timeout"):
+    """VALUE as a server's tool_timeout: whole seconds within TOOL_TIMEOUT_RANGE (a number in the file, not text);
+    ValueError otherwise."""
+    low, high = TOOL_TIMEOUT_RANGE
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(f"{where}: tool_timeout must be whole seconds, {low}-{high} (how long an agent waits for one "
+                         f"call of the server), not {shown_value(value)}")
+    return value
+
+
+def checked_pid1(value, where="pid1"):
+    """VALUE as a server's pid1: "server" (it runs as PID 1 itself, see PID1_VALUES); ValueError for anything else,
+    never read as the default or as on."""
+    if not isinstance(value, str) or value not in PID1_VALUES:
+        raise ValueError(f'{where}: pid1 must be "server" (the server runs as PID 1 and reaps its children) or left '
+                         f"out, not {shown_value(value)}")
+    return value
+
+
+def server_is_pid1(definition):
+    """The image or rootfs server DEFINITION runs as PID 1 itself ("pid1": "server"; validated_image checked it)."""
+    return definition.get("pid1") == "server"
+
+
+def entry_tool_timeout(entry):
+    """The tool_timeout catalog ENTRY declares, checked; None when it declares none or one that is not valid (the
+    agents' default then, as limits of an entry that are not valid are left out)."""
+    try:
+        return checked_tool_timeout(entry["tool_timeout"]) if "tool_timeout" in entry else None
+    except ValueError:
+        return None
+
+
+def parse_tool_timeout(value):
+    """`mcp set --tool-timeout SECONDS|default`: the seconds (checked), or None for default."""
+    text = str(value).strip().lower()
+    if text == "default":
+        return None
+    if not re.fullmatch(r"[0-9]{1,5}", text):
+        raise ValueError(f"--tool-timeout: whole seconds, {TOOL_TIMEOUT_RANGE[0]}-{TOOL_TIMEOUT_RANGE[1]}, or default")
+    return checked_tool_timeout(int(text), "--tool-timeout")
 
 
 # --- limits: the definition's for every start, a start's own (--mcp-limits) in an instance of its own ---------------
@@ -302,16 +379,6 @@ def check_tmp_fits(limits, where="limits"):
     if tmp is not None and memory is not None and tmp > memory:
         raise ValueError(f"{where}: tmp {limits['tmp']} is more than the memory {limits['memory']}: /tmp is memory (a "
                          "tmpfs, counted against the memory limit); give it at most the memory, better half of it")
-
-
-def tmp_warning(limits):
-    """A warning when LIMITS' /tmp takes more than half its memory (the server's processes keep less than half), or
-    None."""
-    tmp, memory = size_mib((limits or {}).get("tmp")), size_mib((limits or {}).get("memory"))
-    if tmp is not None and memory is not None and tmp * 2 > memory >= tmp:
-        return (f"/tmp {limits['tmp']} is more than half the memory {limits['memory']}: once it is full, the server's "
-                "processes have less than half the memory left")
-    return None
 
 
 def checked_limits(limits, where="limits"):
@@ -405,11 +472,21 @@ def with_limits(name, definition, limits):
                                         for token in (LIMIT_OPTIONS[key], str(limits[key]))]]}
 
 
-def instance_for(name, definition, limits, mounts=None):
-    """(instance name, definition with the limits and folders) of server NAME for a start asking for LIMITS ({}: none)
-    and MOUNTS ({target: {host, mode}} of its --mcp-mount; None: none): NAME itself where they are its own (shared by
-    every such start), else NAME.HASH, one per set of limits and folders."""
+def instance_for(name, definition, limits, mounts=None, env=None):
+    """(instance name, definition with the limits, folders and variables) of server NAME for a start asking for LIMITS
+    ({}: none), MOUNTS ({target: {host, mode}} of its --mcp-mount; None: none) and ENV ({VAR: (kind, detail)} of its
+    --mcp-env; None: none): NAME itself where they are its own (shared by every such start), else NAME.HASH, one per
+    set of limits, folders and variables."""
     mounted = with_mounts(name, definition, mounts) if mounts else definition
+    if env:
+        # The start's own variables: an instance of its own unless they are what the definition says already.
+        own = with_start_env(name, mounted, env)
+        if own != mounted:
+            found, changed = instance_for(name, definition, limits, mounts)
+            changed = with_start_env(name, changed, env)
+            variables = {key: changed[key] for key in ENV_KEYS if key in changed}
+            key = {"base": found, "env": variables}
+            return f"{name}.{hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:8]}", changed
     if not limits and mounted == definition:
         return name, definition
     defaults = default_limits(definition) or {}
@@ -519,21 +596,349 @@ def check_start_mounts(a, servers, create=False, out=None):
                            mount.get("mode", "ro"), create, out)
 
 
+# --- variables: required ones, optional ones, plain values and secrets of another name ------------------------------
+#
+# A definition names the variables its server's containers get, each in one of four ways:
+#   "env": [NAME]                  required: NAME of your environment, else the secret NAME (sandbox-ai secrets) - the
+#                                  only form before 0.1.95, so every older definition stays as it was
+#   "env_optional": [NAME]         the same where there is one; left out where there is none (no refusal)
+#   "env_values": {NAME: VALUE}    a fixed value that is no secret (ALLOW_PRIVATE_TARGETS=1); checked: one line, at most
+#                                  ENV_VALUE_LIMIT characters, nothing of a secret's shape or name
+#   "env_secrets": {NAME: SECRET}  required: the secret SECRET (sandbox-ai secrets); its value is never in the file
+# `mcp add` and `mcp set` take --env NAME, --env NAME=VALUE and --env NAME@SECRET; a start's own values (the board's MCP
+# part) are --mcp-env NAME:VAR=VALUE and NAME:VAR@SECRET, in an instance of its own as with --mcp-limits.
+
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+ENV_VALUE_LIMIT = 1024
+ENV_LIMIT = 64  # variables of one server
+ENV_KEYS = ("env", "env_optional", "env_values", "env_secrets")
+# Words of a variable's name that say it holds a secret (split at "_": MAX_TOKENS is none, GITHUB_TOKEN is one).
+SECRET_WORDS = frozenset({"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "APIKEY", "CREDENTIAL", "CREDENTIALS",
+                          "COOKIE", "PW", "PWD", "PASS", "PASSCODE"})
+# Words that end in one of these are a secret's too (AUTHTOKEN, CLIENTSECRET, ROOTPASSWORD; TOKENS and TOKENIZER not).
+SECRET_ENDINGS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "APIKEY")
+SECRET_PAIRS = frozenset({("API", "KEY"), ("PRIVATE", "KEY"), ("ACCESS", "KEY"), ("AUTH", "KEY"), ("SIGNING", "KEY")})
+# What the server's run sets itself: never a definition's or a start's.
+RESERVED_ENV = frozenset({"SANDBOX_AI_MCP_MOUNTS"})
+ENV_HELP = ("--env NAME (NAME of your environment, else the secret NAME of sandbox-ai secrets), --env NAME=VALUE (a "
+            "value that is no secret, kept in the definition) or --env NAME@SECRET (the secret SECRET)")
+_privacy = None
+
+
+def privacy_module():
+    """privacy.py: the shapes of credentials its check knows (BUILTIN), so that none is kept as a plain value."""
+    global _privacy
+    if _privacy is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_privacy_for_mcp", HERE / "privacy.py")
+        with LOADING:
+            if _privacy is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _privacy = loaded
+    return _privacy
+
+
+def secret_looking(name, value):
+    """Why NAME=VALUE looks like a secret, or None: a name that says so (GITHUB_TOKEN, BRAVE_API_KEY, DB_PASSWORD -
+    split at "_", so MAX_TOKENS is none), or a value of a credential's shape (the privacy check's patterns)."""
+    parts = [part for part in str(name).upper().split("_") if part]
+    if SECRET_WORDS & set(parts) or any(pair in SECRET_PAIRS for pair in zip(parts, parts[1:])) or \
+            any(part.endswith(SECRET_ENDINGS) for part in parts):
+        return f"{name} is the name of a secret"
+    for _key, regex, _severity, reason in privacy_module().BUILTIN:
+        if re.search(regex, str(value)):
+            return f"the value has the shape of a credential ({reason})"
+    return None
+
+
+def checked_env_value(name, value, where="--env"):
+    """VALUE as the plain value of variable NAME: text of one line (no control character), at most ENV_VALUE_LIMIT
+    characters, nothing that looks like a secret (secret_looking). ValueError says what is wrong and how a secret is
+    kept instead."""
+    if not isinstance(value, str):
+        raise ValueError(f"{where} {name}: its value must be text")
+    if len(value) > ENV_VALUE_LIMIT:
+        raise ValueError(f"{where} {name}: its value is longer than {ENV_VALUE_LIMIT} characters")
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(f"{where} {name}: its value must be one line, without control characters")
+    reason = secret_looking(name, value)
+    if reason:
+        if where.startswith("--mcp-env "):  # a start's own variable (--mcp-env NAME:): its own option says how
+            raise ValueError(f"{where} {name}: {reason}, and a secret is never kept as a plain value: keep it with "
+                             f"sandbox-ai secrets set {name} and give {where}{name}@{name} (--mcp-env "
+                             f"{where[len('--mcp-env '):]}{name}@SECRET for a secret of another name)")
+        raise ValueError(f"{where} {name}: {reason}, and a secret is never kept as a plain value: keep it with "
+                         f"sandbox-ai secrets set {name} and give --env {name} (or --env {name}@SECRET for a secret "
+                         "of another name)")
+    return value
+
+
+def parse_env_spec(value, where="--env", check=True):
+    """(NAME, kind, detail) of one --env value: NAME ("pass": your environment's NAME, else the secret NAME), NAME=VALUE
+    ("value", the value checked: checked_env_value, unless not CHECK - the caller checks it) or NAME@SECRET ("secret",
+    the secret's name). ValueError otherwise."""
+    text = value if isinstance(value, str) else ""
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]{0,63})(?:=(.*)|@([A-Za-z_][A-Za-z0-9_]{0,63}))?", text, re.S)
+    if not match:
+        raise ValueError(f"{where}: {ENV_HELP}; not {shown_value(value)}")
+    name = match[1]
+    if name in RESERVED_ENV:
+        raise ValueError(f"{where} {name}: the server's start sets this variable itself")
+    if match[3] is not None:
+        return name, "secret", match[3]
+    if match[2] is not None:
+        return name, "value", checked_env_value(name, match[2], where) if check else match[2]
+    return name, "pass", None
+
+
+def check_variables(definition, where):
+    """The variables of an image server's DEFINITION (env, env_optional, env_values, env_secrets) checked: names of
+    variables (secrets' names too), plain values as checked_env_value takes them, each variable in one of them only,
+    at most ENV_LIMIT, none the start sets itself. ValueError otherwise."""
+    for key in ("env", "env_optional"):
+        names = definition.get(key, [])
+        if not isinstance(names, list) or not all(isinstance(v, str) and ENV_NAME.fullmatch(v) for v in names):
+            raise ValueError(f"{where}: {key} must be a list of variable names")
+    values, secrets = definition.get("env_values", {}), definition.get("env_secrets", {})
+    if not isinstance(values, dict) or not all(isinstance(k, str) and ENV_NAME.fullmatch(k) for k in values):
+        raise ValueError(f"{where}: env_values must be an object of NAME: VALUE (values that are no secret)")
+    for name, value in values.items():
+        checked_env_value(name, value, f"{where}: env_values")
+    if not isinstance(secrets, dict) or not all(isinstance(k, str) and ENV_NAME.fullmatch(k) and isinstance(v, str)
+                                                and ENV_NAME.fullmatch(v) for k, v in secrets.items()):
+        raise ValueError(f"{where}: env_secrets must be an object of NAME: SECRET (the names of sandbox-ai secrets)")
+    names = [*definition.get("env", []), *definition.get("env_optional", []), *values, *secrets]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        raise ValueError(f"{where}: each variable once (env, env_optional, env_values or env_secrets), not "
+                         f"{', '.join(twice)} twice")
+    if len(names) > ENV_LIMIT:
+        raise ValueError(f"{where}: at most {ENV_LIMIT} variables")
+    reserved = sorted(RESERVED_ENV & set(names))
+    if reserved:
+        raise ValueError(f"{where}: the server's start sets {', '.join(reserved)} itself")
+
+
+def variables_of(definition):
+    """[{"name", "source": "env" | "optional" | "value" | "secret", "value" (a plain one), "secret" (its secret's
+    name)}] of DEFINITION's variables: what `mcp list --json` and the app show."""
+    found = [{"name": name, "source": "env"} for name in definition.get("env", [])]
+    found += [{"name": name, "source": "optional"} for name in definition.get("env_optional", [])]
+    found += [{"name": name, "source": "value", "value": value}
+              for name, value in (definition.get("env_values") or {}).items()]
+    found += [{"name": name, "source": "secret", "secret": secret}
+              for name, secret in (definition.get("env_secrets") or {}).items()]
+    return found
+
+
+def with_variables(definition, given):
+    """DEFINITION with the variables GIVEN ({NAME: (kind, detail)}, kind "pass" (required), "optional", "value" or
+    "secret") in place of what it says of them. env stays (an older reader finds it); the other keys only when they
+    hold something."""
+    changed = {key: value for key, value in definition.items() if key not in ENV_KEYS}
+    env = [n for n in definition.get("env", []) if n not in given]
+    optional = [n for n in definition.get("env_optional", []) if n not in given]
+    values = {n: v for n, v in (definition.get("env_values") or {}).items() if n not in given}
+    secrets = {n: v for n, v in (definition.get("env_secrets") or {}).items() if n not in given}
+    for name, (kind, detail) in given.items():
+        if kind == "value":
+            values[name] = detail
+        elif kind == "secret":
+            secrets[name] = detail
+        elif kind == "optional":
+            optional.append(name)
+        else:
+            env.append(name)
+    changed["env"] = env
+    for key, value in (("env_optional", optional), ("env_values", values), ("env_secrets", secrets)):
+        if value:
+            changed[key] = value
+    return changed
+
+
+def entry_variables(entry, specs, where="--env"):
+    """{env, env_optional, env_values, env_secrets} of the --env values SPECS (parse_env_spec) for catalog ENTRY,
+    whose "env" declares each variable it uses as {name, description, secret, required}: only those, each once, every
+    required one. NAME of a required variable is required (env), of another one optional (env_optional: passed where
+    there is one); NAME=VALUE is never taken for a secret one (its value comes from sandbox-ai secrets, never the
+    file); NAME@SECRET names the secret it comes from."""
+    declared = {v.get("name"): v for v in entry.get("env", []) if isinstance(v, dict) and isinstance(v.get("name"), str)}
+    given, unknown = {}, []
+    for spec in specs:
+        name, kind, detail = parse_env_spec(spec, where, check=False)
+        if name not in declared:
+            unknown.append(name)
+            continue
+        if name in given:
+            raise ValueError(f"{where} {name}: given twice")
+        if kind == "value" and declared[name].get("secret"):
+            raise ValueError(f"{where} {name}=...: {entry['name']} takes {name} as a secret, so its value is never "
+                             f"kept in the definition: keep it with sandbox-ai secrets set {name} and give --env "
+                             f"{name} (or --env {name}@SECRET)")
+        if kind == "value":
+            detail = checked_env_value(name, detail, where)
+        if kind == "pass" and not declared[name].get("required"):
+            kind = "optional"
+        given[name] = (kind, detail)
+    if unknown:
+        raise ValueError(f"{entry['name']} does not use {', '.join(unknown)}"
+                         + (f" (it takes {', '.join(declared)})" if declared else ""))
+    missing = [n for n, v in declared.items() if v.get("required") and n not in given]
+    if missing:
+        raise ValueError(f"{entry['name']} needs --env {missing[0]} (the variable is read from your environment, else "
+                         f"from the secret {missing[0]} of sandbox-ai secrets, when the server starts; --env "
+                         f"{missing[0]}@SECRET names another secret)")
+    return with_variables({}, given)
+
+
+def entry_env(entry, env):
+    """The names of the variables ENV (--env values) for catalog ENTRY, checked as entry_variables checks them (the
+    form before 0.1.95; add and set use entry_variables)."""
+    found = entry_variables(entry, env)
+    return [*found["env"], *found.get("env_optional", []), *found.get("env_values", {}), *found.get("env_secrets", {})]
+
+
+_secrets = None
+
+
+def secret_store_module():
+    """secret_store.py (sandbox-ai secrets): where a variable's secret comes from."""
+    global _secrets
+    if _secrets is None:
+        spec = importlib.util.spec_from_file_location("secret_store_for_mcp", HERE / "secret_store.py")
+        with LOADING:
+            if _secrets is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _secrets = loaded
+    return _secrets
+
+
+def secret_value(name):
+    """The value of the secret NAME (sandbox-ai secrets), or None (none, or no store to read)."""
+    try:
+        return secret_store_module().get(name)
+    except (OSError, ValueError):
+        return None
+
+
+def run_variables(name, definition, environ=None, secret=None, notes=None):
+    """({variable: value} the containers of server NAME get, [problem]) from DEFINITION: env from ENVIRON (your
+    environment) or the secret of its name, env_optional the same where there is one, env_values as they are,
+    env_secrets from their secrets (SECRET: name -> value or None). A problem (a required variable without a value)
+    says its fix; no value is ever said. A required one without a value that its catalog declares optional
+    (catalog_optional: a definition of before 0.1.95) is left out, said in NOTES (a list) instead."""
+    environ = os.environ if environ is None else environ
+    secret = secret or secret_value
+    found, problems = {}, []
+    for variable in definition.get("env", []):
+        value = environ.get(variable)
+        value = value if value is not None else secret(variable)
+        if value is None and catalog_optional(definition, variable):
+            if notes is not None:
+                notes.append(f"MCP server {name}: {variable} not set: left out (optional in the catalog); set it with "
+                             f"sandbox-ai mcp set {name} --env {variable}=VALUE (with its other variables), or make it "
+                             f"optional in the definition: sandbox-ai mcp set {name} --env {variable}")
+            continue
+        if value is None:
+            problems.append(f"MCP server {name} needs the variable {variable}: set it, or keep it with sandbox-ai "
+                            f"secrets set {variable}; a value that is no secret goes into its definition: sandbox-ai "
+                            f"mcp set {name} --env {variable}=VALUE (with its other variables)"
+                            + (f"; if its catalog declares it optional, sandbox-ai mcp set {name} --env {variable} "
+                               "(with its other variables) makes it optional"
+                               if isinstance(definition.get("catalog"), str) else ""))
+            continue
+        found[variable] = value
+    for variable in definition.get("env_optional", []):
+        value = environ.get(variable)
+        value = value if value is not None else secret(variable)
+        if value is not None:
+            found[variable] = value
+    found.update(definition.get("env_values") or {})
+    for variable, source in (definition.get("env_secrets") or {}).items():
+        value = secret(source)
+        if value is None:
+            problems.append(f"MCP server {name} takes {variable} from the secret {source}, which is not there: "
+                            f"sandbox-ai secrets set {source}")
+            continue
+        found[variable] = value
+    return found, problems
+
+
+def run_definition(definition, passed):
+    """DEFINITION as its containers run it: "env" the variables PASSED (each --env=NAME, the values in the bridge's
+    environment, never on a command line), the other forms gone."""
+    return {**{key: value for key, value in definition.items() if key not in ENV_KEYS}, "env": list(passed)}
+
+
+# --- a start's own variables (--mcp-env), in an instance of its own --------------------------------------------------
+
+def parse_start_env(value):
+    """(NAME, VAR, kind, detail) of one --mcp-env NAME:VAR=VALUE or NAME:VAR@SECRET (parse_env_spec); ValueError says
+    what is wrong."""
+    name, colon, rest = str(value).partition(":")
+    if not colon or not re.fullmatch(MCP_NAME_PATTERN, name) or not rest:
+        raise ValueError(f"--mcp-env NAME:VAR=VALUE or NAME:VAR@SECRET (NAME: an MCP server), not {shown_value(value)}")
+    variable, kind, detail = parse_env_spec(rest, f"--mcp-env {name}:")
+    if kind == "pass":
+        raise ValueError(f"--mcp-env {name}:{variable}: give its value (VAR=VALUE) or the secret it comes from "
+                         "(VAR@SECRET)")
+    return name, variable, kind, detail
+
+
+def start_env(a):
+    """{server: {VAR: (kind, detail)}} a start asks for (its --mcp-env, a later one for a variable over an earlier
+    one)."""
+    found = {}
+    for value in getattr(a, "mcp_env", None) or []:
+        name, variable, kind, detail = parse_start_env(value)
+        found.setdefault(name, {})[variable] = (kind, detail)
+    return found
+
+
+def with_start_env(name, definition, env):
+    """DEFINITION with a start's own variables ENV ({VAR: (kind, detail)}) in place of its own: only an image
+    server's (a command server's are its options' --env), never a helper's or a team's board."""
+    if not env:
+        return definition
+    if "helper" in definition or name.startswith("team-"):
+        raise ValueError(f"MCP server {name}: a helper's or a team's server takes no variables of its own "
+                         "(--mcp-env); it runs with its lead's start")
+    if "image" not in definition and "rootfs" not in definition:
+        raise ValueError(f"MCP server {name} is defined with a command: its variables are the --env options of its "
+                         "definition (sandbox-ai mcp list), not --mcp-env")
+    # As mcp add -e NAME=VALUE: never a plain value for a variable the server takes from a secret (its definition's
+    # env_secrets) - the value would be kept in the instance's definition and a saved board, whatever its name says.
+    secret_ones = sorted(variable for variable, (kind, _) in env.items()
+                         if kind == "value" and variable in (definition.get("env_secrets") or {}))
+    if secret_ones:
+        variable = secret_ones[0]
+        raise ValueError(f"--mcp-env {name}:{variable}=...: {name} takes {variable} from the secret "
+                         f"{definition['env_secrets'][variable]}, so its value is never kept as a plain value: give "
+                         f"--mcp-env {name}:{variable}@SECRET (sandbox-ai secrets set SECRET)")
+    return validated_image(with_variables(definition, env), f"--mcp-env {name}")
+
+
 def server_of(instance):
     """The server an instance is of: NAME of NAME.HASH, NAME itself."""
     return instance.split(".", 1)[0]
 
 
 def instance_of(a, name):
-    """The instance of server NAME the start A reaches (instance_for its --mcp-limits and --mcp-mount; NAME without
-    them)."""
+    """The instance of server NAME the start A reaches: the one its check chose (a.mcp_instances: start_instance, an
+    instance of its own where NAME runs with another definition), else instance_for its --mcp-limits, --mcp-mount and
+    --mcp-env; NAME without them."""
+    chosen = (getattr(a, "mcp_instances", None) or {}).get(name)
+    if isinstance(chosen, str) and re.fullmatch(INSTANCE_PATTERN, chosen) and server_of(chosen) == name:
+        return chosen
     limits, mounts = start_change(a, name)
-    if not limits and not mounts:
+    env = start_env(a).get(name)
+    if not limits and not mounts and not env:
         return name
     servers = {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
     if name not in servers:
         return name
-    return instance_for(name, servers[name], limits, mounts)[0]
+    return instance_for(name, servers[name], limits, mounts, env)[0]
 
 
 def instances(name, include_stopped=False):
@@ -616,12 +1021,13 @@ def check_image_policy(name, definition):
         raise ValueError(f"MCP server {name}: --vpn is not allowed by the administrator's policy ({l.POLICY_FILE})")
 
 
-def check_image_mounts(name, definition):
+def check_image_mounts(name, definition, remember=True, warn=None):
     """The host folders of an image server pass the launcher's host-path policy, read-only or not, as a --mount
     does (agent_sandbox.check_given_path): no symlink a sandbox may have planted on the way, no folder of the user's
     sockets or tree with a live socket, no file system of the kernel's own, none of sandbox-ai's own folders, a
-    private location with a warning, and not inside a tree an agent can write (it could swap the folder for a link
-    before the next connection mounts it). Their rw folders join the registry."""
+    private location with a warning (WARN(text), default: stderr), and not inside a tree an agent can write (it could
+    swap the folder for a link before the next connection mounts it). Their rw folders join the registry (with
+    REMEMBER: the server's start; `mcp add|set` and a start's first check only check)."""
     l = launcher()
     before = l.exposed_before()
     writable = []
@@ -639,10 +1045,10 @@ def check_image_mounts(name, definition):
         # As a --mount gets, whatever its mode (the container runs as root, you): no folder of sockets, no file
         # system of the kernel's own, no tree with a live socket, never sandbox-ai's own folders; a private
         # location with a warning.
-        l.check_given_path(resolved, option, mount.get("mode", "ro") == "rw")
+        l.check_given_path(resolved, option, mount.get("mode", "ro") == "rw", warn=warn)
         if mount.get("mode", "ro") == "rw":
             writable.append(resolved)
-    if writable:
+    if writable and remember:
         l.remember_exposed(None, writable)
 
 
@@ -753,6 +1159,8 @@ def image_command(plan, engine="podman"):
     limits = default_limits(definition)
     flags = [flag.replace(",size=64m,", f",size={limits['tmp']},") if flag.startswith("--tmpfs=/tmp:") else flag
              for flag in RUN_FLAGS]
+    if server_is_pid1(definition):  # no catatonit holding the MCP pipes at /proc/1/fd: the server is PID 1
+        flags.remove("--init")
     command = [engine, "run", *flags, f"--pids-limit={limits['pids']}", f"--memory={limits['memory']}"]
     controllers = launcher().delegated_controllers()
     if controllers is None or "cpu" in controllers:  # rootless Podman sets it only where the controller is delegated
@@ -828,7 +1236,7 @@ def read_catalog(source, fetch=None, signature=False):
         raise ValueError(f"{source}: larger than {CATALOG_LIMIT >> 20} MiB")
     try:
         document = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ValueError(f"{source}: not JSON") from None
     if not isinstance(document, dict) or document.get("schema") != "axross-mcp-catalog" or \
             document.get("version") != 1 or not isinstance(document.get("entries"), list):
@@ -854,12 +1262,6 @@ def well_formed(entry):
         and objects(entry.get("env", []), "name") and isinstance(entry.get("limits", {}), dict)
 
 
-def read_rootfs(source, signature, fetch=None):
-    """({name: rootfs entry}, problem or None) of rootfs.json beside catalog SOURCE (read_sidecar)."""
-    rootfs, _limits, problem = read_sidecar(source, signature, fetch)
-    return rootfs, problem
-
-
 def read_sidecar(source, signature, fetch=None):
     """({name: rootfs entry}, {name: limits}, problem or None) of rootfs.json beside catalog SOURCE: sandbox-ai's own
     part of the catalog - the Bubblewrap form of the servers (archive URL, SHA-256, entrypoint, user, workdir, env)
@@ -879,7 +1281,7 @@ def read_sidecar(source, signature, fetch=None):
         return {}, {}, f"{path}: not used ({own.get('reason', 'not signed like its catalog')})"
     try:
         document = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}, {}, f"{path}: not JSON"
     if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(document.get("rootfs"), dict):
         return {}, {}, f"{path}: expected {{\"version\": 1, \"rootfs\": {{NAME: ...}}}}"
@@ -953,6 +1355,15 @@ def downloaded(sources, fetch=None):
     return handed_out
 
 
+def os_reason(exc):
+    """What went wrong of an OSError EXC in words ("No such file or directory"; a download's reason), without Python's
+    "[Errno N]" and the path said again."""
+    reason = getattr(exc, "reason", None)
+    if reason is not None:
+        return str(getattr(reason, "strerror", None) or reason)
+    return exc.strerror or str(exc)
+
+
 def catalog_entries(sources=None, fetch=None):
     """[(prefix, entry)] of all catalogs; unreachable ones are reported, not fatal."""
     found, problems = [], []
@@ -974,15 +1385,76 @@ def catalog_entries(sources=None, fetch=None):
             if getattr(exc, "code", None) == 404:  # urllib's HTTPError
                 problems.append(f"{source}: not published there (yet); pass --catalog FILE_OR_URL")
             else:
-                problems.append(f"{source}: {exc}")
+                problems.append(f"{source}: {os_reason(exc)}")
         except ValueError as exc:
             problems.append(f"{source}: {exc}")
     remember_recommended(found)
+    remember_catalog_env(found)
     return found, problems
 
 
 def recommended_file():
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "sandbox-ai" / "mcp-recommended.json"
+
+
+def catalog_env_file():
+    return recommended_file().with_name("mcp-catalog-env.json")
+
+
+def remember_catalog_env(found):
+    """The variables each entry of FOUND (catalog_entries) declares - whether required, whether a secret - and its
+    catalog's signature, kept by catalog and entry (catalog_env_file): a start asks whether a variable a definition
+    needs is optional in its catalog (catalog_optional) without reading the catalog (no network at a start). An
+    entry of a catalog whose signature does not verify is forgotten."""
+    try:
+        path = catalog_env_file()
+        known = json.loads(path.read_text()) if path.is_file() else {}
+        known = known if isinstance(known, dict) else {}
+    except (OSError, ValueError, RecursionError):
+        known = {}
+    changed = False
+    for _prefix, entry in found:
+        catalog, ident = entry.get("_catalog"), entry.get("id") or entry.get("name")
+        if not isinstance(catalog, str) or not isinstance(ident, str):
+            continue
+        state = (entry.get("_signature") or {}).get("state")
+        if state not in ("good", "unsigned"):
+            changed |= isinstance(known.get(catalog), dict) and known[catalog].pop(ident, None) is not None
+            continue
+        env = {v["name"]: {"required": v.get("required") is not False, "secret": v.get("secret") is not False}
+               for v in entry.get("env", []) if isinstance(v, dict) and isinstance(v.get("name"), str)
+               and ENV_NAME.fullmatch(v["name"])}
+        kept = {"signature": state, "env": env}
+        if not isinstance(known.get(catalog), dict):
+            known[catalog] = {}
+        if known[catalog].get(ident) != kept:
+            known[catalog][ident] = kept
+            changed = True
+    if changed:
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            write_private(path, known)
+
+
+def catalog_optional(definition, variable):
+    """True when the catalog entry DEFINITION was added from declares VARIABLE optional and no secret (explicitly:
+    "required": false, "secret": false), as that catalog was last read here (catalog_env_file; nothing is
+    downloaded) - and, for a definition added from a signed catalog, signed by a trusted key then too. A definition
+    added before 0.1.95 made such a variable required (`mcp add --env NAME`): it is left out when it has no value."""
+    catalog, source = definition.get("catalog"), definition.get("source")
+    if not isinstance(catalog, str) or not isinstance(source, str):
+        return False
+    try:
+        known = json.loads(catalog_env_file().read_text())
+    except (OSError, ValueError, RecursionError):
+        return False
+    entries = known.get(catalog) if isinstance(known, dict) else None
+    entry = entries.get(source) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict) or entry.get("signature") not in ("good", "unsigned") or \
+            (definition.get("signed_by") and entry.get("signature") != "good"):
+        return False
+    declared = entry.get("env", {}).get(variable) if isinstance(entry.get("env"), dict) else None
+    return isinstance(declared, dict) and declared.get("required") is False and declared.get("secret") is False
 
 
 def remember_recommended(found):
@@ -992,7 +1464,7 @@ def remember_recommended(found):
         path = recommended_file()
         known = json.loads(path.read_text()) if path.is_file() else {}
         known = known if isinstance(known, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         known = {}
     changed = False
     for _prefix, entry in found:
@@ -1017,7 +1489,7 @@ def below_recommended(definition):
         known = json.loads(recommended_file().read_text())
         wanted = known.get(catalog, {}).get(ident) if isinstance(known, dict) else None
         wanted = checked_limits(wanted) if isinstance(wanted, dict) else {}
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return {}
     have = default_limits(definition) or {}
     below = {}
@@ -1075,7 +1547,7 @@ def mount_host(value, host, mode, create=False, out=None):
             path.mkdir(mode=0o700, parents=True)
         except OSError as exc:
             raise ValueError(f"--mount {value}: {path} cannot be created: {exc.strerror or exc}") from None
-        (out or print)(f"sandbox-mcp: created {path}")
+        (out or print)(f"sandbox-ai mcp: created {path}")
     return path
 
 
@@ -1098,20 +1570,6 @@ def entry_mounts(entry, mounts, create=False, out=None):
     if missing:
         raise ValueError(f"{entry['name']} needs --mount {missing[0]}=HOST (HOST: a folder on this machine)")
     return list(given.values())
-
-
-def entry_env(entry, env):
-    """The variables ENV for catalog ENTRY: only those it uses, every required one."""
-    names = [v.get("name") for v in entry.get("env", []) if isinstance(v, dict)]
-    required = [v.get("name") for v in entry.get("env", []) if isinstance(v, dict) and v.get("required")]
-    unknown = [n for n in env if n not in names]
-    if unknown:
-        raise ValueError(f"{entry['name']} does not use {', '.join(unknown)}"
-                         + (f" (it takes {', '.join(names)})" if names else ""))
-    if [n for n in required if n not in env]:
-        raise ValueError(f"{entry['name']} needs --env {[n for n in required if n not in env][0]} (the variable "
-                         "is read from your environment when the server starts)")
-    return list(dict.fromkeys(env))
 
 
 def recommended_limits(entry):
@@ -1148,9 +1606,10 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
     limits = {**recommended_limits(entry),
               **checked_limits({key: value for key, value in (("memory", memory), ("cpus", cpus), ("pids", pids),
                                                               ("tmp", tmp)) if value}, "--memory/--cpus/--pids/--tmp")}
-    env = entry_env(entry, env)
+    # --env NAME (required as the entry says, else optional), NAME=VALUE (never for a secret), NAME@SECRET.
+    variables = entry_variables(entry, env)
     definition = {"image": f"{image}@{digest}", "network": network,
-                  "mounts": entry_mounts(entry, mounts, create, out), "env": env,
+                  "mounts": entry_mounts(entry, mounts, create, out), **variables,
                   "description": str(entry.get("title") or entry.get("name")),
                   "source": str(entry.get("id") or entry.get("name"))}
     if "memory" in limits:
@@ -1163,6 +1622,10 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
         definition["tmp"] = limits["tmp"]
     if vpn:
         definition["vpn"] = vpn
+    if entry_tool_timeout(entry) is not None:
+        definition["tool_timeout"] = entry_tool_timeout(entry)
+    if "pid1" in entry:  # checked with the rest (validated_image): a value that is not "server" is refused
+        definition["pid1"] = entry["pid1"]
     return validated_image(definition, entry["name"])
 
 
@@ -1181,7 +1644,7 @@ def check_signature(entry, unsigned=False, out=print):
         raise ValueError(f"{entry.get('name')}: its catalog is not signed by a trusted key ({signature['reason']}), "
                          "so nobody vouched that it is built from its pinned sources and works with sandbox-ai; "
                          "--unsigned adds it anyway")
-    out(f"sandbox-mcp: {entry.get('name')}: added unsigned ({signature['reason']})")
+    out(f"sandbox-ai mcp: {entry.get('name')}: added unsigned ({signature['reason']})")
     return {"signed_by": None}
 
 
@@ -1206,8 +1669,10 @@ def pull_image(image, local, out=print, popen=subprocess.Popen):
     CalledProcessError when it fails (its last lines said)."""
     progress = progress_module()
     argv = ["podman", "pull", image]
-    status = progress.stream(argv, f"pulling the image of {local}", progress.Progress(out=out, prefix="sandbox-mcp"),
+    begun = time.monotonic()
+    status = progress.stream(argv, f"pulling the image of {local}", progress.Progress(out=out, prefix="sandbox-ai mcp"),
                              popen=popen)
+    LOG.ran("mcp", f"pull the image of {local}", argv, begun, returncode=status)
     if status != 0:
         raise subprocess.CalledProcessError(status, argv)
 
@@ -1218,9 +1683,11 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     verified (or UNSIGNED): for Podman its image pulled by digest, for Bubblewrap its rootfs fetched, checked and
     unpacked (BACKEND podman, bwrap or both; default: Podman when it is there or the entry has no rootfs). The limits
     given, else those the entry recommends; a writable folder that is not there yet is created (once all is checked)."""
+    LOG.info("mcp", f"add asked: {name}" + (f" as {local}" if local else "") + (f", backend {backend}" if backend else ""))
     entries, problems = catalog_entries(catalogs, fetch)
     for problem in problems:
-        out(f"sandbox-mcp: catalog not read: {problem}")
+        LOG.warning("mcp", f"catalog not read: {problem}")
+        out(f"sandbox-ai mcp: catalog not read: {problem}")
     entry = find_entry(entries, name)
     unsigned_note = []
     signed = check_signature(entry, unsigned, unsigned_note.append)
@@ -1239,15 +1706,18 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     if not re.fullmatch(MCP_NAME_PATTERN, local) or local in BUILTIN:
         raise ValueError(f"invalid or reserved server name: {local}")
     if entry.get("network") == "allowlist":
-        out(f"sandbox-mcp: {local} gets the full outside network; it needs only {', '.join(entry.get('hosts', []))}")
+        out(f"sandbox-ai mcp: {local} gets the full outside network; it needs only {', '.join(entry.get('hosts', []))}")
     elif definition.get("network") == "full":
-        out(f"sandbox-mcp: {local} gets the full outside network ("
+        out(f"sandbox-ai mcp: {local} gets the full outside network ("
             + ("--network full" if network == "full" else "its catalog entry asks for it") + ")")
     recommended = {key: value for key, value in recommended_limits(entry).items()
                    if not {"memory": memory, "cpus": cpus, "pids": pids, "tmp": tmp}[key]}
     if recommended:
-        out(f"sandbox-mcp: {local} gets the limits its catalog entry recommends: {limits_text(recommended)} "
+        out(f"sandbox-ai mcp: {local} gets the limits its catalog entry recommends: {limits_text(recommended)} "
             f"(sandbox-ai mcp set {local} changes them)")
+    if "image" in definition or "rootfs" in definition:  # (a folder its start would refuse: never added)
+        check_image_mounts(local, definition, remember=False, warn=lambda _line: None)
+    checked_behind_tor(local, definition, vpn, out, entry)
     if pull:
         pull_image(definition["image"], local, out)
     create_mounts(definition, out)
@@ -1256,7 +1726,8 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
         out(line)
     form = " and ".join(([definition["image"]] if "image" in definition else []) +
                         ([f"rootfs {definition['rootfs']['sha256'][:12]} (Bubblewrap)"] if "rootfs" in definition else []))
-    out(f"sandbox-mcp: {local} added ({form}); use it with --mcp {local}")
+    LOG.info("mcp", f"{local} added ({form}; catalog {definition.get('catalog') or 'none'})")
+    out(f"sandbox-ai mcp: {local} added ({form}); use it with --mcp {local}")
     return definition
 
 
@@ -1272,30 +1743,55 @@ def read_config():
     path = config_file()
     try:
         document = json.loads(path.read_text()) if path.is_file() else {}
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ValueError(f"{path}: invalid JSON: {exc}") from None
     if not isinstance(document, dict):
         raise ValueError(f"{path}: MCP servers must be an object of NAME: definition")
     return path, document
 
 
+_filelock = None
+
+
+def config_lock():
+    """The lock of a read-modify-write of mcp.json (filelock.py, mcp.json.lock): `mcp add` and `mcp set` run side by
+    side (the app's MCP page and a terminal) each read the file and wrote it back whole - one change was lost."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock_for_mcp", HERE / "filelock.py")
+        with LOADING:
+            if _filelock is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _filelock = loaded
+    return _filelock.locked(config_file())
+
+
 def write_definition(name, definition):
-    """DEFINITION as server NAME in the user's mcp.json, replaced in one step."""
-    path, document = read_config()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    document[name] = definition
-    fd, temporary = tempfile.mkstemp(prefix=".mcp-", dir=path.parent)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(document, stream, indent=2)
-    os.replace(temporary, path)
+    """DEFINITION as server NAME in the user's mcp.json, replaced in one step (under config_lock: the other servers'
+    definitions as they are now)."""
+    with config_lock():
+        path, document = read_config()
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        document[name] = definition
+        fd, temporary = tempfile.mkstemp(prefix=".mcp-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(document, stream, indent=2)
+            os.replace(temporary, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)  # (a full disk: no .mcp-* file left beside it)
+            raise
 
 
-SET_KEYS = ("memory", "cpus", "pids", "tmp", "network", "mounts", "env", "vpn", "recommended")
+SET_KEYS = ("memory", "cpus", "pids", "tmp", "network", "mounts", "env", "vpn", "recommended", "tool_timeout")
 
 
 def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
     """(old definition, new definition) of server NAME of the user's mcp.json with CHANGES ({memory, cpus, pids,
-    network, mounts: [TARGET=HOST[:ro|rw]], env: [NAME], vpn: PROFILE or None}; a key left out stays as it is; memory,
+    network, mounts: [TARGET=HOST[:ro|rw]], env: [NAME | NAME=VALUE | NAME@SECRET] (all of its variables:
+    entry_variables), vpn: PROFILE or None}; a key left out stays as it is; memory,
     cpus or pids None: back to the default), checked as `mcp add` checks them: the mounts and variables against the
     catalog entry (ENTRY, else read from the catalog it was added from), the limits, network and VPN as add takes them.
     Its image, rootfs, signature and catalog stay as they are. Nothing is written or created here (set() does)."""
@@ -1309,6 +1805,14 @@ def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
     old = validated({name: document[name]}, config_file())[name]
     new = json.loads(json.dumps(old))
     changes = dict(changes)
+    if "tool_timeout" in changes:  # the agents' wait for one of its calls, for a server of either kind
+        new.pop("tool_timeout", None)
+        timeout = changes.pop("tool_timeout")
+        if timeout is not None:
+            new["tool_timeout"] = checked_tool_timeout(timeout, "--tool-timeout")
+        if not changes:
+            return old, (validated_image(new, f"MCP server {name}") if "image" in old or "rootfs" in old
+                         else validated({name: new}, config_file())[name])
     if changes.pop("recommended", False):
         # The limits its catalog entry recommends, for those not given here as well.
         recommended = recommended_limits(entry or catalog_entry_of(name, old, fetch, catalogs))
@@ -1350,7 +1854,9 @@ def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
         if "mounts" in changes:
             new["mounts"] = entry_mounts(entry, changes["mounts"])
         if "env" in changes:
-            new["env"] = entry_env(entry, changes["env"])
+            # All of its variables (as add takes them): NAME, NAME=VALUE (never for a secret one), NAME@SECRET.
+            new = {**{key: value for key, value in new.items() if key not in ENV_KEYS},
+                   **entry_variables(entry, changes["env"])}
     return old, validated_image(new, f"MCP server {name}")
 
 
@@ -1374,9 +1880,11 @@ def set_changes(a):
         changes["vpn"] = a.vpn or None
     if getattr(a, "recommended", False):
         changes["recommended"] = True
+    if getattr(a, "tool_timeout", None) is not None:
+        changes["tool_timeout"] = parse_tool_timeout(a.tool_timeout)
     if not changes:
         raise ValueError("give what to change: --memory, --cpus, --pids, --tmp, --recommended, --network, --mount, "
-                         "--env or --vpn")
+                         "--env, --vpn or --tool-timeout")
     return changes
 
 
@@ -1418,8 +1926,8 @@ def catalog_entry_of(name, definition, fetch=None, catalogs=None):
 def set_server(name, changes, stop_running=False, out=print, fetch=None, catalogs=None):
     """sandbox-ai mcp set NAME: CHANGES (set_definition) written into mcp.json, a writable folder that is not there yet
     created; its running instances are stopped with STOP_RUNNING (a start that uses it starts it again with these
-    settings), else they run on as they are until stopped - and a start refuses a server that runs with another
-    definition until then. {"server", "changed": [keys], "definition", "running": [instances], "stopped": [...],
+    settings), else they run on as they are until stopped - a start meanwhile gets an instance of its own with the
+    new definition (start_instance). {"server", "changed": [keys], "definition", "running": [instances], "stopped": [...],
     "message"}."""
     old, new = set_definition(name, changes, fetch=fetch, catalogs=catalogs)
     changed = sorted(key for key in set(old) | set(new) if old.get(key) != new.get(key))
@@ -1428,6 +1936,10 @@ def set_server(name, changes, stop_running=False, out=print, fetch=None, catalog
         result["message"] = f"MCP server {name}: nothing changed"
         out(result["message"])
         return result
+    if "vpn" in changed:
+        checked_behind_tor(name, new, new.get("vpn"), out)
+    if "mounts" in changed and ("image" in new or "rootfs" in new):  # (a folder its start would refuse: never set)
+        check_image_mounts(name, new, remember=False, warn=lambda _line: None)
     create_mounts(new, out)
     write_definition(name, new)
     running = instances(name)
@@ -1439,8 +1951,8 @@ def set_server(name, changes, stop_running=False, out=print, fetch=None, catalog
         result["stopped"] = running
         text += f". Stopped {', '.join(running)}: the next start that uses it starts it with these settings"
     elif running:
-        text += (f". It runs ({', '.join(running)}) as it was until it is stopped, and a start refuses it until then: "
-                 f"sandbox-ai mcp stop {name}")
+        text += (f". It runs ({', '.join(running)}) as it was until it is stopped; a start meanwhile gets an instance "
+                 f"of its own with these settings (sandbox-ai mcp stop {name} ends the old one)")
     result["message"] = text
     out(text)
     return result
@@ -1499,7 +2011,7 @@ def definitions(project=None):
     if path.is_file():
         try:
             document = json.loads(path.read_text())
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise ValueError(f"{path}: invalid JSON: {exc}") from None
         result.update(validated(document, path))
     if project:
@@ -1545,19 +2057,27 @@ def state_dir(name):
 
 
 def load_state(name):
+    """The state of server NAME's sandbox ({} when there is none, or it is damaged: valid JSON of another shape -
+    a list, a number - ended `mcp list` for every server, and `mcp stop`, with an AttributeError)."""
     try:
-        return json.loads((state_dir(name) / "mcp.json").read_text())
-    except (OSError, ValueError):
+        state = json.loads((state_dir(name) / "mcp.json").read_text())
+    except (OSError, ValueError, RecursionError):
         return {}
+    return state if isinstance(state, dict) else {}
 
 
 def save_state(name, data):
     directory = state_dir(name)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".mcp-", dir=directory)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(data, stream, indent=2)
-    os.replace(temporary, directory / "mcp.json")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, indent=2)
+        os.replace(temporary, directory / "mcp.json")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)  # (a full disk: no .mcp-* file left in the server's state folder)
+        raise
 
 
 def status(name):
@@ -1571,17 +2091,49 @@ def status(name):
     return "running" if any(arg == directory or arg == directory + b"/server.sock" for arg in cmdline) else "stopped"
 
 
-def wait_for_socket(path, log, process, timeout=READY_TIMEOUT, ready=None):
-    """Until the server's socket PATH is there (READY: macOS, see machine_ready), or the sandbox ended."""
-    deadline = time.monotonic() + timeout
+# A line of a server's log that says how its own Tor bootstraps (vpn.mcp_wrapper's "sandbox-ai mcp: vpn: ...", a
+# command server's own start "agent-sandbox: vpn: ..."): said by the start that waits for it (wait_for_socket).
+TOR_PROGRESS = re.compile(r"(?:sandbox-ai mcp|agent-sandbox): (vpn: (?:tor: |Tor bootstrap ).{1,400})")
+
+
+def wait_for_socket(path, log, process, timeout=READY_TIMEOUT, ready=None, name=None, clock=time.monotonic,
+                    sleep=time.sleep, say=None):
+    """Until the server's socket PATH is there (READY: macOS, see machine_ready), or the sandbox ended. Past TIMEOUT
+    it waits as long as the server's LOG says new lines (progress.StartWatch: a server behind a Tor of its own
+    bootstraps for minutes), and what its Tor says of its bootstrap is said here too, as "MCP server NAME: vpn:
+    tor: bootstrapped 69% ..." (SAY, default standard error: the start's progress shows it)."""
+    progress = progress_module()
+    deadline = clock() + timeout
     ready = ready or path.exists
+    watch = progress.StartWatch(log, clock, cap=max(progress.START_CAP, timeout))
+    position = log.stat().st_size if name and log.exists() else 0
+    say = say or (lambda text: print(text, file=sys.stderr, flush=True))
+
+    def relay():
+        nonlocal position
+        try:
+            with open(log, "rb") as stream:
+                stream.seek(position)
+                chunk = stream.read(1 << 16)
+        except OSError:
+            return
+        complete = chunk[:chunk.rfind(b"\n") + 1]
+        position += len(complete)
+        for raw in complete.decode(errors="replace").splitlines():
+            found = TOR_PROGRESS.fullmatch(raw.strip())
+            if found:
+                say(f"agent-sandbox: MCP server {progress.shown(name, 80)}: {progress.shown(found[1], 300)}")
     while not ready():
+        if name:
+            relay()
         if process.poll() is not None:
             tail = launcher().printable(log.read_text(errors="replace")[-3000:]) if log.exists() else ""
             raise RuntimeError(f"MCP server sandbox failed to start (status {process.returncode}):\n{tail}")
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"MCP server did not become ready within {timeout} s; see {log}")
-        time.sleep(0.2)
+        over = watch.over(clock() > deadline)
+        if over:
+            raise RuntimeError(f"MCP server {name + ' ' if name else ''}did not become ready: {watch.why(over)}; see "
+                               f"{log}")
+        sleep(0.2)
 
 
 def machine_ready(name, a, runner=None):
@@ -1603,7 +2155,9 @@ def machine_ready(name, a, runner=None):
 
 
 def definition_digest(definition, backend, podman_url=None):
-    """Identity of a server instance: everything that decides what it can reach."""
+    """Identity of a server instance: everything that decides what it can reach (its tool_timeout is the agents'
+    setting, not the server's: a change of it makes no instance of its own)."""
+    definition = {key: value for key, value in definition.items() if key != "tool_timeout"}
     return hashlib.sha256(json.dumps([definition, backend, podman_url], sort_keys=True).encode()).hexdigest()
 
 
@@ -1707,6 +2261,83 @@ def server_options(definition, vpn):
 
 PLAN_KINDS = ("image", "command", "helper")
 
+# How the signed catalogs' servers fare behind a Tor profile. Tor is transparent there: every TCP connection goes to
+# tor's TransPort, which accepts it at once and only then has an exit try the destination; every lookup on port 53
+# goes to tor's DNSPort, which answers A, AAAA and PTR questions only; UDP, ICMP and raw sockets do not get past the
+# kill switch. A server that only speaks TCP (HTTPS APIs, browsers, whatweb, WHOIS, MTProto) works; one that needs
+# other DNS record types works in part; one that judges a port by whether its connection is accepted (a port scan)
+# would only be told lies. Every server of both catalogs is held to this in tests/test_mcp_tor_matrix.py. Keyed by
+# the catalog entry's id (a definition's "source"); a catalog entry's own "tor" ({"support": "limited"|"no", "note":
+# TEXT}) is taken over this table when it has one. Not listed: works behind Tor (or reaches no network at all).
+TOR_LIMITS = {
+    "hub:nmap": ("no", "its connect scans would see every port open: tor's TransPort accepts each connection before "
+                       "an exit tries the target, so every port state it reported through Tor would be wrong"),
+    "hub:nuclei": ("limited", "HTTP templates work; DNS templates of record types other than A, AAAA and PTR get no "
+                              "answer (tor's resolver answers only those), and templates of the network protocol see "
+                              "every port open (tor's TransPort accepts each connection first)"),
+    "hub:dnstwist": ("limited", "only A and AAAA lookups work (tor's resolver answers A, AAAA and PTR only): its MX "
+                                "and NS checks get no answer, and a scan of hundreds of permutations through Tor is "
+                                "slow"),
+    "mcp:osint-mcp": ("limited", "dns_lookup of record types other than A, AAAA and PTR (MX, TXT, NS, SOA, CAA ...), "
+                                 "email_security and the DNS parts of recon_domain and compare_domains get no answer: "
+                                 "tor's resolver answers A, AAAA and PTR only; RDAP, crt.sh, Wayback, RIPEstat, "
+                                 "InternetDB, HTTP headers and TLS work"),
+    "mcp:openosint": ("limited", "search_dns gets no answer for MX, NS, TXT, CNAME, SOA and DMARC (tor's resolver "
+                                 "answers A, AAAA and PTR only); WHOIS and the web lookups work, though some services "
+                                 "refuse Tor exits"),
+    "mcp:searxng": ("limited", "SEARXNG_URL must be reachable from a Tor exit: a public instance or an .onion "
+                               "address; one in your local network or on this host cannot be reached through Tor"),
+}
+TOR_SUPPORT = ("yes", "limited", "no")
+
+
+def tor_support(definition, entry=None):
+    """(support, note) of the server DEFINITION (or catalog ENTRY) behind a Tor profile: ("yes", "") when it works
+    there; ("limited", NOTE) when some of its tools do not; ("no", WHY) when it cannot work behind Tor at all
+    (TOR_LIMITS, or the catalog entry's own "tor")."""
+    own = (entry or {}).get("tor") if isinstance(entry, dict) else None
+    if isinstance(own, dict) and own.get("support") in TOR_SUPPORT:
+        return own["support"], launcher().printable(str(own.get("note") or ""))[:600]
+    source = str((entry or {}).get("id") or (definition or {}).get("source") or "")
+    return TOR_LIMITS.get(source, ("yes", ""))
+
+
+def tor_problem(name, definition, profile_name, entry=None):
+    """None, or why the server NAME (DEFINITION) cannot work behind the Tor profile PROFILE_NAME (ValueError's
+    text); a server that works in part is said by tor_note."""
+    support, why = tor_support(definition, entry)
+    if support != "no":
+        return None
+    return (f"MCP server {name} cannot work behind the Tor profile {profile_name}: {why}. Use it without Tor, or "
+            f"behind a VPN profile that is no Tor profile")
+
+
+def tor_note(name, definition, entry=None):
+    """What does not work of the server NAME behind Tor ("" when everything does)."""
+    support, note = tor_support(definition, entry)
+    return f"MCP server {name} behind Tor: {note}" if support == "limited" and note else ""
+
+
+def checked_behind_tor(name, definition, vpn, out, entry=None):
+    """mcp add --vpn and mcp set --vpn: a server that cannot work behind a Tor profile VPN is refused, one that works
+    in part is added with what does not work said (OUT)."""
+    if not vpn:
+        return
+    try:
+        kind = launcher().load_vpn_module().load_profile(vpn).get("type")
+    except (OSError, ValueError):
+        return  # (no such profile: the server's start says so)
+    if kind != "tor":
+        return
+    problem = tor_problem(name, definition, vpn, entry)
+    if problem:
+        LOG.warning("mcp", f"refused: {problem}")
+        raise ValueError(problem)
+    note = tor_note(name, definition, entry)
+    if note:
+        LOG.info("mcp", note)
+        out(f"sandbox-ai mcp: {note}")
+
 
 def server_kind(definition):
     return "helper" if "helper" in definition else "image" if "image" in definition or "rootfs" in definition \
@@ -1752,13 +2383,21 @@ def server_network(name, definition, vpn=None, vpn_module=None):
     if chosen is not None and reaches:
         try:
             profile = vpn_module.load_profile(chosen)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            LOG.debug("mcp", f"{name}: the VPN profile {chosen} is not read here (its own start refuses it)", exc)
             profile = None  # a missing or damaged profile: the VPN's own start refuses it (nothing starts)
         if profile is not None:
             plan["vpn_type"] = profile.get("type")
             problem = vpn_module.egress_problem(profile, name)
             if problem:
                 raise ValueError(problem)
+            if plan["vpn_type"] == "tor":
+                # A server that cannot work behind Tor is refused, not started broken (TOR_LIMITS); what does not
+                # work of one that works in part is said when it starts (begin_running).
+                problem = tor_problem(name, definition, chosen)
+                if problem:
+                    raise ValueError(problem)
+                plan["tor_note"] = tor_note(name, definition)
     return plan
 
 
@@ -1815,6 +2454,7 @@ def verified_or_stopped(name, plan, a, podman_url=None):
     try:
         verify_network(name, plan, a, podman_url)
     except ValueError as exc:
+        LOG.warning("mcp", f"{name}: stopped again - it does not run behind the VPN {plan['vpn']}", exc)
         stop_locked(name)
         raise ValueError(f"MCP server {name} was stopped: it does not run behind the VPN {plan['vpn']} as it must "
                          f"({exc})") from None
@@ -1936,12 +2576,222 @@ def check_vpn_starts(instance, plan, runs=None):
                 f"or end {launcher().printable(run)} first (sandbox-ai stop {launcher().printable(run)})")
 
 
+def start_servers(a):
+    """{name: definition} of every server the start A can name (definitions(), its project's, its helpers')."""
+    return {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
+
+
+def start_definition(name, a, servers=None):
+    """(instance, definition, digest) of server NAME as the start A runs it: instance_for its --mcp-limits,
+    --mcp-mount and --mcp-env (NAME, or NAME.HASH), the definition with them, and the digest of what decides what it
+    can reach (definition_digest of it with the gateway's rules of A's rulesets, A's backend). ValueError: NAME is not
+    defined, or what the start asks for it is not valid."""
+    servers = start_servers(a) if servers is None else servers
+    if name not in servers:
+        raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+    limits, mounts = start_change(a, name)
+    instance, definition = instance_for(name, servers[name], limits, mounts, start_env(a).get(name))
+    gateway = launcher().mcp_gateway(a, name, None)  # (only its rules count for the digest, not where it asks)
+    digest = definition_digest({**definition, "gateway": gateway["rules"]} if gateway else definition,
+                               a.backend, a.podman_url)
+    return instance, definition, digest
+
+
+def separable(name, definition):
+    """Whether server NAME (DEFINITION) may run in an instance of a start's own: not a helper (one per start, by its
+    own name) and not a team's board (one board the team's members share)."""
+    return "helper" not in definition and not name.startswith("team-")
+
+
+def own_instance(name, digest):
+    """NAME.HASH of the instance of server NAME for a start whose definition (its DIGEST, start_definition) differs
+    from the one NAME runs with."""
+    return f"{name}.{hashlib.sha256(str(digest).encode()).hexdigest()[:8]}"
+
+
+def start_instance(name, a, servers=None):
+    """(instance, definition, digest, note) of server NAME for the start A (start_definition), where an instance of
+    the same name runs with another definition or other rules already (another project's server of this name, a
+    definition changed by mcp set, another ruleset): an instance of its own for this start, NAME.HASH of what it runs
+    - the one running serves its starts on, unchanged, and nothing of it reaches this start. NOTE says so (None: the
+    instance is the start's as it is). ValueError for a helper or a team's board (one of each runs) and for an unknown
+    server."""
+    instance, definition, digest = start_definition(name, a, servers)
+    if status(instance) != "running" or load_state(instance).get("definition") == digest:
+        return instance, definition, digest, None
+    if not separable(name, definition):
+        raise ValueError(f"MCP server {instance} is running with a different definition or other rules, and "
+                         + ("a helper" if "helper" in definition else "a team's board") + " runs once: stop it "
+                         f"first: sandbox-ai mcp stop {instance}")
+    own = own_instance(name, digest)
+    if status(own) == "running" and load_state(own).get("definition") != digest:
+        raise ValueError(f"MCP server {own} is running with a different definition or other rules; stop it first: "
+                         f"sandbox-ai mcp stop {own}")
+    return own, definition, digest, (
+        f"MCP server {instance} runs with another definition or other rules (another project's server of that name, a "
+        f"definition changed since it started, or other MCP rules): this start gets an instance of its own, {own}; "
+        f"the running one serves its starts on (sandbox-ai mcp stop {instance} ends it)")
+
+
+def image_present(image, run=subprocess.run):
+    """Whether Podman of this host has IMAGE (`podman image exists`: a server's containers run it with --pull=never);
+    None when that cannot be said (no Podman, no answer; SANDBOX_AI_MCP_NO_IMAGE_CHECK=1: not asked - the tests' made-up
+    images)."""
+    if os.environ.get("SANDBOX_AI_MCP_NO_IMAGE_CHECK") == "1" or not shutil.which("podman"):
+        return None
+    try:
+        return LOG.run("mcp", f"is the server image {image} there", ["podman", "image", "exists", image], runner=run,
+                       ok=(0, 1), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=30, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None  # (its line in launcher.log says why)
+
+
+def start_problems(a, names, servers=None, present=None):
+    """([problem], {name: instance}, [note]) of the --mcp servers NAMES of the start A, each checked before anything
+    is made or started, every problem with its fix and all of them at once (a start used to fail on the first one,
+    late, after its workspace and session were made - and again on the next): what the start asks for them
+    (--mcp-limits, --mcp-mount, --mcp-env), their folders (there, or creatable when writable) and the administrator's
+    policy, their variables and secrets (run_variables), their image (there: Podman runs it with --pull=never;
+    PRESENT(image) -> True, False or None, default image_present) or rootfs, their VPN (their own profile there, the
+    start's VPN in front: vpn_for_servers), macOS (no image server yet), and an instance of the same name running with
+    another definition (start_instance: an instance of the start's own, said in a note; a helper's or a team's board
+    is a problem). The instances: those that are not NAME. Names not in SERVERS are left to the caller (unknown)."""
+    servers = start_servers(a) if servers is None else servers
+    present = present or image_present
+    problems, found, notes = [], {}, []
+    wanted = {}
+    for key, parse in (("limits", start_limits), ("mounts", start_mounts), ("env", start_env)):
+        try:
+            wanted[key] = parse(a)
+        except ValueError as exc:
+            problems.append(str(exc))
+            wanted[key] = {}
+    l = launcher()
+    vpn_module = None
+    for name in dict.fromkeys(names):
+        if name not in servers:
+            continue
+        own_problems = []
+        try:
+            _instance, definition = instance_for(name, servers[name], wanted["limits"].get(name),
+                                                 wanted["mounts"].get(name), wanted["env"].get(name))
+            if wanted["mounts"].get(name):
+                check_start_mounts(a, {name: servers[name]})
+        except ValueError as exc:
+            problems.append(str(exc))
+            continue
+        if "image" in definition or "rootfs" in definition:
+            if l.on_machine(a):
+                own_problems.append(f"MCP server {name} is a container image of a catalog; on macOS such servers are "
+                                    "not supported yet: start without it (a server defined with a command works)")
+            for mount in definition.get("mounts", []):
+                with contextlib.suppress(KeyError):
+                    try:
+                        mount_host(f"{mount['target']}={mount['host']}:{mount.get('mode', 'ro')}", mount["host"],
+                                   mount.get("mode", "ro"))
+                    except ValueError as exc:
+                        own_problems.append(f"MCP server {name}: {exc} (sandbox-ai mcp set {name} --mount ...)")
+            if not own_problems:  # (the folders there: the host-path policy its start holds them to, read-only too)
+                try:
+                    check_image_mounts(name, definition, remember=False, warn=lambda _line: None)
+                except ValueError as exc:
+                    own_problems.append(str(exc))
+            try:
+                check_image_policy(name, definition)
+            except ValueError as exc:
+                own_problems.append(str(exc))
+            own_problems += run_variables(name, definition, notes=notes)[1]
+            engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) \
+                else "podman"
+            if engine == "podman" and present(definition["image"]) is False:
+                own_problems.append(f"MCP server {name}: its image {definition['image']} is not there (its containers "
+                                    f"are not pulled at a start): podman pull {definition['image']}, or add it again "
+                                    f"(sandbox-ai mcp add)")
+            elif engine == "bwrap" and not Path(str(definition["rootfs"].get("path", ""))).is_dir():
+                own_problems.append(f"MCP server {name}: its rootfs is gone ({definition['rootfs'].get('path')}); "
+                                    "add it again: sandbox-ai mcp add ... --backend bwrap")
+        own_vpn = network_of(definition)[1]
+        if own_vpn and not getattr(a, "vpn", None):
+            try:
+                vpn_module = vpn_module or l.load_vpn_module()
+                vpn_module.load_profile(own_vpn)
+            except (OSError, ValueError) as exc:
+                own_problems.append(f"MCP server {name}: its VPN: {exc}")
+        if getattr(a, "vpn", None):
+            try:
+                vpn_for_servers(a, [name])
+            except (OSError, ValueError) as exc:
+                own_problems.append(str(exc))
+        if not own_problems:
+            try:
+                instance, _definition, _digest, note = start_instance(name, a, servers)
+            except ValueError as exc:
+                own_problems.append(str(exc))
+            else:
+                if instance != name:
+                    found[name] = instance
+                if note:
+                    notes.append(note)
+        problems += own_problems
+    return list(dict.fromkeys(problems)), found, notes
+
+
+def problems_text(problems, about="the MCP servers of this start"):
+    """What a start with PROBLEMS (start_problems) is told: the one problem, else each on a line of its own after how
+    many there are (with ABOUT: "this start" when others than its MCP servers' are among them) - none of them is a
+    reason to try one at a time."""
+    if len(problems) == 1:
+        return problems[0]
+    return (f"{len(problems)} problems with {about} (nothing was started or made; fix them, then start again):\n"
+            + "\n".join(f"  - {problem}" for problem in problems))
+
+
+def remember_instance(a, name, instance):
+    """The instance of server NAME the start A reaches (its socket is mounted, its record names it): a.mcp_instances."""
+    found = dict(getattr(a, "mcp_instances", None) or {})
+    if instance == name:
+        found.pop(name, None)
+    else:
+        found[name] = instance
+    with contextlib.suppress(AttributeError):
+        a.mcp_instances = found
+
+
 def ensure_running(name, a, vpn=None):
     """Start the server sandbox for NAME unless it already runs; returns 'running' or 'started'. VPN (sandbox-ai
-    mcp start --vpn) puts that VPN profile in front for this start, whatever the definition says."""
-    instance = instance_of(a, name)  # NAME, or NAME.HASH for a start with limits of its own (--mcp-limits)
+    mcp start --vpn) puts that VPN profile in front for this start, whatever the definition says. The instance is
+    start_instance's: NAME, NAME.HASH for a start with limits, folders or variables of its own, or one of its own
+    where NAME runs with another definition."""
+    instance, _definition, _digest, note = start_instance(name, a)
+    if note and (getattr(a, "mcp_instances", None) or {}).get(name) != instance:
+        print(f"agent-sandbox: {note}", file=sys.stderr)  # (the start's check said it already otherwise)
+    remember_instance(a, name, instance)
     with server_lock(instance):
         return ensure_running_locked(name, a, vpn, instance)
+
+
+def begin_running(name, a, vpn=None):
+    """ensure_running without its wait: the server for NAME started (unless it runs) and left starting; the function
+    returned waits until it is ready (its socket, its network checked, "started" said) and returns 'running' or
+    'started'. The server's lock is held until then: a start begins each of its servers, then waits for them, so that
+    their sandboxes come up side by side instead of one after another."""
+    instance, _definition, _digest, note = start_instance(name, a)
+    if note and (getattr(a, "mcp_instances", None) or {}).get(name) != instance:
+        print(f"agent-sandbox: {note}", file=sys.stderr)  # (the start's check said it already otherwise)
+    remember_instance(a, name, instance)
+    held = contextlib.ExitStack()
+    held.enter_context(server_lock(instance))
+    try:
+        outcome = ensure_running_locked(name, a, vpn, instance, wait=False)
+    except BaseException:
+        held.close()
+        raise
+
+    def ready():
+        with held:
+            return outcome() if callable(outcome) else outcome
+    return ready
 
 
 def gateway_arguments(gateway):
@@ -2001,15 +2851,19 @@ def started_for(a):
     return found if any(found.values()) else None
 
 
-def ensure_running_locked(name, a, vpn=None, instance=None):
-    """ensure_running under the lock of INSTANCE (instance_of: NAME, or NAME.HASH with the start's own limits)."""
-    servers = {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
+def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
+    """ensure_running under the lock of INSTANCE (start_instance: NAME, NAME.HASH with the start's own limits, folders
+    or variables, or one of its own where NAME runs with another definition). WAIT False: a server it starts is left
+    starting, and what it returns then is the function that waits until it is ready (begin_running)."""
+    servers = start_servers(a)
     if name not in servers:
         raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
     limits, mounts = start_change(a, name)
     if mounts:  # the start's own folders: a writable one that is not there yet is made now (as mcp add makes it)
         check_start_mounts(a, {name: servers[name]}, create=True, out=lambda line: print(line, file=sys.stderr))
-    instance, definition = instance_for(name, servers[name], limits, mounts)
+    base, definition = instance_for(name, servers[name], limits, mounts, start_env(a).get(name))
+    instance = instance if isinstance(instance, str) and server_of(instance) == name and \
+        re.fullmatch(INSTANCE_PATTERN, instance) else base
     directory = state_dir(instance)
     # How it is named in what is said: NAME, or NAME.HASH with its limits (an instance of a start's own limits) and
     # the folders of the start's own.
@@ -2023,6 +2877,9 @@ def ensure_running_locked(name, a, vpn=None, instance=None):
                                a.backend, a.podman_url)
     # Its network, decided in the one place for it (with VPN: behind that VPN, whatever the definition says).
     plan = server_network(instance, definition, vpn)  # (an instance: its own VPN container and pod)
+    if plan.get("tor_note"):  # behind Tor, what of it does not work there (TOR_LIMITS), said as it starts
+        LOG.info("mcp", plan["tor_note"])
+        print(f"agent-sandbox: {plan['tor_note']}", file=sys.stderr)
     if launcher().on_machine(a) and ("image" in definition or "rootfs" in definition):
         # The bridge of a catalog server runs on this host and listens on a Unix socket there, which the sandboxes in
         # podman machine's VM cannot connect to (TODO.md: macOS support, stage 4).
@@ -2033,6 +2890,7 @@ def ensure_running_locked(name, a, vpn=None, instance=None):
         if load_state(instance).get("definition") != digest:
             # Another project's definition of this name: its workspace must not reach this agent. Other rules
             # for it: they must not hold for this agent instead of its own.
+            LOG.warning("mcp", f"{label}: refused - it runs with another definition or other rules")
             raise ValueError(f"MCP server {label} is running with a different definition or other rules; "
                              f"stop it first: sandbox-ai mcp stop {instance}")
         # Behind the VPN this start puts it behind, or behind its own definition's (vpn None here): a server of
@@ -2049,11 +2907,22 @@ def ensure_running_locked(name, a, vpn=None, instance=None):
             print(f"agent-sandbox: MCP server {label} lost its VPN ({exc}); it is started again", file=sys.stderr)
             usable = False
         if usable:
+            LOG.info("mcp", f"{label}: runs already (PID {state.get('pid')}); this start uses it")
             return "running"
+        LOG.info("mcp", f"{label}: runs, but its socket or its VPN is gone; it is stopped and started again")
         stop_locked(instance)  # alive but its socket (or its VPN) is gone: replace it rather than start a second one
     check_vpn_starts(instance, plan)  # never back outside the VPN of a running start that reaches it
     sock = launcher().mcp_socket_dir(instance)
     definition = plan["definition"]
+    variables = {}
+    if "image" in definition or "rootfs" in definition:
+        # Its variables (required ones, optional ones there are, plain values, secrets), every problem at once; its
+        # containers get exactly these, each --env=NAME with the value in the bridge's environment.
+        variables, problems = run_variables(name, definition)
+        if problems:
+            raise ValueError("; ".join(problems))
+        definition = run_definition(definition, variables)
+        plan = {**plan, "definition": definition}
     # The server sandbox can write its socket directory: start from a fresh one. Questions of an earlier
     # server are void: their asker is gone.
     shutil.rmtree(sock, ignore_errors=True)
@@ -2097,21 +2966,13 @@ def ensure_running_locked(name, a, vpn=None, instance=None):
                    plan["vpn_container"], str(sock.resolve()), "--", *bridge,
                    *watched(directory, instance, definition, connection_command(plan))]
         environment = dict(os.environ)
-        for variable in definition.get("env", []):
-            if variable not in environment:
-                # Not in your environment: the secret of that name (sandbox-ai secrets), if there is one.
-                spec = importlib.util.spec_from_file_location("secret_store_for_mcp", HERE / "secret_store.py")
-                store = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(store)
-                value = store.get(variable)
-                if value is None:
-                    raise ValueError(f"MCP server {name} needs the variable {variable}: set it, or keep it with "
-                                     f"sandbox-ai secrets set {variable}")
-                environment[variable] = value
+        environment.update(variables)
         # The bridge compares every folder with what was checked here before each connection's container.
         environment["SANDBOX_AI_MCP_MOUNTS"] = json.dumps(mount_records(definition))
         log = directory / "supervisor.log"
         process = start_logged(cmd, directory, cwd=str(directory), env=environment)
+        LOG.info("mcp", f"{label}: its bridge starts ({engine}, {'behind the VPN ' + plan['vpn'] if plan['vpn'] else 'no VPN'}"
+                        f"), PID {process.pid}; its log: {log}")
         save_state(instance, {"pid": process.pid, "pid_start": launcher().process_start(process.pid, PROC),
                               "server": name, "limits": default_limits(definition),
                               "image": definition.get("image"), "backend": engine, "definition": digest,
@@ -2121,41 +2982,66 @@ def ensure_running_locked(name, a, vpn=None, instance=None):
                           **({"rootfs": definition["rootfs"]["sha256"]} if engine == "bwrap" else {}),
                           "vpn": plan["vpn"], "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
-        wait_for_socket(sock / "server.sock", log, process)
-        verified_or_stopped(instance, plan, a)
-        form = (f"Bubblewrap, rootfs {definition['rootfs']['sha256'][:12]}" if engine == "bwrap"
-                else f"container {definition['image']}")
-        print(f"agent-sandbox: MCP server {label} started ({form})", file=sys.stderr)
-        return "started"
+        def started():
+            waited(instance, lambda: wait_for_socket(sock / "server.sock", log, process, name=label), log)
+            verified_or_stopped(instance, plan, a)
+            form = (f"Bubblewrap, rootfs {definition['rootfs']['sha256'][:12]}" if engine == "bwrap"
+                    else f"container {definition['image']}")
+            print(f"agent-sandbox: MCP server {label} started ({form})", file=sys.stderr)
+            return "started"
+        return started() if wait else started
     pod = pod_name(instance)
     if a.backend == "podman" and launcher().remove_stale_pod(a, pod, sock.resolve()):
         print(f"agent-sandbox: removed pod {pod} left behind by an earlier MCP server {instance}", file=sys.stderr)
     if "helper" in definition:
         cmd = helper_command(name, plan, a, directory, sock, gateway)
         process = start_logged(cmd, directory)
+        LOG.info("mcp", f"{name}: the helper {definition['helper']} starts in its own sandbox, PID {process.pid}; its "
+                        f"log: {directory / 'supervisor.log'}")
         save_state(name, {"pid": process.pid, "pid_start": launcher().process_start(process.pid, PROC),
                           "command": cmd[cmd.index("--", cmd.index("--internal-mcp-serve")) + 1:],
                           "helper": definition["helper"], "backend": a.backend, "podman_url": a.podman_url,
                           "definition": digest, "vpn": plan["vpn"],
                           "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
-        wait_for_socket(sock / "server.sock", directory / "supervisor.log", process, **machine_ready(name, a))
-        verified_or_stopped(instance, plan, a)
-        print(f"agent-sandbox: helper {definition['helper']} ({name}) started in its own sandbox", file=sys.stderr)
-        return "started"
+        def started():
+            waited(instance, lambda: wait_for_socket(sock / "server.sock", directory / "supervisor.log", process,
+                                                     name=name, **machine_ready(name, a)), directory / "supervisor.log")
+            verified_or_stopped(instance, plan, a)
+            print(f"agent-sandbox: helper {definition['helper']} ({name}) started in its own sandbox", file=sys.stderr)
+            return "started"
+        return started() if wait else started
     cmd = server_command(instance, plan, a, directory, sock, gateway)
     log = directory / "supervisor.log"
     process = start_logged(cmd, directory)
+    LOG.info("mcp", f"{label}: starts in its own sandbox ({a.backend}"
+                    f"{', behind the VPN ' + plan['vpn'] if plan['vpn'] else ''}), PID {process.pid}; its log: {log}")
     save_state(instance, {"pid": process.pid, "pid_start": launcher().process_start(process.pid, PROC),
                           "server": name, "limits": default_limits(definition),
                           "command": definition["command"], "backend": a.backend,
                           "podman_url": a.podman_url, "definition": digest, "vpn": plan["vpn"],
                           "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
-    wait_for_socket(sock / "server.sock", log, process, **machine_ready(instance, a))
-    verified_or_stopped(instance, plan, a)
-    print(f"agent-sandbox: MCP server {label} started in its own sandbox", file=sys.stderr)
-    return "started"
+    def started():
+        waited(instance, lambda: wait_for_socket(sock / "server.sock", log, process, name=label,
+                                                 **machine_ready(instance, a)), log)
+        verified_or_stopped(instance, plan, a)
+        print(f"agent-sandbox: MCP server {label} started in its own sandbox", file=sys.stderr)
+        return "started"
+    return started() if wait else started
+
+
+def waited(instance, wait, log):
+    """WAIT() (a server's socket awaited), with its time and its failure in launcher.log (the server's own log: LOG)."""
+    begun = time.monotonic()
+    try:
+        wait()
+    except Exception as exc:
+        LOG.warning("mcp", f"{instance}: did not come up after {time.monotonic() - begun:.1f} s (its log: {log})", exc)
+        with contextlib.suppress(AttributeError, TypeError):
+            exc.launch_logged = True  # (the start's own line names the server without saying all of this again)
+        raise
+    LOG.info("mcp", f"{instance}: its socket is there after {time.monotonic() - begun:.1f} s")
 
 
 def server_command(name, plan, a, directory, sock, gateway):
@@ -2197,8 +3083,31 @@ def split_log(directory, stream):
     directory = Path(directory)
     approvals = directory / "approvals"
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
-    with open(os.open(directory / "supervisor.log", flags, 0o600), "ab") as log, \
-            open(os.open(directory / "mcp-calls.jsonl", flags, 0o600), "ab") as calls:
+    # A write that fails (a full disk, a quota) loses that line only: the reader goes on reading, else the
+    # supervisor's next line found its output closed and the server's relay failed every call from then on, also
+    # once there was room again. What was lost is said in the file once a line can be written there again.
+    lost = {"supervisor.log": 0, "mcp-calls.jsonl": 0}
+
+    def write(stream, name, data):
+        if lost[name]:
+            why = "not written (the disk was full or not writable)"
+            note = json.dumps({"event": "lost", "lines": lost[name], "server": directory.name, "reason": why}) + "\n" \
+                if name.endswith(".jsonl") else f"sandbox-ai: {lost[name]} lines of this log were {why}\n"
+            data = note.encode() + data
+        try:
+            view = memoryview(data)
+            while view:  # (unbuffered: a write cut short by the full disk is finished, or fails, here)
+                view = view[stream.write(view):]
+            lost[name] = 0
+        except OSError:
+            lost[name] += 1
+
+    def private(path, data):
+        with contextlib.suppress(OSError):  # an unwritten question is never answered: its call is refused
+            write_private(path, data)
+
+    with open(os.open(directory / "supervisor.log", flags, 0o600), "ab", buffering=0) as log, \
+            open(os.open(directory / "mcp-calls.jsonl", flags, 0o600), "ab", buffering=0) as calls:
         for line in iter(lambda: stream.readline(1 << 20), b""):
             kind, _, rest = line.partition(b" ")
             record = None
@@ -2208,20 +3117,18 @@ def split_log(directory, stream):
                 except (ValueError, RecursionError):
                     pass
             if not isinstance(record, dict):
-                log.write(line)
-                log.flush()
+                write(log, "supervisor.log", line)
                 continue
             record.setdefault("server", directory.name)
             if kind == b"sandbox-ai-mcp-ask":
                 ident = str(record.get("id", ""))
                 if re.fullmatch(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}", ident) and approvals.is_dir():
-                    write_private(approvals / f"{ident}.json", record)
+                    private(approvals / f"{ident}.json", record)
                 continue
-            calls.write((json.dumps(record, ensure_ascii=False) + "\n").encode())
-            calls.flush()
+            write(calls, "mcp-calls.jsonl", (json.dumps(record, ensure_ascii=False) + "\n").encode())
             ident = str(record.get("question", ""))
             if re.fullmatch(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}", ident) and (approvals / f"{ident}.json").exists():
-                write_private(approvals / f"{ident}.done", {**(record.get("approval") or {}), "id": ident})
+                private(approvals / f"{ident}.done", {**(record.get("approval") or {}), "id": ident})
 
 
 def write_private(path, data):
@@ -2281,12 +3188,14 @@ def stop_locked(name, timeout=30, quiet=False):
             print(f"sandbox-ai mcp: MCP server {name} is not running", file=sys.stderr)
         return 0
     pid = load_state(name)["pid"]
+    LOG.info("mcp", f"{name}: stopping its supervisor (PID {pid})")
     with contextlib.suppress(ProcessLookupError):  # it ended right after the check: stopped all the same
         os.kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + timeout
     while status(name) == "running" and time.monotonic() < deadline:
         time.sleep(0.2)
     if status(name) == "running":
+        LOG.warning("mcp", f"{name}: its supervisor (PID {pid}) did not end within {timeout} s of SIGTERM: killed")
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
         time.sleep(0.5)
@@ -2297,6 +3206,7 @@ def stop_locked(name, timeout=30, quiet=False):
                 # Without its supervisor the pod would keep running the server; only our labelled one goes.
                 launcher().remove_stale_pod(engine, pod_name(name), launcher().mcp_socket_dir(name).resolve())
             except (ValueError, subprocess.CalledProcessError) as exc:
+                LOG.warning("mcp", f"{name}: its pod could not be removed", exc)
                 print(f"agent-sandbox: {exc}", file=sys.stderr)
     (launcher().mcp_socket_dir(name) / "server.sock").unlink(missing_ok=True)
     print(f"sandbox-ai mcp: MCP server {name} stopped", file=sys.stderr)
@@ -2402,6 +3312,7 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
     # A run of a version that did not record its servers (no "mcp_running"): its options are taken for it.
     if named and (not running or name in entry.get("mcp_running", [name])):
         result.update(attached="already", message=f"{shown} uses the MCP server {name} already")
+        LOG.info("mcp", f"attach {name} to {entry['name']}: {result['attached']}")
         out(result["message"])
         return result
     if start_server:
@@ -2417,6 +3328,7 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
             sessions.resume_locked(key, mcp=[name])
         result.update(attached="restarted", state="running",
                       message=f"{shown} runs again with the MCP server {name}; the agent continues its conversation")
+        LOG.info("mcp", f"attach {name} to {entry['name']}: {result['attached']}")
         out(result["message"])
         return result
     sessions.add_mcp(key, [name])
@@ -2429,6 +3341,7 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
     else:
         result.update(attached="next start", message=f"{shown} reaches the MCP server {name} from its next start on: "
                                                      f"sandbox-ai resume {shown}")
+    LOG.info("mcp", f"attach {name} to {entry['name']}: {result['attached']}")
     out(result["message"])
     return result
 
@@ -2560,7 +3473,7 @@ def record_server(record, name, add=True, instance=None):
 def live_state(record):
     try:
         data = json.loads((Path(record["directory"]) / LIVE_STATE).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {"claude": [], "created": False}
     return data if isinstance(data, dict) else {"claude": [], "created": False}
 
@@ -2626,9 +3539,11 @@ def forget_live_entries(home):
                 del servers[name]
                 removed.append(name)
         return bool(removed)
-    with contextlib.suppress(OSError, ValueError):
+    try:
         with claude_config_lock(Path(home), wait=2.0):
             l.update_json_defaults(Path(home), ".claude.json", apply, l.CLAUDE_STATE_LIMIT, keep_mode=True)
+    except (OSError, ValueError) as exc:
+        LOG.warning("mcp", f"the live MCP servers were not taken out of {Path(home) / '.claude.json'}", exc)
     return removed
 
 
@@ -2805,6 +3720,8 @@ def attach_live(name, start, helper=None, out=print):
     result["message"] = (f"{shown} reaches the MCP server {name} now"
                          f"{' (it was attached already)' if result['attached'] == 'already' else ''}"
                          f"{', kept for its later starts' if result['kept'] else ''}. {how}")
+    LOG.info("mcp", f"attach {helper and 'the helper ' + helper or name} to {entry['name']} --live: "
+                    f"{result['attached']}" + ("" if result["kept"] else "; not kept for its later starts"))
     out(result["message"])
     return result
 
@@ -2871,6 +3788,8 @@ def detach(name, start, helper=None, live=False, out=print):
         result["message"] = f"{shown} does not use the MCP server {name}"
     result["message"] += ". The server's own sandbox keeps running (sandbox-ai mcp stop NAME ends it)" \
         if result["detached"] != "not attached" else ""
+    LOG.info("mcp", f"detach {helper and 'the helper ' + helper or name} from {entry['name']}"
+                    f"{' --live' if live else ''}: {result['detached']}")
     out(result["message"])
     return result
 
@@ -2926,12 +3845,40 @@ def server_list(served=None):
                       "kind": "image" if "image" in d else "rootfs" if "rootfs" in d else
                       "helper" if "helper" in d else "command", "own": name in own,
                       "definition": {key: value for key, value in d.items() if key != "rootfs"},
+                      # Its variables, each with where its value comes from (variables_of; a secret's value never).
+                      "variables": variables_of(d) if "image" in d or "rootfs" in d else [],
                       "builtin_defaults": default_limits({"image": ""} if "image" in d or "rootfs" in d
                                                          else {"command": []}) if "helper" not in d else None,
                       "last_problem": problem,
                       "below_recommended": below_recommended(d) if "image" in d or "rootfs" in d else {},
                       **origin(name, d)})
     return found
+
+
+def catalog_json(prefix, entry):
+    """Catalog ENTRY (of the catalog PREFIX) as `mcp catalog --json` prints it: what the listing says (entry, title,
+    network and hosts, published, signature good|bad|none, the catalog's name) and the variables it declares
+    ([{name, description, secret, required}]: the web page's add form shows them), its tool_timeout. A catalog may be
+    unsigned: every text one printable line, bounded; a variable without a proper name is left out."""
+    def shown(text, limit=300):
+        return launcher().printable(" ".join(str(text).split()))[:limit]
+    signature = (entry.get("_signature") or {}).get("state")
+    variables = [{"name": item["name"], "description": shown(item.get("description") or "", 500),
+                  "secret": bool(item.get("secret")), "required": bool(item.get("required"))}
+                 for item in entry.get("env", []) if isinstance(item, dict) and isinstance(item.get("name"), str)
+                 and ENV_NAME.fullmatch(item["name"])]
+    # The folders it takes ([{target, required, description}]): one it requires is asked for before `mcp add` (the
+    # app's Board), not left for add to refuse with "needs --mount TARGET=HOST".
+    mounts = [{"target": item["target"], "required": bool(item.get("required")),
+               "description": shown(item.get("description") or "", 300)}
+              for item in entry.get("mounts", []) if isinstance(item, dict) and isinstance(item.get("target"), str)
+              and item["target"].startswith("/") and item["target"].isprintable() and len(item["target"]) <= 200]
+    return {"entry": f"{shown(prefix)}:{shown(entry.get('name'))}", "prefix": shown(prefix),
+            "name": shown(entry.get("name")), "title": shown(entry.get("title", "")),
+            "network": shown(entry.get("network", "none")), "hosts": [shown(host) for host in entry.get("hosts", [])],
+            "published": bool(entry.get("digest")), "signature": {"good": "good", "bad": "bad"}.get(signature, "none"),
+            "catalog": shown(catalog_label(entry["_catalog"])) if isinstance(entry.get("_catalog"), str) else None,
+            "env": variables, "mounts": mounts, "tool_timeout": entry_tool_timeout(entry)}
 
 
 def cli(argv):
@@ -2954,10 +3901,10 @@ def cli(argv):
     start.add_argument("-j", "--json", action="store_true", help="with --for: the result as JSON")
     attaching = commands.add_parser("attach", help="Connect a server to an agent start (kept for its later starts)",
                                     usage="sandbox-ai mcp attach NAME START [--live | --restart] [--json]\n"
-                                          "       sandbox-mcp attach --helper AGENT START --live [--json]")
+                                          "       sandbox-ai mcp attach --helper AGENT START --live [--json]")
     attaching.add_argument("name", metavar="NAME", help="the server (sandbox-ai mcp list); with --helper: START")
     attaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
-    attaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode"],
+    attaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"],
                            help="the agent AGENT as a helper (an MCP server of its own sandbox), as --helper at a start")
     attaching.add_argument("-r", "--restart", action="store_true",
                            help="a running start is restarted with it now (the agent continues its conversation); "
@@ -2971,10 +3918,10 @@ def cli(argv):
     detaching = commands.add_parser("detach", help="Take a server from an agent start (and with --live from its "
                                                    "running sandbox now)",
                                     usage="sandbox-ai mcp detach NAME START [--live] [--json]\n"
-                                          "       sandbox-mcp detach --helper AGENT START [--live] [--json]")
+                                          "       sandbox-ai mcp detach --helper AGENT START [--live] [--json]")
     detaching.add_argument("name", metavar="NAME", help="the server; with --helper: START")
     detaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
-    detaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode"])
+    detaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"])
     detaching.add_argument("-l", "--live", action="store_true",
                            help="close its relay in the running sandbox now (the agent's connections to it end)")
     detaching.add_argument("-j", "--json", action="store_true")
@@ -2993,24 +3940,40 @@ def cli(argv):
     setting.add_argument("-n", "--network", choices=["none", "full"])
     setting.add_argument("-m", "--mount", action="append", metavar="TARGET=HOST[:ro|rw]",
                          help="The folders, all of them (TARGET: in the server's container, of those its catalog entry "
-                              "takes; HOST: a folder on this machine, a writable one is created); repeatable")
+                              "takes; HOST: a folder on this machine, a writable one is created; held to the "
+                              "host-path policy of its start); repeatable")
     setting.add_argument("--no-mounts", action="store_true", help="No folders")
-    setting.add_argument("-e", "--env", action="append", metavar="VARIABLE", help="The variables, all of them")
+    setting.add_argument("-e", "--env", action="append", metavar="NAME[=VALUE|@SECRET]",
+                         help="The variables, all of them: NAME (your environment's, else the secret NAME), "
+                              "NAME=VALUE (a value that is no secret, kept in the definition) or NAME@SECRET (that "
+                              "secret of sandbox-ai secrets); repeatable")
     setting.add_argument("--no-env", action="store_true", help="No variables")
     setting.add_argument("-v", "--vpn", metavar="PROFILE", help="Its network only through this VPN profile")
     setting.add_argument("--no-vpn", action="store_true", help="No VPN of its own")
+    setting.add_argument("-T", "--tool-timeout", metavar="SECONDS",
+                         help="How long an agent waits for one call of it, 10-3600 seconds (a server whose commands "
+                              "run long); default: back to sandbox-ai's (660)")
     setting.add_argument("-s", "--stop", action="store_true",
                          help="Stop its running instances now: the next start that uses it starts it with the change")
     setting.add_argument("-j", "--json", action="store_true")
     catalog = commands.add_parser("catalog", help="Servers of the MCP catalogs (sandbox-ai-mcp, axross-mcp-hub)")
     catalog.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
                          help="Read this catalog instead of the default ones; repeatable")
+    catalog.add_argument("-j", "--json", action="store_true",
+                         help="{entries: [...], problems: [...]}: each entry with the variables its catalog declares")
     added = commands.add_parser("add", help="Add a catalog server: pull its image by digest, write its definition")
     added.add_argument("name", help="Catalog entry, e.g. duckduckgo or hub:binwalk")
     added.add_argument("-a", "--as", dest="local", metavar="NAME", help="Name for --mcp (default: the entry's)")
-    added.add_argument("-m", "--mount", action="append", default=[], metavar="TARGET=HOST[:ro|rw]")
-    added.add_argument("-e", "--env", action="append", default=[], metavar="VARIABLE",
-                       help="Pass this variable from your environment (a secret the entry names)")
+    added.add_argument("-m", "--mount", action="append", default=[], metavar="TARGET=HOST[:ro|rw]",
+                       help="A folder of the server (TARGET: in its container, one its catalog entry takes - "
+                            "exiftool's and binwalk's /work, engram's and memory's data; HOST: a folder on this "
+                            "machine, a writable one is created); held to the host-path policy of its start before "
+                            "anything is pulled (not HOME itself, nothing of sandbox-ai's own); repeatable")
+    added.add_argument("-e", "--env", action="append", default=[], metavar="NAME[=VALUE|@SECRET]",
+                       help="A variable of the entry: NAME passes your environment's NAME, else the secret NAME "
+                            "(required where the entry requires it, else only where there is one); NAME=VALUE keeps a "
+                            "value that is no secret in the definition (ALLOW_PRIVATE_TARGETS=1; never a secret's); "
+                            "NAME@SECRET takes the secret SECRET of sandbox-ai secrets; repeatable")
     added.add_argument("-n", "--network", choices=["none", "full"],
                        help="Override the entry's network; an allowlist entry needs full")
     added.add_argument("-M", "--memory", metavar="SIZE", help="Memory limit, e.g. 2g (default 512m)")
@@ -3034,8 +3997,14 @@ def cli(argv):
         sources = [(f"c{index}", value) for index, value in enumerate(a.catalog)] or None
     if a.command == "catalog":
         entries, problems = catalog_entries(sources)
+        if a.json:
+            print(json.dumps({"entries": [catalog_json(prefix, entry) for prefix, entry in
+                                          sorted(entries, key=lambda pe: (pe[0], str(pe[1].get("name"))))],
+                              "problems": [launcher().printable(str(problem))[:600] for problem in problems]},
+                             indent=2))
+            return 0
         for problem in problems:
-            print(f"sandbox-mcp: catalog not read: {problem}", file=sys.stderr)
+            print(f"sandbox-ai mcp: catalog not read: {problem}", file=sys.stderr)
         for prefix, entry in sorted(entries, key=lambda pe: (pe[0], str(pe[1].get("name")))):
             signature = entry.get("_signature") or {}
             state = ("" if entry.get("digest") else "  (not published yet)") + (
@@ -3050,8 +4019,17 @@ def cli(argv):
                   f"{shown(str(entry.get('title', '')))}{state}")
         return 0
     if a.command == "add":
-        add(a.name, a.local, a.mount, a.env, a.network, a.memory, a.pids, sources, pull=not a.no_pull, vpn=a.vpn,
-            unsigned=a.unsigned, backend=a.backend, cpus=a.cpus, tmp=a.tmp)
+        try:
+            add(a.name, a.local, a.mount, a.env, a.network, a.memory, a.pids, sources, pull=not a.no_pull, vpn=a.vpn,
+                unsigned=a.unsigned, backend=a.backend, cpus=a.cpus, tmp=a.tmp)
+        except subprocess.CalledProcessError as exc:
+            # Its image could not be pulled (its last lines are said above): nothing is added - a message, never a
+            # traceback (the app's Preparing tab shows this).
+            local = a.local or str(a.name).rpartition(":")[2]
+            print(f"sandbox-ai mcp: {launcher().printable(local)} is not added: pulling its image failed (exit status "
+                  f"{exc.returncode}); check the network and Podman (sandbox-ai doctor), then add it again",
+                  file=sys.stderr)
+            return 1
         return 0
     if a.command == "set":
         result = set_server(a.name, set_changes(a), stop_running=a.stop,
@@ -3063,7 +4041,7 @@ def cli(argv):
         try:
             served = serving()
         except (OSError, ValueError) as exc:  # the starts could not be read: the servers are listed anyway
-            print(f"sandbox-mcp: the starts they serve are unknown: {exc}", file=sys.stderr)
+            print(f"sandbox-ai mcp: the starts they serve are unknown: {exc}", file=sys.stderr)
             served = {}
         found = server_list(served)
         if a.json:

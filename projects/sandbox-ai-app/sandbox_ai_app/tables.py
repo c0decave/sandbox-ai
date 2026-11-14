@@ -290,7 +290,12 @@ class _Watcher(QObject):
     def eventFilter(self, watched, event):  # noqa: N802
         view = self.view
         kind = event.type()
-        if kind in (QEvent.Type.Resize, QEvent.Type.Show) and getattr(view, "fit_titles", None):
+        if kind == QEvent.Type.Show and watched is view and not getattr(view, "fit_titles", None) \
+                and view.model() is not None:
+            # Shown before its first fill (or never filled: a listing that failed): fitted to its titles now that
+            # the theme's font is on them, not left at Qt's 100 px each ("gent versio").
+            fit_columns(view)
+        elif kind in (QEvent.Type.Resize, QEvent.Type.Show) and getattr(view, "fit_titles", None):
             if not view.fitting and view.viewport().width() != getattr(view, "fit_room", None):
                 apply(view)
         elif kind == QEvent.Type.ToolTip and watched is view.viewport():

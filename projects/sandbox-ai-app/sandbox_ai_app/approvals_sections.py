@@ -16,12 +16,13 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from . import applog
 from . import theme
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .widgets import (
-    ask_first, background, compact_combo, confirm, fill, flow, listing, on_screen, plain_label, row_key, selected_rows,
-    set_enabled, table, warn,
+    ask_first, background, compact_combo, confirm, fill, flow, list_menu, listing, on_screen, plain_label, row_key,
+    selected_rows, set_enabled, table, warn,
 )
 
 FOLLOW, ALL = "follow", "all"
@@ -216,7 +217,8 @@ class ContextHeader(QWidget):
             cut = None
             try:
                 cut = self.sai.module("net").cut_state(record["directory"])
-            except Exception:  # noqa: BLE001 - an older sandbox-ai, an unreadable state: not said
+            except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai, an unreadable state: not said
+                applog.swallowed("approvals_sections", "ContextHeader.show_state: an older sandbox-ai, an unrea…", _exc)
                 cut = None
             self.state.setText(prefix + state_text(record, self.seconds, cut))
 
@@ -296,13 +298,14 @@ class BlockedSection(QWidget):
                            multi=True, stretch=3, compact=(0, 1, 2, 5), numeric=(5,))
         self.table.setAccessibleName(tr("Blocked"))
         self.table.itemSelectionChanged.connect(self.selection_changed)
+        list_menu(self.table, lambda: [*self.buttons.values(), None, self.refresh_button])
         layout.addWidget(self.table, 1)
         self.empty = plain_label(role="secondary")
         layout.addWidget(self.empty)
         self.detail = plain_label(selectable=True)
         self.detail.setAccessibleName(tr("Why it was refused"))
         layout.addWidget(self.detail)
-        self.message = plain_label(selectable=True)
+        self.message = plain_label(selectable=True, log="approvals")
         layout.addWidget(self.message)
         self.timer = QTimer(self)
         self.timer.timeout.connect(lambda: on_screen(self) and self.refresh())  # (not in a minimised window)
@@ -340,7 +343,7 @@ class BlockedSection(QWidget):
             return
         self.reading = None
         if error is not None:
-            self.message.setText(tr("Cannot read what was refused: {error}", error=printable(error)))
+            self.message.setText(tr("Cannot read what was refused: {error}", error=printable_text(error)))
             return
         self.entries = list(result or [])
         self.show_entries()
@@ -431,12 +434,21 @@ class BlockedSection(QWidget):
                         result = self.sai.call("approvals", "ask-again", question, timeout=60)
                     elif action == "deny-run":
                         result = self.sai.call("approvals", "deny", question, "--scope", "run", timeout=60)
+                    elif action in ("allow-run", "allow-always") and question and \
+                            entry.get("question_kind") == "dns" and entry.get("kind") != "network":
+                        # A lookup the agent asked about: as an answer to it, only the name's public addresses are
+                        # opened (the agent chose the name; it may point at this host or the LAN), "always" kept as
+                        # such an answer is (approvals allow ID: decide_again), never as the project's --allow-host.
+                        scope = "always" if action == "allow-always" else "run"
+                        result = self.sai.call("approvals", "allow", question, "--scope", scope, timeout=90)
                     elif action == "allow-run" and question and entry.get("question_kind") != "dns" and not (
                             entry.get("kind") == "network" and option):
                         result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
                     elif option:  # a destination: as sandbox-ai net allow (resolved through the run's VPN or Tor)
                         keep = ["--keep"] if action == "allow-always" else []
-                        result = self.sai.call("net", "allow", run, *option, *keep, timeout=90)
+                        # A name the agent looked up: only its public addresses (--keep: remembered as an approval).
+                        public = ["--public-only"] if option[0] == "--allow-host" else []
+                        result = self.sai.call("net", "allow", run, *option, *public, *keep, timeout=90)
                         if question and result[0] == 0:
                             self.sai.call("approvals", "ask-again", question, timeout=60)  # no remembered deny left
                     else:  # allow-always for a request or tool call: an exception rule, then allowed for this run
@@ -461,6 +473,12 @@ class BlockedSection(QWidget):
         approvals = self.sai.module("approvals")
         for entry in chosen:
             option = target_option(entry.get("target"))
+            if (entry.get("question") and entry.get("question_kind") == "dns" and entry.get("kind") != "network") or \
+                    (option and option[0] == "--allow-host"):
+                lines.append(tr("{what}: allowed always for this project, as an answer to the lookup is: only the "
+                                "name's public addresses are opened, now and at every later start.",
+                                what=printable(entry.get("what"))))
+                continue
             if option:
                 lines.append(tr("{what}: {option} goes into the project's .sandbox-ai.json (trusted at once); every "
                                 "later start of the project may reach it.", what=printable(entry.get("what")),
@@ -471,7 +489,7 @@ class BlockedSection(QWidget):
                 plan = approvals.rule_exception(record or {}, entry)
             except (ValueError, OSError, AttributeError) as exc:
                 warn(self, tr("Allow always"), tr("{what}: {error}", what=printable(entry.get("what")),
-                                                  error=printable(exc)), modal=False)
+                                                  error=printable_text(exc)), modal=False)
                 return None
             rule = json.dumps(plan["rule"], ensure_ascii=False)
             if plan["where"] == "own":
@@ -493,12 +511,12 @@ class BlockedSection(QWidget):
     def acted(self, action, result, error):
         self.acting = None
         if error is not None:
-            self.message.setText(tr("Not done: {error}", error=printable(error)))
+            self.message.setText(tr("Not done: {error}", error=printable_text(error)))
         else:
             failed = [(entry, err or out) for entry, (status, out, err) in result if status != 0]
             if failed:
                 self.message.setText("\n".join(tr("{what}: {error}", what=printable(entry.get("what")),
-                                                  error=printable(str(why).strip().splitlines()[-1] if str(why).strip()
+                                                  error=printable_text(str(why).strip().splitlines()[-1] if str(why).strip()
                                                                   else "?")) for entry, why in failed[:6]))
             else:
                 cut = [entry for entry, _ in result if self.cut_of(entry.get("run"))]
@@ -512,7 +530,8 @@ class BlockedSection(QWidget):
         record = self.header.runs.get(run)
         try:
             return bool(record) and bool(self.sai.module("net").cut_state(record["directory"]))
-        except Exception:  # noqa: BLE001 - not known: not said
+        except Exception as _exc:  # noqa: BLE001 - not known: not said
+            applog.swallowed("approvals_sections", "BlockedSection.cut_of: not known: not said", _exc)
             return False
 
 
@@ -544,12 +563,13 @@ class AllowedSection(QWidget):
         self.table = table([tr("Destination"), tr("Names"), tr("Kind")], multi=True, stretch=1, compact=(0, 2))
         self.table.setAccessibleName(tr("Allowed now"))
         self.table.itemSelectionChanged.connect(self.update_buttons)
+        list_menu(self.table, lambda: [self.revoke, None, refresh])
         layout.addWidget(self.table, 1)
         layout.addWidget(plain_label(tr("Listed: what was allowed while it runs (on this page, with sandbox-ai net "
                                         "allow, or by an answer). What its start options allow is on the Board "
                                         "(Network); what is kept for the project, under Remembered."),
                                      role="secondary"))
-        self.message = plain_label(selectable=True)
+        self.message = plain_label(selectable=True, log="approvals")
         layout.addWidget(self.message)
         self.update_buttons()
 
@@ -575,11 +595,11 @@ class AllowedSection(QWidget):
                                  else tr("No sandbox runs: nothing to show."))
         elif error is not None or result[0] != 0:
             self.rows = []
-            self.summary.setText(tr("Cannot read it: {error}", error=printable(error or result[2] or result[1])))
+            self.summary.setText(tr("Cannot read it: {error}", error=printable_text(error or result[2] or result[1])))
         else:
             try:
                 shown = json.loads(result[1])
-            except ValueError:
+            except (ValueError, RecursionError):
                 shown = {}
             self.rows = allowed_rows(shown)
             self.summary.setText(tr("{count} destinations allowed during this run", count=len(self.rows)) + (
@@ -616,7 +636,7 @@ class AllowedSection(QWidget):
     def revoked(self, result, error):
         status, out, err = result if error is None else (1, "", str(error))
         self.message.setText(tr("Revoked.") if status == 0 else tr("Not revoked: {error}",
-                                                                   error=printable((err or out).strip())))
+                                                                   error=printable_text((err or out).strip())))
         self.refresh()
 
 

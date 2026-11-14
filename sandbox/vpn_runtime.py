@@ -67,7 +67,16 @@ TOR_CHECK = "https://check.torproject.org/api/ip"  # {"IsTor": true, "IP": ...}
 ONION_PROBE = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"
 OUTSIDE_RESOLVER = "1.1.1.1"  # asked to show that a lookup sent elsewhere reaches tor's DNSPort as well
 IPV6_PROBE = "2606:4700:4700::1111"  # a literal IPv6 address that must stay unreachable behind Tor
-BOOTSTRAP_TIMEOUT = 240
+# Tor's bootstrap (a profile's tor.bootstrap_timeout, bootstrap_attempts, bootstrap_stall; bootstrap_settings):
+# each attempt has BOOTSTRAP_TIMEOUT seconds, more while its percentage still rises (up to twice as long); one whose
+# percentage stays for BOOTSTRAP_STALL seconds has stalled, and tor starts again (a new guard, fresh circuits), up
+# to BOOTSTRAP_ATTEMPTS attempts in all. The kill switch stays loaded all the while.
+BOOTSTRAP_TIMEOUT = 300
+BOOTSTRAP_ATTEMPTS = 3
+BOOTSTRAP_STALL = 90
+BOOTSTRAP_LIMITS = {"timeout": (60, 3600), "attempts": (1, 10), "stall": (30, 1800)}
+BOOTSTRAP_STILL = 30  # while the percentage stays, "still at N%" this often: the launcher sees the start goes on
+BOOTSTRAP_RESTART = 15  # seconds a restart of tor may take (the old one ended, the kill switch looked at)
 BRIDGE_TRANSPORTS = {"obfs4": "/usr/bin/obfs4proxy"}
 DEFAULT_MTU = 1420
 DEFAULT_KEEPALIVE = 25  # keeps the conntrack entry (and NAT on the way) of the endpoint alive
@@ -142,6 +151,18 @@ def skip_name(data, offset):
         offset += 1 + length
 
 
+RCODES = {1: "FORMERR", 2: "SERVFAIL", 4: "NOTIMP", 5: "REFUSED"}
+
+
+class DnsError(ValueError):
+    """A resolver's answer with an error code other than NXDOMAIN (RCODE: 2 is SERVFAIL)."""
+
+    def __init__(self, rcode):
+        self.rcode = int(rcode)
+        named = RCODES.get(self.rcode)
+        super().__init__(f"DNS error code {self.rcode}" + (f" ({named})" if named else ""))
+
+
 def dns_answers(data, ident, qtype):
     """Addresses of type QTYPE in a reply to query IDENT; [] for NXDOMAIN or no data. The resolver follows CNAME
     chains and returns their records in the same answer."""
@@ -154,7 +175,7 @@ def dns_answers(data, ident, qtype):
     if rcode == 3:
         return []
     if rcode:
-        raise ValueError(f"DNS error code {rcode}")
+        raise DnsError(rcode)
     offset = 12
     for _ in range(qdcount):
         offset = skip_name(data, offset) + 4
@@ -227,6 +248,100 @@ def resolver_for(servers, lookup=None):
                 errors.append(f"{server}: {exc}")
         raise OSError("; ".join(errors) or "no resolver")
     return resolve
+
+
+# tor says "Bootstrapped 100%" before it has a circuit an exit looks names up through: until then its DNSPort answers
+# SERVFAIL (or nothing), and it does so for a name one exit cannot resolve. Such an answer means "not yet" (TorDns).
+TOR_DNS_PATIENCE = 90  # seconds: how long the lookups wait for tor's first circuit after its bootstrap
+TOR_DNS_NAME_PATIENCE = 30  # seconds: once tor has resolved a name, how long another name's SERVFAIL is asked again
+TOR_DNS_RESOLVE_PATIENCE = 20  # seconds: a name allowed during the run (vpn.resolver_for_run waits 30 s in all)
+TOR_DNS_DELAYS = (2, 3, 5, 8, 10, 15)  # the pauses before the 2nd, 3rd, ... try
+TOR_DNS_WELL_KNOWN = "check.torproject.org"  # asked too while tor has no circuit: no circuit, or a failing name?
+
+
+class TorDnsError(OSError):
+    """tor's DNSPort gave no answer for a name within the patience (TorDns)."""
+
+
+class TorDns:
+    """Lookups at tor's DNSPort after its bootstrap, patient with SERVFAIL and with no answer: asked again after
+    TOR_DNS_DELAYS - while no lookup has worked yet, up to PATIENCE seconds in all for tor's first circuit (every
+    other try asks TOR_DNS_WELL_KNOWN too, which tells a missing circuit from a name that fails); once one has, up
+    to NAME_PATIENCE seconds for each name. Each try is said (OUT: the launcher's progress). Never past DEADLINE
+    (CLOCK's time: the launcher's wait). Only the server it is given is asked - tor's DNSPort on loopback, behind the
+    kill switch, which nothing here touches. Any other error (NXDOMAIN is an empty answer, the kill switch's refusal)
+    is not tried again."""
+
+    def __init__(self, out=None, patience=TOR_DNS_PATIENCE, name_patience=TOR_DNS_NAME_PATIENCE, deadline=None,
+                 clock=time.monotonic, sleep=time.sleep, ask=None, circuit=False):
+        self.out, self.patience, self.name_patience, self.deadline = out, patience, name_patience, deadline
+        self.clock, self.sleep, self.ask = clock, sleep, ask
+        self.circuit = circuit  # a lookup through tor has answered: tor has a circuit
+        self.waiting = None  # when the wait for the first circuit began
+
+    @staticmethod
+    def not_yet(exc):
+        """What an answer of tor's DNSPort that means "not yet" is called, else None."""
+        if isinstance(exc, DnsError) and exc.rcode == 2:
+            return "SERVFAIL"
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            return "no answer"
+        return None
+
+    def say(self, text):
+        if self.out is not None:
+            emit("progress", out=self.out, message=text)
+
+    def lookup(self, name, server, qtype, timeout=4.0, port=53):
+        ask = self.ask or dns_lookup
+        tries, seen, begun, known = 0, [], None, None
+        while True:
+            tries += 1
+            try:
+                found = ask(name, server, qtype, timeout=timeout, port=port)
+            except (OSError, ValueError) as exc:
+                what = self.not_yet(exc)
+                if what is None:
+                    raise
+                seen.append(what)
+            else:
+                self.circuit = True
+                return found
+            now = self.clock()
+            begun = now if begun is None else begun
+            if not self.circuit:
+                self.waiting = now if self.waiting is None else self.waiting
+                if tries % 2 == 0 and name.rstrip(".").lower() != TOR_DNS_WELL_KNOWN:
+                    try:
+                        ask(TOR_DNS_WELL_KNOWN, server, 1, timeout=timeout, port=port)
+                        self.circuit, begun, known = True, now, True  # the name's own patience from now on
+                    except (OSError, ValueError) as exc:
+                        known = False
+                        if self.not_yet(exc) is None:
+                            raise
+            start = begun if self.circuit else self.waiting
+            patience = self.name_patience if self.circuit else self.patience
+            delay = TOR_DNS_DELAYS[min(tries - 1, len(TOR_DNS_DELAYS) - 1)]
+            if now + delay - start > patience or \
+                    (self.deadline is not None and now + delay + timeout > self.deadline):
+                raise TorDnsError(self.failure(name, seen, now - start, known))
+            if self.circuit:
+                self.say(f"Tor: {name} has no answer through Tor yet ({seen[-1]}, try {tries}); asking again")
+            else:
+                self.say(f"Tor: waiting for its first circuit (DNS through Tor: {seen[-1]}, try {tries})")
+            self.sleep(delay)
+
+    def failure(self, name, seen, seconds, known):
+        counted = ", ".join(f"{what} {seen.count(what)}x" for what in dict.fromkeys(seen))
+        asked = f"{len(seen)} tr{'ies' if len(seen) != 1 else 'y'} in {int(seconds)} s: {counted}"
+        if self.circuit:
+            return (f"tor resolves other names, but not {name} ({asked} from tor's DNSPort {TOR_DNS}): the Tor exits "
+                    "could not look it up. Is the name right and its DNS working? Try again later")
+        neither = f"; {TOR_DNS_WELL_KNOWN} neither" if known is False else ""
+        return (f"tor has bootstrapped, but its DNSPort {TOR_DNS} answered no lookup of {name} ({asked}{neither}): "
+                "tor has no working circuit to an exit yet. Try again in a minute; if it stays so, the Tor network "
+                "is slow or blocked from here (bridges: sandbox-ai vpn add NAME --tor --bridges FILE), or this "
+                "host's clock is off. Nothing left past Tor: the kill switch held throughout")
 
 
 def system_resolver(name, family):
@@ -335,7 +450,7 @@ def parse_echo(body):
     vpn = None
     try:
         document = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         document = None
     if isinstance(document, dict):
         value = next((document[key] for key in ("ip", "IP", "address", "ip_addr") if isinstance(document.get(key), str)), "")
@@ -740,35 +855,167 @@ def bootstrap_progress(text):
     return found
 
 
+def bootstrap_settings(tor):
+    """{"timeout", "attempts", "stall"} of Tor's bootstrap from a profile's "tor" (TOR: its bootstrap_timeout,
+    bootstrap_attempts, bootstrap_stall; the defaults where it has none); ValueError for one out of its limits."""
+    tor = tor if isinstance(tor, dict) else {}
+    found = {}
+    for key, default in (("timeout", BOOTSTRAP_TIMEOUT), ("attempts", BOOTSTRAP_ATTEMPTS), ("stall", BOOTSTRAP_STALL)):
+        value = tor.get(f"bootstrap_{key}")
+        value = default if value is None else value
+        low, high = BOOTSTRAP_LIMITS[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"Tor's bootstrap_{key} is {low}-{high}" + (" seconds" if key != "attempts" else "")
+                             + f", not {value!r}")
+        found[key] = value
+    return found
+
+
+def attempt_seconds(settings):
+    """How long one attempt at the bootstrap may take at most (its timeout, twice that while it still rises)."""
+    return 2 * settings["timeout"] + BOOTSTRAP_RESTART
+
+
+def bootstrap_seconds(settings):
+    """How long the bootstrap may take at most, every attempt included (vpn.ready_timeout waits that long)."""
+    return settings["attempts"] * attempt_seconds(settings)
+
+
+class BootstrapStalled(RuntimeError):
+    """An attempt at the bootstrap that ended without 100% while tor still ran: tor is started again."""
+
+    def __init__(self, message, percent, summary):
+        super().__init__(message)
+        self.percent, self.summary = percent, summary
+
+
+def read_from(path, offset):
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(offset)
+            return stream.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
 def wait_bootstrap(log_path, process, timeout=BOOTSTRAP_TIMEOUT, out=None, secrets=(), clock=time.monotonic,
-                   sleep=time.sleep):
-    """Wait until tor's log says "Bootstrapped 100%", reporting each step; an error when tor exits or the
-    TIMEOUT passes, with how far it got and the log's last lines (SECRETS, the bridges, hidden)."""
-    deadline = clock() + timeout
-    shown = None
+                   sleep=time.sleep, stall=None, attempt=(1, 1), offset=0):
+    """One attempt (ATTEMPT: its number and how many there are) at tor's bootstrap: until tor's log (LOG_PATH, from
+    OFFSET on: this attempt's tor) says "Bootstrapped 100%", reporting each new percentage, and every
+    BOOTSTRAP_STILL seconds one that stays. tor that exits: RuntimeError. BootstrapStalled: no new percentage for
+    STALL seconds (default: TIMEOUT); past TIMEOUT an attempt that still rises (never STALL seconds without a new
+    percentage) goes on, up to twice TIMEOUT. Messages carry how far it got and the log's last lines, the bridges (SECRETS) hidden."""
+    stall = timeout if stall is None else stall
+    begun = clock()
+    shown, rose, said = None, begun, begun
+    number, attempts = attempt
+    of = f", attempt {number} of {attempts}" if attempts > 1 else ""
 
     def tail(text):
         return "\n".join(redact(line, secrets) for line in text.splitlines()[-15:])
+
+    def got(percent, summary):
+        return f"{percent}%" + (f" ({redact(summary, secrets)})" if summary else "")
     while True:
-        try:
-            text = Path(log_path).read_text(errors="replace")
-        except OSError:
-            text = ""
+        text = read_from(log_path, offset)
         percent, summary = bootstrap_progress(text)
+        now_ = clock()
         if percent != shown:
-            emit("progress", out=out, message=f"tor: bootstrapped {percent}%"
-                 + (f" ({redact(summary, secrets)})" if summary else ""))
-            shown = percent
+            emit("progress", out=out, message=f"tor: bootstrapped {got(percent, summary)}{of}")
+            if shown is not None:
+                rose = now_
+            shown, said = percent, now_
         if percent >= 100:
             return percent
         if process.poll() is not None:
             raise RuntimeError(f"tor exited ({process.returncode}) at {percent}% of its bootstrap:\n{tail(text)}")
-        if clock() > deadline:
-            got = f"{percent}%" + (f": {redact(summary, secrets)}" if summary else "")
-            raise RuntimeError(f"tor did not finish its bootstrap within {timeout} s (it got to {got}); is the Tor "
-                               "network blocked here? Bridges help: sandbox-ai vpn add NAME --tor --bridges FILE\n"
-                               + tail(text))
+        still, took = now_ - rose, now_ - begun
+        if still >= stall:
+            raise BootstrapStalled(f"stalled at {got(percent, summary)} for {int(still)} s", percent, summary)
+        if took >= 2 * timeout:
+            raise BootstrapStalled(f"was not done within {int(took)} s, twice its {timeout} s although it still rose "
+                                   f"(at {got(percent, summary)})", percent, summary)
+        if now_ - said >= BOOTSTRAP_STILL:
+            emit("progress", out=out, message=f"tor: still at {got(percent, summary)} for {int(still)} s{of}")
+            said = now_
         sleep(0.5)
+
+
+def stop_tor(process, runner):
+    """End the tor of an attempt that stalled (TERM, KILL after 10 s); the runner no longer reports it as down."""
+    with contextlib.suppress(OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=10)
+    with contextlib.suppress(ValueError):
+        runner.children.remove(process)
+
+
+def fresh_guard(uid, path=None):
+    """Tor's state file (its guards) gone before tor starts again: the next attempt picks a new guard; the cached
+    directory documents stay. The data directory is debian-tor's (0700) and root here has no CAP_DAC_OVERRIDE: it
+    becomes root's for the moment (CHOWN), then debian-tor's again. A failure leaves the guard as it was."""
+    path = Path(path or TOR_DATA)
+    try:
+        os.chown(path, 0, 0, follow_symlinks=False)
+        with contextlib.suppress(FileNotFoundError):
+            (path / "state").unlink()
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            own_data_directory(uid, path)
+
+
+def bootstrap_hints(bridges):
+    return ("What helps: " + ("other bridges" if bridges else "bridges, if this network blocks Tor")
+            + " (sandbox-ai vpn add NAME --tor --bridges FILE --force); another network; this host's clock (tor "
+            "refuses the directory when the clock is hours off: timedatectl); more time or attempts (sandbox-ai vpn "
+            "set NAME --bootstrap-timeout SECONDS --bootstrap-attempts N)")
+
+
+def bootstrap(start, log_path, runner, settings, out=None, secrets=(), bridges=(), uid=TOR_UID, clock=time.monotonic,
+              sleep=time.sleep):
+    """Tor's bootstrap with its retries (SETTINGS, bootstrap_settings): START() starts tor (its process); an attempt
+    that stalls ends that tor and starts it again with a fresh guard - said, with the attempt's number - up to
+    SETTINGS["attempts"] attempts. Between two attempts the kill switch (loaded before the first, never touched
+    here) is looked at: gone, nothing starts again. Returns tor's process at 100%; RuntimeError with what was
+    tried, the last bootstrap line and what helps."""
+    attempts, tried, last, tail = settings["attempts"], [], None, ""
+    for number in range(1, attempts + 1):
+        try:
+            offset = Path(log_path).stat().st_size
+        except OSError:
+            offset = 0
+        process = start()
+        try:
+            wait_bootstrap(log_path, process, settings["timeout"], out, secrets, clock=clock, sleep=sleep,
+                           stall=settings["stall"], attempt=(number, attempts), offset=offset)
+            return process
+        except BootstrapStalled as exc:
+            tried.append(f"attempt {number} {exc}")
+            lines = read_from(log_path, offset).splitlines()
+            last = next((redact(line, secrets).strip() for line in reversed(lines) if BOOTSTRAPPED.search(line)), last)
+            tail = "\n".join(redact(line, secrets) for line in lines[-10:])
+            stop_tor(process, runner)
+            if number == attempts:
+                break
+            listing = runner.run(["nft", "list", "table", "inet", TABLE], check=False)
+            problem = killswitch_problem(listing.stdout if listing.returncode == 0 else "")
+            if problem:
+                raise RuntimeError(f"Tor's bootstrap {exc}, and {problem}: tor is not started again") from None
+            fresh_guard(uid)
+            emit("progress", out=out, message=f"Tor bootstrap {exc}; trying again ({number + 1} of {attempts})")
+    each = f"each {settings['timeout']} s, up to {2 * settings['timeout']} s while it still rose; stalled: no new " \
+           f"percentage for {settings['stall']} s"
+    raise RuntimeError(f"Tor did not finish its bootstrap in {attempts} attempt{'s' if attempts != 1 else ''} "
+                       f"({each}): " + "; ".join(tried) + f". Its last bootstrap line: {last or 'none'}. "
+                       + bootstrap_hints(bridges) + (f"\ntor's last lines:\n{tail}" if tail else ""))
 
 
 def tor_uid(name=TOR_USER):
@@ -792,10 +1039,12 @@ def own_data_directory(uid, path=None):
     os.chown(path, uid, uid, follow_symlinks=False)
 
 
-def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
+def up_tor(payload, runner, out=None, uid_of=None, clock=time.monotonic, sleep=time.sleep):
     """tor behind its kill switch: the rules first, then the torrc (private, with the bridges), then tor, which
-    binds its ports as root and becomes debian-tor; ready once it has bootstrapped."""
+    binds its ports as root and becomes debian-tor; ready once it has bootstrapped (bootstrap: an attempt that
+    stalls is tried again, with the kill switch in place all the while)."""
     tor = payload["profile"]["tor"]
+    settings = bootstrap_settings(tor)
     bridges = parse_bridges((payload.get("secrets") or {}).get("tor_bridges") or "")
     if tor.get("bridges") and not bridges:
         raise ValueError("the profile has bridges, but none arrived")
@@ -810,8 +1059,11 @@ def up_tor(payload, runner, out=None, timeout=BOOTSTRAP_TIMEOUT, uid_of=None):
     write_private(config, tor_config(tor, bridges))
     write_private(defaults, "")
     log_path = RUN / "tor.log"
-    process = runner.spawn(["tor", "-f", str(config), "--defaults-torrc", str(defaults)], open(log_path, "ab"))
-    wait_bootstrap(log_path, process, timeout, out, secret_values(payload))
+
+    def start():
+        with open(log_path, "ab") as log:
+            return runner.spawn(["tor", "-f", str(config), "--defaults-torrc", str(defaults)], log)
+    bootstrap(start, log_path, runner, settings, out, secret_values(payload), bridges, uid, clock, sleep)
     count = len(bridges)
     return {"interface": f"TransPort 127.0.0.1:{TOR_TRANS_PORT}", "implementation": "tor", "addresses": [],
             "ipv4": True, "ipv6": False, "full4": True, "full6": False,
@@ -924,11 +1176,12 @@ def mcp_dns_rules(resolver, mark=CHECK_MARK):
     resolver = ipaddress.IPv4Address(resolver)
     return "\n".join([
         f"table inet {MCP_DNS_TABLE} {{",
-        " chain redirect { type nat hook output priority -90; policy accept;",
+        # (no nft keyword as a chain's name: "redirect" made nft -f fail, and with it every such VPN container)
+        " chain dns_redirect { type nat hook output priority -90; policy accept;",
         f"  meta mark {int(mark):#x} return",
         f"  meta nfproto ipv4 udp dport 53 dnat ip to {resolver}:53",
         f"  meta nfproto ipv4 tcp dport 53 dnat ip to {resolver}:53", " }",
-        " chain refuse { type filter hook output priority -6; policy accept;",
+        " chain dns_refuse { type filter hook output priority -6; policy accept;",
         f"  meta mark {int(mark):#x} return",
         "  meta nfproto ipv6 udp dport 53 reject with icmpx type admin-prohibited",
         "  meta nfproto ipv6 tcp dport 53 reject with icmpx type admin-prohibited", " }",
@@ -1215,18 +1468,21 @@ def check_deadline(checks, servers, tor, started):
     return started + float(seconds) - after - READY_SLACK
 
 
-def gather_checks(payload, tunnel, runner, get=fetch, started=None):
+def gather_checks(payload, tunnel, runner, get=fetch, started=None, dns=None):
     """The checks from inside: the address each echo service sees over IPv4 and IPv6, the way to each resolver,
     their answers, and the egress address of the resolver chain (whoami.akamai.net answers with the address of
     the resolver that asked it). STARTED (or the payload's "started", main's for the first check): when the launcher
-    began to wait for this container - its retries end in time (check_deadline)."""
+    began to wait for this container - its retries end in time (check_deadline). Behind Tor every lookup but the
+    .onion probes goes through DNS (a TorDns: main's, else one of its own), patient while tor builds its first
+    circuit."""
     checks = payload.get("checks") or {}
     started = payload.get("started") if started is None else started
     servers = tunnel["dns"] or list(FALLBACK_DNS)
-    resolve = resolver_for(servers)
+    tor = bool(tunnel.get("tor"))
+    lookup = (dns or TorDns()).lookup if tor else None
+    resolve = resolver_for(servers, lookup)
     result = {"dns": {"servers": servers, "configured": bool(tunnel["dns"]), "routes": {}, "answers": {}}}
     timeout = float(checks.get("timeout", 8))
-    tor = bool(tunnel.get("tor"))
     if checks.get("ip", True):
         result["ipv4"] = echo_retried(checks.get("urls") or [], 4, resolve, get, timeout, tor,
                                       checks.get("attempts", TOR_ATTEMPTS if tor else ATTEMPTS),
@@ -1238,7 +1494,7 @@ def gather_checks(payload, tunnel, runner, get=fetch, started=None):
         if not tor:  # tor's DNSPort is on loopback; that every lookup reaches it is shown below
             result["dns"]["routes"][server] = route_device(server, runner)
         try:
-            dns_lookup(probe_name, server, 1, timeout=timeout / 2)
+            (lookup or dns_lookup)(probe_name, server, 1, timeout=timeout / 2)
             result["dns"]["answers"][server] = True
         except (OSError, ValueError) as exc:
             result["dns"]["answers"][server] = str(exc)
@@ -1259,10 +1515,11 @@ def gather_checks(payload, tunnel, runner, get=fetch, started=None):
     return result
 
 
-def resolve_hosts(names, tunnel, mode_tailnet=False):
+def resolve_hosts(names, tunnel, mode_tailnet=False, lookup=None):
     """{name: [addresses]} for the agent's pinned names, through the tunnel's resolvers (Tailscale without an exit
-    node: MagicDNS, then the container's own resolver, since only the tailnet goes through the tunnel)."""
-    resolve = resolver_for(tunnel["dns"] or list(FALLBACK_DNS))
+    node: MagicDNS, then the container's own resolver, since only the tailnet goes through the tunnel). LOOKUP: how
+    a resolver is asked (Tor: a TorDns's, patient while tor builds circuits)."""
+    resolve = resolver_for(tunnel["dns"] or list(FALLBACK_DNS), lookup)
     # Addresses of a family the tunnel does not carry would only make programs try a way the kill switch refuses.
     families = (4, 6) if mode_tailnet else tuple(v for v in (4, 6) if tunnel.get(f"ipv{v}")) or (4,)
     result = {}
@@ -1380,7 +1637,7 @@ def handle_request(line, tunnel, tailnet, secrets=()):
         request = json.loads(line)
         if not isinstance(request, dict):
             raise ValueError("a request is a JSON object")
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         return {"event": "answer", "id": None, "error": f"unreadable request: {exc}"}
     ident, op = request.get("id"), request.get("op")
     try:
@@ -1410,7 +1667,8 @@ def save_serve_state(tunnel, tailnet, path=None):
     """What `resolve` needs of the running tunnel, in the container's private /run."""
     with contextlib.suppress(OSError):
         write_private(path or SERVE_STATE, json.dumps({"dns": tunnel.get("dns") or [], "ipv4": tunnel.get("ipv4"),
-                                                       "ipv6": tunnel.get("ipv6"), "tailnet": bool(tailnet)}))
+                                                       "ipv6": tunnel.get("ipv6"), "tailnet": bool(tailnet),
+                                                       "tor": bool(tunnel.get("tor"))}))
 
 
 def baseline(settings, resolve=system_resolver, get=fetch):
@@ -1436,12 +1694,12 @@ def baseline_command(stdin, out):
                                        "timeout": float(settings.get("timeout") or 8),
                                        "dns_probe": settings.get("dns_probe")})) + "\n")
         return 0
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError) as exc:
         out.write(json.dumps({"error": str(exc)}) + "\n")
         return 1
 
 
-def resolve_command(stdin, out, path=None):
+def resolve_command(stdin, out, path=None, clock=time.monotonic, sleep=time.sleep):
     """`vpn_runtime.py resolve`, run by the launcher with podman exec in the running VPN container: the names on
     standard input (a JSON list) resolved through the tunnel's resolvers, {"hosts": {...}} or {"error"} on stdout.
     Its lookups are marked as the checks' are: the agent's firewall in the namespace does not hold them (tor's
@@ -1453,14 +1711,17 @@ def resolve_command(stdin, out, path=None):
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names) or len(names) > 256:
             raise ValueError("expected a JSON list of host names")
         tunnel = {"dns": state.get("dns") or [], "ipv4": state.get("ipv4"), "ipv6": state.get("ipv6")}
-        out.write(json.dumps({"hosts": resolve_hosts(names, tunnel, bool(state.get("tailnet")))}) + "\n")
+        # Behind Tor a name an exit could not look up (SERVFAIL) is asked again, within the launcher's 30 s.
+        lookup = TorDns(patience=TOR_DNS_RESOLVE_PATIENCE, name_patience=TOR_DNS_RESOLVE_PATIENCE,
+                        circuit=True, clock=clock, sleep=sleep).lookup if state.get("tor") else None
+        out.write(json.dumps({"hosts": resolve_hosts(names, tunnel, bool(state.get("tailnet")), lookup)}) + "\n")
         return 0
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         out.write(json.dumps({"error": str(exc)}) + "\n")
         return 1
 
 
-def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
+def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None, clock=time.monotonic, sleep=time.sleep):
     if argv[:1] == ["openvpn-route-up"]:
         return openvpn_route_up()
     if argv[:1] == ["resolve"]:
@@ -1491,9 +1752,16 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None):
             raise ValueError(f"unknown VPN type {kind!r}")
         tailnet = kind == "tailscale" and not payload["profile"]["tailscale"].get("exit_node")
         first = {**payload, "started": started}  # (only the first check: the launcher waits for it)
-        checks = gather_checks(first, tunnel, runner) if not tailnet else \
+        # Tor: its first lookups may meet a DNSPort without a circuit yet (SERVFAIL): waited for within the
+        # launcher's wait and said as progress - one wait for the checks and the agent's names alike.
+        ready_seconds = (payload.get("checks") or {}).get("ready_seconds")
+        waits = isinstance(ready_seconds, (int, float)) and not isinstance(ready_seconds, bool)
+        dns = TorDns(out=out, clock=clock, sleep=sleep, deadline=clock() + float(ready_seconds) - READY_SLACK - (
+            time.monotonic() - started) if waits else None) if kind == "tor" else None
+        checks = gather_checks(first, tunnel, runner, **({"dns": dns} if dns else {})) if not tailnet else \
             gather_checks({**first, "checks": {**(payload.get("checks") or {}), "ip": False}}, tunnel, runner)
-        hosts = resolve_hosts(payload.get("resolve") or [], tunnel, tailnet)
+        hosts = resolve_hosts(payload.get("resolve") or [], tunnel, tailnet,
+                              **({"lookup": dns.lookup} if dns else {}))
         if payload.get("mcp") and kind != "tor":
             # The container of an MCP image server (vpn.mcp_wrapper): its lookups go to the VPN's resolver. Tor's
             # rules hand every lookup to its DNSPort already; a tailnet-only profile is refused before (vpn.py

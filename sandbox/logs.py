@@ -454,9 +454,9 @@ def report(summary, out=print):
                 out(f"      in:      {p(process.get('cwd') or '?')}, started by "
                     f"{p(' < '.join(str(c) for c in process.get('parents') or []) or '?')}")
         if sandbox:
-            out(f"      sandbox: " + ", ".join(f"{key} {p(value)}" for key, value in sandbox.items()))
+            out("      sandbox: " + ", ".join(f"{key} {p(value)}" for key, value in sandbox.items()))
         if client:
-            out(f"      sent:    " + ", ".join(f"{key} {p(value)}" for key, value in client.items())[:300])
+            out("      sent:    " + ", ".join(f"{key} {p(value)}" for key, value in client.items())[:300])
     for server, calls in (summary.get("tool_calls") or {}).items():
         refused = sum(1 for call in calls if call[2:] and call[2] != "allow")
         out(f"MCP {p(server)}: {len(calls)} tool call(s)" + (f", {refused} not allowed outright" if refused else "")
@@ -470,10 +470,15 @@ def cli(argv):
     parser.add_argument("-p", "--project", type=Path, help="Project whose wizard log directory to read")
     parser.add_argument("-j", "--json", action="store_true")
     a = parser.parse_args(argv)
-    directory = a.directory or default_log_dir(Path(a.project or os.getcwd()).expanduser().absolute())
+    project = Path(a.project or os.getcwd()).expanduser().absolute()
+    directory = a.directory or default_log_dir(project)
     if not directory.is_dir():
-        print(f"sandbox-ai logs: no log directory {directory}; start the agent with --log-dir "
-              "(the wizard's logging question) first", file=sys.stderr)
+        if a.directory:
+            print(f"sandbox-ai logs: no log directory {directory}", file=sys.stderr)
+        else:  # (every start with the connection proxy, the default, keeps its log there)
+            print(f"sandbox-ai logs: no log directory yet: nothing has run in {project} yet (a start there keeps its "
+                  f"log in {directory}); "
+                  "a log kept elsewhere (--log-dir): sandbox-ai logs DIR", file=sys.stderr)
         return 1
     summary = summarize(directory)
     summary["telemetry"] = telemetry(directory)

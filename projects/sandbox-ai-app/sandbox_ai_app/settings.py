@@ -27,10 +27,11 @@ from PySide6.QtWidgets import (
 
 from . import backend, fonts, help_texts, help_view, notifications, presets as PR, project_trust as PT, theme
 from .board_view import PathEdit
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
+from .short_notices import short_notice
 from .widgets import (
-    MONO, ask_first, background, inform, outcome, plain_label, safe_tooltip, tame_combos, warn, shown_as_text,
+    MONO, ask_first, background, outcome, plain_label, safe_tooltip, tame_combos, warn, shown_as_text,
 )
 
 LOCAL = "local"
@@ -159,7 +160,9 @@ class PresetDirs(QWidget):
         row.addWidget(self.remove_button)
         row.addStretch()
         layout.addLayout(row)
-        self.status = plain_label(role="secondary", selectable=True)
+        from .widgets import list_menu
+        list_menu(self.list, lambda: [self.remove_button, None, self.add_button])
+        self.status = plain_label(role="secondary", selectable=True, log="settings")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         if not sai.has_preset_dirs():
@@ -191,7 +194,7 @@ class PresetDirs(QWidget):
             return
         self.list.clear()
         if error is not None:
-            self.status.setText(tr("Cannot list the preset directories: {error}", error=printable(str(error))))
+            self.status.setText(tr("Cannot list the preset directories: {error}", error=printable_text(str(error))))
             self.entries = []
             self.update_buttons()
             return
@@ -261,7 +264,7 @@ class PresetDirs(QWidget):
         if status != 0:
             warn(self, tr("Preset directories"), text or tr("Failed (exit status {status}).", status=status))
         elif text:
-            inform(self, tr("Preset directories"), text, modal=False)
+            short_notice(self, tr("Preset directories"), text)
         self.changed.emit()
         self.refresh()
 
@@ -303,7 +306,9 @@ class TrustedProjects(QWidget):
         row.addWidget(self.forget_button)
         row.addStretch()
         layout.addLayout(row)
-        self.status = plain_label(role="secondary", selectable=True)
+        from .widgets import list_menu
+        list_menu(self.list, lambda: [self.review_button, self.forget_button, None, self.refresh_button])
+        self.status = plain_label(role="secondary", selectable=True, log="settings")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.update_buttons()
@@ -329,7 +334,7 @@ class TrustedProjects(QWidget):
             return
         self.list.clear()
         if error is not None:
-            self.status.setText(tr("Cannot list the trusted configurations: {error}", error=printable(str(error))[:400]))
+            self.status.setText(tr("Cannot list the trusted configurations: {error}", error=printable_text(str(error))[:400]))
             self.entries = []
             self.update_buttons()
             return
@@ -397,7 +402,7 @@ class TrustedProjects(QWidget):
 
     def forgotten(self, result, error):
         status, out, err = outcome(result, error)
-        text = printable((out + err).strip())[-1500:]
+        text = printable_text((out + err).strip())[-1500:]
         if status != 0:
             warn(self, tr("Trusted project configurations"), text or tr("Failed (exit status {status}).",
                                                                       status=status))
@@ -491,13 +496,19 @@ class SettingsDialog(QDialog):
                                    "or the menu; control characters are always asked about. A link: Ctrl+click "
                                    "(Cmd+click), or Copy link in the menu - also one drawn over several rows. A "
                                    "request to read the clipboard is never answered."), role="secondary"))
+        # What only says that something is done ("Written and trusted: …"): a short notice in the window that goes
+        # by itself (short_notices.py); off, none is shown (the status bar and the log still have each).
+        self.check(form, "short_notices", tr("Show short notices (toasts)"), current)
+        form.addRow(plain_label(tr("A short notice near the bottom of the window says for a moment that something is "
+                                   "done (written, trusted, removed…) and goes by itself; no OK to click. Off: none "
+                                   "is shown, the status bar and the log still have each."), role="secondary"))
         self.check(form, "notifications", tr("Show notifications (popups)"), current)
         form.addRow(plain_label(tr("Off (the default): nothing pops up. Questions wait on the Approvals page, the "
                                    "number of open ones is shown in the navigation and the tray, and every "
                                    "notification is written to the log (the log window)."), role="secondary"))
         self.check(form, "notify", tr("Desktop notification for each new question"), current)
         self.check(form, "auto_tabs", tr("Open a tab for each session or sandbox that starts"), current)
-        self.check(form, "reopen_terminals", tr("Reopen the terminals of running sessions at start"), current)
+        self.check(form, "reopen_terminals", tr("At start, also open a terminal for every other running session"), current)
         self.spin(form, "notify_seconds", tr("Notifications stay (seconds)"), 3, 120, current)
         self.combo(form, "notify_style", tr("Notifications are shown"),
                    [(key, tr(text)) for key, text in notifications.STYLES], current)
@@ -593,25 +604,27 @@ class SettingsDialog(QDialog):
         # privacy: sandbox-ai's own defaults, for every start (the app's and the command line's)
         page, form = self.tab(tr("Privacy"))
         self.telemetry = QComboBox()
-        levels = sai.telemetry_levels()
+        # off and strict only: telemetry is always off (an older sandbox-ai's on is never offered; an old "on" in
+        # the file is shown as off, which is how sandbox-ai reads it now)
+        levels = [level for level in sai.telemetry_levels() if level in backend.TELEMETRY_ORDER]
         defaults, problem = sai.sandbox_defaults()
         texts = {"off": tr("off: no usage statistics, error reports, feedback or update checks (recommended)"),
-                 "strict": tr("strict: also no other calls than the model's"),
-                 "on": tr("on: the agents' own settings")}
+                 "strict": tr("strict: also no other calls than the model's")}
         for level in levels:
             self.telemetry.addItem(texts.get(level, level), level)
         self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(defaults.get("telemetry", "off"))))
         self.telemetry.setEnabled(bool(levels) and not problem)
         self.telemetry.currentIndexChanged.connect(lambda _: self.save_telemetry(self.telemetry.currentData()))
         self.fields["telemetry"] = self.telemetry
-        form.addRow(tr("Telemetry of Claude Code, Codex and OpenCode"), self.telemetry)
+        form.addRow(tr("Telemetry of the agents (always off)"), self.telemetry)
         if not levels:
             form.addRow(plain_label(tr("This sandbox-ai has no telemetry setting yet: update it."), role="notice-error"))
         elif problem:
-            form.addRow(plain_label(tr("It stops every start: {problem}", problem=printable(problem)),
+            form.addRow(plain_label(tr("It stops every start: {problem}", problem=printable_text(problem)),
                                     role="notice-error"))
-        form.addRow(plain_label(tr("For every start, in {path}; --telemetry on the command line wins, the security "
-                                   "modes high and paranoid allow no less than off and strict.",
+        form.addRow(plain_label(tr("Telemetry is always off, for every agent; strict also holds back their other "
+                                   "calls. For every start, in {path}; a --telemetry option given at a start wins, "
+                                   "the security mode paranoid allows no less than strict.",
                                    path=breakable(printable(str(sai.sandbox_defaults_file())))), role="secondary"))
 
         # policy
@@ -622,7 +635,7 @@ class SettingsDialog(QDialog):
             form.addRow(plain_label(tr("There is no administrator policy on this machine.")))
         else:
             if problem:
-                form.addRow(plain_label(tr("It stops every start: {problem}", problem=printable(problem)),
+                form.addRow(plain_label(tr("It stops every start: {problem}", problem=printable_text(problem)),
                                         role="notice-error"))
             forbidden = ", ".join(str(v) for v in policy.get("forbid", [])) or tr("nothing")
             form.addRow(tr("Forbidden"), plain_label(printable(forbidden)))
@@ -675,7 +688,7 @@ class SettingsDialog(QDialog):
         try:
             self.sai.save_sandbox_default("loop_guard", layers or None)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Loop guard for local models"), printable(exc))
+            warn(self, tr("Loop guard for local models"), printable_text(exc))
             return
         self.changed.emit("loop_guard")
 
@@ -730,7 +743,7 @@ class SettingsDialog(QDialog):
         try:
             self.sai.save_setting(key, value)
         except (OSError, ValueError) as exc:  # a full disk, a read-only or unreadable settings file: said, not kept
-            warn(self, tr("Not saved"), printable(exc), modal=False)
+            warn(self, tr("Not saved"), printable_text(exc), modal=False)
             return
         if key == "debug":
             from . import applog
@@ -806,7 +819,7 @@ class SettingsDialog(QDialog):
         try:
             self.sai.save_sandbox_default("desktop_notifications", None if level == "all" else level)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Notifications"), printable(exc))
+            warn(self, tr("Notifications"), printable_text(exc))
             return
         self.changed.emit("desktop_notifications")
 
@@ -814,7 +827,7 @@ class SettingsDialog(QDialog):
         try:
             self.sai.save_sandbox_default("telemetry", None if level == "off" else level)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Privacy"), printable(exc))
+            warn(self, tr("Privacy"), printable_text(exc))
             return
         self.changed.emit("telemetry")
 
@@ -827,9 +840,9 @@ class SettingsDialog(QDialog):
         try:
             login_browser.forget()
         except (OSError, ValueError) as exc:
-            warn(self, tr("Login browser"), printable(exc), modal=False)
+            warn(self, tr("Login browser"), printable_text(exc), modal=False)
             return
-        inform(self, tr("Login browser"), tr("Forgotten."), modal=False)
+        short_notice(self, tr("Login browser"), tr("Forgotten."))
 
     def choose_autostart(self, on):
         """Written or removed only here or on the System page, when the human ticks the box (the folders sandboxes
@@ -843,10 +856,10 @@ class SettingsDialog(QDialog):
         try:
             if error is not None:
                 raise OSError(tr("Which folders sandboxes can write is not known ({error}): nothing is written.",
-                                 error=printable(error)))
+                                 error=printable_text(error)))
             backend.set_autostart(bool(on), forbidden=forbidden, also=[str(self.sai.directory)])
         except (OSError, ValueError) as exc:
-            warn(self, tr("Start at login"), printable(exc))
+            warn(self, tr("Start at login"), printable_text(exc))
             self.autostart.blockSignals(True)
             self.autostart.setChecked(backend.autostart_enabled())
             self.autostart.blockSignals(False)

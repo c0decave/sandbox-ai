@@ -21,8 +21,9 @@ import json
 import math
 import re
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
+from . import applog
 
 SCOPE_ALL = "*"
 MODEL = re.compile(r"[\w.:/@+-]{1,200}", re.ASCII)  # as sandbox-ai's llm.MODEL_NAME
@@ -64,8 +65,8 @@ def parse_catalogue(out):
     checked (a name, a known type, numbers as bounds); ValueError when the answer is none of that."""
     try:
         data = json.loads(out or "")
-    except ValueError:
-        raise ValueError(printable((out or "").strip()[-300:]) or tr("no answer")) from None
+    except (ValueError, RecursionError):
+        raise ValueError(printable_text((out or "").strip()[-300:]) or tr("no answer")) from None
     if not isinstance(data, list):
         raise ValueError(tr("not a list of parameters"))
     found = []
@@ -90,7 +91,8 @@ def local_catalogue(sai, kind=None):
         if not hasattr(module, "params_catalogue"):
             return None
         return parse_catalogue(json.dumps(module.params_catalogue(kind)))
-    except Exception:  # noqa: BLE001 - a sandbox-ai that does not load knows no parameters
+    except Exception as _exc:  # noqa: BLE001 - a sandbox-ai that does not load knows no parameters
+        applog.swallowed("llm_params", "local_catalogue: a sandbox-ai that does not load knows no parameters", _exc)
         return None
 
 
@@ -129,7 +131,8 @@ def loop_spec(sai=None, view=None):
     try:
         module = sai.module("llm") if sai is not None else None
         defaults, ranges = getattr(module, "LOOP_DEFAULTS", None), getattr(module, "LOOP_RANGES", None)
-    except Exception:  # noqa: BLE001 - a sandbox-ai that does not load: the view's layers
+    except Exception as _exc:  # noqa: BLE001 - a sandbox-ai that does not load: the view's layers
+        applog.swallowed("llm_params", "loop_spec: a sandbox-ai that does not load: the view's layers", _exc)
         defaults, ranges = None, None
     if isinstance(defaults, dict) and defaults:
         return dict(defaults), dict(ranges or {})

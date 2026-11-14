@@ -357,6 +357,10 @@
         }
       },
       size: function () { return [term.cols, term.rows]; },
+      // (tests: CALLBACK after each paint of xterm.js - what a frame looks like when it is shown)
+      rendered: function (callback) {
+        if (typeof term.onRender === "function") { term.onRender(function () { callback(); }); }
+      },
       fontFamily: function () { return term.options.fontFamily; },
       menuState: function () {
         return JSON.stringify({ selection: typeof term.hasSelection === "function" && term.hasSelection(),

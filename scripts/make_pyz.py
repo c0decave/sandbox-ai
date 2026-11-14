@@ -15,7 +15,6 @@ Reproducible: entries sorted and stored (deflate differs between zlib builds), f
 """
 import argparse
 import hashlib
-import io
 import json
 import os
 from pathlib import Path

@@ -5,7 +5,7 @@
 
 Needs PySide6 (any Python that can `import PySide6`) and the app (projects/sandbox-ai-app). The app runs with
 QT_QPA_PLATFORM=offscreen in a throwaway HOME and XDG folders (nothing of yours is read or changed), in its
-default dark theme, against this checkout's sandbox-ai. A staged demo fills the pages: a project (~/src/shop) with
+default dark theme (--theme NAME for another), against this checkout's sandbox-ai. A staged demo fills the pages: a project (~/src/shop) with
 a few files, a staged run with two open questions and its logs (requests, refusals, a refused push, the agents'
 timeline), a host, a kit, a secret, an identity and a model server, all made with this checkout's own commands
 where one exists. The videos mark these screenshots as "staged demo data".
@@ -13,7 +13,10 @@ where one exists. The videos mark these screenshots as "staged demo data".
 Besides one picture per page (PAGE-LANG.png) it takes the states listed in STATES (STATE-LANG.png): the board
 with a preset, the preset gallery, the file manager's editor, context menu and a remote system in a pane (served by
 the app's own test SFTP server, tests/fake_sftp_server.py, over this machine's files: no SSH connection is made),
-the kill switch, a secret given to a running sandbox as a Git login, the settings, the log window and others. A dialog or menu is drawn over the window where the app would show it. A state the
+the kill switch, a secret given to a running sandbox as a Git login, the settings, the log window, the gallery's
+category Agents, the agent's part of a Hermes preset, the guide of a service part, the sandbox's own browser in its
+window (the app's VNC view fed a staged picture), an MCP tool call's arguments in full, an MCP server's variables in its
+Properties, the LLM traffic log of the staged run as a chat and its parameters, and others. A dialog or menu is drawn over the window where the app would show it. A state the
 app of this checkout cannot show (renamed, not there yet) is skipped with a warning; the video then falls back to
 the page's own picture. make_video.py picks the files up from OUT/app-shots (or --app-shots DIR).
 """
@@ -32,11 +35,12 @@ import traceback
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 PAGES = ["launch", "board", "sandboxes", "approvals", "terminals", "files", "kits", "mcp", "llm", "images", "credentials",
-         "team", "connections", "activity", "statistics", "system", "hosts", "help"]
+         "team", "connections", "activity", "traffic", "statistics", "system", "hosts", "help"]
 # The extra states: name -> the page they are on. How each is made is in Capture.state_NAME (dashes as _).
 STATES = {
-    "launch-network": "launch", "board-preset": "board", "board-gallery": "board", "sandboxes-cut": "sandboxes",
-    "approvals-blocked": "approvals", "connections-record": "connections", "files-markdown": "files",
+    "launch-network": "launch", "board-preset": "board", "board-gallery": "board", "board-agents": "board",
+    "board-agent": "board", "board-guide": "board", "sandboxes-cut": "sandboxes", "sandboxes-browser": "sandboxes",
+    "approvals-arguments": "approvals", "approvals-blocked": "approvals", "traffic-parameters": "traffic", "connections-record": "connections", "files-markdown": "files",
     "mcp-properties": "mcp", "llm-parameters": "llm", "images-yours": "images",
     "activity-safeguards": "activity", "files-editor": "files",
     "files-menu": "files", "files-properties": "files", "kits-marketplaces": "kits", "images-extension": "images",
@@ -92,7 +96,10 @@ def stage(root, home=None):
     (run_dir / "run.json").write_text(json.dumps({
         "run": RUN, "name": NAME, "agent": "claude", "backend": "podman", "workspace": str(project),
         "pid": os.getpid(), "session": None, "session_dir": str(root / "session"), "log_dir": str(logs),
-        "started": stamp(600), "proxy": True}))
+        "started": stamp(600), "proxy": True,
+        # its browser of its own (--browser): the Sandboxes page's Browser button opens its live view
+        "browser": {"kind": "chromium", "control": "human", "profile": "fresh", "container": f"{RUN}-browser",
+                    "vnc": str(root / "runtime" / "sandbox-ai" / "runs" / f"{RUN}.browser-vnc" / "vnc.sock")}}))
 
     def ask(ident, seconds_ago, **question):
         (run_dir / "approvals" / f"{ident}.json").write_text(json.dumps({"id": ident, "time": stamp(seconds_ago),
@@ -101,6 +108,17 @@ def stage(root, home=None):
     ask("1762506000-41-1", 12, kind="connect", destination="203.0.113.9:443", address="203.0.113.9", port=443,
         host="api.example.com", protocol="tls")
     ask("1762506000-41-2", 4, kind="browser", url="https://login.example.com/device?code=WDJB-MJHT")
+    # An MCP tool call a rule asks about, its arguments longer than the question's line: shown in full below the list.
+    post = {"text": "Release 0.3 of the shop is out: a price check for every item, with tests. Prices: apple 0.50, "
+                    "pear 0.70, plum 0.30. Thanks to everyone who reported the rounding bug in the basket total, "
+                    "and to the reviewers of the new checkout page. Changelog and download: "
+                    "https://shop.example.org/releases/0.3 #python #webshop",
+            "langs": ["en"], "reply_to": None,
+            "embed": {"external": {"uri": "https://shop.example.org/releases/0.3", "title": "shop 0.3",
+                                   "description": "A price check for every item"}}}
+    whole = json.dumps(post, ensure_ascii=False)
+    ask("1762506000-41-3", 2, kind="mcp", server="bluesky", tool="create_post", rule="ask-posts",
+        ruleset="rules.json", arguments=whole[:290] + "…", arguments_full=json.dumps(post, indent=2, ensure_ascii=False))
     stage_logs(logs, project)
     return home, project
 
@@ -149,6 +167,7 @@ def stage_logs(logs, project):
         jsonl(logs / safeguards.FILE, [r for r in found if isinstance(r, dict)])
     except Exception as error:  # noqa: BLE001 - another version's safeguards: the tab stays empty
         print(f"capture_app: warning: no staged safeguards: {error!r}", file=sys.stderr)
+    stage_traffic(logs)
     jsonl(logs / "files.jsonl", [{"time": stamp(420), "action": "write", "path": "/work/shop/app.py"},
                                  {"time": stamp(410), "action": "create", "path": "/work/tests/test_app.py"}])
     jsonl(logs / "processes.jsonl", [{"time": stamp(470 - i), "command": c} for i, c in enumerate(
@@ -177,6 +196,63 @@ def stage_logs(logs, project):
     ])
 
 
+def digest(value):
+    """The digest of a message in an LLM traffic record (as the relay makes it: which messages are new)."""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+                          .encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def stage_traffic(logs):
+    """The staged run's LLM traffic log: the agent on the model server gpu-box (qwen3-coder), a short conversation
+    with tool calls, the relay's parameters and one answer the loop guard ended."""
+    def call(ident, name, arguments):
+        return {"id": ident, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    def asked(ident, name, arguments):
+        return {"id": ident, "name": name, "arguments": json.dumps(arguments)}
+
+    plan = "The prices are a dict. I will check that every price is positive and add a test."
+    system = {"role": "system", "content": "You are a coding agent in a sandbox. Work in /work/shop."}
+    steps = [  # (the messages new in the request, the answer, tokens in and out, milliseconds)
+        ([{"role": "user", "content": "Add a price check to the shop and a test for it"}],
+         {"tool_calls": [asked("c1", "read_file", {"path": "shop/app.py"})], "finish_reason": "tool_calls"},
+         (4210, 38), 2100),
+        ([{"role": "assistant", "content": None, "tool_calls": [call("c1", "read_file", {"path": "shop/app.py"})]},
+          {"role": "tool", "tool_call_id": "c1",
+           "content": 'PRICES = {"apple": 0.5, "pear": 0.7, "plum": 0.3}\n\n\nclass Shop(BaseHTTPRequestHandler): ...'}],
+         {"text": plan, "tool_calls": [asked("c2", "write_file", {"path": "tests/test_app.py"})],
+          "finish_reason": "tool_calls"}, (4630, 212), 5400),
+        ([{"role": "assistant", "content": plan,
+           "tool_calls": [call("c2", "write_file", {"path": "tests/test_app.py"})]},
+          {"role": "tool", "tool_call_id": "c2", "content": "written: tests/test_app.py (5 lines)"}],
+         {"tool_calls": [asked("c3", "bash", {"command": "python -m pytest -q"})], "finish_reason": "tool_calls"},
+         (4980, 31), 1700),
+        ([{"role": "assistant", "content": None, "tool_calls": [call("c3", "bash", {"command": "python -m pytest -q"})]},
+          {"role": "tool", "tool_call_id": "c3", "content": "1 passed in 0.08s"}],
+         {"text": "The test passes. " * 6, "finish_reason": "stop"}, (5120, 96), 2600),
+        ([{"role": "assistant", "content": "The test passes."},
+          {"role": "user", "content": "Thanks. Is the price check in app.py too?"}],
+         {"text": "Yes: the test checks PRICES of shop/app.py, every price above zero.", "finish_reason": "stop"},
+         (5260, 41), 1900),
+    ]
+    messages, records = [system], []
+    for n, (new, answer, (tokens_in, tokens_out), ms) in enumerate(steps, 1):
+        messages = messages + new
+        record = {"version": 1, "n": n, "time": stamp(560 - n * 40), "run": RUN, "source": "llm",
+                  "endpoint": "gpu-box", "host": "192.168.178.20:11434", "api": "chat", "model": "qwen3-coder:30b",
+                  "stream": True, "status": 200, "ms": ms, "digests": [digest("")] + [digest(m) for m in messages],
+                  "request": {"model": "qwen3-coder:30b", "temperature": 0.7, "top_k": 20, "num_ctx": 32768,
+                              "stream": True, "messages": messages},
+                  "response": {**answer, "usage": {"prompt_tokens": tokens_in, "completion_tokens": tokens_out}},
+                  "changes": [{"field": "temperature", "from": 0.2, "to": 0.7, "why": "parameter"},
+                              {"field": "top_k", "to": 20, "why": "parameter"},
+                              {"field": "num_ctx", "to": 32768, "why": "parameter"}]}
+        if n == 4:
+            record["loop"] = {"action": "answer stopped", "kind": "text", "detail": "the same sentence repeated"}
+        records.append(record)
+    jsonl(logs / f"llm-traffic-20261113-095000-{RUN}.jsonl", records)
+
+
 def demo_commands(env, cwd):
     """What the pages list besides the run: made with this checkout's own commands (offline ones only)."""
     sai = str(REPO / "sandbox-ai")
@@ -190,6 +266,10 @@ def demo_commands(env, cwd):
           "--description", "commits at work"], None),
         ([sai, "llm", "add", "gpu-box", "-k", "ollama", "-u", "http://192.168.178.20:11434", "-m", "qwen3-coder:30b"],
          None),
+        # an MCP server of the signed catalog with a value that is no secret and a secret of another name (0.1.95)
+        ([sai, "secrets", "set", "TELEGRAM_SHOP_BOT"], "123456:demo-not-a-real-token\n"),
+        ([sai, "mcp", "add", "telegram", "--network", "full", "--env", "TELEGRAM_BOT_TOKEN@TELEGRAM_SHOP_BOT",
+          "--env", "TELEGRAM_ALLOWED_CHATS=123456789", "--no-pull", "--backend", "podman"], None),
     ]
     for argv, stdin in steps:
         done = subprocess.run(argv, env=env, cwd=cwd, input=stdin, text=True, capture_output=True, timeout=120)
@@ -201,7 +281,7 @@ def demo_commands(env, cwd):
 class Capture:
     """The app's window, offscreen, and the pictures of its pages and states."""
 
-    def __init__(self, app_dir, out, lang, size):
+    def __init__(self, app_dir, out, lang, size, look="dark"):
         os.environ.update({"QT_QPA_PLATFORM": "offscreen", "SANDBOX_AI_APP_LANGUAGE": lang,
                            "SANDBOX_AI_APP_NO_INTRO": "1", "QTWEBENGINE_DISABLE_SANDBOX": "1"})
         sys.path.insert(0, str(app_dir))
@@ -209,8 +289,13 @@ class Capture:
         self.qapp = QApplication.instance() or QApplication([])
         from sandbox_ai_app import backend, i18n, terminal, theme
         i18n.set_language(lang)
+        try:  # Qt's own words (Cancel, OK) in the app's language, as the app loads them (0.1.95)
+            from sandbox_ai_app import main as app_main
+            self.qt_words = app_main.qt_translations(self.qapp) if hasattr(app_main, "qt_translations") else None
+        except Exception:  # noqa: BLE001 - an older app: Qt's English words
+            self.qt_words = None
         terminal.available = lambda web=None: (False, "not in the video")
-        theme.apply("dark")
+        theme.apply(look)
         self.theme = theme
         from sandbox_ai_app import widgets
         if hasattr(widgets, "window_close_controls"):  # every extra window with its [x] at the top right (0.1.94)
@@ -330,6 +415,7 @@ class Capture:
     # -- the pages as they first show --
 
     def page_approvals(self, page):
+        self.restamp_questions()
         page.poll()
         self.settle(0.5)
         if page.open.rowCount():
@@ -395,6 +481,202 @@ class Capture:
         self.settle(2.0)
         return self.over(dialog, title=dialog.windowTitle())
 
+    def wide_inspector(self, width=760):
+        """The Board's inspector panel wider than at first: its values readable in the picture."""
+        from PySide6.QtCore import Qt
+        dock = getattr(self.window, "docks", {}).get("inspector")
+        if dock is not None:
+            fold = getattr(self.window, "inspector_fold", None)
+            if fold is not None and hasattr(fold, "unfold"):
+                fold.unfold()
+            self.window.workspace.resizeDocks([dock], [width], Qt.Orientation.Horizontal)
+            self.settle(0.8)
+
+    def select_agent(self, page):
+        agent = next((node for node in page.scene.items() if type(node).__name__ == "NodeItem"
+                      and "agent" in str(getattr(node, "kind", "") or getattr(getattr(node, "part", None), "kind", ""))),
+                     None)
+        if agent is None:
+            raise LookupError("no agent on the board")
+        page.scene.clearSelection()
+        agent.setSelected(True)
+        self.settle(0.5)
+        if getattr(page, "show_inspector", None):
+            page.show_inspector()
+        self.settle(1.0)
+
+    def state_board_agent(self, page):
+        """A preset of an agent not live-tested yet (Hermes): the agent's part with its choice, the line below it, the
+        model server list; the launcher's check names the image to build (Build now)."""
+        page.new_from_preset("coding-hermes")
+        self.settle(2.0)
+        self.select_agent(page)
+        self.wide_inspector()
+        end = time.time() + 60  # the launcher's verdict comes from a dry run in the background
+        while time.time() < end and not page.verdict.text():
+            self.settle(0.5)
+        self.settle(1.0)
+        return self.window.grab().toImage()
+
+    def state_board_agents(self, page):
+        """The gallery at its category Agents: every agent's presets, those not live-tested yet marked."""
+        from sandbox_ai_app.preset_gallery import PresetGallery
+        dialog = PresetGallery(page.sai, directory=str(self.project), parent=self.window)
+        self.extra.append(dialog)
+        dialog.resize(1400, 780)
+        dialog.show()
+        self.settle(2.0)
+        for row in range(dialog.categories.count()):
+            item = dialog.categories.item(row)
+            if item.text().split(" (")[0].endswith(("Agenten", "Agents")):
+                dialog.categories.setCurrentItem(item)
+                dialog.show_category(item)
+                break
+        else:
+            raise LookupError("no category Agents in the gallery")
+        self.settle(1.0)
+        return self.over(dialog, title=dialog.windowTitle())
+
+    def state_board_guide(self, page):
+        """The guide for a service part, its introduction seen once already: it starts at the image, a drop-down of
+        your images; Show the introduction goes back."""
+        from sandbox_ai_app import guide_view
+        node_id = None
+        before = {node.id for node in page.board.nodes}
+        page.add_node("service")
+        self.settle(0.8)
+        node_id = next(node.id for node in page.board.nodes if node.id not in before)
+        dialog = guide_view.NodeGuide(page.board.node(node_id), page.problems, page, skip_intro=True)
+        self.extra.append(dialog)
+        dialog.resize(720, 460)
+        dialog.show()
+        self.settle(1.0)
+        dialog.forward()  # past the name: the image, from a drop-down of your images
+        self.settle(1.5)
+        return self.over(dialog, title=dialog.windowTitle())
+
+    def state_sandboxes_browser(self, page):
+        """The staged run's own browser (--browser) in its window: the app's VNC view, fed a picture of a page as an
+        x11vnc would send it (no browser runs)."""
+        import struct
+        from PySide6.QtCore import QRect, Qt
+        from PySide6.QtGui import QColor, QFont, QImage, QPainter
+        from sandbox_ai_app import vnc_view
+        self.select_run(page)
+        width, height = 1280, 800
+        picture = QImage(width, height, QImage.Format.Format_RGB32)
+        picture.fill(QColor("#ffffff"))
+        paint = QPainter(picture)
+        paint.fillRect(QRect(0, 0, width, 84), QColor("#dee1e6"))
+        paint.fillRect(QRect(10, 8, 260, 34), QColor("#ffffff"))
+        paint.fillRect(QRect(110, 48, width - 130, 30), QColor("#ffffff"))
+        font = QFont("DejaVu Sans", 13)
+        paint.setFont(font)
+        paint.setPen(QColor("#202124"))
+        paint.drawText(QRect(22, 8, 240, 34), Qt.AlignmentFlag.AlignVCenter, "shop - prices")
+        paint.drawText(QRect(124, 48, 600, 30), Qt.AlignmentFlag.AlignVCenter, "localhost:8080/prices")
+        for x, mark in ((16, "‹"), (46, "›"), (76, "⟳")):
+            paint.drawText(QRect(x, 48, 24, 30), Qt.AlignmentFlag.AlignCenter, mark)
+        paint.setFont(QFont("DejaVu Sans", 30, QFont.Weight.Bold))
+        paint.drawText(QRect(80, 130, 1000, 60), Qt.AlignmentFlag.AlignVCenter, "shop")
+        paint.setFont(QFont("DejaVu Sans", 16))
+        paint.setPen(QColor("#5f6368"))
+        paint.drawText(QRect(80, 190, 1000, 40), Qt.AlignmentFlag.AlignVCenter, "Prices, checked by the agent's new test")
+        paint.setPen(QColor("#202124"))
+        for row, (item, price) in enumerate((("apple", "0.50"), ("pear", "0.70"), ("plum", "0.30"))):
+            top = 260 + row * 56
+            paint.fillRect(QRect(80, top, 520, 48), QColor("#f1f3f4" if row % 2 == 0 else "#ffffff"))
+            paint.drawText(QRect(100, top, 300, 48), Qt.AlignmentFlag.AlignVCenter, item)
+            paint.drawText(QRect(400, top, 180, 48), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, price)
+        paint.fillRect(QRect(80, 460, 200, 48), QColor("#1a73e8"))
+        paint.setPen(QColor("#ffffff"))
+        paint.drawText(QRect(80, 460, 200, 48), Qt.AlignmentFlag.AlignCenter, "Check prices")
+        paint.end()
+        window = vnc_view.BrowserWindow(f"Browser – {NAME}", Path(os.environ["XDG_RUNTIME_DIR"]) / "none" / "vnc.sock",
+                                        parent=None)
+        self.extra.append(window)
+        window.timer.stop()
+        client = window.client
+        client.send = lambda data: None
+        client.parser, client.buffer = client.protocol(), bytearray()
+        client.need, client.dead = next(client.parser), False
+        client.feed(b"RFB 003.008\n")
+        client.feed(b"\x01\x01")
+        client.feed(struct.pack(">I", 0))
+        client.feed(struct.pack(">HH", width, height) + b"\0" * 16 + struct.pack(">I", 7) + b"browser")
+        pixels = bytes(picture.constBits())[:width * height * 4]
+        client.feed(b"\x00\x00" + struct.pack(">H", 1) + struct.pack(">HHHHi", 0, 0, width, height, 0) + pixels)
+        window.timer.stop()
+        window.resize(1180, 820)
+        window.show()
+        self.settle(1.0)
+        return self.over(window, title=window.windowTitle())
+
+    def state_approvals_arguments(self, page):
+        """The MCP tool call's question selected: its arguments in full below the list."""
+        from PySide6.QtWidgets import QSplitter
+        self.restamp_questions()
+        page.poll()
+        self.settle(0.5)
+        model = page.open.model()
+        for row in range(model.rowCount()):
+            texts = " ".join(str(model.index(row, c).data() or "") for c in range(model.columnCount()))
+            if "create_post" in texts:
+                page.open.selectRow(row)
+                page.open.scrollTo(model.index(row, 0))
+                break
+        else:
+            raise LookupError("no MCP question in the list")
+        widget, split = page.open, None
+        while widget is not None and split is None:  # the open questions given the room of the page's upper part
+            widget = widget.parentWidget()
+            split = widget if isinstance(widget, QSplitter) else None
+        if split is not None and split.count() == 2:
+            total = sum(split.sizes())
+            split.setSizes([int(total * 0.8), total - int(total * 0.8)])
+        self.settle(1.0)
+        page.open.scrollTo(page.open.currentIndex())
+        self.settle(0.5)
+        return self.window.grab().toImage()
+
+    def restamp_questions(self):
+        """The staged questions asked a few seconds ago again (the pictures are taken minutes after the staging, and
+        an unanswered question is refused after its minute)."""
+        folder = Path(os.environ["XDG_RUNTIME_DIR"]) / "sandbox-ai" / "runs" / RUN / "approvals"
+        for number, path in enumerate(sorted(folder.glob("*.json"))):
+            try:
+                question = json.loads(path.read_text())
+                question["time"] = stamp(14 - 4 * number)
+                path.write_text(json.dumps(question))
+            except (OSError, ValueError):
+                pass
+
+    def page_traffic(self, page):
+        """The staged run's requests, the second (an answer with a tool call) read as a chat."""
+        end = time.time() + 60
+        while time.time() < end and page.table.model().rowCount() < 5:
+            self.settle(0.5)
+        model = page.table.model()
+        for row in range(model.rowCount()):
+            if str(model.index(row, 0).data()) == "2":
+                page.table.selectRow(row)
+        end = time.time() + 30
+        while time.time() < end and getattr(page, "detail", None) is None:
+            self.settle(0.3)
+        self.settle(1.0)
+
+    def state_traffic_parameters(self, page):
+        self.page_traffic(page)
+        model = page.table.model()
+        for row in range(model.rowCount()):
+            if str(model.index(row, 0).data()) == "4":  # the one the loop guard ended
+                page.table.selectRow(row)
+        self.settle(2.0)
+        self.tab(page.tabs, 1)
+        image = self.window.grab().toImage()
+        self.tab(page.tabs, 0)
+        return image
+
     def state_sandboxes_cut(self, page):
         from PySide6.QtCore import QPoint
         self.select_run(page)
@@ -445,7 +727,7 @@ class Capture:
         self.settle(0.8)
         return self.window.grab().toImage()
 
-    def dialog_of(self, action, seconds=3.0):
+    def dialog_of(self, action, seconds=3.0, size=None):
         """The dialog ACTION opens (with exec(): shown instead, so that nothing waits for an answer), once it has
         read what it reads in the background."""
         from PySide6.QtWidgets import QApplication, QDialog
@@ -466,6 +748,8 @@ class Capture:
             raise LookupError("no dialog opened" + (f" ({self.window.statusBar().currentMessage()})"
                                                     if self.window.statusBar().currentMessage() else ""))
         self.extra.append(found)
+        if size:  # room for every row (offscreen a dialog keeps its first, smallest size)
+            found.resize(max(found.width(), size[0]), max(found.height(), size[1]))
         self.settle(seconds)
         return self.over(found, title=found.windowTitle())
 
@@ -479,8 +763,14 @@ class Capture:
         raise LookupError(f"no {name} in the list")
 
     def state_mcp_properties(self, page):
-        self.select_named(page.servers, "demo")
-        return self.dialog_of(lambda: page.properties("demo"))
+        """A server of the catalog with its variables (0.1.95): a value that is no secret, a secret of another name."""
+        name = "telegram"
+        try:
+            self.select_named(page.servers, name)
+        except LookupError:  # (an app before 0.1.95, or the catalog not reached when the demo was staged)
+            name = "demo"
+            self.select_named(page.servers, name)
+        return self.dialog_of(lambda: page.properties(name), size=(980, 800))
 
     def state_llm_parameters(self, page):
         self.select_named(page.servers, "gpu-box")
@@ -592,7 +882,8 @@ class Capture:
         server = self.app_dir / "tests" / "fake_sftp_server.py"
         if not hasattr(page, "remote_dialog") or not server.is_file():
             raise LookupError("the file manager of this app has no remote panes")
-        home = Path(tempfile.mkdtemp(prefix="deploy-"))
+        # beside the demo HOME (with --home /tmp/me: /tmp/deploy-...), so that the remote path reads short
+        home = Path(tempfile.mkdtemp(prefix="deploy-", dir=str(Path(os.environ["HOME"]).parent)))
         self.cleanup.append(home)
         (home / "shop" / "releases" / "2026-11-10").mkdir(parents=True)
         (home / "shop" / "releases" / "2026-11-12").mkdir()
@@ -748,13 +1039,14 @@ def main(argv=None):
                                        "afterwards); default: inside a temporary folder")
     parser.add_argument("--only", help="only these pages and states, comma-separated (e.g. files,files-editor); the "
                                        "others in --out stay as they are")
+    parser.add_argument("--theme", default="dark", help="the app's theme for the pictures (default dark; e.g. light)")
     parser.add_argument("--one", help=argparse.SUPPRESS)  # a child process: one language, environment prepared
     args = parser.parse_args(argv)
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     size = tuple(int(v) for v in args.size.lower().split("x"))
     if args.one:
-        Capture(Path(args.app).resolve(), out, args.one, size).run(set(args.only.split(",")) if args.only else None)
+        Capture(Path(args.app).resolve(), out, args.one, size, args.theme).run(set(args.only.split(",")) if args.only else None)
         return 0
     status = 0
     for lang in (["en", "de"] if args.lang == "both" else [args.lang]):
@@ -772,7 +1064,8 @@ def main(argv=None):
             demo_commands(env, str(home))
             # the child must not see this process's run directory as its own (it stages its pid there)
             child = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--app", str(Path(args.app).resolve()),
-                                    "--out", str(out), "--size", args.size, "--one", lang]
+                                    "--out", str(out), "--size", args.size, "--theme", args.theme,
+                                    "--one", lang]
                                    + (["--only", args.only] if args.only else []), env=env, cwd=str(home))
             status = status or child.returncode
         finally:

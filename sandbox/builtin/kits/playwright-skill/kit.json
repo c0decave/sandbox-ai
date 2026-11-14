@@ -4,7 +4,11 @@
  "agents": [
   "claude",
   "codex",
-  "opencode"
+  "opencode",
+  "hermes",
+  "dsh",
+  "qwen",
+  "goose"
  ],
  "default": "off",
  "upstream": {

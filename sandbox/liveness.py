@@ -13,21 +13,39 @@ answered). Inside a sandbox or container the host's processes are not visible: n
 
 Standard library only.
 """
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import time
 
+HERE = Path(__file__).resolve().parent
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 PODMAN_TIMEOUT = 20
 CACHE_SECONDS = 2.0
 POD_NAME = re.compile(r"agent-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
 # sandbox-ai's own pods: agent-AGENT-HEX (a run, a session's run, a VPN's pod) and agent-mcp-NAME (an MCP server);
 # newer ones also carry RUN_LABEL. Nothing else is ever removed as a leftover.
-OWN_POD = re.compile(r"agent-(?:(?:claude|codex|opencode)-[0-9a-f]{8,12}|mcp-[A-Za-z0-9_-]{1,32})")
+OWN_POD = re.compile(r"agent-(?:(?:claude|codex|opencode|hermes|dsh|qwen|goose)-[0-9a-f]{8,12}|mcp-[A-Za-z0-9_-]{1,32})")
 RUN_LABEL = "sandbox-ai.run"
 SESSION_LABEL = "sandbox-ai.session"
 # Container states in which a sandbox still lives (a paused pod too: `sandbox-ai pause`).
@@ -95,14 +113,28 @@ def pods(url=None, fresh=False, clock=time.monotonic):
     hit = _cache.get(key)
     if hit is not None and not fresh and clock() - hit[0] < CACHE_SECONDS:
         return hit[1]
+    why = ""
     try:
         done = RUNNER(podman(url, "pod", "ps", "--format", "json"), capture_output=True, text=True,
                       stdin=subprocess.DEVNULL, timeout=PODMAN_TIMEOUT, check=False)
         listed = json.loads(done.stdout or "null") if done.returncode == 0 else None
+        if done.returncode != 0:
+            why = f"exit status {done.returncode}: {LOG.tail(done.stderr)}"
+        elif not isinstance(listed, list):  # (it was logged with no reason at all)
+            why = f"exit status 0, but no list of pods: {LOG.tail(done.stdout, 200) or 'no output'}"
+            listed = None
     except FileNotFoundError:
         listed = []  # no podman here: no pod of it can run (a launcher used this same program)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired, RecursionError) as exc:
+        why = LOG.exception_text(exc)
         listed = None
+    # Polled (the app's listing): said once when Podman stops answering, once when it answers again.
+    where = f"Podman at {url}" if url else "Podman"
+    answered_before = LOG.state(("podman pod ps", key)) is not False
+    LOG.changed(("podman pod ps", key), listed is not None, "liveness",
+                (None if answered_before else f"{where} answers podman pod ps again") if listed is not None else
+                f"{where} does not answer podman pod ps (whether a run's pod still runs stays unknown): {why}",
+                "INFO" if listed is not None else "WARNING")
     found = None
     if isinstance(listed, list):
         found = {}
@@ -133,18 +165,25 @@ def verdict(record):
     """What became of the run RECORD (a run.json) whose launcher PID is gone: "dead" (ended: its directory may
     go), "orphaned" (its Podman pod still runs a container) or "unknown" (this process cannot tell: inside a
     sandbox, another PID namespace, Podman not answering)."""
+    def decided(state, why):
+        run = record.get("run") if isinstance(record, dict) else None
+        LOG.changed(("verdict", str(run)), state, "liveness", f"the run {run} (its launcher is gone): {state}: {why}",
+                    "DEBUG" if state == "unknown" else "INFO")
+        return state
     if not pids_visible(record):
-        return "unknown"
+        return decided("unknown", "its launcher's processes are not visible from here (another PID namespace, a "
+                                  "sandbox)")
     if record.get("backend") != "podman":
-        return "dead"  # Bubblewrap ends with its launcher (--die-with-parent)
+        return decided("dead", "Bubblewrap ends with its launcher")
     pod = pod_of(record)
     if pod is None:
-        return "unknown"
+        return decided("unknown", "its record names no pod")
     url = record.get("podman_url") if isinstance(record.get("podman_url"), str) else None
     live = pod_live(pod, url)
     if live is None:
-        return "unknown"
-    return "orphaned" if live else "dead"
+        return decided("unknown", "Podman does not answer")
+    return decided("orphaned", f"its pod {pod} still runs a container") if live else \
+        decided("dead", f"no container of its pod {pod} runs")
 
 
 def remove_ended_pod(record):
@@ -159,19 +198,49 @@ def remove_ended_pod(record):
     if info is None or info["live"] or info["status"] not in ENDED_POD_STATES:
         return False
     try:
-        done = RUNNER(podman(url, "pod", "rm", pod), capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                      timeout=PODMAN_TIMEOUT, check=False)
+        done = LOG.run("liveness", f"remove the pod {pod} of an ended run", podman(url, "pod", "rm", pod),
+                       runner=RUNNER, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       timeout=PODMAN_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return False
     _cache.pop(url or "", None)
+    if done.returncode == 0:
+        LOG.info("liveness", f"removed the pod {pod} its killed launcher left behind")
     return done.returncode == 0
 
 
+TEMPORARY_PREFIX = "agent-sandbox-"  # the launcher's temporary folders (its session's and its proxy's)
+
+
 def discard(directory):
-    """Remove the run directory DIRECTORY of an ended run, and its browser directory (RUN.browser) beside it."""
+    """Remove the run directory DIRECTORY of an ended run, its browser directory (RUN.browser) and the folder of its
+    sandbox browser's VNC socket (RUN.browser-vnc, browser.vnc_dir) beside it, and the temporary folders its run.json
+    names (a launcher killed with SIGKILL left them for good: the proxy's proxy.json holds the --api-key keys and the
+    Git and LLM tokens in plain text, the session's folder the tokens given at run time)."""
     directory = Path(directory)
+    try:
+        record = json.loads((directory / "run.json").read_text())
+    except (OSError, ValueError, RecursionError):
+        record = None
+    if isinstance(record, dict):
+        for key in ("session_dir", "proxy_dir"):
+            remove_temporary(record.get(key))
     shutil.rmtree(directory, ignore_errors=True)
-    shutil.rmtree(directory.with_name(directory.name + ".browser"), ignore_errors=True)
+    for suffix in (".browser", ".browser-vnc"):
+        shutil.rmtree(directory.with_name(directory.name + suffix), ignore_errors=True)
+
+
+def remove_temporary(path):
+    """Remove PATH when it is one of the launcher's temporary folders: an absolute path to a folder (never a link)
+    named agent-sandbox-..., of this user. Anything else a damaged run.json names is left alone."""
+    if not isinstance(path, str) or not os.path.isabs(path) or not Path(path).name.startswith(TEMPORARY_PREFIX):
+        return
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return
+    if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def stop_pod(pod, url=None, wait=30):
@@ -182,8 +251,8 @@ def stop_pod(pod, url=None, wait=30):
     for args, limit in ((("pod", "stop", "--time", str(int(wait)), pod), wait + PODMAN_TIMEOUT),
                         (("pod", "rm", "--force", pod), PODMAN_TIMEOUT * 3)):
         try:
-            done = RUNNER(podman(url, *args), capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                          timeout=limit, check=False)
+            done = LOG.run("liveness", f"end the orphaned pod {pod}", podman(url, *args), runner=RUNNER,
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=limit, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             said.append(str(exc))
             continue
@@ -192,6 +261,9 @@ def stop_pod(pod, url=None, wait=30):
             said.append(lines[-1] if lines else f"podman {' '.join(args[:2])} failed ({done.returncode})")
     _cache.pop(url or "", None)
     live = pod_live(pod, url, fresh=True)
+    LOG.info("liveness", f"the orphaned pod {pod} is ended" if live is False else
+             f"the orphaned pod {pod} is not ended ({'it runs' if live else 'Podman does not answer'})"
+             + (f": {'; '.join(said)}" if said else ""))
     return live is False, "; ".join(said)
 
 
@@ -223,8 +295,9 @@ def remove_pods(names, url=None):
     removed = []
     for name in names:
         try:
-            done = RUNNER(podman(url, "pod", "rm", name), capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                          timeout=PODMAN_TIMEOUT * 3, check=False)
+            done = LOG.run("liveness", f"remove the leftover pod {name}", podman(url, "pod", "rm", name), runner=RUNNER,
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=PODMAN_TIMEOUT * 3,
+                           check=False)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if done.returncode == 0:

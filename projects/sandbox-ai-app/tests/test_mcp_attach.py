@@ -5,7 +5,7 @@ import os
 import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
-from sandbox_ai_app import backend, widgets  # noqa: E402
+from sandbox_ai_app import backend, short_notices, widgets  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -57,7 +57,7 @@ def test_attach_to_a_start(page, monkeypatch):
     page.attach()
     assert page.asked == [("web", "docs", True)]
     assert dialogs[0][0].startswith("api (claude, running)") and dialogs[0][1].startswith("docs (codex, stopped)")
-    assert any("from its next start on" in text for _, text, *_ in widgets.SHOWN)
+    assert any("from its next start on" in text for _, text in short_notices.SHOWN)
     page.servers.clearSelection()
     page.servers.setCurrentItem(None)
     page.asked.clear()

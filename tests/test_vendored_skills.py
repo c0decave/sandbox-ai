@@ -28,7 +28,7 @@ def load(name, path):
 s = load("sandbox_for_vendored_skills", "sandbox/agent_sandbox.py")
 k = load("kits_for_vendored_skills", "sandbox/kits.py")
 kitctl = load("kitctl_for_vendored_skills", "sandbox/kitctl.py")
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 # The latest commit date a pin may have: 14 days before the release that brought these kits (0.1.94, 2026-11-12).
 NEWEST_PIN = "2026-10-29"
 
@@ -303,7 +303,8 @@ def test_the_skills_telemetry_is_off_in_every_sandbox_by_default(tmp_path, agent
     env = s.telemetry_environment(args(tmp_path, agent))
     for name, value in TELEMETRY_OFF.items():
         assert env.get(name) == value, name
-    assert not set(TELEMETRY_OFF) & set(s.telemetry_environment(args(tmp_path, agent, "--telemetry", "on")))
+    # Always: an old --telemetry on is ignored (telemetry is always off since 0.1.95).
+    assert set(TELEMETRY_OFF) <= set(s.telemetry_environment(args(tmp_path, agent, "--telemetry", "on")))
 
 
 NODE = shutil.which("node")

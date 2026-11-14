@@ -33,11 +33,16 @@ import time
 import urllib.parse
 import weakref
 
-from .files import printable
+from . import applog
+from .files import printable, printable_text
 
 # Fallbacks only, for the moments before an installation is loaded; SandboxAI reads the real values from
 # sandbox-ai's own modules (the launcher's parser, approvals.ID, secret_store.NAME and LIMIT, ...).
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+LOGIN_AGENTS = ("claude", "codex", "opencode")  # `sandbox-ai login AGENT` of a sandbox-ai without login.AGENTS
+# The agents `sandbox-ai login` takes in this release (login.py's AGENTS): DSH and Goose have no login command, on no
+# host - a terminal with `sandbox-ai login goose` would only fail there.
+LOGIN_AGENTS_ANYWHERE = ("claude", "codex", "opencode", "hermes", "qwen")
 MIN_VERSION = "0.1.21"  # the first release with approvals, secrets, images and log telemetry
 PLUGINS_WAIT = 1800  # seconds `sandbox-ai plugins claude` may take (each marketplace and plugin is fetched)
 TRANSFER_SECONDS = 1200  # sandbox-ai session copy|move: its dry run there (up to 180 s) and the start (up to 900 s)
@@ -81,18 +86,20 @@ def mac_terminal(script, iterm=False, directory=None):
 GROUPS = {
     "Workspace": ["--workspace", "--workspace-ro", "--mount", "--state-dir", "--copy", "--name", "--name-style",
                   "--project-name", "--keep", "--no-keep"],
-    "Network": ["--ask", "--profile", "--allow-host", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
+    "Network": ["--ask", "--profile", "--allow-host", "--allow-domain", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",
-                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--llm-param"],
+                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--llm-param", "--llm-traffic", "--llm-traffic-limit"],
     "Proxy & privacy": ["--mode", "--mode-at-least", "--no-proxy", "--no-inspect", "--rules", "--privacy-check", "--privacy-rules",
                         "--canaries", "--no-canaries", "--telemetry", "--log-dir", "--log-debug"],
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
             "--token-proxy", "--git-credentials"],
-    "Agent": ["--model", "--effort", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
-              "--no-memory", "--no-plugins", "--local-config", "--env", "--secret-env", "--api-key", "--publish"],
+    "Agent": ["--model", "--effort", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
+              "--no-memory", "--no-plugins", "--local-config", "--env", "--secret-env", "--api-key", "--publish",
+              "--hermes-enable", "--qwen-enable", "--goose-enable"],
     "Login": ["--copy-auth", "--no-auth", "--auth-file", "--import-codex-auth"],
-    "Display & terminal": ["--gui", "--gui-vnc", "--gui-screen", "--gui-wayland", "--audio", "--tmux", "--no-tmux"],
+    "Display & terminal": ["--gui", "--gui-vnc", "--gui-screen", "--gui-wayland", "--browser", "--browser-control",
+                           "--browser-profile", "--audio", "--tmux", "--no-tmux"],
     "Hardware": ["--device", "--gpu"],
     "Limits": ["--memory", "--cpus", "--pids", "--tmp-size"],
     "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
@@ -242,6 +249,9 @@ class SandboxAI:
                 if name == "presets" and hasattr(module, "EXPOSED_BEFORE"):
                     # Extra preset directories where sandboxes wrote are skipped: the launcher knows where.
                     module.EXPOSED_BEFORE = self.launcher.exposed_before
+                if name == "presets" and hasattr(module, "EXPERIMENTAL_BADGE") and \
+                        hasattr(self.launcher, "experimental_badge"):
+                    module.EXPERIMENTAL_BADGE = self.launcher.experimental_badge  # the badge: the launcher's list
                 if name == "liveness" and isinstance(getattr(module, "CACHE_SECONDS", None), (int, float)):
                     # The app asks every sandboxes_interval (3 s): a Podman listing (`podman pod ps`, a Go program
                     # that may start Podman's service) is kept a little longer than one look; an action's own
@@ -261,7 +271,8 @@ class SandboxAI:
             return None
         try:
             return self.module("procinfo")
-        except Exception:  # noqa: BLE001 - an older sandbox-ai: what /proc would say (nothing on a Mac)
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: what /proc would say (nothing on a Mac)
+            applog.swallowed("backend", "SandboxAI.procinfo: an older sandbox-ai: what /proc would say (nothing…", _exc)
             return None
 
     def forget_pods(self):
@@ -328,7 +339,44 @@ class SandboxAI:
         started. Its lead is reaped only under the signal lock: while a group is signalled, its number cannot
         have been given to another group. Inside watching(): its output is handed on as it comes, and it is
         ended when cancelled. ARGV: the command line that does what `sandbox-ai ARGS` would (host_run's ssh), run
-        instead of it; it is never given with a runner of the tests."""
+        instead of it; it is never given with a runner of the tests. Each command is logged (logged_call)."""
+        began = time.monotonic()
+        result = self._call(*args, timeout=timeout, input=input, argv=argv)
+        try:
+            self.logged_call(argv, args, result, time.monotonic() - began, timeout)
+        except Exception:  # noqa: BLE001 - a log line never changes a command's outcome
+            pass
+        return result
+
+    def logged_call(self, argv, args, result, seconds, timeout):
+        """One command of call() in the log: its command line (secrets masked: applog.argv_text; a secret goes as
+        standard input, never in it), how long it took, its exit status and, when it failed, the tail of its error
+        output. A success at DEBUG; a failure at INFO once per change of what it said (a poll that fails every few
+        seconds the same way: then at DEBUG); a timeout at WARNING."""
+        status, _out, err = result
+        key = ("command", tuple(str(a) for a in args[:3]))
+        if status == 0 and not applog.in_work() and not applog.debug_wanted() and applog.last_change(key) in (None, 0):
+            return  # (a read that went well, every few seconds: nothing to write, nothing worked out for it)
+        shown = applog.argv_text(["sandbox-ai", *args]) + (" (its ssh command line run directly)" if argv else "")
+        took = applog.seconds(seconds)
+        if status == 0:
+            if applog.last_change(key) not in (None, 0):  # it failed before: that it works again is said once
+                applog.changed(key, "INFO", "command", f"exit status 0 again after {took}: {shown}", same=0)
+            else:  # (a human's action at INFO: its command and outcome are what the log is read for)
+                applog.log("INFO" if applog.in_work() else "DEBUG", "command", f"exit status 0 after {took}: {shown}")
+            return
+        why = applog.tail(err)
+        said = f"{'cancelled' if status == CANCELLED else f'exit status {status}'} after {took}: {shown}" + \
+            (f"\n{why}" if why else "")
+        if status == 124:
+            applog.log("WARNING", "command", f"no answer within {timeout:g} s: {shown}" + (f"\n{why}" if why else ""))
+            return
+        if applog.in_work():
+            applog.log("WARNING", "command", said)
+            return
+        applog.changed(key, "INFO", "command", said, quiet="DEBUG", same=(status, why))
+
+    def _call(self, *args, timeout=120, input=None, argv=None):
         output, cancelled, errors_only = getattr(self._watch, "value", None) or (None, None, False)
         if cancelled is not None and cancelled():
             return CANCELLED, "", "cancelled"
@@ -432,7 +480,8 @@ class SandboxAI:
                 continue
             try:
                 module = self.module(name)
-            except Exception:  # noqa: BLE001
+            except Exception as _exc:  # noqa: BLE001
+                applog.swallowed("backend", "SandboxAI.check_version failed (went on without it)", _exc)
                 missing.append(f"{name}.py")
                 continue
             missing += [f"{name}.{attribute}" for attribute in attributes if not hasattr(module, attribute)]
@@ -460,6 +509,17 @@ class SandboxAI:
             if action.dest == "agent" and action.choices:
                 return tuple(action.choices)
         return AGENTS
+
+    def experimental_agent(self, agent):
+        """The badge of AGENT when it has not passed its live test in this sandbox-ai ({"names"}: its launcher's
+        experimental_badge, from its one list EXPERIMENTAL_PARTS), else {} (an older sandbox-ai: none)."""
+        badge = getattr(self.launcher, "experimental_badge", None)
+        try:
+            found = badge([agent]) if badge else None
+        except Exception as _exc:  # noqa: BLE001 - a badge is a hint: never a reason the agent cannot be chosen
+            applog.swallowed("backend", "SandboxAI.experimental_agent: a badge is a hint: never a reason the ag…", _exc)
+            found = None
+        return found if isinstance(found, dict) else {}
 
     @property
     def question_id(self):
@@ -512,6 +572,20 @@ class SandboxAI:
         """[[name, agent, backend, status, workspace, created]] of the named sessions."""
         return self.module("sessions").rows()
 
+    def session_terminal(self, ident):
+        """{"terminal": "ready"|"starting"|"missing"|"ended", "terminal_log": the end of its supervisor.log (missing and
+        ended only: no terminal, or its tmux session has ended)} of
+        the running session IDENT (sessions.terminal_state: files only); {} for a sandbox-ai without it."""
+        sessions = self.module("sessions")
+        if not hasattr(sessions, "terminal_state"):
+            return {}
+        try:
+            state, tail = sessions.terminal_state(ident, sessions.load(ident))
+        except (OSError, ValueError, KeyError, TypeError):
+            return {}
+        key = "terminal_log" if state in ("missing", "ended") else "terminal_step"
+        return {"terminal": state, **({key: printable(tail)[-2000:]} if tail else {})}
+
     def session_transfer_supported(self):
         """Whether this sandbox-ai has `session copy|move NAME HOST` (a session to another host)."""
         sessions = self.module("sessions")
@@ -536,7 +610,7 @@ class SandboxAI:
         try:
             plan = json.loads(out)
             paths, problems = plan["paths"], plan["problems"]
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError, RecursionError) as exc:
             raise ValueError(f"sandbox-ai session plan: not a plan ({exc})") from None
         if not (isinstance(paths, list) and isinstance(problems, list)):
             raise ValueError("sandbox-ai session plan: not a plan")
@@ -568,7 +642,7 @@ class SandboxAI:
             try:
                 with open(directory / "session.json", "rb") as stream:
                     data = json.loads(stream.read(1 << 20))
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 continue
             if valid_run(directory.name):
                 found[sessions.display(directory.name, data)] = directory.name
@@ -584,6 +658,15 @@ class SandboxAI:
         """(agent, launcher options, agent arguments) session IDENT was created with, as session_ids last read them
         (the Start page shows them for its project), or None."""
         return self.__dict__.get("_session_starts", {}).get(ident)
+
+    def session_exit(self, ident):
+        """The exit status of the last run of session IDENT (its exit.json, sessions.exit_status), or None."""
+        sessions = self.module("sessions")
+        try:
+            status = sessions.exit_status(ident, sessions.load(ident))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        return status if isinstance(status, int) and not isinstance(status, bool) else None
 
     def session_servers(self, ident):
         """The MCP servers the options of session IDENT name (its later starts reach them), as session_ids last read
@@ -618,7 +701,7 @@ class SandboxAI:
                                      timeout=600)
         try:
             return json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
 
     def mcp_definitions(self):
@@ -636,7 +719,8 @@ class SandboxAI:
         if host == "local":
             try:
                 module = self.module("services")
-            except Exception:  # noqa: BLE001 - an older or unreadable installation has none
+            except Exception as _exc:  # noqa: BLE001 - an older or unreadable installation has none
+                applog.swallowed("backend", "SandboxAI.user_images: an older or unreadable installation has none", _exc)
                 return []
             if not hasattr(module, "listing"):
                 return []
@@ -651,7 +735,8 @@ class SandboxAI:
                     if row.get("base_image") and row.get("target")}
         try:
             images = self.module("images")
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.variant_bases failed (went on without it)", _exc)
             return {}
         found = {}
         for name, _agent in images.variants() if hasattr(images, "variants") else []:
@@ -702,7 +787,7 @@ class SandboxAI:
             return {}
         try:
             data = json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             return {}
         return {name: entry for name, entry in data.items() if isinstance(entry, dict)} if isinstance(data, dict) else {}
 
@@ -745,8 +830,9 @@ class SandboxAI:
             elif command == "publish-logins" and url:
                 self.module("publish_logins").server_host(values.get("kind"), url)
         except ValueError as exc:
-            return printable(str(exc))
-        except Exception:  # noqa: BLE001 - an older sandbox-ai without the check: its add says it
+            return printable_text(str(exc))
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai without the check: its add says it
+            applog.swallowed("backend", "SandboxAI.login_url_problem: an older sandbox-ai without the check: it…", _exc)
             return None
         return None
 
@@ -904,7 +990,7 @@ class SandboxAI:
             for entry in entries:
                 try:
                     record = json.loads((entry / "run.json").read_text())
-                except (OSError, ValueError):
+                except (OSError, ValueError, RecursionError):  # (damaged: nested beyond what Python reads)
                     continue
                 if not isinstance(record, dict) or not net.alive(record.get("pid"), record.get("pid_start")):
                     continue
@@ -940,7 +1026,8 @@ class SandboxAI:
                 return False
             approvals.heartbeat("app") if on else approvals.end_heartbeat()
             return True
-        except Exception:  # noqa: BLE001 - a heartbeat that cannot be written: the launcher notifies as before
+        except Exception as _exc:  # noqa: BLE001 - a heartbeat that cannot be written: the launcher notifies as before
+            applog.swallowed("backend", "SandboxAI.watcher_heartbeat: a heartbeat that cannot be written: the l…", _exc)
             return False
 
     def answer(self, ident, decision, scope="once"):
@@ -1192,7 +1279,8 @@ class SandboxAI:
         real = os.path.realpath(os.path.expanduser(str(workspace)))
         try:
             runs = self.runs()
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.run_for failed (went on without it)", _exc)
             return None
         return next((name for name, record in runs.items()
                      if os.path.realpath(str(record.get("workspace", ""))) == real), None)
@@ -1204,7 +1292,8 @@ class SandboxAI:
         --git-token-* logins came in later versions)."""
         try:
             parser = self.module("net").parser()
-        except Exception:  # noqa: BLE001 - an old or damaged installation
+        except Exception as _exc:  # noqa: BLE001 - an old or damaged installation
+            applog.swallowed("backend", "SandboxAI.net_options: an old or damaged installation", _exc)
             return set()
         for action in parser._actions:
             if isinstance(action, argparse._SubParsersAction) and command in action.choices:
@@ -1215,7 +1304,8 @@ class SandboxAI:
         """The subcommands of `sandbox-ai net` this installation has (e.g. "stop" since the app's 0.2 era)."""
         try:
             parser = self.module("net").parser()
-        except Exception:  # noqa: BLE001 - an old or damaged installation: nothing beyond what it lists
+        except Exception as _exc:  # noqa: BLE001 - an old or damaged installation: nothing beyond what it lists
+            applog.swallowed("backend", "SandboxAI.net_commands: an old or damaged installation: nothing beyond…", _exc)
             return set()
         for action in parser._actions:
             if isinstance(action, argparse._SubParsersAction):
@@ -1230,7 +1320,8 @@ class SandboxAI:
             sessions = self.module("sessions")
             return bool(sessions.foreground(sessions.load(ident if ident and valid_run(ident) else
                                                           sessions.resolve(name))))
-        except Exception:  # noqa: BLE001 - an older sandbox-ai, or a damaged start: as before
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai, or a damaged start: as before
+            applog.swallowed("backend", "SandboxAI.foreground_start: an older sandbox-ai, or a damaged start: a…", _exc)
             return False
 
     def instances(self, proc=Path("/proc")):
@@ -1261,7 +1352,8 @@ class SandboxAI:
             servers, problems = {}, problems + [str(exc)]
         try:
             ids = self.session_ids()
-        except Exception:  # noqa: BLE001 - keyed by name then (an older sandbox-ai)
+        except Exception as _exc:  # noqa: BLE001 - keyed by name then (an older sandbox-ai)
+            applog.swallowed("backend", "SandboxAI.instances: keyed by name then (an older sandbox-ai)", _exc)
             ids = {}
         by_session = runs_of_starts(runs, ids)
         used = set()
@@ -1273,6 +1365,12 @@ class SandboxAI:
             ident = ids.get(name, name)  # its directory: a renamed session keeps its row and its tab
             if not run:  # not running: what it keeps for its later starts (start_tree.reached: "mcp")
                 record = {"mcp": self.session_servers(ident)}
+                if state == "stopped":  # how its last run ended (a failed one keeps its tab: ui.sync_tabs)
+                    status = self.session_exit(ident)
+                    if status is not None:
+                        record["status"] = status
+            if state == "running":  # its terminal there yet, still starting, or none (terminal_state)
+                record = {**record, **self.session_terminal(ident)}
             found.append(Instance("session", f"session:{ident}", name, run=run, session=name, project=workspace,
                                   agent=agent, backend=engine, started=record.get("started") or created, state=state,
                                   proxy=record.get("proxy") if run else None, pid=record.get("pid"), record=record,
@@ -1340,7 +1438,9 @@ class SandboxAI:
                     try:
                         data = self.module("team").load(team)
                         leads[team] = f"{team}-{data['lead']}"
-                    except Exception:  # noqa: BLE001 - no team of that name, a damaged record, an older sandbox-ai
+                    except Exception as _exc:  # noqa: BLE001
+                        # (no team of that name, a damaged record, an older sandbox-ai)
+                        applog.swallowed("backend", "SandboxAI.add_team_leads: no team of that name, a damaged …", _exc)
                         leads[team] = None
                 lead = leads[team]
                 if lead and lead != instance.name and instance.name.startswith(f"{team}-"):
@@ -1434,7 +1534,9 @@ class SandboxAI:
         found = []
         try:
             entries = self.module("starts").entries(True, prune=False)
-        except Exception:  # noqa: BLE001 - an older sandbox-ai, a damaged start: the app's own list still counts
+        except Exception as _exc:  # noqa: BLE001
+            # (an older sandbox-ai, a damaged start: the app's own list still counts)
+            applog.swallowed("backend", "SandboxAI.recent_folders: an older sandbox-ai, a damaged start: the ap…", _exc)
             entries = []
         for entry in entries if isinstance(entries, list) else []:
             if isinstance(entry, dict) and entry.get("kind") != "mcp":
@@ -1480,23 +1582,23 @@ class SandboxAI:
         try:
             for key in launcher.trusted_configs():
                 add(os.path.dirname(str(key)), "trusted")
-        except Exception:  # noqa: BLE001 - a damaged trust store: the other sources still count
-            pass
+        except Exception as _exc:  # noqa: BLE001 - a damaged trust store: the other sources still count
+            applog.swallowed("backend", "SandboxAI.known_projects: a damaged trust store: the other sources sti…", _exc)
         try:
             for row in self.sessions():
                 add(row[4], "session")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.known_projects failed (went on without it)", _exc)
         try:
             for record in self.runs().values():
                 add(record.get("workspace"), "running")
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.known_projects failed (went on without it)", _exc)
         try:
             for project, _, _ in self.remembered():
                 add(project, "approvals")
-        except Exception:  # noqa: BLE001 - older sandbox-ai versions keep no such list
-            pass
+        except Exception as _exc:  # noqa: BLE001 - older sandbox-ai versions keep no such list
+            applog.swallowed("backend", "SandboxAI.known_projects: older sandbox-ai versions keep no such list", _exc)
         try:
             data = json.loads((state_dir() / "exposed.json").read_text())
             for path in data if isinstance(data, list) else []:
@@ -1517,7 +1619,7 @@ class SandboxAI:
         except FileNotFoundError:
             return "none", None
         except (OSError, ValueError) as exc:
-            return "unreadable", printable(exc)
+            return "unreadable", printable_text(exc)
         return ("trusted" if review.trusted else "changed" if review.changed else "untrusted"), str(review.path)
 
     def project_kits(self, directory):
@@ -1534,7 +1636,8 @@ class SandboxAI:
     def has_kits_command(self):
         try:
             return "kits" in self.module("main").PYTHON_COMMANDS
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.has_kits_command failed (went on without it)", _exc)
             return False
 
     def kits_inventory(self):
@@ -1604,10 +1707,11 @@ class SandboxAI:
         """This sandbox-ai writes reports (report.py, `sandbox-ai report`)."""
         return (self.directory / "report.py").is_file()
 
-    def report(self, path, kind="pdf", names=(), log_dir=None, parts=True, since=None):
+    def report(self, path, kind="pdf", names=(), log_dir=None, parts=True, since=None, traffic=False):
         """`sandbox-ai report NAME... -f KIND -o PATH` (or --log-dir DIR for every run of a log folder): one report of
         the starts NAMES (each with its runs and, with PARTS, its MCP servers, helpers and team) written to PATH, from
-        SINCE on (10m, 2h, an ISO time) when given. Returns PATH; ValueError: not written."""
+        SINCE on (10m, 2h, an ISO time) when given; TRAFFIC: with the section on the LLM traffic log (--llm-traffic).
+        Returns PATH; ValueError: not written."""
         if kind not in self.REPORT_FORMATS:
             raise ValueError(f"no report format {kind!r}")
         if not valid_directory(path):
@@ -1622,6 +1726,8 @@ class SandboxAI:
         args = ["report", "--format", kind, "--output", str(path)]
         if not parts:
             args.append("--no-parts")
+        if traffic:
+            args.append("--llm-traffic")
         if since:
             if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z:.+ -]{0,39}", str(since)):
                 raise ValueError("not a time")
@@ -1650,7 +1756,7 @@ class SandboxAI:
         for line in out.splitlines():
             try:
                 record = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(record, dict):
                 records.append(record)
@@ -1716,9 +1822,6 @@ class SandboxAI:
         """`sandbox-ai logs DIR --json`: its "telemetry" and "tool_calls" are what the Statistics page shows."""
         return self.command("logs", str(directory), "--json")
 
-    def doctor_argv(self, backend="podman"):
-        return self.command("doctor", "--backend", backend, "--json")
-
     def statistics(self, directory):
         """logs.telemetry of DIRECTORY plus the MCP servers' tool calls (in this process; the window runs
         statistics_argv in the background instead)."""
@@ -1729,16 +1832,26 @@ class SandboxAI:
 
     # -- logins and secrets --
 
+    def login_agents(self):
+        """The agents `sandbox-ai login AGENT` takes here (its login.AGENTS: DSH and Goose have none), in the
+        launcher's order."""
+        try:
+            takes = tuple(self.module("login").AGENTS)
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: the three it always had
+            applog.swallowed("backend", "SandboxAI.login_agents: an older sandbox-ai: the three it always had", _exc)
+            takes = LOGIN_AGENTS
+        return tuple(agent for agent in self.agents if agent in takes)
+
     def login_status(self):
-        """[(agent, where, problem, source)]: where "store" (sandbox-ai's own login) or "host"; problem
-        None, "missing" or "expired"."""
+        """[(agent, where, problem, source)] of the agents `sandbox-ai login` takes (login_agents): where "store"
+        (sandbox-ai's own login) or "host"; problem None, "missing" or "expired"."""
         launcher, rows = self.launcher, []
-        for agent in self.agents:
+        for agent in self.login_agents():
             try:
                 where, problem = launcher.login_state(agent)
                 source = printable(launcher.auth_sources(agent)[0][0])
             except (OSError, ValueError) as exc:
-                where, problem, source = "?", "error", printable(exc)
+                where, problem, source = "?", "error", printable_text(exc)
             rows.append((agent, where, problem, source))
         return rows
 
@@ -1783,7 +1896,7 @@ class SandboxAI:
         status, out, err = self.host_run(host, "secrets", "backend", timeout=60)
         word = (out.strip().splitlines() or [""])[-1].strip()
         if status != 0 or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", word):
-            raise ValueError(printable((err or out).strip())[-300:] or f"exit status {status}")
+            raise ValueError(printable_text((err or out).strip())[-300:] or f"exit status {status}")
         return word
 
     def secret_exists(self, name, host="local"):
@@ -1847,12 +1960,14 @@ class SandboxAI:
             found.append((kind, label, path))
         try:
             runs = self.runs()
-        except Exception:  # noqa: BLE001 - the browser shows what it can
+        except Exception as _exc:  # noqa: BLE001 - the browser shows what it can
+            applog.swallowed("backend", "SandboxAI.file_roots: the browser shows what it can", _exc)
             runs = {}
         sessions = self.module("sessions")
         try:
             ids = self.session_ids()  # {name shown: id}: a renamed session keeps its id (its directory)
-        except Exception:  # noqa: BLE001 - an older sandbox-ai: the names are the ids
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: the names are the ids
+            applog.swallowed("backend", "SandboxAI.file_roots: an older sandbox-ai: the names are the ids", _exc)
             ids = {}
         names = {key: name for name, key in ids.items()}
 
@@ -1881,7 +1996,8 @@ class SandboxAI:
             add("run-home", name, paths["state_dir"])
         try:
             rows = sessions.rows()
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.file_roots failed (went on without it)", _exc)
             rows = []
         for row in rows:
             name = row[0]  # the name shown (after a rename); load() and session_dir() take the session's id
@@ -1920,7 +2036,8 @@ class SandboxAI:
             return [*([first] if first else []), *(w for w in dict.fromkeys(rest) if w != first)]
         try:
             runs = self.runs()
-        except Exception:  # noqa: BLE001 - what can be read
+        except Exception as _exc:  # noqa: BLE001 - what can be read
+            applog.swallowed("backend", "SandboxAI.sandbox_paths: what can be read", _exc)
             runs = {}
         sessions = self.module("sessions")
         for record in runs.values():
@@ -1930,7 +2047,8 @@ class SandboxAI:
                 add([(paths["state_dir"], SANDBOX_HOME)])
         try:
             rows = sessions.rows()
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.sandbox_paths failed (went on without it)", _exc)
             rows = []
         for row in rows:
             try:
@@ -1954,8 +2072,8 @@ class SandboxAI:
         folders += self.rw_mounts()
         try:
             folders += [str(p) for p in self.launcher.exposed_before()]
-        except Exception:  # noqa: BLE001 - an older sandbox-ai: the registry is read directly below
-            pass
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: the registry is read directly below
+            applog.swallowed("backend", "SandboxAI.sandbox_folders: an older sandbox-ai: the registry is read d…", _exc)
         folders += preload_trees()
         return list(dict.fromkeys(os.path.realpath(f) for f in folders))
 
@@ -1964,14 +2082,16 @@ class SandboxAI:
         found = []
         try:
             runs = self.runs()
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.rw_mounts failed (went on without it)", _exc)
             runs = {}
         for record in runs.values():
             found += run_paths(self.launcher, record.get("pid"), info=self.procinfo())["mounts"]
         sessions = self.module("sessions")
         try:
             rows = sessions.rows()
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.rw_mounts failed (went on without it)", _exc)
             rows = []
         for row in rows:
             try:
@@ -2011,8 +2131,18 @@ class SandboxAI:
 
     def save_settings(self, values):
         data = json_for_change(self.settings_file())
+        changed = {key: value for key, value in values.items() if data.get(key) != value}
         data.update(values)
-        write_private_json(self.settings_file(), data)
+        try:
+            write_private_json(self.settings_file(), data)
+        except OSError as exc:
+            applog.log("WARNING", "settings", f"{self.settings_file()}: not written ({applog.error_text(exc)}): "
+                                              f"{', '.join(map(str, values))}")
+            raise
+        if changed:  # (the values of settings whose name says secret are not shown)
+            applog.log("INFO", "settings", "changed: " + ", ".join(
+                f"{key}=" + ("***" if applog.SECRET_OPTION.match(f'--{key}') else applog.redact(repr(value))[:200])
+                for key, value in changed.items()))
 
     # -- other hosts (sandbox-ai hosts): machines whose sandbox-ai this one manages over SSH --
 
@@ -2053,7 +2183,7 @@ class SandboxAI:
         status, out, err = self.call("hosts", "test", name, "--json", timeout=150)
         try:
             return json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
 
     def host_run(self, name, *args, timeout=120, input=None):
@@ -2115,7 +2245,8 @@ class SandboxAI:
                 return entry, control
             if not hosts.ensure_master(entry, control, deadline=deadline):
                 return None
-        except Exception:  # noqa: BLE001 - the command connects on its own (and says what is wrong)
+        except Exception as _exc:  # noqa: BLE001 - the command connects on its own (and says what is wrong)
+            applog.swallowed("backend", "SandboxAI.shared_connection: the command connects on its own (and says…", _exc)
             return None
         return entry, control
 
@@ -2136,7 +2267,8 @@ class SandboxAI:
             if not callable(getattr(hosts, "argv", None)):
                 return None
             argv = hosts.argv(name, [str(arg) for arg in args], **({"control": control} if control else {}))
-        except Exception:  # noqa: BLE001 - sandbox-ai's own command reports it
+        except Exception as _exc:  # noqa: BLE001 - sandbox-ai's own command reports it
+            applog.swallowed("backend", "SandboxAI.ssh_argv: sandbox-ai's own command reports it", _exc)
             return None
         return list(argv) if argv and isinstance(argv, (list, tuple)) and all(isinstance(a, str) for a in argv) \
             else None
@@ -2211,7 +2343,9 @@ class SandboxAI:
         (for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
         try:
             version = (self.host_statuses(cached=True).get(name) or {}).get("version")
-        except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS
+        except Exception as _exc:  # noqa: BLE001
+            # (an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS)
+            applog.swallowed("backend", "SandboxAI.host_command_options: an older sandbox-ai, or no list of hos…", _exc)
             version = None
         cache = self.__dict__.setdefault("_net_options", {})
         key = (name, *command, version)
@@ -2246,7 +2380,8 @@ class SandboxAI:
             return
         try:
             known = self.host_command_options(host, *command)
-        except Exception:  # noqa: BLE001 - not answered: the command itself goes, and says what is wrong
+        except Exception as _exc:  # noqa: BLE001 - not answered: the command itself goes, and says what is wrong
+            applog.swallowed("backend", "SandboxAI.require_options: not answered: the command itself goes, and …", _exc)
             return
         missing = [o for o in options if o not in known]
         if missing:
@@ -2292,7 +2427,7 @@ class SandboxAI:
         status, out, err = self.host_run(host, "resume", name, "--review-home", "--json", timeout=120)
         try:
             data = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, dict):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2310,7 +2445,7 @@ class SandboxAI:
                                          *[token for path in paths for token in ("--path", path)], timeout=120)
         try:
             data = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, dict):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2324,7 +2459,7 @@ class SandboxAI:
         status, out, err = self.call("rules", "check", "--json", *files, timeout=60)
         try:
             data = json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, dict) or not isinstance(data.get("rulesets"), list):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2333,14 +2468,14 @@ class SandboxAI:
     def rules_show(self, agent, argv, project=None):
         """The rulesets a start of AGENT with the launcher options ARGV (in PROJECT, else the app's folder) would
         have (`sandbox-ai rules show --json`): {"agent", "project_config", "rulesets": [{"name", "from", ...}]}."""
-        if agent not in ("claude", "codex", "opencode"):
+        if agent not in AGENTS:
             raise ValueError("invalid agent")
         status, out, err = self.call("rules", "show", "--agent", agent, "--json",
                                      *(["--project", str(project)] if project else []), "--",
                                      *self.as_given(argv), timeout=60)
         try:
             data = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, dict) or not isinstance(data.get("rulesets"), list):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2354,7 +2489,7 @@ class SandboxAI:
         status, out, err = self.host_run(host, "rules", "reload", name, "--json", timeout=90)
         try:
             data = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, dict):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2364,7 +2499,7 @@ class SandboxAI:
         status, out, err = self.host_run(name, *args, timeout=timeout)
         try:
             return json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
 
     def host_terminal(self, name, *args):
@@ -2403,7 +2538,7 @@ class SandboxAI:
         status, out, err = self.call(*args, timeout=timeout)
         try:
             return json.loads(out)[0]
-        except (ValueError, IndexError, KeyError, TypeError):
+        except (ValueError, IndexError, KeyError, TypeError, RecursionError):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
 
     def host_install_supported(self):
@@ -2441,7 +2576,7 @@ class SandboxAI:
         status, out, err = self.call(*args, "--json", timeout=timeout)
         try:
             result = json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             result = None
         if not isinstance(result, dict):  # refused before it began (an option this sandbox-ai lacks, no such host)
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -2507,7 +2642,7 @@ class SandboxAI:
             document = json.loads(path.read_text())
         except FileNotFoundError:
             return {}, None
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
             return {}, f"{path}: {exc}"
         if not isinstance(document, dict) or document.get("version") != 1:
             return {}, f"{path}: expected an object with \"version\": 1"
@@ -2518,7 +2653,8 @@ class SandboxAI:
         none - () for a sandbox-ai without that default (it shows them all)."""
         try:
             return tuple(getattr(self.launcher, "DESKTOP_NOTIFICATIONS", ()))
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.desktop_notification_levels failed (went on without it)", _exc)
             return ()
 
     def save_sandbox_default(self, key, value):
@@ -2540,7 +2676,8 @@ class SandboxAI:
                 raise ValueError("this sandbox-ai has no loop guard layers yet; update it")
             if value is not None:
                 value = dict(module.check_loop(value, "loop_guard"))
-        elif key != "telemetry" or value is not None and value not in self.telemetry_levels():
+        elif key != "telemetry" or value is not None and (value not in self.telemetry_levels()
+                                                           or value not in TELEMETRY_ORDER):  # never on
             raise ValueError(f"this sandbox-ai has no default {key} = {value!r}")
         document, problem = self.sandbox_defaults()
         if problem:
@@ -2559,7 +2696,13 @@ class SandboxAI:
             found = [p for p in root.iterdir() if p.is_dir()]
         except OSError:
             return []
-        return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+
+        def changed(path):
+            try:
+                return path.stat().st_mtime
+            except OSError:  # removed since it was listed
+                return 0
+        return sorted(found, key=changed, reverse=True)
 
     # -- profiles --
 
@@ -2569,7 +2712,7 @@ class SandboxAI:
     def profiles(self):
         try:
             data = json.loads(self.profiles_file().read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -2589,16 +2732,28 @@ class SandboxAI:
 
     def project_document(self, agent, options, values, agent_args=()):
         """(.sandbox-ai.json document, main workspace) for the form's values: the first workspace is where
-        the file lives, further ones are listed; options a project file may not set are left out."""
+        the file lives, further ones are listed; options a project file may not set are left out, and so are values
+        it may not hold (--llm-traffic all: PROJECT_REFUSED_VALUES) or that are gone (--telemetry on)."""
         forbidden = set(self.launcher.CONFIG_FORBIDDEN)
         workspaces = [w for value in values.get("--workspace", []) for w in str(value).split(",") if w.strip()]
-        kept = {name: value for name, value in values.items() if name not in forbidden}
+        kept = {name: value for name, value in values.items()
+                if name not in forbidden and not project_refused(name, value) and not retired(name, value)}
         document = {"version": 1, "agent": agent, "options": argv_from_values(options, kept)}
         if workspaces[1:]:
             document["workspaces"] = workspaces[1:]
         if agent_args:
             document["agent_args"] = list(agent_args)
         return document, (workspaces[0] if workspaces else None)
+
+    def create_folders(self, paths):
+        """Make each folder of PATHS (with the folders above it) that a start names as its workspace or project
+        folder, checked as a start checks a workspace (the launcher's create_workspace: never a system folder,
+        XDG_RUNTIME_DIR, sandbox-ai's own tree, a file or a link to elsewhere in its path). Returns the folders made
+        or there; ValueError with the reason (never a bare errno) for the first one refused."""
+        create = getattr(self.launcher, "create_workspace", None)
+        if create is None:
+            raise ValueError("this sandbox-ai cannot create a workspace for the app: create the folder first")
+        return [str(create(path)) for path in paths]
 
     def write_project(self, directory, document):
         """Write DIRECTORY/.sandbox-ai.json and trust exactly the bytes written.
@@ -2820,7 +2975,8 @@ class SandboxAI:
                 return status, "\n".join(said)
         return 0, "\n".join(part for part in said if part)
 
-    LOGIN_LINE = re.compile(r"(claude|codex|opencode)\s+(login store|host)\s+(.*?)\s+\((.*)\)\s*")
+    # A line of `sandbox-ai login --status` there: every agent it names (Hermes and Qwen Code too) that this app knows.
+    LOGIN_LINE = re.compile(rf"({'|'.join(AGENTS)})\s+(login store|host)\s+(.*?)\s+\((.*)\)\s*")
 
     def host_login_status(self, name):
         """[(agent, where, problem, source)] as login_status() says them, for host NAME from `sandbox-ai login
@@ -2843,7 +2999,7 @@ class SandboxAI:
 
     def login_argv(self, host, agent, logout=False):
         """`sandbox-ai login AGENT [--logout]` on HOST, for a terminal (the agent's own login asks there)."""
-        if agent not in AGENTS:
+        if agent not in AGENTS or agent not in LOGIN_AGENTS_ANYWHERE:
             raise ValueError("unknown agent")
         return self.host_terminal(host, "login", agent, *(["--logout"] if logout else []))
 
@@ -2987,8 +3143,10 @@ class SandboxAI:
         data = self.host_json(host, "images", "--json", timeout=90)
         if not isinstance(data, list):
             raise ValueError("sandbox-ai images --json: not a list of images")
-        return sorted({str(e["target"]) for e in data if isinstance(e, dict) and e.get("variant")
-                       and isinstance(e.get("target"), str) and re.fullmatch(KIT_NAME, e["target"])})
+        # (a name several agents have a variant of is listed as NAME@AGENT: --image-variant takes NAME, the agent's)
+        return sorted({str(e["target"]).partition("@")[0] for e in data if isinstance(e, dict) and e.get("variant")
+                       and isinstance(e.get("target"), str)
+                       and re.fullmatch(KIT_NAME, str(e["target"]).partition("@")[0])})
 
     START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
                      "--git-token-secret")
@@ -3026,7 +3184,7 @@ class SandboxAI:
             try:
                 found[option] = sorted({printable(str(name))[:64] for name in read() if str(name).strip()})
             except Exception as exc:  # noqa: BLE001 - one list not answered: the others are still offered
-                problems[option] = printable(str(exc))[-300:]
+                problems[option] = printable_text(str(exc))[-300:]
         return found, problems
 
     def host_preset_dirs(self, host):
@@ -3153,7 +3311,8 @@ class SandboxAI:
         defaults weaken its starts."""
         try:
             data = self.host_json(host, "defaults", "show", "--json", timeout=60)
-        except Exception:  # noqa: BLE001 - not answered: measured against sandbox-ai's own defaults
+        except Exception as _exc:  # noqa: BLE001 - not answered: measured against sandbox-ai's own defaults
+            applog.swallowed("backend", "SandboxAI.host_trust_defaults: not answered: measured against sandbox-…", _exc)
             return {}
         values = data.get("values") if isinstance(data, dict) and isinstance(data.get("values"), dict) else {}
         return {key: values[key] for key in ("mode", "canaries") if key in values}
@@ -3188,9 +3347,11 @@ class SandboxAI:
         return result
 
     # images
-    def image_build_argv(self, host, target, extension_only=False, pin=None, uv=None, node=None):
-        """`sandbox-ai build [--extension-only] [--pin V] [--uv V] [--node IMAGE] TARGET` on HOST, for a terminal."""
-        if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", target):
+    def image_build_argv(self, host, target, extension_only=False, pin=None, uv=None, node=None, variant=False):
+        """`sandbox-ai build [--extension-only] [--pin V] [--uv V] [--node IMAGE] [--variant] TARGET` on HOST, for a
+        terminal. VARIANT: TARGET is a variant (NAME, or NAME@AGENT where several agents have one of that name) - built
+        as one even where its name is a build target too (tor: `build tor` is the Tor VPN's image)."""
+        if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(@[a-z]{1,20})?", target):
             raise ValueError("invalid image")
         options = ["--extension-only"] if extension_only else []
         for option, value, pattern in (("--pin", pin, r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}"),
@@ -3200,7 +3361,7 @@ class SandboxAI:
                 if not re.fullmatch(pattern, value):
                     raise ValueError(f"{option}: {value!r}")
                 options += [option, value]
-        return self.host_terminal(host, "build", *options, target)
+        return self.host_terminal(host, "build", *options, *(["--variant"] if variant else []), target)
 
     # activity and statistics
     def host_activity(self, host, source=(), tail=5000, since=None, kinds=(), grep=None, timeout=120):
@@ -3337,7 +3498,9 @@ class SandboxAI:
         self.host_version_known(name)  # (a worker: SSH is fine here) a host just added says its version first
         try:
             version = (self.host_statuses(cached=True).get(name) or {}).get("version")
-        except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS
+        except Exception as _exc:  # noqa: BLE001
+            # (an older sandbox-ai, or no list of hosts: asked every NET_OPTIONS_SECONDS)
+            applog.swallowed("backend", "SandboxAI.host_launch_options: an older sandbox-ai, or no list of host…", _exc)
             version = None
         cache = self.__dict__.setdefault("_launch_options", {})
         key = (name, agent, version)
@@ -3376,8 +3539,8 @@ class SandboxAI:
         if name != "local" and hasattr(hosts, "ask_version"):
             try:
                 hosts.ask_version(name, command=lambda host, args, timeout: self.host_run(host, *args, timeout=timeout))
-            except Exception:  # noqa: BLE001 - an older or broken list of hosts: the version stays unknown
-                pass
+            except Exception as _exc:  # noqa: BLE001 - an older or broken list of hosts: the version stays unknown
+                applog.swallowed("backend", "SandboxAI.host_version_known: an older or broken list of hosts: th…", _exc)
 
     def host_knows_as_given(self, name, agent=None):
         """Host NAME's launcher takes --workspaces-as-given: its kept status names 0.1.78 or later (a small local
@@ -3387,8 +3550,8 @@ class SandboxAI:
         try:
             if hasattr(hosts, "knows_workspaces_as_given") and hosts.knows_workspaces_as_given(name):
                 return True
-        except Exception:  # noqa: BLE001 - no list of hosts, a damaged status file: not known
-            pass
+        except Exception as _exc:  # noqa: BLE001 - no list of hosts, a damaged status file: not known
+            applog.swallowed("backend", "SandboxAI.host_knows_as_given: no list of hosts, a damaged status file…", _exc)
         known = self.cached_launch_options(name, agent)
         return bool(known and AS_GIVEN in known)
 
@@ -3428,11 +3591,13 @@ class SandboxAI:
         if name == "local":
             try:
                 served = self.mcp_serving()
-            except Exception:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
+            except Exception as _exc:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
+                applog.swallowed("backend", "SandboxAI.host_mcp_servers: the starts could not be read: the serv…", _exc)
                 served = {}
             try:
                 origins = self.mcp_origins()
-            except Exception:  # noqa: BLE001 - the origin is only shown
+            except Exception as _exc:  # noqa: BLE001 - the origin is only shown
+                applog.swallowed("backend", "SandboxAI.host_mcp_servers: the origin is only shown", _exc)
                 origins = {}
             return [(server, state, ", ".join(served.get(server, [])), what, origins.get(server, ""))
                     for server, state, what in self.mcp_servers()]
@@ -3473,7 +3638,7 @@ class SandboxAI:
             problem = entry.get("last_problem") if isinstance(entry.get("last_problem"), dict) else None
             below = entry.get("below_recommended") if isinstance(entry.get("below_recommended"), dict) else {}
             if problem or below:
-                found[entry["name"]] = {"problem": {k: printable(str(problem.get(k) or ""))[:600]
+                found[entry["name"]] = {"problem": {k: printable_text(str(problem.get(k) or ""))[:600]
                                                     for k in ("time", "what", "why", "fix")} if problem else None,
                                         "below": {printable(str(k))[:20]: printable(str(v))[:20] for k, v in below.items()}}
         return found
@@ -3487,7 +3652,8 @@ class SandboxAI:
             if hasattr(mcp, "server_list"):
                 try:
                     served = self.mcp_serving()
-                except Exception:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
+                except Exception as _exc:  # noqa: BLE001 - the starts could not be read: the servers are listed anyway
+                    applog.swallowed("backend", "SandboxAI.host_mcp_list: the starts could not be read: the ser…", _exc)
                     served = {}
                 return mcp.server_list(served)
         data = self.host_json(name, "mcp", "list", "--json", timeout=60)
@@ -3528,7 +3694,8 @@ class SandboxAI:
         try:
             mcp = self.module("mcp")
             label, defaults = mcp.catalog_label, dict(mcp.CATALOGS)
-        except Exception:  # noqa: BLE001 - an older sandbox-ai: the prefix
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: the prefix
+            applog.swallowed("backend", "SandboxAI.catalog_name: an older sandbox-ai: the prefix", _exc)
             label, defaults = (lambda source: source), {}
         numbered = re.fullmatch(r"c([0-9]{1,2})", str(prefix))
         catalogs = list(catalogs or ())
@@ -3581,7 +3748,7 @@ class SandboxAI:
         if status == 0:
             try:
                 data = json.loads(out)
-            except ValueError:
+            except (ValueError, RecursionError):
                 data = None
         if not isinstance(data, dict):
             text = (err or out).strip()
@@ -3590,12 +3757,14 @@ class SandboxAI:
                 # an older sandbox-ai there (0.1.77 has no mcp detach): "update it", not its usage (review 6 W-F2)
                 raise HostTooOld(host, tuple(args[:2]), [o for o in args if o in ("--live", "--helper")] or
                                  [args[1]])
-            lines = [line[len("sandbox-mcp: "):] if line.startswith("sandbox-mcp: ") else line
+            # the command's prefix off: "sandbox-ai mcp: " (its errors; every message from 0.1.95 on), "sandbox-mcp: "
+            # (the rest, before)
+            lines = [re.sub(r"^(?:sandbox-ai mcp|sandbox-mcp): ", "", line)
                      for line in text.splitlines() if line.strip()]
             # each line on its own: a line break stays one (printable would write it as \x0a)
             raise ValueError("\n".join(printable(line) for line in lines[-5:])[-800:] or f"exit status {status}")
         message = data.get("message") if isinstance(data.get("message"), str) else ""
-        data["message"] = printable(message)[:2000]
+        data["message"] = printable_text(message)[:2000]
         data["notes"] = [printable(line.strip())[:500] for line in (err or "").splitlines()
                          if line.strip() and line.strip() != message.strip()][:10]
         return data
@@ -3608,30 +3777,54 @@ class SandboxAI:
         from .wizard_llm import parse_endpoints
         status, out, err = self.host_run(host, "llm", "list", "--json", timeout=90)
         if status != 0:
-            raise ValueError(printable((err or out).strip())[-500:] or f"exit status {status}")
+            raise ValueError(printable_text((err or out).strip())[-500:] or f"exit status {status}")
         return parse_endpoints(out)[0]
 
-    def host_llm_models(self, host, name):
-        """[model name] the server NAME of HOST offers now (`sandbox-ai llm models NAME --json` there). ValueError:
-        not answered (the server is down, say)."""
+    def host_llm_models(self, host, name, timeout=60):
+        """[model] the server NAME of HOST offers now (`sandbox-ai llm models NAME --json` there, within TIMEOUT
+        seconds): each {name, size, loaded, parameters, type, capabilities, families ...} as wizard_llm.parse_models
+        checks it. ValueError: not answered (the server is down, say)."""
         from .wizard_llm import models_argv, parse_models
-        status, out, err = self.host_run(host, *models_argv(name), timeout=60)
+        status, out, err = self.host_run(host, *models_argv(name), timeout=timeout)
         if status != 0:
-            raise ValueError(printable((err or out).strip())[-500:] or f"exit status {status}")
-        return [model["name"] for model in parse_models(out)]
+            raise ValueError(printable_text((err or out).strip())[-500:] or f"exit status {status}")
+        return parse_models(out)
 
-    def host_llm_servers(self, host, ask_models=6):
-        """The model servers of HOST for the Model choice beside the agent: `llm list --json` there, and for each one
-        (the first ASK_MODELS) that lists no models since its last check, `llm models NAME --json` - so NAME:MODEL is
-        offered for that host's servers, not this machine's. A server that does not answer keeps what the list said."""
-        endpoints = [dict(e) for e in self.host_llm_endpoints(host)]
+    LLM_MODELS_SECONDS = 15  # a server that has not answered by then is listed without its models (the hint says why)
+    LLM_MODELS_AT_ONCE = 8
+
+    def host_llm_servers(self, host, endpoints=None, timeout=None):
+        """The model servers of HOST for the Model choice beside the agent: every one `llm list --json` lists there
+        (ENDPOINTS: that list, read already), each asked for its models (`llm models NAME --json`) - all of them at
+        once (LLM_MODELS_AT_ONCE at a time), each within TIMEOUT seconds (LLM_MODELS_SECONDS; another host's a few
+        more for SSH) - so NAME:MODEL is offered for that host's servers, not this machine's. A server that does not
+        answer keeps what the list said, with "answered": False and "models_error" (why: the Model choice says it);
+        one that answered has "answered": True. Never on the GUI thread (a background call)."""
+        from concurrent.futures import ThreadPoolExecutor
+        endpoints = [dict(e) for e in (self.host_llm_endpoints(host) if endpoints is None else endpoints)
+                     if isinstance(e, dict) and isinstance(e.get("name"), str)]
+        if not endpoints:
+            return endpoints
+        timeout = timeout or (self.LLM_MODELS_SECONDS if host == "local" else self.LLM_MODELS_SECONDS + 10)
         # (this machine's too: a server added without --model, e.g. LM Studio on a laptop, listed no models, and only
-        # its bare name was offered)
-        for endpoint in [e for e in endpoints if not e.get("models")][:ask_models]:
-            try:
-                endpoint["models"] = self.host_llm_models(host, endpoint["name"])
-            except (ValueError, OSError):
-                continue
+        # its bare name was offered; one after another with a minute each, a few servers that were down took longer
+        # than the whole read may and the choice listed none)
+        with ThreadPoolExecutor(max_workers=min(self.LLM_MODELS_AT_ONCE, len(endpoints)),
+                                thread_name_prefix="llm-models") as pool:
+            asked = [(endpoint, pool.submit(self.host_llm_models, host, endpoint["name"], timeout))
+                     for endpoint in endpoints]
+            for endpoint, future in asked:
+                try:
+                    listed = future.result()
+                    # (its names for the choice; what is known of each - size, parameters, what it can do - for the
+                    # model picker's tags, sorts and filters: wizard_llm.picker_rows)
+                    endpoint["models"] = [m["name"] if isinstance(m, dict) else m for m in listed]
+                    endpoint["model_info"] = {m["name"]: m for m in listed if isinstance(m, dict)}
+                    endpoint["answered"] = True
+                except Exception as exc:  # noqa: BLE001 - not answered, whatever the reason: what the list said
+                    applog.swallowed("backend", "SandboxAI.host_llm_servers: not answered, whatever the reason: …", exc)
+                    endpoint["answered"] = False
+                    endpoint["models_error"] = printable_text(str(exc).strip())[-300:] or type(exc).__name__
         return endpoints
 
     def host_connections(self, host, source, tail=5000, since=None):
@@ -3683,7 +3876,7 @@ class SandboxAI:
         status, out, err = self.host_run(name, *privacy_check_args(paths, rules_dir, project, every), timeout=600)
         try:
             data = json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, list):
             raise ValueError((err or out).strip()[-800:] or f"exit status {status}")
@@ -3703,7 +3896,7 @@ class SandboxAI:
         status, out, err = self.host_run(name, "doctor", f"--backend={engine}", "--json", timeout=300)
         try:
             data = json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             data = None
         if not isinstance(data, list):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
@@ -3746,7 +3939,7 @@ def web_listen_problem(value):
     try:
         web_listen_address(value)
     except ValueError as exc:
-        return printable(str(exc)) if str(exc).startswith("--listen") else \
+        return printable_text(str(exc)) if str(exc).startswith("--listen") else \
             f"--listen {printable(value)}: ADDRESS:PORT, e.g. 127.0.0.1:8443 or [::]:8443"
     return None
 
@@ -3864,7 +4057,7 @@ def cut_report(result):
     "error"}], or None when it said no report (an older sandbox-ai, no answer); then its error text explains."""
     try:
         report = json.loads(result[1])
-    except (ValueError, TypeError, IndexError):
+    except (ValueError, TypeError, IndexError, RecursionError):
         return None
     runs = report.get("runs") if isinstance(report, dict) else None
     if not isinstance(runs, list):
@@ -3982,6 +4175,9 @@ APP_NEEDS_CONFIRM = {
     "preset-delete": "deleting a preset of your own removes it for good (export it first to keep a copy)",
     "preset-replace": "replacing a preset of your own overwrites it with the board shown now (export it first to keep "
                       "a copy)",
+    # sandbox-ai llm unload (and a load that replaces what is loaded): no route of the web interface does it
+    "llm-unload": "unloading a model takes it from the server's memory: a running sandbox that uses it waits for it to "
+                  "load again at its next request (or fails)",
     "files-delete": "deleting removes the files or folders for good (there is no wastebasket)",
     "files-replace": "replacing overwrites what is there now with what is copied or moved",
     # what the window itself ends, drops or runs (no sandbox-ai command): asked the same way, Cancel the default
@@ -4012,7 +4208,9 @@ APP_NEEDS_CONFIRM = {
                   "a TOTP code are still asked)",
 }
 MODE_ORDER = ("lax", "low", "medium", "high", "paranoid")  # the order of protection, weakest first (webui.MODE_ORDER)
-TELEMETRY_ORDER = ("on", "off", "strict")  # the agents' telemetry, the least private first (webui.TELEMETRY_ORDER)
+# The agents' telemetry, the least private first (webui.TELEMETRY_ORDER): always off - there is no on since
+# sandbox-ai 0.1.95 (an old "on" counts as off, as the launcher reads it).
+TELEMETRY_ORDER = ("off", "strict")
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
 DEFAULT_CANARIES = ("credentials", "home")  # canary.DEFAULT_CATEGORIES, when a host does not say its canary_default
 CANARY_CATEGORIES = ("credentials", "home", "workspace")
@@ -4100,6 +4298,8 @@ def defaults_lowered(old, new, canary_default=None):
     found = []
     for key, order, default in (("mode", MODE_ORDER, DEFAULT_MODE), ("telemetry", TELEMETRY_ORDER, DEFAULT_TELEMETRY)):
         before, after = old.get(key, default), new.get(key, default)
+        if key == "telemetry" and before == RETIRED_VALUES["--telemetry"]:
+            before = DEFAULT_TELEMETRY  # an old on: off
         if after in order and (before not in order or order.index(after) < order.index(before)):
             found.append((key, before, after))
     lost = canary_categories(old.get("canaries"), canary_default) - canary_categories(new.get("canaries"),
@@ -4649,10 +4849,10 @@ def settings_problem():
 
 # The settings the app knows, with their defaults (the Settings dialog edits them; the file keeps them).
 SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "", "language": "system", "terminal": "app", "tray": True, "notify": True,
-            "notifications": False, "notify_safeguards": True,
+            "notifications": False, "notify_safeguards": True, "short_notices": True,
             "notify_seconds": 15, "notify_style": "themed", "approvals_interval": 1000, "sandboxes_interval": 3000, "connections_interval": 2000,
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
-            "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "reopen_terminals": True, "guide_nodes": True,
+            "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "reopen_terminals": False, "guide_nodes": True,
             "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
             "web_without_sandbox": False, "show_flags": False,
             # the terminal tabs: where sign-in links open (app, system), copy what is selected, ask before a paste of
@@ -4811,7 +5011,7 @@ def parse_dry_run(status, out, err):
         return None, err.strip() or out.strip()
     try:
         return json.loads(out), err.strip()
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, out.strip()
 
 
@@ -4856,6 +5056,42 @@ class Option:
         return [self.long, text]
 
 
+# Values the launcher refuses in a project file (agent_sandbox.load_project_config: only the command line or the
+# defaults file records the cloud providers' traffic): never written into one.
+PROJECT_REFUSED_VALUES = {"--llm-traffic": "all"}
+# Values that are gone: the agents' telemetry is always off since sandbox-ai 0.1.95, and an old --telemetry on (in
+# the app's state, a board, a preset, a project file) is dropped wherever the app reads it - shown as off, never
+# written, never passed (the launcher would ignore it, with a note).
+RETIRED_VALUES = {"--telemetry": "on"}
+RETIRED_SHORT = {"-tm": "--telemetry"}  # the launcher's short form (agent_sandbox.SHORT_OPTIONS)
+
+
+def project_refused(option, value):
+    """Whether OPTION with VALUE may not be in a project file although the option itself may (--llm-traffic all)."""
+    return option in PROJECT_REFUSED_VALUES and str(value).strip() == PROJECT_REFUSED_VALUES[option]
+
+
+def retired(option, value):
+    """Whether OPTION with VALUE is gone (--telemetry on): dropped wherever the app reads it."""
+    option = RETIRED_SHORT.get(option, option)
+    return option in RETIRED_VALUES and str(value).strip() == RETIRED_VALUES[option]
+
+
+def without_retired(tokens):
+    """Command-line TOKENS without the gone values (RETIRED_VALUES: "--telemetry on", "--telemetry=on", "-tm on")."""
+    tokens, kept, index = [str(token) for token in tokens], [], 0
+    while index < len(tokens):
+        name, equals, value = tokens[index].partition("=")
+        if equals and retired(name, value):
+            index += 1
+        elif not equals and index + 1 < len(tokens) and retired(name, tokens[index + 1]):
+            index += 2
+        else:
+            kept.append(tokens[index])
+            index += 1
+    return kept
+
+
 def argv_from_values(options, values):
     """Launcher arguments from {long option: value}, in the order of OPTIONS."""
     argv = []
@@ -4889,6 +5125,9 @@ def values_from_argv(options, argv, canonical=None):
             continue
         if equals:
             value, index = attached, index + 1
+        elif option.kind == "choice" and option.const is not None and (
+                index + 1 >= len(tokens) or tokens[index + 1].startswith("-")):
+            value, index = option.const, index + 1  # an optional value not given (--browser: chromium)
         elif index + 1 < len(tokens):
             value, index = tokens[index + 1], index + 2
         else:
@@ -4974,7 +5213,7 @@ def read_connections(path, limit=5000, max_bytes=LOG_BYTES, strict=False, since=
             break
         try:
             record = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(record, dict):
             records.append(record)
@@ -5017,7 +5256,8 @@ def option_arity(launcher):
     try:
         found = {option: action.nargs for action in launcher.build_parser()._actions
                  for option in action.option_strings}
-    except Exception:  # noqa: BLE001 - an old launcher or a test double
+    except Exception as _exc:  # noqa: BLE001 - an old launcher or a test double
+        applog.swallowed("backend", "option_arity: an old launcher or a test double", _exc)
         found = {}
     try:
         _arity[launcher] = found
@@ -5035,8 +5275,8 @@ def paths_from_options(launcher, tokens, cwd=None):
         tokens = tokens[:tokens.index("--")]
     try:
         tokens = launcher.canonical_options(tokens)
-    except Exception:  # noqa: BLE001 - an old or damaged record: read what can be read
-        pass
+    except Exception as _exc:  # noqa: BLE001 - an old or damaged record: read what can be read
+        applog.swallowed("backend", "paths_from_options: an old or damaged record: read what can be read", _exc)
     arity = {**KNOWN_ARITY, **option_arity(launcher)}
     result = {"workspaces": [], "state_dir": None, "mounts": [], "workspace_names": {}}
     base = Path(cwd) if cwd else None
@@ -5165,7 +5405,7 @@ def memory_share(instance):
         with open(Path(directory) / "memory.json", "rb") as stream:
             data = json.loads(stream.read(4096))
         used, limit = int(data["used_bytes"]), int(data["limit_bytes"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
     if used < 0 or limit <= 0:
         return None
@@ -5320,7 +5560,7 @@ def json_part(out):
     text = out or ""
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         pass
     decoder, offset = json.JSONDecoder(), 0
     for line in text.splitlines(keepends=True):
@@ -5351,7 +5591,9 @@ class QuestionCache:
 
     QUIET = 2.0  # seconds a folder's modification time must lie back before its listing is reused (coarse clocks)
 
-    def __init__(self, ident=re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}"), limit=64 << 10):
+    # Bytes of a question file read: a tool call's question carries its arguments in full (64 KiB of UTF-8, escaped
+    # once more in the file: up to three times that), as sandbox-ai's supervisor reads it (1 MiB).
+    def __init__(self, ident=re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}"), limit=1 << 20):
         self.ident, self.limit, self.parsed, self.results = ident, limit, {}, {}
         self.listings = {}  # {folder: (its stat key, [(kind, question, result, paths)])} of folders that were quiet
 
@@ -5463,6 +5705,10 @@ class RemoteQuestion(dict):
             self["max_scope"] = "always"  # an older sandbox-ai there: it refuses what its policy does not allow
         if item.get("url_truncated") is True:
             self["url_truncated"] = True
+        # A tool call's arguments in full (approvals.question_details there): lines kept, escaped here too, bounded.
+        if isinstance(item.get("details"), str) and item["details"]:
+            self["details"] = bounded_details(item["details"])
+            self["details_whole"] = item.get("details_whole") is True
         if self.get("kind") != "browser":
             for key in ("url", "url_refused", "url_host", "url_truncated"):
                 self.pop(key, None)
@@ -5477,6 +5723,44 @@ class RemoteQuestion(dict):
         if self.get("kind") == "browser" or left is None:
             return age, None
         return age, max(0, int(left - elapsed))
+
+
+DETAILS_LIMIT = (64 << 10) + 512  # characters of a question's details shown (sandbox-ai's approvals.DETAILS_LIMIT)
+DETAILS_KINDS = ("mcp", "tool")  # questions whose details carry a call's arguments in full (approvals.DETAILS_KINDS)
+
+
+def bounded_details(text, limit=DETAILS_LIMIT):
+    """TEXT of a question's details for the screen: its lines kept, every other control character escaped
+    (printable_text), at most LIMIT characters, with a line that says how many more there were."""
+    text = str(text)
+    more = len(text) - limit
+    return printable_text(text[:limit]) + (f"\n… {more} more characters not shown" if more > 0 else "")
+
+
+def arguments_whole(question):
+    """QUESTION's line shows its tool call's arguments whole (as sandbox-ai's approvals.arguments_whole): no details,
+    or a short form of at most the 300 characters the line shows that is the same JSON as the details."""
+    full = question.get("arguments_full")
+    if question.get("kind") not in DETAILS_KINDS or not isinstance(full, str):
+        return True
+    short = question.get("arguments")
+    if not isinstance(short, str) or len(printable(short)) > 300:
+        return False
+    try:
+        return json.loads(short) == json.loads(full)
+    except (ValueError, RecursionError):
+        return False
+
+
+def question_details(question):
+    """(details, whole) of QUESTION: a tool call's arguments in full, as the call will send them (pretty-printed JSON,
+    credentials redacted: sandbox-ai's runtime.full_arguments), and whether its line shows them whole too; ("", True)
+    for a question without them (another kind, an older sandbox-ai). Another host's come as its sandbox-ai said them
+    (RemoteQuestion: "details", escaped there and here); this machine's from the question file, escaped here."""
+    if isinstance(question, RemoteQuestion):
+        return question.get("details", ""), question.get("details_whole", True)
+    full = question.get("arguments_full") if question.get("kind") in DETAILS_KINDS else None
+    return (bounded_details(full), arguments_whole(question)) if isinstance(full, str) and full else ("", True)
 
 
 def remote_questions(host, items, ident=re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}"), read_at=None):
@@ -5800,8 +6084,8 @@ def session_transfer_args(command, name, host, new_name=None, maps=(), check=Fal
     return args + (["--check"] if check else []) + (["--replace"] if replace else [])
 
 
-LIVE_HELPERS =("claude", "codex", "opencode")  # mcp attach --helper AGENT: the agents a helper can be
-HELPER_SERVER = re.compile(r"helper-(claude|codex|opencode)-[0-9a-f]{8}")  # agent_sandbox.helper_name
+LIVE_HELPERS = AGENTS  # mcp attach --helper AGENT (and the launcher's --helper): every agent can be a helper
+HELPER_SERVER = re.compile(rf"helper-({'|'.join(AGENTS)})-[0-9a-f]{{8}}")  # agent_sandbox.helper_name
 
 
 def helper_of(server):
@@ -5818,7 +6102,7 @@ def mcp_live_args(start, server=None, helper=None, detach=False, live=True):
         raise ValueError("not a start's name")
     if helper:
         if helper not in LIVE_HELPERS or server:
-            raise ValueError("a helper is claude, codex or opencode (and no server's name with it)")
+            raise ValueError(f"a helper is one of {', '.join(LIVE_HELPERS)} (and no server's name with it)")
         named = ["--helper", helper]
     elif re.fullmatch(MCP_NAME, str(server or "")):
         named = [server]
@@ -5872,9 +6156,7 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
         if mode == "rw":
             writable.append(source)
     for variable in env:
-        if not re.fullmatch(VARIABLE, str(variable)):
-            raise ValueError("a variable is letters, digits and _, not starting with a digit")
-        args.append(f"--env={variable}")
+        args.append(f"--env={env_spec(variable)}")  # NAME, NAME=VALUE or NAME@SECRET
     if network:
         if network not in ("none", "full"):
             raise ValueError("the network is none or full")
@@ -5914,10 +6196,33 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
 CPUS = r"[0-9]{1,4}(?:\.[0-9]{1,2})?"  # a CPU limit (mcp.checked_cpus checks its range)
 
 
+ENV_VALUE_LIMIT = 1024  # mcp.ENV_VALUE_LIMIT: a plain value of an MCP server's variable
+
+
+def env_spec(value):
+    """VALUE as one --env of `mcp add`/`mcp set` (or the VAR part of --mcp-env NAME:VAR...): NAME, NAME=VALUE (a value
+    of one line, no control character, at most ENV_VALUE_LIMIT characters; mcp.py refuses what looks like a secret) or
+    NAME@SECRET. ValueError says what is wrong."""
+    text = str(value if value is not None else "")
+    name, equals, rest = text.partition("=")
+    if equals:
+        if not re.fullmatch(VARIABLE, name):
+            raise ValueError("a variable is letters, digits and _, not starting with a digit")
+        if len(rest) > ENV_VALUE_LIMIT or any(ord(c) < 32 or ord(c) == 127 for c in rest):
+            raise ValueError(f"{name}: a value is one line of at most {ENV_VALUE_LIMIT} characters")
+        return text
+    name, at, secret = text.partition("@")
+    if not re.fullmatch(VARIABLE, name) or (at and not re.fullmatch(VARIABLE, secret)):
+        raise ValueError("a variable is letters, digits and _, not starting with a digit (NAME, NAME=VALUE or "
+                         "NAME@SECRET)")
+    return text
+
+
 def mcp_set_args(name, stop=False, **changes):
     """The words after `sandbox-ai` of `mcp set NAME` with CHANGES: memory, cpus, pids (a value, or "default": back to
-    the default), network (none|full), mounts ([(target, host folder, "ro"|"rw")]: all of them; [] none), env ([NAME]:
-    all of them; [] none), vpn (a profile, or None: none); STOP: --stop. Every value checked for its form here (the
+    the default), network (none|full), mounts ([(target, host folder, "ro"|"rw")]: all of them; [] none), env ([NAME,
+    NAME=VALUE or NAME@SECRET]: all of them; [] none - env_spec), vpn (a profile, or None: none); STOP: --stop. Every
+    value checked for its form here (the
     command checks the rest as `mcp add` does). ValueError says what is wrong."""
     if not re.fullmatch(MCP_NAME, str(name or "")):
         raise ValueError("a name for --mcp is 1-32 letters, digits, '_' or '-'")
@@ -5948,9 +6253,7 @@ def mcp_set_args(name, stop=False, **changes):
         if not changes["env"]:
             args.append("--no-env")
         for variable in changes["env"]:
-            if not re.fullmatch(VARIABLE, str(variable)):
-                raise ValueError("a variable is letters, digits and _, not starting with a digit")
-            args.append(f"--env={variable}")
+            args.append(f"--env={env_spec(variable)}")
     if "vpn" in changes:
         if changes["vpn"]:
             if not re.fullmatch(VPN_PROFILE, str(changes["vpn"])):

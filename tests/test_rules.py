@@ -273,6 +273,10 @@ def test_each_request_meets_only_the_rules_that_apply_with_the_same_verdict():
             found = rules.http(facts)
             assert {key: found[key] for key in ("decision", "rule", "ruleset")} == verdict_before(rules, facts), \
                 (sources, facts)
+            for number, source in enumerate(rules.sources):  # the index brings in exactly the rules that apply
+                for request in (facts, {**facts, "names": set()}, {**facts, "address": None}):
+                    assert rules.http_rules(number, request) == [
+                        each for each in source["http"] if rules.applies(each, request)]
             for source in rules.sources:  # the compiled comparison is Ruleset.host's
                 for each in source["http"]:
                     assert rules.applies(each, facts) == bool(
@@ -301,6 +305,28 @@ def test_a_host_name_is_told_from_an_address_as_ipaddress_tells_it():
             if found is not None and not value.strip().startswith("["):
                 plain = value.strip().lower().rstrip(".")
                 assert found[0] == (str(ipaddress.ip_address(plain)) if address(plain) else plain), repr(value)
+
+
+def test_a_request_is_held_only_against_the_rules_of_its_hosts(monkeypatch):
+    """Performance round 3 (0.1.95): with 2000 rules for other hosts a request met each of them (applies(), 0.5 ms of
+    every request through the proxy); now the index brings in only the rules of its names, its suffixes, its address
+    and those for every host - with the same verdicts."""
+    many = [rule(f"other-{n}", "deny", host=f"h{n}.example", path=f"/p{n}/**") for n in range(1990)]
+    rules = ruleset({"version": 1, "http": [*many, rule("api", "allow", host="api.example", methods="GET"),
+                                            rule("corp", "deny", host="*.corp.example"),
+                                            rule("all", "ask", host="*", path="/admin/**"),
+                                            rule("pin", "deny", host="pinned.example", path="/x")]},
+                    pinned={"pinned.example": ["192.0.2.30"]})
+    held = []
+    real = rt.Ruleset.http_match
+    monkeypatch.setattr(rt.Ruleset, "http_match", lambda self, each, *rest: held.append(each["id"]) or
+                        real(self, each, *rest))
+    assert http(rules, "GET", "/x", host="api.example", origin="api.example")["decision"] == "allow"
+    assert http(rules, "GET", "/admin/x", host="api.example", origin="api.example")["decision"] == "ask"
+    assert http(rules, "GET", "/x", host="a.b.corp.example", origin="a.b.corp.example")["rule"] == "corp"
+    assert http(rules, "GET", "/x", host="www.example", origin="192.0.2.30:443")["rule"] == "pin"
+    assert http(rules, "GET", "/p7/a", host="h7.example", origin="h7.example")["rule"] == "other-7"
+    assert len(held) <= 12 and not any(ident.startswith("other-") and ident != "other-7" for ident in held), held
 
 
 def test_pinned_addresses_and_the_host_header_carry_the_rules():
@@ -1176,7 +1202,7 @@ def test_mcp_servers_behind_a_vpn_keep_their_gateway(host, monkeypatch):
         started.append(cmd)
         return mock_process()
     monkeypatch.setattr(m.subprocess, "Popen", popen)
-    monkeypatch.setattr(m, "wait_for_socket", lambda *args: None)
+    monkeypatch.setattr(m, "wait_for_socket", lambda *args, **kwargs: None)
     monkeypatch.setattr(m.launcher(), "remove_stale_pod", lambda *args: False)
     monkeypatch.setattr(m, "PROC", host / "proc")
     # The VPN proofs after the start (mcp.verify_network) as passed: no Podman here.

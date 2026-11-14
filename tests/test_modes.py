@@ -438,7 +438,7 @@ def test_the_run_records_its_mode_for_run_time_changes(m):
     what it refuses at run time and its approval scope."""
     presets = [f"--allow-{p}" for p in s.PRESETS]
     run = m.run("--mode", "high")
-    expected = {"name": "high", "origin": "--mode", "refuses": ["--allow", "--allow-host", "--allow-tcp", "--dns", "--allow-host-port", *presets],
+    expected = {"name": "high", "origin": "--mode", "refuses": ["--allow", "--allow-host", "--allow-domain", "--allow-tcp", "--dns", "--allow-host-port", *presets],
                 "approval_scope": "run"}
     assert run.run_record["mode"] == expected and run.config["mode"] == expected
     run = m.run("--mode", "paranoid", "--offline")

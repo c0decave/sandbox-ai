@@ -34,18 +34,20 @@ open directory descriptors and never through a link: copy_entry and move_entry b
 host is Root("/", sandbox=False)), and Root.delete_entry, rename_entry, make_folder, make_file (an empty file,
 O_EXCL, 0600 where an agent may write), chmod_entry and chown_entry. A move copies first and removes the
 source only when the copy is complete, and then only the files it copied unchanged (what the agent added or
-changed meanwhile stays, and is reported). Below a sandbox root no set-user-ID, set-group-ID or sticky bit is ever set, and chown goes only to the user and their own
-groups; files a rootless Podman sandbox gave a subordinate UID (/etc/subuid) are taken back with
-take_ownership (podman unshare: inside Podman's user namespace, UID 0 is the user).
+changed meanwhile stays, and is reported). Below a sandbox root - and on a sandbox's folder itself, reached from a host
+folder that lists it (chmod_entry's AGENTS) - no set-user-ID, set-group-ID or sticky bit is ever set, and chown goes only
+to the user and their own groups; files a rootless Podman sandbox gave a subordinate UID (/etc/subuid) are taken
+back with take_ownership (podman unshare: inside Podman's user namespace, UID 0 is the user).
 
 A remote system's folder (remote.RemoteRoot, SSH and SFTP) has the same interface; copy_entry, move_entry and exists_in
 hand a remote side to remote.py.
 
 The file manager's editor reads a whole file with Root.read_file (a regular file only, at most EDIT_LIMIT bytes) and
 writes it back with Root.write_file: a temporary file in the same folder renamed over the old one, never written
-through a link or a hard link, refused (Changed) when the file is no longer the one that was read unless the human
-said to replace it; its permission bits stay, set-ID and sticky bits do not. Root.measure counts a folder's size for
-the Properties dialog (links counted, never followed; bounded like a delete; its progress readable while it counts).
+through a link or a hard link, refused (Changed; Gone when it is no longer there at all) when the file is no longer
+the one that was read unless the human said to replace it; its permission bits stay, set-ID and sticky bits do not.
+Root.measure counts a folder's size for the Properties dialog (links counted, never followed; bounded like a delete; its
+progress readable while it counts).
 Root.free_space gives the free and total bytes of a folder's file system (os.fstatvfs of the open folder: Linux and
 macOS) for the panes' status lines.
 """
@@ -188,6 +190,17 @@ class Cancelled(Refused):
 
 class Changed(Refused):
     """The file is no longer the one that was read (Root.write_file with expected)."""
+
+
+class Gone(Changed):
+    """Root.write_file with expected: the file is no longer there at all (removed, renamed or moved since it was read) -
+    a save makes it anew there only after a question that says so (it asked to replace "the changed file", and to
+    Reload, which can only fail)."""
+
+
+def gone(name):
+    return Gone(tr("{name} is no longer there: it was removed, renamed or moved since it was opened.",
+                   name=printable(name)))
 
 
 class NoTemporary(Refused):
@@ -584,6 +597,8 @@ def _write_in_place(parent, name, data, expected):
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise Refused(tr("{name} is a symbolic link; links are not followed.", name=printable(name))) from None
+        if exc.errno == errno.ENOENT and expected is not None:
+            raise gone(name) from None
         raise
     try:
         info = os.fstat(fd)
@@ -937,7 +952,9 @@ class Root:
                     raise Refused(tr("{name} is on a read-only file system: it was not written.", name=printable(name)))
                 raise Refused(tr("{name} is read-only for you (its permissions or its owner): it was not written. "
                                  "Change its permissions first.", name=printable(name)))
-            if expected is not None and (now is None or _identity(now) != tuple(expected)):
+            if expected is not None and now is None:
+                raise gone(name)
+            if expected is not None and _identity(now) != tuple(expected):
                 raise Changed(tr("{name} changed since it was opened.", name=printable(name)))
             temporary = _temporary_name()
             try:
@@ -978,7 +995,9 @@ class Root:
                         again = os.stat(name, dir_fd=parent, follow_symlinks=False)
                     except FileNotFoundError:
                         again = None
-                    if again is None or _identity(again) != tuple(expected):
+                    if again is None:
+                        raise gone(name)
+                    if _identity(again) != tuple(expected):
                         raise Changed(tr("{name} changed since it was opened.", name=printable(name)))
                 try:
                     _place(temporary, name, parent, True, (written.st_dev, written.st_ino))
@@ -1137,7 +1156,11 @@ class Root:
                 raise Refused(tr("{name} is not a folder (symbolic links are not followed).",
                                  name=printable(name))) from None
             raise
-        self._inside(fd)
+        try:
+            self._inside(fd)
+        except BaseException:  # (moved out of the root meanwhile: refused - its descriptor was left open each time)
+            os.close(fd)
+            raise
         return fd
 
     @staticmethod
@@ -1387,11 +1410,13 @@ class Root:
         finally:
             os.close(fd)
 
-    def chmod_entry(self, relative, mode, special=False):
+    def chmod_entry(self, relative, mode, special=False, agents=frozenset()):
         """Set the permission bits MODE (0..0o7777) of the file or folder RELATIVE; a link is refused (it has
         none of its own, and what it points to is not changed). Set-user-ID, set-group-ID and sticky bits only
-        with SPECIAL and never below a sandbox root; one the item has already may stay (a folder below a set-group-ID
-        one inherits it: no bit of such a folder in a sandbox could be changed) or go."""
+        with SPECIAL and never below a sandbox root, nor on a sandbox's folder itself (AGENTS: (st_dev, st_ino) of the
+        sandboxes' folders - ~/projects/ws changed from ~/projects, under whatever name it is reached); one the item
+        has already may stay (a folder below a set-group-ID one inherits it: no bit of such a folder in a sandbox
+        could be changed) or go."""
         mode = int(mode)
         if not 0 <= mode <= 0o7777:
             raise Refused(tr("Not a permission mode: {mode}", mode=oct(mode)))
@@ -1402,7 +1427,8 @@ class Root:
                 raise Refused(tr("{name} is a symbolic link; links are not followed.", name=printable(name)))
             if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
                 raise Refused(tr("{name} is not a regular file.", name=printable(name)))
-            if mode & SPECIAL_BITS & ~stat.S_IMODE(info.st_mode) and (self.sandbox or not special):
+            agents_own = (info.st_dev, info.st_ino) in (agents or ())
+            if mode & SPECIAL_BITS & ~stat.S_IMODE(info.st_mode) and (self.sandbox or agents_own or not special):
                 raise Refused(tr("Set-user-ID, set-group-ID and sticky bits are not set here (never below a "
                                  "sandbox's folder)."))
             _chmod_at(parent, name, info, mode)
@@ -1733,7 +1759,14 @@ def _fill_folder(source, source_fd, target, target_parent, name, shown, overwrit
                 if (info.st_dev, info.st_ino) in avoid:
                     result.skipped.append((path, tr("the copy itself")))
                     continue
-                sub = source._open_child_dir(source_fd, child)
+                try:
+                    sub = source._open_child_dir(source_fd, child)
+                except FileNotFoundError:  # (between the look and the opening)
+                    result.skipped.append((path, tr("removed while it was copied")))
+                    continue
+                except Refused as exc:  # (swapped for a link or a file meanwhile - never followed: named, as a file)
+                    result.skipped.append((path, str(exc)))
+                    continue
                 try:
                     if _other_mount(source_fd, sub):  # (a move keeps its source then: something was skipped)
                         result.skipped.append((path, tr(MOUNTED)))
@@ -1745,6 +1778,9 @@ def _fill_folder(source, source_fd, target, target_parent, name, shown, overwrit
             elif stat.S_ISREG(info.st_mode):
                 try:
                     fd, info = _open_regular(child, source_fd)
+                except FileNotFoundError:  # (between the look and the opening: the whole copy failed)
+                    result.skipped.append((path, tr("removed while it was copied")))
+                    continue
                 except Refused as exc:
                     result.skipped.append((path, str(exc)))
                     continue
@@ -1884,6 +1920,59 @@ def _remove_copied(root, dir_fd, name, shown, result, depth):
         os.unlink(name, dir_fd=dir_fd)
         return []
     return [shown]
+
+
+def copy_aside(root, relative, names, folder, limit, cancelled=None):
+    """Copies of those of NAMES in the folder RELATIVE of the local ROOT that are plain files - regular, not executable,
+    no set-ID or sticky bit, as they are now (lstat relative to the folder opened once) - in a host folder FOLDER()
+    makes (called only when there is something to copy): what the Files page hands to other programs instead of the
+    agent's own files, which the agent could turn into links afterwards. Each copied as copy_entry copies (no link
+    followed, a regular file only, never executable there); nothing when they hold more than LIMIT bytes together.
+    Their paths - not those that changed while they were copied (part old, part new). Cancelled once CANCELLED() is
+    true (given up: all of them or none)."""
+    found, opened = [], root.open_dir(relative)
+    try:
+        for name in names:
+            try:
+                info = os.stat(name, dir_fd=opened, follow_symlinks=False)
+            except (OSError, ValueError):
+                continue
+            if stat.S_ISREG(info.st_mode) and not info.st_mode & (0o111 | SPECIAL_BITS):
+                found.append((name, info.st_size))
+    finally:
+        os.close(opened)
+    if not found or sum(size for _, size in found) > limit:
+        return []
+    aside, copied, left = folder(), [], limit
+    target = Root(aside, sandbox=False)
+    for name, _size in found:
+        try:
+            done = copy_entry(root, f"{relative}/{name}" if relative else name, target, "", untrusted=True,
+                              limit=left, entries=1, cancelled=cancelled)
+        except Cancelled:
+            raise  # (given up: none of them - the files copied before alone went to the clipboard, the rest unsaid)
+        except (OSError, ValueError):
+            continue
+        left -= done.bytes
+        if done.changed or done.files != 1 or done.directories:
+            # (changed while it was copied - or no file any more: the agent made a folder of that name between the look
+            # above and the copy, which went out as that folder)
+            try:
+                _remove_aside(target, name)
+            except OSError:
+                pass
+            continue
+        copied.append(os.path.join(aside, name))
+    return copied
+
+
+def _remove_aside(root, name):
+    """NAME removed from the open ROOT's folder (copy_aside's: what is not handed out)."""
+    fd = root.open_dir("")
+    try:
+        _remove(fd, name)
+    finally:
+        os.close(fd)
 
 
 def entry_infos(root, items):

@@ -7,8 +7,10 @@ import faulthandler
 import os
 from pathlib import Path
 import platform
+import re
 import sys
 import threading
+import time
 import traceback
 
 APP_PACKAGE = "sandbox_ai_app"
@@ -179,10 +181,47 @@ def to_terminal():
         return True
 
 
+LEVEL_NAMES = {"WARN": "WARNING", "ERR": "ERROR", "CRITICAL": "ERROR"}
+REPEAT_WINDOW = 600.0  # seconds: the same entry again within them is counted, not written (see _repeated)
+_repeat_lock = threading.Lock()
+_repeat = {"key": None, "count": 0, "since": 0.0}  # the entry written last, and how often it came again since
+
+
+def _repeated(level, where, message):
+    """True when this entry is the one written last (same level, place and text) within REPEAT_WINDOW: it is counted
+    instead of written - a background re-check that said the same every few seconds filled the log with one line.
+    The count is written before the next other entry (or this one again once the window is over): "came N more
+    times"."""
+    key, moment = (level, where, str(message)), time.monotonic()
+    with _repeat_lock:
+        if key == _repeat["key"] and moment - _repeat["since"] < REPEAT_WINDOW:
+            _repeat["count"] += 1
+            return True
+        previous, count, since = _repeat["key"], _repeat["count"], _repeat["since"]
+        _repeat.update(key=key, count=0, since=moment)
+    if previous is not None and count:
+        first = previous[2].splitlines()[0][:160] if previous[2] else ""
+        line = f"(the entry before came {count} more time{'s' if count != 1 else ''} in {moment - since:.0f} s: " \
+               f"{first})"
+        if previous[0] == "DEBUG":
+            if debugging():
+                write_debug(f"{header('DEBUG', previous[1])}\n  {line}\n")
+        else:
+            write(f"{header(previous[0], previous[1])}\n  {line}\n")
+        notify(previous[0], previous[1], line)
+    return False
+
+
 def log(level, where, message):
-    """One entry of LEVEL (INFO, WARNING, ERROR) from WHERE (a component, e.g. "board"): into the log (standard error
-    and the app's log file) and the log window."""
-    level = level if level in LEVELS else "INFO"
+    """One entry of LEVEL (DEBUG, INFO, WARNING, ERROR; WARN is WARNING) from WHERE (a component, e.g. "board"): into
+    the log (standard error and the app's log file) and the log window. The same entry right after it again is
+    counted, not written again (_repeated)."""
+    level = str(level).upper()
+    level = level if level in LEVELS else LEVEL_NAMES.get(level, "INFO")
+    if level == "DEBUG" and not debugging() and not _debug_wanted:
+        return
+    if _repeated(level, where, message):
+        return
     text = f"{header(level, where)}\n  " + "\n  ".join(str(message).split("\n")) + "\n"
     if level == "DEBUG":
         if debugging():
@@ -261,6 +300,12 @@ def debugging():
     return _debug or bool(os.environ.get("SANDBOX_AI_APP_DEBUG"))
 
 
+def debug_wanted():
+    """True when a DEBUG entry goes anywhere (debug mode, or a log window showing debug entries): what is worked out
+    only for one can be skipped otherwise."""
+    return _debug_wanted or debugging()
+
+
 def debug(event, **fields):
     """One DEBUG line (only in debug mode): EVENT and its FIELDS, the component that called it."""
     on = debugging()
@@ -273,6 +318,147 @@ def debug(event, **fields):
     if on:
         write_debug(f"{header('DEBUG', where)}\n  {message}\n")
     notify("DEBUG", where, message)
+
+
+# -- what a log line may say: never a secret --
+
+# NAME=VALUE / NAME: VALUE of a credential, tokens of the usual forms, a password in a URL (as sandbox-ai's
+# progress.py masks a build's output), a bearer token, and an option whose name says it carries one.
+SECRET_SETTING = re.compile(r"(?i)\b([A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|authorization|"
+                            r"credential|private[_-]?key|cookie)[A-Za-z0-9_.-]*)(\s*[=:]\s*)"
+                            r"(\"[^\"]*\"|'[^']*'|\S+)")
+SECRET_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|"
+                          r"sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|"
+                          r"ya29\.[A-Za-z0-9_.-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})")
+URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@")
+BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+SECRET_OPTION = re.compile(r"(?i)^--?[A-Za-z0-9_.-]*(key|token|secret|passw|credential|auth|bearer|cookie)")
+SECRET_RUN = re.compile(r"[A-Za-z0-9_\-+/=.]{32,}")
+SECRET_PREFIXES = ("sk-", "ghp_", "gho_", "github_pat_", "glpat-", "xoxa-", "xoxb-", "xoxp-", "AKIA", "ya29.")
+
+
+def looks_secret(value):
+    """A token by its look (as state.looks_secret): a well-known prefix, or a long run of letters and digits."""
+    value = str(value)
+    if value.startswith(SECRET_PREFIXES) and len(value) >= 12:
+        return True
+    return bool(SECRET_RUN.fullmatch(value)) and any(c.isdigit() for c in value) and \
+        any(c.isalpha() for c in value) and not value.startswith("/")
+
+
+def redact(text, secrets=()):
+    """TEXT for a log line: every value of SECRETS and whatever looks like a credential masked (***), control
+    characters escaped (line breaks and tabs kept)."""
+    text = str(text)
+    for secret in secrets or ():
+        if secret and len(str(secret)) >= 4:
+            text = text.replace(str(secret), "***")
+    text = URL_PASSWORD.sub(r"\1***@", text)
+    text = BEARER.sub(lambda m: m[1] + " ***", text)
+    text = SECRET_SETTING.sub(lambda m: m[1] + m[2] + "***", text)
+    text = SECRET_TOKEN.sub("***", text)
+    if not text.replace("\n", "").replace("\t", "").isprintable():
+        text = "".join(c if c in "\n\t" or c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256 else
+                       f"\\u{ord(c):04x}" for c in text)
+    return text
+
+
+def argv_text(argv, limit=600):
+    """A command line for a log line: the value of an option whose name says it is a secret (--token VALUE,
+    --api-key=VALUE) and every argument that looks like a credential masked, the rest redact()ed; at most LIMIT
+    characters (cut with "…")."""
+    shown, skip = [], False
+    for token in [str(t) for t in (argv or ())]:
+        if skip:
+            shown.append("***")
+            skip = False
+            continue
+        name, equals, value = token.partition("=")
+        if SECRET_OPTION.match(name):
+            shown.append(f"{name}=***" if equals else token)
+            skip = not equals
+            continue
+        if looks_secret(token):
+            shown.append("***")
+            continue
+        if equals and looks_secret(value):
+            shown.append(f"{name}=***")
+            continue
+        shown.append(token if token and not any(c in token for c in " \t'\"") else repr(token))
+    text = redact(" ".join(shown))
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def tail(text, lines=6, limit=800):
+    """The last LINES lines of TEXT (a command's error output) for a log line, redacted, at most LIMIT characters."""
+    found = [line.rstrip() for line in str(text or "").strip().splitlines() if line.strip()]
+    text = redact("\n".join(found[-lines:]))
+    return text if len(text) <= limit else "…" + text[-(limit - 1):]
+
+
+def error_text(exc, limit=500):
+    """An exception (or a message) for a log line: its type and message, redacted, at most LIMIT characters."""
+    text = redact(f"{type(exc).__name__}: {exc}" if isinstance(exc, BaseException) else exc)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def swallowed(where, what, exc, level="DEBUG"):
+    """An error the app goes on after (an `except` that returns a default): WHAT failed and the exception, at LEVEL
+    (DEBUG; WARNING when the human's action fails because of it). Never raises."""
+    try:
+        log(level, where, f"{what}: {error_text(exc)}")
+    except Exception:  # noqa: BLE001 - a log line must never fail
+        pass
+
+
+_changes = {}  # changed(): {key: the message logged last}
+_changes_lock = threading.Lock()
+
+
+def changed(key, level, where, message, quiet=None, same=None):
+    """MESSAGE at LEVEL once per change of what KEY says (a session's state, a prerequisite present or missing, a
+    host reachable): the same MESSAGE (or the same SAME, when given: what is compared, without a time that differs
+    each time) for KEY again is written only at QUIET (e.g. "DEBUG"; None: not at all). True when it was a change."""
+    compared = message if same is None else same
+    with _changes_lock:
+        new = _changes.get(key) != compared
+        _changes[key] = compared
+        if len(_changes) > 5000:  # (keys of sessions and hosts long gone)
+            _changes.clear()
+            _changes[key] = message
+    if new:
+        log(level, where, message)
+    elif quiet:
+        log(quiet, where, message)
+    return new
+
+
+_context = threading.local()  # .work: the background call running on this thread is a human's action (widgets)
+
+
+def set_work(work):
+    """The calls of this thread from now on belong to a human's action (WORK True: an install, a start, a stop) or a
+    read (False, None): a command it runs is logged at INFO then, not at DEBUG (in_work)."""
+    _context.work = work
+
+
+def in_work():
+    return bool(getattr(_context, "work", False))
+
+
+def last_change(key):
+    """What changed() compared for KEY last (None: nothing yet)."""
+    with _changes_lock:
+        return _changes.get(key)
+
+
+def seconds(value):
+    """A duration for a log line: "0.42 s", "12 s", "3 min 5 s"."""
+    if value < 10:
+        return f"{value:.2f} s"
+    if value < 120:
+        return f"{value:.0f} s"
+    return f"{int(value // 60)} min {int(value % 60)} s"
 
 
 def delivered_by():

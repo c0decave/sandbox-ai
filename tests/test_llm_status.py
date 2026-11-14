@@ -360,16 +360,51 @@ def test_watch_reads_again_until_ctrl_c(servers, monkeypatch):
     add("gpu", "vllm", url)
     sleeps = []
 
+    # The watch's own pause (llm.watch_sleep), not time.sleep: that one is every thread's, and on CI a thread an earlier
+    # test left running called it first - its KeyboardInterrupt went there, the watch's pauses returned at once and it
+    # read on for 5 minutes. Bounded: every pause from the second on ends the watch.
     def sleep(seconds):
         sleeps.append(seconds)
-        if len(sleeps) == 2:
+        if len(sleeps) >= 2:
             raise KeyboardInterrupt
-    monkeypatch.setattr(llm.time, "sleep", sleep)
+    monkeypatch.setattr(llm, "watch_sleep", sleep)
     status, out = run("status", "gpu", "--json", "--watch", "5")
     lines = out.splitlines()
     assert status == 0 and sleeps == [5, 5] and len(lines) == 2, "one JSON line per reading"
     assert all(json.loads(line)[0]["usage"]["requests_running"] == 3 for line in lines)
     assert run("status", "gpu", "--watch", "1")[0] == 1, "at least 2 seconds between two readings"
+    assert len(sleeps) == 2, "refused before its first reading"
+
+
+def test_the_watch_pauses_with_its_own_sleep_and_another_threads_sleep_cannot_end_it(servers, monkeypatch):
+    """time.sleep is shared by every thread: the watch never takes its pause from there, and a thread that sleeps
+    meanwhile (one an earlier test left running) neither ends the watch nor keeps it reading without a pause."""
+    url, _ = servers(ROUTES["vllm"])
+    add("gpu", "vllm", url)
+    pauses, mine, others = [], [], []
+    real_sleep, this_thread = time.sleep, threading.current_thread()
+
+    # (In the whole part of the suite another test's leftover thread did call time.sleep(0.25) meanwhile - what CI's
+    # hang was made of.) Such a call sleeps as it would; one from the watch's own thread is recorded.
+    def shared_sleep(seconds):
+        if threading.current_thread() is this_thread:
+            mine.append(seconds)
+            raise KeyboardInterrupt  # ends the watch: never a pause from time.sleep
+        others.append(seconds)
+        real_sleep(min(seconds, 0.05))
+
+    def pause(seconds):
+        pauses.append(seconds)
+        if len(pauses) >= 3:
+            raise KeyboardInterrupt
+        real_sleep(0.01)  # another thread may sleep meanwhile: it ends nothing
+        threading.Thread(target=time.sleep, args=(0.01,), daemon=True).start()
+    monkeypatch.setattr(llm, "watch_sleep", pause)
+    monkeypatch.setattr(llm.time, "sleep", shared_sleep)
+    status, out = run("status", "gpu", "--json", "--watch", "2")
+    assert status == 0 and pauses == [2, 2, 2] and len(out.splitlines()) == 3 and mine == []
+    monkeypatch.undo()
+    assert llm.watch_sleep.__module__ == llm.__name__, "the real pause: time.sleep, called by the watch's own function"
 
 
 def test_wizard_models_status_tests_a_server_not_registered(servers, capsys):

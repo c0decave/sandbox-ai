@@ -1,0 +1,58 @@
+# DeepSeek Harness (deepseek-ai/deepseek-harness, MIT) as sandbox-ai's agent dsh (sandbox-ai build dsh).
+# Only the reviewed release (docs/DSH_REVIEW.md, sandbox/dsh.py): npm's @deepseek-ai/dsh at the reviewed version and
+# its 686 dependencies exactly as Containerfile.dsh.lock has them, each checked against its sha512 integrity by
+# npm ci; no install script runs (--ignore-scripts: node-pty and koffi ship prebuilt Linux binaries), nothing is
+# piped into a shell. DSH cannot update itself: its install is read-only in the sandbox, and the image has no pnpm
+# for its plugin manager (a new release or plugin is reviewed, then built here).
+# uv ships as a static binary in its official image; COPY --from takes only it (MCP servers and kits use uvx).
+ARG UV_VERSION=0.13.5
+# Floating tag: the current Active LTS line with its newest patch release.
+# Pin with --build-arg NODE_IMAGE=docker.io/library/node:<version>-bookworm-slim.
+ARG NODE_IMAGE=docker.io/library/node:lts-bookworm-slim
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM ${NODE_IMAGE}
+
+# The reviewed release; another one does not match the lock (npm ci refuses it).
+ARG DSH_VERSION=0.2.1-rc.5
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates bash git python3 python3-pip python3-venv firejail nftables ripgrep util-linux \
+    vim netcat-traditional bind9-dnsutils iputils-ping iproute2 traceroute curl wget tmux \
+    openssh-client jq openssl \
+    && rm -rf /var/lib/apt/lists/*
+# GitHub CLI from GitHub's own apt repository (Debian's gh is years behind), the key over HTTPS.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -nv -O /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+RUN gh --version
+# GUI base (--gui): virtual display, VNC over a Unix socket, fonts and the runtime libraries Playwright's Chromium
+# needs (fetched at run time, e.g. `uvx playwright install chromium`).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb x11vnc x11-utils fonts-liberation fonts-dejavu-core \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcairo-gobject2 libcups2 \
+    libdbus-1-3 libdbus-glib-1-2 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 \
+    libpango-1.0-0 libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 libxcomposite1 \
+    libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 libxtst6 \
+    libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxshmfence1 libxkbfile1 libfontconfig1 gdb \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /uvx /usr/local/bin/
+RUN python3 -m pip --version && uv --version
+# DSH exactly as locked (scripts/agent_npm_lock.py dsh: every version older than 14 days at the review, each with
+# its integrity).
+COPY Containerfile.dsh.lock /opt/dsh/package-lock.json
+RUN printf '{"name":"sandbox-ai-dsh","private":true,"dependencies":{"@deepseek-ai/dsh":"%s"}}\n' \
+       "${DSH_VERSION}" > /opt/dsh/package.json \
+    && cd /opt/dsh && npm ci --ignore-scripts --no-audit --no-fund \
+    && npm cache clean --force \
+    && test "$(node -p 'require("/opt/dsh/node_modules/@deepseek-ai/dsh/package.json").version')" = "${DSH_VERSION}" \
+    && ln -s /opt/dsh/node_modules/.bin/dsh /usr/local/bin/dsh
+# Its patch is mounted here by the launcher (read-only, sandbox/dsh.py); its telemetry is off for every dsh.
+ENV DSH_TELEMETRY_DISABLED=1
+RUN mkdir -p -m 755 /etc/dsh && DSH_HOME=/tmp/dsh-check dsh --version && rm -rf /tmp/dsh-check
+ENV HOME=/root
+WORKDIR /work

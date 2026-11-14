@@ -26,6 +26,7 @@ import stat
 
 from .files import printable
 from .i18n import tr
+from . import applog
 
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")  # the launcher's MODEL_NAME
 LIMIT = 8 << 20
@@ -175,7 +176,8 @@ def choices(agent, sai=None, environ=None):
             return codex_models(environ)
         if agent == "opencode":
             return opencode_models(environ)
-    except Exception:  # noqa: BLE001 - a damaged cache: the model can still be typed
+    except Exception as _exc:  # noqa: BLE001 - a damaged cache: the model can still be typed
+        applog.swallowed("models", "choices: a damaged cache: the model can still be typed", _exc)
         return []
     return []
 

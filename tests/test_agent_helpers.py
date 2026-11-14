@@ -225,7 +225,9 @@ def test_codex_waits_long_enough_for_a_helper_or_a_board():
     a = s.parse_args(["codex", "--mcp", "demo", "--mcp", "helper-claude-12345678", "--mcp", "team-app"])
     args = s.mcp_agent_args(a)
     timeouts = [v for v in args if "tool_timeout_sec" in v]
-    assert timeouts == [f"mcp_servers.helper-claude-12345678.tool_timeout_sec={s.LONG_TOOL_TIMEOUT}",
+    # Every server gets its wait (tests/test_mcp_timeouts.py); a helper and a board the long one.
+    assert timeouts == [f"mcp_servers.demo.tool_timeout_sec={s.DEFAULT_MCP_TOOL_TIMEOUT}",
+                        f"mcp_servers.helper-claude-12345678.tool_timeout_sec={s.LONG_TOOL_TIMEOUT}",
                         f"mcp_servers.team-app.tool_timeout_sec={s.LONG_TOOL_TIMEOUT}"]
     assert s.LONG_TOOL_TIMEOUT > 1800, "longer than a helper's task may run"
 

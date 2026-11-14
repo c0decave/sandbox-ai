@@ -1,0 +1,30 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "coding-dsh",
+  "title": "Coding with DeepSeek Harness",
+  "description": "DeepSeek Harness on your project with its maker's model (DeepSeek's API and platform), PyPI, npm and GitHub open for the project's packages and code, the agent's memory of this project kept between sessions; everything else stays closed.",
+  "translations": {
+    "de": {
+      "title": "Programmieren mit DeepSeek Harness",
+      "description": "DeepSeek Harness an Ihrem Projekt mit dem Modell seines Herstellers (die API und Plattform von DeepSeek), PyPI, npm und GitHub offen für die Pakete und den Code des Projekts, das Gedächtnis des Agenten zu diesem Projekt bleibt zwischen den Sitzungen; alles andere bleibt zu."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "dsh"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github"
+  ],
+  "notes": [
+    "The model: DeepSeek's API and platform (a key: --api-key api.deepseek.com=DEEPSEEK_API_KEY, or the account in its web UI). Its hosts are open by default; nothing else of the provider's.",
+    "PyPI, npm and GitHub are open for the project's dependencies; everything else is refused or asked (--ask). Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy.",
+    "Memory: ~/.dsh/AGENTS.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
+    "DeepSeek Harness' interactive surface is its web UI on the sandbox's loopback: add --browser to see it in the sandbox's own browser (the app's Browser button; Podman). One task without the UI: sandbox-ai dsh -- headless \"TASK\".",
+    "DeepSeek Harness's telemetry is always off and cannot be turned on (pinned in its read-only configuration and refused by the proxy).",
+    "DeepSeek Harness is not live-tested yet (a start says so); its image first: sandbox-ai build dsh."
+  ]
+}

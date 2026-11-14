@@ -88,7 +88,7 @@ def test_the_media_recipe(tmp_path, monkeypatch):
     lines = []
     assert images.main(["recipe", "media", "--from", "claude"], out=lines.append) == 0
     assert "sandbox-ai build media" in lines[-1] and "--image-variant media" in lines[-1]
-    document = json.loads((images.config_root() / "media" / "image.json").read_text())
+    document = json.loads((images.config_root() / "variants" / "claude" / "media" / "image.json").read_text())
     assert "pulseaudio" in document["apt"] and "ffmpeg" in document["apt"] and "piper-tts" in document["pip"]
     assert images.main(["recipe", "media", "--from", "claude"], out=lines.append) != 0  # exists already
     assert images.main(["recipe", "media", "--from", "codex", "--as", "media-codex"], out=lines.append) == 0

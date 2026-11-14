@@ -80,7 +80,8 @@ def test_show_names_each_ruleset_and_where_it_comes_from(tmp_path, config, monke
     assert shown["agent"] == "codex" and shown["project_config"] == str(config / ".sandbox-ai.json")
     assert [(s["name"], s["from"]) for s in shown["rulesets"]] == [
         ("rules.json", str(L.user_rules_file())), ("--rules mine.json", str(mine)),
-        ("--allow-http", "the --allow-http options"), ("project", str(config / ".sandbox-ai.json"))]
+        ("--allow-http", "the --allow-http options"), ("project", str(config / ".sandbox-ai.json")),
+        ("telemetry", "--telemetry (the agents' telemetry hosts)")], "an old --telemetry on changes nothing"
     lines.clear()
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -240,7 +241,9 @@ def test_reloaded_rules_hold_for_the_bare_address_of_a_name_allowed_during_the_r
     rules = rt.ProxyServer.rules.fget(proxy)
     request = rt.Ruleset.request("10.0.0.5:80", "POST", "/admin", [["Host", "10.0.0.5"]], "10.0.0.5")
     assert rules.pins("10.0.0.5") and rules.http(request)["decision"] == "deny"
-    # A file of a supervisor before 0.1.92 (a bare list) is still read.
+    # A bare list (what a supervisor before 0.1.92 wrote, into its own run's /run: never this proxy's) is no
+    # {rulesets, pinned}: the rules stay as they were.
     path.write_text(json.dumps(written["rulesets"]))
+    os.utime(path, ns=(1, 1))
     proxy.rules_checked = -1e9
-    assert rt.ProxyServer.rules.fget(proxy) is not None
+    assert rt.ProxyServer.rules.fget(proxy) is rules

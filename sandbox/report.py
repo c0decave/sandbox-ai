@@ -15,6 +15,9 @@ allowed - as Markdown, HTML or PDF, with a table of contents and links.
   -o FILE                write the report to FILE (mode 0600); without it Markdown and HTML go to standard output
   --since TIME, --until TIME   only what happened from / up to TIME (10m, 2h, 3d, 14:30, 2026-11-04 or an ISO time)
   --json                 the gathered data as JSON instead of a report
+  --llm-traffic          a section on the LLM traffic log of each run: every model request with its model, tokens,
+                         time, status and what the loop guard did (never the conversation: sandbox-ai llm traffic
+                         --markdown makes that report)
 
 The report is made only from what sandbox-ai records: the run registry (run.json of a running sandbox, and through
 its supervisor what was allowed during the run), the start directories and their histories, and the log directory
@@ -387,7 +390,7 @@ def settings_of(argv, agent=None, session_data=None):
         if namespace is None and argv:
             launcher = module("logs").launcher()
             words = list(argv)
-            if words and words[0] not in ("claude", "codex", "opencode") and agent:
+            if words and words[0] not in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose") and agent:
                 words = [agent, *words]
             namespace, _ = launcher.build_parser().parse_known_args(words)
     if namespace is None:
@@ -445,7 +448,8 @@ def run_from_record(run, record, role="run", part_of=None):
         data = json.loads((Path(str(directory)) / "cut.json").read_text())
         entry["cut_since"] = data.get("since") if entry["cut"] else None
     argv = launcher_argv(record)
-    entry["options"] = shown_options(argv[1:] if argv and argv[0] in ("claude", "codex", "opencode") else argv)
+    entry["options"] = shown_options(argv[1:] if argv and argv[0] in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+                                     else argv)
     entry["settings"] = settings_of(argv, record.get("agent"))
     entry["run_dir"] = directory
     return entry
@@ -1430,9 +1434,62 @@ NOT_RECORDED = [
 ]
 
 
-def gather(scope, since=None, until=None, sources=None, live=True):
-    """The report's data (scrubbed) of SCOPE (resolve())."""
-    return Gatherer(scope, since, until, sources, live).read().result()
+TRAFFIC_REQUESTS = 500     # requests of the LLM traffic log listed per run (the newest); more are counted
+TRAFFIC_BYTES = 256 << 20  # of one run's LLM traffic log read at most (the newest)
+
+
+def llm_traffic_data(runs, directories=(), since=None, until=None):
+    """The section --llm-traffic asks for: per run with an LLM traffic log (llm_traffic.py) in its log directory or
+    one of DIRECTORIES (the report's), its requests - time, model, status, time taken, tokens, finish reason, how many
+    messages were new, the tool calls asked for, the loop guard, truncation, errors - and their sums; no text of the
+    conversation."""
+    traffic = module("llm_traffic")
+    found, listed_dirs = [], {}
+    for run in runs:
+        files = None
+        for directory in [run.get("log_dir"), *directories]:
+            if isinstance(directory, str) and directory:
+                if directory not in listed_dirs:
+                    listed_dirs[directory] = traffic.run_files(directory)
+                files = listed_dirs[directory].get(run.get("run"))
+            if files:
+                break
+        if not files:
+            continue
+        thread, rows, models = traffic.Thread(), [], collections.Counter()
+        sums = {"requests": 0, "tokens_in": 0, "tokens_out": 0, "errors": 0, "loop_guard": 0, "truncated": 0,
+                "relay_changes": 0}
+        for record in traffic.read_records(files["paths"], budget=TRAFFIC_BYTES):
+            new_from, continues = thread.new_from(record)
+            moment = epoch(record.get("time"))
+            if (since is not None and (moment is None or moment < since)) or \
+                    (until is not None and (moment is None or moment > until)):
+                continue
+            info = traffic.summary(record, new_from, continues)
+            sums["requests"] += 1
+            sums["tokens_in"] += info["tokens_in"] if isinstance(info["tokens_in"], int) else 0
+            sums["tokens_out"] += info["tokens_out"] if isinstance(info["tokens_out"], int) else 0
+            sums["errors"] += bool(info["error"] or not isinstance(info["status"], int) or info["status"] >= 400)
+            sums["loop_guard"] += bool(info["loop"])
+            sums["truncated"] += bool(info["truncated"])
+            sums["relay_changes"] += bool(info["changes"])
+            models[str(info["model"] or "?")] += 1
+            rows.append({key: info[key] for key in ("n", "time", "source", "endpoint", "host", "model", "status", "ms",
+                                                    "tokens_in", "tokens_out", "finish_reason", "new", "messages",
+                                                    "tool_calls", "loop", "changes", "truncated", "error")})
+        found.append({"run": run.get("run"), "files": [str(path) for path in files["paths"]], "bytes": files["bytes"],
+                      **sums, "models": dict(models.most_common(10)), "rows": rows[-TRAFFIC_REQUESTS:],
+                      "left_out": max(0, len(rows) - TRAFFIC_REQUESTS)})
+    return found
+
+
+def gather(scope, since=None, until=None, sources=None, live=True, traffic=False):
+    """The report's data (scrubbed) of SCOPE (resolve()); TRAFFIC: with the section on the LLM traffic log."""
+    gatherer = Gatherer(scope, since, until, sources, live).read()
+    data = gatherer.result()
+    if traffic:
+        data["llm_traffic"] = gatherer.redact.deep(llm_traffic_data(data["runs"], list(scope["dirs"]), since, until))
+    return data
 
 
 # -- the document: blocks every format renders (see pdfdoc.py) --
@@ -1481,7 +1538,9 @@ def build(data):
     """(blocks, outline) of the report DATA."""
     blocks, outline, taken = [], [], set()
     sections = [("summary", "Summary"), ("runs", "Runs"), ("statistics", "Statistics"), ("network", "Network"),
-                ("security", "Security report"), ("appendix", "Appendix")]
+                ("security", "Security report"),
+                *([("llm_traffic", "LLM traffic")] if data.get("llm_traffic") is not None else []),
+                ("appendix", "Appendix")]
     anchors = {key: slug(title, taken) for key, title in sections}
     run_anchors = {run["run"]: slug(f"run {run_title(run)}", taken) for run in data["runs"]}
     finding_anchors = {f["id"]: slug(f"finding {f['id']}", taken) for f in data["findings"]}
@@ -1755,6 +1814,9 @@ def build(data):
     if data["findings_left_out"]:
         blocks.append(("para", [t(f"… and {data['findings_left_out']} more findings (the least severe) not listed.")]))
 
+    if data.get("llm_traffic") is not None:
+        llm_traffic_blocks(data["llm_traffic"], blocks, heading, anchors["llm_traffic"], run_anchors, data["runs"])
+
     # Appendix
     heading(1, "Appendix", anchors["appendix"])
     blocks.append(("para", [b("Log files read")]))
@@ -1773,6 +1835,40 @@ def build(data):
     blocks.append(("para", [b("What sandbox-ai does not record (so this report cannot show it)")]))
     blocks.append(("list", [[t(text)] for text in data["not_recorded"]]))
     return blocks, outline
+
+
+def llm_traffic_blocks(traffic, blocks, heading, anchor, run_anchors, runs):
+    """The section on the LLM traffic log (report --llm-traffic)."""
+    heading(1, "LLM traffic", anchor)
+    blocks.append(("para", [t("Every request the connection proxy recorded in the LLM traffic log (llm-traffic-*.jsonl: "
+                              "the --llm server's requests, with --llm-traffic all also the cloud provider's): model, "
+                              "status, time taken, tokens, the finish reason, how many of its messages were new, the "
+                              "tool calls the model asked for and what the loop guard did. The conversations "
+                              "themselves are not in this report: sandbox-ai llm traffic RUN --markdown shows them.")]))
+    if not traffic:
+        blocks.append(("para", [t("No run of this report has an LLM traffic log.")], "muted"))
+    for entry in traffic:
+        run = next((r for r in runs if r["run"] == entry["run"]), None)
+        title = run_title(run) if run else entry["run"]
+        blocks.append(("para", [b("Run "), link(title, run_anchors[run["run"]]) if run else t(title),
+                                t(f": {entry['requests']} requests, tokens in {entry['tokens_in']} / out "
+                                  f"{entry['tokens_out']}, {entry['errors']} failed, {entry['loop_guard']} with the "
+                                  f"loop guard, {entry['relay_changes']} changed by the relay, {entry['truncated']} "
+                                  f"truncated; models: {joined([f'{m} ({n})' for m, n in entry['models'].items()])}")]))
+        if entry["rows"]:
+            blocks.append(("table", ["#", "Time", "Model", "Status", "Time taken", "Tokens in/out", "New", "Finish",
+                                     "Tool calls", "Loop guard"],
+                           [[cell(r["n"]), cell(utc_text(r["time"])), cell(r["model"] or "-"),
+                             cell(r["status"] if r["status"] is not None else (r["error"] or "no answer")),
+                             cell(f"{r['ms']} ms" if r["ms"] is not None else "-"),
+                             cell(f"{r['tokens_in'] if r['tokens_in'] is not None else '-'} / "
+                                  f"{r['tokens_out'] if r['tokens_out'] is not None else '-'}"),
+                             cell(f"{r['new']}/{r['messages']}"), cell(r["finish_reason"] or "-"),
+                             cell(joined(r["tool_calls"], 4)),
+                             cell(joined(r["loop"]) + (" (truncated)" if r["truncated"] else ""))]
+                            for r in entry["rows"]]))
+        if entry["left_out"]:
+            blocks.append(("para", [t(f"… and {entry['left_out']} earlier requests not listed.")], "muted"))
 
 
 def vpn_text(vpn):
@@ -1940,10 +2036,31 @@ def render(data, kind):
     raise ValueError(f"no format {kind!r}; formats: {', '.join(FORMATS)}")
 
 
+def check_output(path, kind):
+    """-o PATH, looked at before the report is gathered: a folder, or a file in a folder that is not there, is said in
+    words (ValueError) - not as the errno of the temporary file written beside it."""
+    path = Path(path).expanduser()
+    if path.is_dir():
+        raise ValueError(f"-o: {printable(str(path), 400)} is a folder; give the report's file name, e.g. "
+                         f"{printable(str(path / ('report.' + kind)), 400)}")
+    directory = path.parent if str(path.parent) else Path(".")
+    if not directory.is_dir():
+        raise ValueError(f"-o: the folder {printable(str(directory), 400)} does not exist" +
+                         (" (it is a file)" if directory.exists() else ""))
+
+
 def write_file(path, content):
     """CONTENT into PATH (mode 0600: a report names what a run did), replaced whole."""
     path = Path(path).expanduser()
     data = content if isinstance(content, bytes) else content.encode("utf-8")
+    try:
+        special = not stat.S_ISREG(os.stat(path).st_mode) and not stat.S_ISDIR(os.stat(path).st_mode)
+    except OSError:
+        special = False
+    if special:  # /dev/null, /dev/stdout, a named pipe: written into as it is (nothing can be renamed over it)
+        with open(path, "wb") as stream:
+            stream.write(data)
+        return path
     directory = path.parent if str(path.parent) else Path(".")
     fd, temporary = tempfile.mkstemp(prefix=".report-", dir=directory)
     try:
@@ -1979,6 +2096,8 @@ def parser():
     p.add_argument("--until", metavar="TIME", help="Only what happened up to TIME")
     p.add_argument("--no-parts", action="store_true", help="The start alone, without its MCP servers, helpers and team")
     p.add_argument("-j", "--json", action="store_true", help="The gathered data as JSON instead of a report")
+    p.add_argument("--llm-traffic", action="store_true", help="A section on the LLM traffic log: each model request's "
+                   "model, tokens, time, status and the loop guard (not the conversation)")
     return p
 
 
@@ -2006,8 +2125,10 @@ def cli(argv, out=None, err=None):
     kind = output_format(a)
     if kind == "pdf" and a.output is None and not a.json and out.isatty():
         raise ValueError("a PDF is not shown in a terminal: write it to a file with -o FILE.pdf")
+    if a.output is not None:
+        check_output(a.output, "json" if a.json else kind)
     scope = resolve(a.name, a.session, a.all, a.project, a.log_dir, parts=not a.no_parts)
-    data = gather(scope, since, until)
+    data = gather(scope, since, until, traffic=a.llm_traffic)
     if a.json:
         content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     else:

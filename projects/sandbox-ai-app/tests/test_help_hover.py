@@ -156,6 +156,48 @@ def test_the_parts_list_without_question_marks_gives_the_title_the_row_and_ignor
         help_view.set_shown(True)
 
 
+def title_ink(header, section):
+    """px of SECTION's title the header paints: the columns of its picture that differ from the section's background."""
+    QApplication.processEvents()
+    picture = header.grab().toImage()
+    ratio = picture.devicePixelRatio()
+    left = round(header.sectionViewportPosition(section) * ratio) + 2
+    right = round((header.sectionViewportPosition(section) + header.sectionSize(section)) * ratio) - 3
+    middle = picture.height() // 2
+    background = picture.pixel(left + 1, 2)
+    ink = [x for x in range(left, min(right, picture.width())) if any(
+        picture.pixel(x, y) != background for y in range(middle - 4, middle + 5))]
+    return (max(ink) - min(ink)) if ink else 0
+
+
+@pytest.mark.parametrize("last", ["State", "Bytes", "Question"])
+def test_the_last_column_title_is_whole_beside_the_question_mark(qapp, last):
+    """Design review 0.1.95: "tat", "yte", "uestion" - the last title of the Credentials overview, the Connections
+    log and the Hosts table was cut on both sides: its room for the (?) was kept twice, by the header's viewport (the
+    (?) is beside the titles) and by a padding of the last title that its size did not count."""
+    from sandbox_ai_app import theme
+    before = theme.current()
+    theme.apply("dark")  # the theme's padding of the titles: with it, the last one was cut
+    view = widgets.table(["Kind", "Where / used by", last], stretch=1)
+    view.resize(700, 300)
+    view.show()
+    help_view.corner(view, next(iter(H.TIPS)))
+    widgets.tables.fit_columns(view)
+    header = view.horizontalHeader()
+    try:
+        assert header.property("helpRoom") is True
+        whole = header.fontMetrics().horizontalAdvance(last)
+        assert title_ink(header, 2) >= whole * 0.9, f"{last}: {title_ink(header, 2)} px of {whole}"
+        button = view.findChild(help_view.HelpButton)
+        corner = button.geometry()
+        title_end = header.mapTo(view, header.rect().topLeft()).x() + header.sectionViewportPosition(2) + \
+            header.sectionSize(2)
+        assert title_end <= corner.left(), "the (?) covers no title"
+    finally:
+        view.close()
+        theme.apply(before)
+
+
 def test_a_table_keeps_room_for_its_question_mark_only_while_it_is_shown(window):
     header = window.hosts.table.horizontalHeader()
     assert header.property("helpRoom") is True

@@ -561,7 +561,8 @@ def test_reload_rules_of_a_running_sandbox(ui, sai, monkeypatch):
     assert page.run_named["rules"].text() == "Reload rules"
     page.reload_rules()
     assert ran(sai, "ct1", "rules") == ("ct1", "rules", "reload", "api", "--json") and ui.asked[-1][0] == "rules-reload"
-    title, text, _ = widgets.SHOWN[-1]
+    from sandbox_ai_app import short_notices
+    title, text = short_notices.SHOWN[-1]
     assert "policy: 1 HTTP rules (kept from its start)" in text and "rules.json: 2 HTTP rules" in text
     assert "apply from its next start" in text
     sai.answers[("rules", "reload")] = (1, "", "sandbox-ai rules reload: the sandbox refused: --no-inspect x\n")

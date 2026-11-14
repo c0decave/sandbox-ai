@@ -227,7 +227,7 @@ def running():
         data = json.loads(state_file().read_text())
         pid, port = int(data["pid"]), int(data["port"])
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
     return {"pid": pid, "port": port} if b"demo_device.py" in cmdline and b"serve" in cmdline else None
 

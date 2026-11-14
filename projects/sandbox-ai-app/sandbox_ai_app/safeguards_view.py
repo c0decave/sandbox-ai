@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import backend, tables, theme
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
 from .widgets import MONO, background, plain_label, safe_tooltip
 
@@ -125,7 +125,7 @@ class SafeguardsView(QWidget):
         for kind in TITLES:
             self.kind.addItem(f"{kind_title(kind)} ({kind})", kind)
         self.kind.currentIndexChanged.connect(lambda _: self.show_records(self.records))
-        self.status = plain_label(role="secondary", selectable=True)
+        self.status = plain_label(role="secondary", selectable=True, log="safeguards")
         top.addWidget(self.refresh_button)
         top.addWidget(self.kind)
         top.addWidget(self.status, 1)
@@ -154,6 +154,8 @@ class SafeguardsView(QWidget):
         self.copy_button.setEnabled(False)
         row.addWidget(self.copy_button)
         row.addWidget(plain_label(tr("Mute kinds: Settings > Window (they are still listed here)."), role="secondary"), 1)
+        from .widgets import list_menu
+        list_menu(self.tree, lambda: [self.copy_button, None, self.refresh_button])
         lower_layout.addWidget(self.detail, 1)
         lower_layout.addLayout(row)
         split.addWidget(self.tree)
@@ -182,7 +184,7 @@ class SafeguardsView(QWidget):
         if token != self.token:
             return
         if error is not None:
-            self.status.setText(tr("Cannot read the safeguard records: {error}", error=printable(error)))
+            self.status.setText(tr("Cannot read the safeguard records: {error}", error=printable_text(error)))
             return
         self.show_records([r for r in result or [] if isinstance(r, dict)])
 
@@ -288,7 +290,7 @@ class SafeguardMute(QWidget):
             self.sai.save_sandbox_default("safeguard_mute", muted or None)
         except (OSError, ValueError) as exc:
             if self.problem is not None:
-                self.problem(printable(exc))
+                self.problem(printable_text(exc))
             return
         self.changed.emit()
 

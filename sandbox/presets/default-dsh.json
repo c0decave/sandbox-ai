@@ -1,0 +1,24 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "default-dsh",
+  "title": "DeepSeek Harness (default)",
+  "description": "DeepSeek Harness on your project with sandbox-ai's defaults and nothing more: only its maker's model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "translations": {
+    "de": {
+      "title": "DeepSeek Harness (Standard)",
+      "description": "DeepSeek Harness an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur das Modell seines Herstellers ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "dsh"
+  ],
+  "options": [],
+  "notes": [
+    "The model: DeepSeek's API and platform (a key: --api-key api.deepseek.com=DEEPSEEK_API_KEY, or the account in its web UI). Its hosts are open by default; nothing else of the provider's.",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-dsh (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "Its telemetry is always off and cannot be turned on.",
+    "DeepSeek Harness is not live-tested yet (a start says so); its image first: sandbox-ai build dsh (a start builds it when it is missing)."
+  ]
+}

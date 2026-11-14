@@ -10,8 +10,9 @@ Usage: scripts/publish_release.py --source URL [--tag vX.Y.Z] [--token-env NAME]
   --sign KEY        sign the SHA256SUMS among the files first (SHA256SUMS.sig, uploaded along)
   --allow-unsigned  publish an unsigned SHA256SUMS although sandbox/release-signers lists keys
 
-Before anything is uploaded, every file SHA256SUMS lists must match it, and when sandbox/release-signers lists
-keys, SHA256SUMS.sig must be a good signature by one of them: installations would refuse the release otherwise.
+Before anything is uploaded, SHA256SUMS must list every file and every file must match it, and when
+sandbox/release-signers lists keys, SHA256SUMS.sig must be a good signature by one of them: installations would
+refuse the release otherwise (files without SHA256SUMS only with --allow-unsigned).
 The videos about the app's pages (sandbox-ai-videos.tar, make_dist.py --videos DIR) are optional; when they are among
 the files, SHA256SUMS must list them (the app installs them only then).
 Files with the same name in an existing release are replaced. The token is sent only to the
@@ -62,11 +63,19 @@ def check_files(files, key, allow_unsigned):
     if sums is None:
         if key:
             fail("--sign: no SHA256SUMS among the files")
+        if keys and not allow_unsigned:
+            fail("no SHA256SUMS among the files, but sandbox/release-signers lists keys: nothing would check what is "
+                 "uploaded. Upload them with SHA256SUMS (make_dist.py --sums-only --add FILE ...), or pass "
+                 "--allow-unsigned")
         return files
     listed = {parts[1].lstrip("*"): parts[0] for parts in (line.split() for line in sums.read_text().splitlines())
               if len(parts) == 2}
     if VIDEOS in names and VIDEOS not in listed:
         fail(f"SHA256SUMS does not list {VIDEOS}: the app would refuse it (make_dist.py --sums-only --videos DIR)")
+    unlisted = sorted(name for name in names if name not in listed and name not in ("SHA256SUMS", "SHA256SUMS.sig"))
+    if unlisted:
+        fail(f"SHA256SUMS does not list {', '.join(unlisted)}: nobody could check it against the signed checksums "
+             "(make_dist.py --sums-only --add FILE ... writes them anew)")
     for name, path in names.items():
         if name in listed and hashlib.sha256(path.read_bytes()).hexdigest() != listed[name]:
             fail(f"{path} does not match SHA256SUMS (rebuild dist/ with scripts/make_dist.py)")
@@ -119,9 +128,22 @@ def is_loopback(host):
         return False
 
 
+class SameOrigin(urllib.request.HTTPRedirectHandler):
+    """Redirects within the origin of the request only (scheme, host and port): urllib carries every header of a
+    request over to where a redirect points, the token's Authorization included."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
+        if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+            fail(f"{req.get_method()} {req.full_url}: HTTP {code} redirect to {new.scheme}://{new.netloc}, another "
+                 "host: not followed (the token goes only to the repository's API host)")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class Client:
     def __init__(self, token):
         self.token = token
+        self.opener = urllib.request.build_opener(SameOrigin)
 
     def request(self, method, url, body=None, content_type="application/json"):
         data = json.dumps(body).encode() if isinstance(body, (dict, list)) else body
@@ -131,7 +153,7 @@ class Client:
         if data is not None:
             request.add_header("Content-Type", content_type)
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with self.opener.open(request, timeout=300) as response:
                 payload = response.read()
         except urllib.error.HTTPError as exc:
             if exc.code == 404:

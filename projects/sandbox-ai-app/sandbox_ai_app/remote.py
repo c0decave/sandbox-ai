@@ -16,22 +16,30 @@ needs its passphrase or a password fails (AuthenticationNeeded) - the page offer
 A path below the root is walked component by component with LSTAT: a symbolic link on the way is refused and named
 with where it points ("not followed"); the last component is acted on as itself (a link is removed or renamed, never
 written through). (SFTP has no descriptors to walk by, so a remote program that swaps a folder for a link between
-two requests is not stopped as files.py stops a local one; the remote system is the human's own.) Everything is
+two requests is not stopped as files.py stops a local one; the remote system is the human's own - but permission bits
+are set with lsetstat@openssh.com where the server has it, never through a link put in the item's place.) Everything is
 bounded like files.py (Budget: LIMIT bytes, MAX_ENTRIES entries, MAX_DEPTH folders), cancellable between requests,
 and a request that gets no answer within REQUEST_TIMEOUT ends the connection.
 
 Copies: a remote file or folder comes in through a staging folder created in the target folder (removed in any
 case, and at exit), from where files.copy_entry puts it in place with every local rule (temporary names, links
 skipped, nothing executable and risky files named where the target is a sandbox's folder: what comes from a remote
-system into a sandbox's folder counts as the agent's); a local one goes out under a temporary name renamed into
-place when complete (posix-rename@openssh.com to replace, else a rename that refuses an existing name), what the
-copy created is removed unless it completes. A move copies first and removes the source when the copy is complete.
+system into a sandbox's folder counts as the agent's, and so does what comes from a system whose files count as an
+agent's - RemoteRoot.agents, one of sandbox-ai's hosts - wherever it goes); a local one goes out under a temporary
+name renamed into place when complete (posix-rename@openssh.com to replace, else a rename that refuses an existing
+name), what the copy created is removed unless it completes. A move copies first and removes the source when the copy is complete.
+
+SFTP tells no inode number and no time finer than a second, so a file another program rewrote with as many bytes within
+that second has the same size, time and bits: the editor's identity of a remote file carries the SHA-256 of what was
+read, and a save reads the file again and compares it before it replaces it (RemoteRoot.unchanged_since); a move reads a
+file of up to REHASH_LIMIT bytes again before it removes it.
 """
 from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
 import errno
+import hashlib
 import os
 import re
 import secrets
@@ -42,7 +50,7 @@ import subprocess
 import threading
 import time
 
-from . import files
+from . import applog, files
 from .files import (
     Budget, Cancelled, Changed, Entry, FileData, Listing, MAX_DEPTH, MAX_ENTRIES, Refused, Result, TOO_MANY_WALK,
     WALK_ENTRIES, kind_of, parts, printable, single_name,
@@ -55,6 +63,10 @@ CONNECT_TIMEOUT = 20  # s: ssh's ConnectTimeout
 CHUNK = 32 << 10  # bytes per READ or WRITE request (every SFTP server takes this much)
 WINDOW = 16  # requests on their way at once while a file is read or written
 READLINKS = 2000  # links of one listing whose targets are read
+# Bytes of a file a move from a remote system reads again before it removes it (its SHA-256 compared with what was
+# fetched): SFTP tells no time finer than a second - a file rewritten with as many bytes within that second looked
+# unchanged. Larger files are taken by their size, time and bits (reading each twice would double a move).
+REHASH_LIMIT = 4 << 20
 IDLE_ANSWERS = 3  # answers to READDIR in a row that bring no name: more, and the listing is given up
 PACKET_LIMIT = 1 << 20  # bytes: a larger answer from the server ends the connection
 STDERR_KEPT = 8 << 10  # bytes of ssh's own messages kept (for the reason a connection failed)
@@ -215,9 +227,12 @@ def effective(target, config=None, ssh="ssh"):
             *(["-l", target.user] if target.user else []), "--", target.host]
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        applog.swallowed("remote", f"ssh -G for {target.text()} (what ssh makes of it) gave no answer", exc)
         return {}
     if done.returncode != 0:
+        applog.log("DEBUG", "remote", f"ssh -G for {target.text()}: exit status {done.returncode}: "
+                                      f"{applog.tail(done.stderr, 3)}")
         return {}
     found = {}
     for line in done.stdout.splitlines():
@@ -257,12 +272,18 @@ def scan_host(target, keyscan="ssh-keyscan", timeout=CONNECT_TIMEOUT, config=Non
     if host.startswith("-") or not 0 < port < 65536:
         host, port = target.host, target.port or 22
     argv = [keyscan, "-T", str(min(timeout, 30)), *(["-p", str(port)] if port != 22 else []), "--", host]
+    began = time.monotonic()
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout + 5, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
+        applog.log("WARNING", "remote", f"the host keys of {target.text()} could not be read: "
+                                        f"{applog.error_text(exc)}: {applog.argv_text(argv)}")
         raise RemoteError(tr("Could not read the host keys of {host}: {error}", host=printable(target.text()),
                              error=printable(exc))) from None
     lines = [line for line in done.stdout.splitlines() if line and not line.startswith("#")]
+    applog.log("INFO" if lines else "WARNING", "remote", f"{target.text()} offered {len(lines)} host keys "
+               f"(ssh-keyscan of {host} port {port}, exit status {done.returncode}, "
+               f"{applog.seconds(time.monotonic() - began)})" + ("" if lines else f": {applog.tail(done.stderr, 3)}"))
     if not lines:
         raise RemoteError(tr("{host} offered no host key.", host=printable(target.text())))
     alias = seen.get("hostkeyalias", "")
@@ -277,6 +298,8 @@ def fingerprints(lines, keygen="ssh-keygen"):
         done = subprocess.run([keygen, "-l", "-f", "-"], input="\n".join(lines) + "\n", capture_output=True,
                               text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired) as exc:
+        applog.log("WARNING", "remote", f"ssh-keygen could not read the host keys' fingerprints: "
+                                        f"{applog.error_text(exc)}")
         raise RemoteError(printable(exc)) from None
     found = []
     for line in done.stdout.splitlines():
@@ -384,13 +407,17 @@ class Sftp:
     def __init__(self, argv, target=None, timeout=REQUEST_TIMEOUT):
         self.target, self.timeout = target or Target("?"), timeout
         self.lock, self.next_id, self.extensions, self.errors = threading.RLock(), 1, {}, bytearray()
+        self.lsetstat_works = None  # (lsetstat_supported: not asked yet)
         # Requests waiting for the lock (turn()): a long read or write lets them go first between two windows.
         self.queued, self.counting = 0, threading.Lock()
         self.interrupted = threading.Event()  # interrupt(): what waits for the server gives up at once
+        began, where = time.monotonic(), self.target.text()
+        applog.log("INFO", "remote", f"SFTP to {where}: connecting: {applog.argv_text(argv)}")
         try:
             self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                             stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
         except OSError as exc:
+            applog.log("WARNING", "remote", f"SFTP to {where}: ssh could not be started: {applog.error_text(exc)}")
             raise RemoteError(tr("ssh could not be started: {error}", error=printable(exc))) from None
         threading.Thread(target=self.drain, daemon=True).start()
         self.buffer = b""
@@ -399,12 +426,19 @@ class Sftp:
             kind, payload = self.receive()
         except ConnectionLost:
             self.close()
-            raise self.reason() from None
+            reason = self.reason()
+            applog.log("WARNING", "remote", f"SFTP to {where}: not connected after "
+                       f"{applog.seconds(time.monotonic() - began)} ({type(reason).__name__}): {applog.redact(reason)}"
+                       f"\n{applog.tail(bytes(self.errors).decode('utf-8', 'replace'), 4)}")
+            raise reason from None
         if kind != VERSION:
             self.close()
+            applog.log("WARNING", "remote", f"SFTP to {where}: the remote system does not speak SFTP")
             raise ConnectionLost(tr("The remote system does not speak SFTP."))
         reader = Reader(payload)
         self.version = reader.u32()
+        applog.log("INFO", "remote", f"SFTP to {where}: connected in {applog.seconds(time.monotonic() - began)} "
+                                     f"(SFTP version {self.version}, pid {self.process.pid})")
         while reader.at < len(payload):
             name = reader.text()
             self.extensions[name] = reader.string()
@@ -433,6 +467,8 @@ class Sftp:
         return self.process.poll() is None
 
     def close(self):
+        applog.log("DEBUG", "remote", f"SFTP to {self.target.text()}: closed (ssh pid {self.process.pid}, "
+                                      f"{'running' if self.process.poll() is None else f'exit {self.process.poll()}'})")
         try:
             self.process.stdin.close()
         except OSError:
@@ -451,6 +487,7 @@ class Sftp:
     def interrupt(self):
         """Give up what waits for the server now (Cancel of a job whose request stalled): the connection ends - an
         unanswered request leaves the session out of step. Never waits (the GUI thread may call it)."""
+        applog.log("INFO", "remote", f"SFTP to {self.target.text()}: interrupted (Cancel): the connection is ended")
         self.interrupted.set()
         try:
             self.process.kill()
@@ -472,6 +509,8 @@ class Sftp:
                 raise self.ended()
             left = deadline - time.monotonic()
             if left <= 0:
+                applog.log("WARNING", "remote", f"SFTP to {self.target.text()}: no answer within {self.timeout} s - "
+                                                "the connection is ended")
                 self.close()
                 raise ConnectionLost(tr("{host} did not answer within {seconds} s; the connection was ended.",
                                         host=printable(self.target.text()), seconds=self.timeout))
@@ -644,12 +683,77 @@ class Sftp:
     def remove(self, path):
         self.status(*self.ask(REMOVE, pack_string(check_name(path))), path)
 
-    def chmod(self, path, mode, times=None):
-        """The permission bits MODE of PATH (and TIMES: (atime, mtime), if given)."""
+    def chmod(self, path, mode, times=None, follow=True):
+        """The permission bits MODE of PATH (and TIMES: (atime, mtime), if given). FOLLOW False: PATH itself, never
+        through a symbolic link put in its place - lsetstat@openssh.com where the server has it (a link there is
+        refused); SETSTAT, which the server applies through a link, only where it has not (as before)."""
+        if not follow and self.lsetstat(path, pack_attrs(mode, times)):
+            return
         self.status(*self.ask(SETSTAT, pack_string(check_name(path)) + pack_attrs(mode, times)), path)
 
-    def chown(self, path, uid, gid):
-        """PATH given to UID and GID (SETSTAT; a server that is no root's refuses another user)."""
+    def lsetstat(self, path, attrs):
+        """ATTRS set on PATH itself with lsetstat@openssh.com: True once done; False where the server has no such
+        extension, or one that fails for what is no link (fchmodat with AT_SYMLINK_NOFOLLOW of an older C library):
+        SETSTAT then, as before. A symbolic link at PATH is refused.
+
+        Whether it fails for what is no link is asked once per connection of "." (the remote HOME, which no agent of
+        a host of sandbox-ai's can put a link in place of: its own bits set again - lsetstat_works): a failure for
+        PATH, then a LSTAT that found no link there, was taken for such a server - an agent that swapped a link and a
+        file in turn at PATH had its link's failure followed by a file's look, and the SETSTAT that came next went
+        through the link put back in time."""
+        if "lsetstat@openssh.com" not in self.extensions:
+            return False
+        try:
+            self.status(*self.ask(EXTENDED, pack_string("lsetstat@openssh.com") + pack_string(check_name(path)) +
+                                  attrs), path)
+            if struct.unpack(">I", attrs[:4])[0] & PERMISSIONS_ATTR:
+                self.lsetstat_works = True
+            return True
+        except OSError as exc:
+            try:
+                info = self.lstat(path)
+            except OSError:
+                raise exc from None
+            if stat.S_ISLNK(info.mode):
+                raise Refused(tr("{name} is a symbolic link; links are not followed.",
+                                 name=printable(path.rsplit("/", 1)[-1]))) from None
+            if self.lsetstat_supported():
+                raise exc from None  # (it works for what is no link: PATH failed as itself - or was a link a moment)
+            return False
+
+    def lsetstat_supported(self):
+        """Whether lsetstat@openssh.com sets the bits of what is no link on this server (lsetstat_works, asked once):
+        "." given its own bits again with it. (OpenSSH's on Linux with a C library older than glibc 2.32, or without
+        /proc - a chroot -, fails for every path - "Failure", or "Operation unsupported" where it has no fchmodat:
+        SETSTAT then.)"""
+        works = self.lsetstat_works
+        if works is None:
+            try:
+                info = self.lstat(".")
+            except ConnectionLost:
+                raise
+            except OSError:
+                info = None
+            try:
+                if info is None:
+                    raise OSError(errno.EIO, ".")
+                self.status(*self.ask(EXTENDED, pack_string("lsetstat@openssh.com") + pack_string(".") +
+                                      pack_attrs(stat.S_IMODE(info.mode))), ".")
+                works = True
+            except ConnectionLost:
+                raise
+            except PermissionError:  # (it reached the change itself - a HOME of root's, a chroot's: as one that works)
+                works = True
+            except OSError:
+                works = False
+            self.lsetstat_works = works
+        return works
+
+    def chown(self, path, uid, gid, follow=True):
+        """PATH given to UID and GID (SETSTAT; a server that is no root's refuses another user). FOLLOW False: as
+        chmod's."""
+        if not follow and self.lsetstat(path, pack_attrs(owner=(uid, gid))):
+            return
         self.status(*self.ask(SETSTAT, pack_string(check_name(path)) + pack_attrs(owner=(uid, gid))), path)
 
     def rename(self, old, new, replace=False):
@@ -793,6 +897,9 @@ class RemoteRoot:
     KNOWN_HOSTS, CONFIG: ssh's files (default: the user's)."""
     remote = True
     sandbox = False
+    # Whether its files count as an agent's (the Files page: on for one of sandbox-ai's hosts, where sandboxes run, and
+    # as the human chooses for the connection): copied to this machine never executable, files that tools run named.
+    agents = False
 
     def __init__(self, target, path="", ssh="ssh", known_hosts=None, config=None, timeout=REQUEST_TIMEOUT):
         self.target = target if isinstance(target, Target) else Target.parse(target)
@@ -803,8 +910,19 @@ class RemoteRoot:
         self.argv = argv
         self.sftp = Sftp(argv, self.target, timeout)
         try:
-            self.home = self.sftp.realpath(".")  # (where the Files page starts: the remote HOME)
-            self.path = self.sftp.realpath(check_name(path or "."))
+            # (where the Files page starts: the remote HOME - as a clean absolute path: the server answers what it
+            # likes, and a HOME of "/x/../y" made the pane fail to show anything, ".." being refused)
+            self.home = clean_path(self.sftp.realpath("."))
+            # (the root: "/" is "/" - a server's answer of "/srv/x/.." made the pane's root that folder, its HOME looked
+            # for below it; another folder as the server names it, cleaned, never "/" for an answer that is no path)
+            asked = check_name(path or ".")
+            if asked == "/":
+                self.path = "/"
+            else:
+                answer = self.sftp.realpath(asked)
+                if not isinstance(answer, str) or not answer.startswith("/") or any(c in answer for c in "\0\n\r"):
+                    raise Refused(tr("{path} is not a folder.", path=printable(answer)))
+                self.path = clean_path(answer)
             info = self.sftp.stat(self.path)
             if not stat.S_ISDIR(info.mode):
                 raise Refused(tr("{path} is not a folder.", path=printable(self.path)))
@@ -930,8 +1048,9 @@ class RemoteRoot:
             data, _count, more = self.sftp.read_file(handle, info.size, limit if info.size else limit + 1)
         finally:
             self.sftp.close_handle(handle)
-        return FileData(data[:limit], identity(info), info.size, more or info.size > len(data) or len(data) > limit,
-                        info.mode)
+        # (with the SHA-256 of what was read: a save reads the file again before it replaces it - write_file)
+        return FileData(data[:limit], identity(info) + (content_hash(data[:limit]),), info.size,
+                        more or info.size > len(data) or len(data) > limit, info.mode)
 
     def measure(self, relative, entries=WALK_ENTRIES, cancelled=None, progress=None, seen=None):
         """Result.bytes, .files, .directories of RELATIVE with all it holds (links counted, never followed), bounded
@@ -987,8 +1106,9 @@ class RemoteRoot:
 
     def write_file(self, relative, data, expected=None, in_place=False, mode=None):
         """DATA as the file RELATIVE: written under a temporary name beside it and renamed over it (its permission
-        bits kept, never set-ID or sticky); refused (Changed) when it is not the file EXPECTED (identity) any more.
-        Its owner and group stay: the new file is given to them; where the server refuses (it is another user's),
+        bits kept, never set-ID or sticky); refused (Changed; files.Gone when it is no longer there) when it is not the
+        file EXPECTED (identity) any more, and refused when nobody may write it (no write bit: as a local save). Its
+        owner and group stay: the new file is given to them; where the server refuses (it is another user's),
         files.NotKept is raised - IN_PLACE (after the human said yes) writes the file itself then (not in one step).
         MODE: the bits of the file as it was read, which a file no longer there is made with again (else 0644)."""
         folder, name = self.parent(relative)
@@ -1003,25 +1123,24 @@ class RemoteRoot:
         if info is not None:
             if stat.S_ISLNK(info.mode) or not stat.S_ISREG(info.mode):
                 raise Refused(tr("{name} is not a regular file.", name=printable(name)))
-            if expected is not None and identity(info) != tuple(expected):
+            # (as a local save: a file nobody may write is not replaced - renamed over it, its read-only bits were no
+            # protection on a remote system; whether you may write one others may, SFTP does not tell)
+            if not stat.S_IMODE(info.mode) & 0o222:
+                raise Refused(tr("{name} is read-only (its permissions): it was not written. Change its permissions "
+                                 "first.", name=printable(name)))
+            if expected is not None and identity(info) != tuple(expected)[:3]:
                 raise Changed(tr("{name} changed on disk since it was opened.", name=printable(name)))
             mode = stat.S_IMODE(info.mode) & 0o777
         elif expected is not None:
-            raise Changed(tr("{name} changed on disk since it was opened.", name=printable(name)))
+            raise files.gone(name)
         chunks = iter([bytes(data[at:at + CHUNK]) for at in range(0, len(data), CHUNK)])
         owner = (info.uid, info.gid) if info is not None and info.flags & UIDGID_ATTR else None
 
         def unchanged():
             """Once more right before the rename (as files.Root.write_file): the new contents took their time to go up,
             and what another program - an agent of a host of sandbox-ai's - wrote meanwhile was replaced unasked."""
-            if expected is None:
-                return
-            try:
-                again = self.sftp.lstat(path)
-            except FileNotFoundError:
-                again = None
-            if again is None or identity(again) != tuple(expected):
-                raise Changed(tr("{name} changed on disk since it was opened.", name=printable(name)))
+            if expected is not None:
+                self.unchanged_since(path, name, expected)
         self.put(folder, name, lambda: next(chunks, b""), mode, replace=True, owner=owner, in_place=info is not None,
                  before=unchanged)
         return self.saved_identity(path, data)
@@ -1029,11 +1148,16 @@ class RemoteRoot:
     def write_in_place(self, path, name, data, expected):
         """DATA written into the remote file PATH itself (write_file's IN_PLACE: asked first - a write cut short leaves
         it half written): it must still be the regular file EXPECTED; its owner, group and bits stay."""
-        info = self.sftp.lstat(path)
+        try:
+            info = self.sftp.lstat(path)
+        except FileNotFoundError:
+            if expected is None:
+                raise
+            raise files.gone(name) from None
         if stat.S_ISLNK(info.mode) or not stat.S_ISREG(info.mode):
             raise Refused(tr("{name} is not a regular file.", name=printable(name)))
-        if expected is not None and identity(info) != tuple(expected):
-            raise Changed(tr("{name} changed on disk since it was opened.", name=printable(name)))
+        if expected is not None:
+            self.unchanged_since(path, name, expected)
         chunks = iter([bytes(data[at:at + CHUNK]) for at in range(0, len(data), CHUNK)])
         handle = self.sftp.open(path, WRITE_FLAG | TRUNC_FLAG)
         try:
@@ -1044,15 +1168,41 @@ class RemoteRoot:
         self.sftp.close_written(handle)
         return self.saved_identity(path, data)
 
+    def unchanged_since(self, path, name, expected):
+        """Changed unless the file PATH is still the one EXPECTED (read_file's identity, or a save's): its size, its
+        modification time in whole seconds and its bits as they were - and, where EXPECTED has it, the SHA-256 of what
+        was read, compared with the file read again. SFTP tells no inode number and no time finer than a second: a file
+        another program rewrote with as many bytes within the same second (an agent of a host of sandbox-ai's, a
+        formatter) looked unchanged, and a save replaced it unasked."""
+        expected = tuple(expected)
+        try:
+            again = self.sftp.lstat(path)
+        except FileNotFoundError:
+            raise files.gone(name) from None
+        if not stat.S_ISREG(again.mode) or identity(again) != expected[:3] or \
+                len(expected) > 3 and expected[3] is not None and self.hash_of(path, again.size) != expected[3]:
+            raise Changed(tr("{name} changed on disk since it was opened.", name=printable(name)))
+
+    def hash_of(self, path, size):
+        """content_hash of the remote file PATH (SIZE bytes as it was stat'ed: more or fewer read - it changed meanwhile -
+        give None)."""
+        digest = hashlib.sha256()
+        handle = self.sftp.open(path, READ_FLAG)
+        try:
+            _data, count, _more = self.sftp.read_file(handle, size, size + 1, sink=digest.update)
+        finally:
+            self.sftp.close_handle(handle)
+        return digest.hexdigest() if count == size else None
+
     def saved_identity(self, path, data):
-        """What a save of DATA to PATH saved (write_file's result, the next save's EXPECTED): the file as it is now -
-        unless it is no longer as long as DATA (a program wrote it right after: that write was taken for this save's,
-        and the next save replaced it unasked, as files.Root.write_file says); then one that matches no file, so that
-        the next save finds it changed."""
+        """What a save of DATA to PATH saved (write_file's result, the next save's EXPECTED): the file as it is now, with
+        the SHA-256 of DATA - unless it is no longer as long as DATA (a program wrote it right after: that write was
+        taken for this save's, and the next save replaced it unasked, as files.Root.write_file says); then one that
+        matches no file, so that the next save finds it changed."""
         now = self.sftp.lstat(path)
         if stat.S_ISREG(now.mode) and now.size == len(data):
-            return identity(now)
-        return (len(data), -1, now.mode)
+            return identity(now) + (content_hash(data),)
+        return (len(data), -1, now.mode, None)
 
     def put(self, folder, name, source, mode, replace=False, cancelled=None, budget=None, times=None, owner=None,
             in_place=False, before=None):
@@ -1098,13 +1248,13 @@ class RemoteRoot:
                 made = self.sftp.lstat(temporary)
                 if (made.uid, made.gid) != tuple(owner):
                     try:
-                        self.sftp.chown(temporary, *owner)
+                        self.sftp.chown(temporary, *owner, follow=False)
                     except OSError:
                         raise files.NotKept(tr(
                             "{name} belongs to UID {uid} (group {gid}): saved through a new file renamed over it, it "
                             "would become yours. It can be written in place (it stays theirs).", name=printable(name),
                             uid=owner[0], gid=owner[1])) from None
-            self.sftp.chmod(temporary, mode & 0o777, times)
+            self.sftp.chmod(temporary, mode & 0o777, times, follow=False)
             if before is not None:
                 before()
             try:
@@ -1186,7 +1336,9 @@ class RemoteRoot:
                 except OSError:
                     left.append(shown)
             return left
-        if stat.S_ISREG(info.mode) and seen["files"].get(path) == identity(info):
+        fetched = seen["files"].get(path)
+        if stat.S_ISREG(info.mode) and fetched is not None and tuple(fetched[:3]) == identity(info) and (
+                info.size > REHASH_LIMIT or len(fetched) < 4 or self.hash_of(path, info.size) == fetched[3]):
             self.sftp.remove(path)
             return []
         return [shown]
@@ -1245,13 +1397,23 @@ class RemoteRoot:
             raise
         self.sftp.close_handle(handle)
 
-    def chmod_entry(self, relative, mode, special=False):
+    def chmod_entry(self, relative, mode, special=False, agents=frozenset()):
+        """The bits MODE of RELATIVE: a new set-ID or sticky bit only with SPECIAL - one it has already may stay or go, as
+        files.Root.chmod_entry (they were sent without them: a shared set-group-ID folder of a system whose files count
+        as an agent's lost it at a tick of the group's write). (AGENTS: as files.Root.chmod_entry takes them - the
+        sandboxes' folders are this machine's, none of them is a remote system's.)"""
         if not 0 <= mode <= 0o7777:
             raise Refused(tr("Not a permission mode: {mode}", mode=f"{mode:o}"))
         path = self.walk(relative) if parts(relative) else self.path
-        if stat.S_ISLNK(self.sftp.lstat(path).mode):
+        info = self.sftp.lstat(path)
+        if stat.S_ISLNK(info.mode):
             raise Refused(tr("A symbolic link has no permissions of its own; what it points to is not changed here."))
-        self.sftp.chmod(path, mode if special else mode & 0o777)
+        if mode & files.SPECIAL_BITS & ~stat.S_IMODE(info.mode) and not special:
+            raise Refused(tr("Set-user-ID, set-group-ID and sticky bits are not set here (never below a "
+                             "sandbox's folder)."))
+        # (never through a link an agent of a host of sandbox-ai's put in its place after the look: a file of the
+        # human's got the bits chosen)
+        self.sftp.chmod(path, mode, follow=False)
 
     def chown_entry(self, *_args, **_kwargs):
         raise Refused(tr("Owners are not changed on a remote system from here."))
@@ -1260,9 +1422,24 @@ class RemoteRoot:
         raise Refused(tr("A remote folder has no local descriptor."))
 
 
+def clean_path(path):
+    """The remote PATH a server answered (REALPATH) as an absolute path without "." and ".." (posixpath.normpath), or "/"
+    for one that is no absolute path or holds a NUL or a line break."""
+    import posixpath
+    if not isinstance(path, str) or not path.startswith("/") or any(c in path for c in "\0\n\r"):
+        return "/"
+    return posixpath.normpath(path).replace("//", "/") or "/"
+
+
 def identity(info):
-    """What write_file compares: (size, mtime, mode) - SFTP has no inode numbers."""
+    """What write_file compares: (size, mtime, mode) - SFTP has no inode numbers (an editor's identity adds the
+    content_hash of what it read: RemoteRoot.unchanged_since)."""
     return (info.size, int(info.mtime), info.mode)
+
+
+def content_hash(data):
+    """The SHA-256 (hex) of DATA: what a remote save compares the file read again with (RemoteRoot.unchanged_since)."""
+    return hashlib.sha256(bytes(data)).hexdigest()
 
 
 def attrs_size(info):
@@ -1311,8 +1488,10 @@ def move_entry(source, relative, target, target_dir="", overwrite=False, untrust
     seen = {"files": {}, "folders": set(), "changed": []}
     if is_remote(source):
         # (what comes into a sandbox's folder counts as the agent's)
-        result = download(source, relative, target, target_dir, overwrite, bool(target_untrusted) or target.sandbox,
-                          None, limit, entries, cancelled, progress, seen)
+        # (an agent's - one of sandbox-ai's hosts: UNTRUSTED - wherever it goes; in a sandbox's folder whatever comes)
+        result = download(source, relative, target, target_dir, overwrite,
+                          bool(untrusted) or bool(target_untrusted) or target.sandbox, None, limit, entries, cancelled,
+                          progress, seen)
     else:
         untrusted = source.sandbox if untrusted is None else untrusted
         result = upload(source, relative, target, target_dir, overwrite, untrusted, None, limit, entries, cancelled,
@@ -1489,8 +1668,18 @@ def _fetch(source, path, info, dir_fd, name, shown, budget, skipped, depth, seen
                     skipped.append((f"{shown}/{child}", tr("a line break in its name (not sent to a remote system)")))
                     continue
                 inner = join(path, child)
-                _fetch(source, inner, source.entry(inner, attrs), fd, child, f"{shown}/{child}", budget, skipped,
-                       depth + 1, seen)
+                try:
+                    _fetch(source, inner, source.entry(inner, attrs), fd, child, f"{shown}/{child}", budget, skipped,
+                           depth + 1, seen)
+                except FileNotFoundError:
+                    # (listed, then gone before it was read - an agent of a host of sandbox-ai's works there:
+                    # named, as a local copy names it, the rest copied; the whole copy failed, and nothing of it was
+                    # kept. What was staged of it goes.)
+                    try:
+                        files._remove(fd, single_name(child))
+                    except OSError:
+                        pass
+                    skipped.append((f"{shown}/{child}", tr("removed while it was copied")))
             os.fchmod(fd, stat.S_IMODE(info.mode) & 0o777 | 0o700)
         finally:
             os.close(fd)
@@ -1499,13 +1688,18 @@ def _fetch(source, path, info, dir_fd, name, shown, budget, skipped, depth, seen
         skipped.append((shown, tr("not a regular file")))
         return
     handle = source.sftp.open(path, READ_FLAG)
+    digest = hashlib.sha256()  # (what a move compares the file with before it removes it: _remove_fetched)
+
+    def sink(chunk):
+        _write_all(fd, chunk)
+        digest.update(chunk)
     try:
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | files.O_CLOEXEC, 0o600, dir_fd=dir_fd)
         try:
             # (one byte beyond the budget is asked for: a file larger than a copy may be is refused by the budget, as a
             # local one - read up to files.LIMIT, it was taken as copied and put in place cut short)
             _data, count, _more = source.sftp.read_file(handle, info.size, budget.limit + 1, budget.cancelled, budget,
-                                                        sink=lambda chunk: _write_all(fd, chunk))
+                                                        sink=sink)
             os.fchmod(fd, stat.S_IMODE(info.mode) & 0o777 | 0o600)  # (staged: readable for the copy from it)
             if info.flags & TIMES_ATTR:  # (the copy keeps the times of the file copied)
                 try:
@@ -1523,7 +1717,7 @@ def _fetch(source, path, info, dir_fd, name, shown, budget, skipped, depth, seen
     if count != info.size or after is None or identity(after) != identity(info):
         seen["changed"].append(shown)
     else:
-        seen["files"][path] = identity(info)
+        seen["files"][path] = identity(info) + (digest.hexdigest(),)
 
 
 def _write_all(fd, chunk):
@@ -1538,7 +1732,8 @@ def upload(source, relative, target, target_dir, overwrite, untrusted, name, lim
     """The local RELATIVE of the Root SOURCE into the remote folder TARGET_DIR of TARGET: walked relative to open
     folders without following a link (links skipped and named), each file under a temporary name renamed into place;
     what the copy created is removed unless it completes. UNTRUSTED: no file arrives executable (listed). AGENTS:
-    (st_dev, st_ino) of the sandboxes' folders - one met in the folder sent is sent as UNTRUSTED."""
+    (st_dev, st_ino) of the sandboxes' folders - one met in the folder sent is sent as UNTRUSTED, its files listed in
+    Result.agent_paths (their risky ones are named, as files.copy_entry's)."""
     budget, result = Budget(limit, entries, cancelled, progress=progress), Result()
     parent, source_name = source._parent(relative)
     created = []  # remote folders this copy made (removed unless it completes)
@@ -1594,7 +1789,7 @@ def _undo_created(target, created):
     return stayed
 
 
-def _send_file(fd, info, target, folder, name, shown, overwrite, untrusted, budget, result):
+def _send_file(fd, info, target, folder, name, shown, overwrite, untrusted, budget, result, inside=False):
     budget.entry()
     mode = stat.S_IMODE(info.st_mode) & (0o644 if untrusted else 0o777)  # (never writable by others there)
     if untrusted and info.st_mode & 0o111:
@@ -1607,6 +1802,8 @@ def _send_file(fd, info, target, folder, name, shown, overwrite, untrusted, budg
     result.files += 1
     result.bytes += info.st_size
     result.paths.append(shown)
+    if inside:  # (in a sandbox's folder met inside what is sent: _send_folder's AGENTS - its risky files are named)
+        result.agent_paths.append(shown)
     after = os.fstat(fd)  # (a move removes only the files copied unchanged: files._remove_copied)
     if files._identity(after) == files._identity(info):
         result.ids.add(files._identity(after))
@@ -1615,13 +1812,13 @@ def _send_file(fd, info, target, folder, name, shown, overwrite, untrusted, budg
 
 
 def _send_folder(source, fd, info, target, folder, name, shown, overwrite, untrusted, budget, result, created, depth,
-                 agents=frozenset()):
+                 agents=frozenset(), inside=False):
     budget.entry()
     if depth >= MAX_DEPTH:
         raise Refused(tr("Folders nested more than {count} deep are not copied.", count=MAX_DEPTH))
     walked = os.fstat(fd)
     if (walked.st_dev, walked.st_ino) in agents:  # (a sandbox's folder: the agent's, with all it holds)
-        untrusted = True
+        untrusted = inside = True
     path = join(folder, name)
     try:
         existing = target.sftp.lstat(path)
@@ -1635,8 +1832,12 @@ def _send_folder(source, fd, info, target, folder, name, shown, overwrite, untru
     result.directories += 1
     result.folders.add((walked.st_dev, walked.st_ino))
     for child in files._names(fd, budget):
-        child_info = os.stat(child, dir_fd=fd, follow_symlinks=False)
         here = f"{shown}/{child}"
+        try:
+            child_info = os.stat(child, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:  # (as a local copy: named, the rest sent - the whole copy failed and was undone)
+            result.skipped.append((here, tr("removed while it was copied")))
+            continue
         if "\n" in child or "\r" in child:  # (it cannot be named to the server: the whole copy ended there)
             result.skipped.append((here, tr("a line break in its name (not sent to a remote system)")))
             continue
@@ -1644,19 +1845,33 @@ def _send_folder(source, fd, info, target, folder, name, shown, overwrite, untru
             result.skipped.append((here, tr("symbolic link; not copied")))
             continue
         if stat.S_ISDIR(child_info.st_mode):
-            inner = source._open_child_dir(fd, child)
+            try:
+                inner = source._open_child_dir(fd, child)
+            except FileNotFoundError:
+                result.skipped.append((here, tr("removed while it was copied")))
+                continue
+            except Refused as exc:  # (swapped for a link or a file meanwhile - never followed: named, as a local copy)
+                result.skipped.append((here, str(exc)))
+                continue
             try:
                 if files._other_mount(fd, inner):  # (a move keeps its source then: something was skipped)
                     result.skipped.append((here, tr(files.MOUNTED)))
                     continue
                 _send_folder(source, inner, child_info, target, path, child, here, overwrite, untrusted, budget,
-                             result, created, depth + 1, agents)
+                             result, created, depth + 1, agents, inside)
             finally:
                 os.close(inner)
         elif stat.S_ISREG(child_info.st_mode):
-            inner, child_info = files._open_regular(child, fd)
             try:
-                _send_file(inner, child_info, target, path, child, here, overwrite, untrusted, budget, result)
+                inner, child_info = files._open_regular(child, fd)
+            except FileNotFoundError:
+                result.skipped.append((here, tr("removed while it was copied")))
+                continue
+            except Refused as exc:  # (no regular file any more - a FIFO put in its place: as a local copy, named)
+                result.skipped.append((here, str(exc)))
+                continue
+            try:
+                _send_file(inner, child_info, target, path, child, here, overwrite, untrusted, budget, result, inside)
             finally:
                 os.close(inner)
         else:
@@ -1664,7 +1879,7 @@ def _send_folder(source, fd, info, target, folder, name, shown, overwrite, untru
     if existing is None:  # (a folder that was there keeps its bits, as in a local merge: a 0755 one became 0700)
         # (an agent's folder never arrives writable by others, as files._folder_mode makes a local copy: its 0777
         # folder was one anybody on the remote system could put files in)
-        target.sftp.chmod(path, stat.S_IMODE(info.st_mode) & (0o755 if untrusted else 0o777) | 0o700)
+        target.sftp.chmod(path, stat.S_IMODE(info.st_mode) & (0o755 if untrusted else 0o777) | 0o700, follow=False)
 
 
 def ssh_command(target, known_hosts=None, config=None, ssh="ssh"):

@@ -80,8 +80,9 @@ def mac_notification(title, text, popen=None):
     try:
         (popen or subprocess.Popen)(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        pass  # no notification then, as when the desktop has none
+    except OSError as exc:  # no notification then, as when the desktop has none
+        from . import applog
+        applog.swallowed("notifications", "osascript could not show the notification", exc)
     return None
 
 
@@ -296,6 +297,7 @@ class Toast(QFrame):
         import shiboken6
         if not shiboken6.isValid(self):  # closed while its menu was open (answered elsewhere, or pushed out)
             return
+        menu.deleteLater()  # (made anew for each right click)
         if not self.underMouse():
             self.start()
 
@@ -345,6 +347,8 @@ class Notifier:
             if self.tray is not None:
                 return self._desktop(level, title, text, seconds)
             if self.window is None or not self.window.isVisible():
+                from . import applog
+                applog.log("DEBUG", "notifications", f"not shown (no tray, no window shown): {clean(title, 80)}")
                 return None
             overlay = self.window
         toast = Toast(level, title, text, seconds, action=action, overlay=overlay)

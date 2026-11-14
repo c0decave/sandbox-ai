@@ -15,8 +15,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QPushButton, QVBoxLayout, QWidget)
 
 from . import state as app_state
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
+from .short_notices import short_notice
 from .widgets import ask_first, background, inform, plain_label, warn
 
 FORMATS = (("pdf", N_("PDF: bookmarks and links, to print or pass on")),
@@ -40,7 +41,7 @@ def file_name(label, kind):
 class ReportDialog(QDialog):
     """The format, the file, the period, whether the parts of a start go with it, and whether to open it."""
 
-    def __init__(self, parent, title, what, label, parts=True):
+    def __init__(self, parent, title, what, label, parts=True, traffic=False):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.label = label
@@ -80,6 +81,11 @@ class ReportDialog(QDialog):
         layout.addWidget(self.parts)
         self.parts.setVisible(parts)
         self.ask_parts = parts
+        self.traffic = QCheckBox(tr("With the LLM traffic (each model request, never the conversation)"))
+        self.traffic.setToolTip(tr("A section on the LLM traffic log: every model request's model, status, time, "
+                                   "tokens and what the loop guard did (sandbox-ai report --llm-traffic)"))
+        layout.addWidget(self.traffic)
+        self.traffic.setVisible(traffic)
         self.open_after = QCheckBox(tr("Open it when it is written"))
         self.open_after.setChecked(True)
         layout.addWidget(self.open_after)
@@ -112,10 +118,11 @@ class ReportDialog(QDialog):
             self.format_changed()
 
     def values(self):
-        """{"kind", "path", "since", "parts", "open"}; path absolute (~ expanded)."""
+        """{"kind", "path", "since", "parts", "traffic", "open"}; path absolute (~ expanded)."""
         path = os.path.expanduser(self.path.text().strip())
         return {"kind": self.kind(), "path": path, "since": self.since.text().strip() or None,
-                "parts": self.parts.isChecked() or not self.ask_parts, "open": self.open_after.isChecked()}
+                "parts": self.parts.isChecked() or not self.ask_parts,
+                "traffic": not self.traffic.isHidden() and self.traffic.isChecked(), "open": self.open_after.isChecked()}
 
 
 def make_report(parent, sai, label, what, names=(), log_dir=None, parts=True, owner=None, source=None,
@@ -126,7 +133,8 @@ def make_report(parent, sai, label, what, names=(), log_dir=None, parts=True, ow
     if not sai.has_report():
         inform(parent, title, tr("This sandbox-ai writes no reports yet: update it (sandbox-ai update)."), modal=False)
         return None
-    dialog = ReportDialog(parent, title, what, label, parts)
+    # (the LLM traffic section: only a sandbox-ai that has the LLM traffic log knows --llm-traffic)
+    dialog = ReportDialog(parent, title, what, label, parts, (Path(sai.directory) / "llm_traffic.py").is_file())
     try:
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
@@ -148,14 +156,15 @@ def make_report(parent, sai, label, what, names=(), log_dir=None, parts=True, ow
 
     def done(result, error):
         if error is not None:
-            warn(parent, title, tr("The report was not written: {error}", error=printable(error)), modal=False)
+            warn(parent, title, tr("The report was not written: {error}", error=printable_text(error)), modal=False)
             return
         text = tr("Written to {path}.", path=printable(result))
         if notice is not None:
             notice("success", title, text)
         elif not values["open"]:
-            inform(parent, title, text, modal=False)
+            short_notice(parent, title, text)
         if values["open"]:
             opener(result)
     return background(sai.report, path, values["kind"], list(names), log_dir, values["parts"] if parts else True,
-                      values["since"], owner=owner, source=source, timeout=630, work=True, done=done)
+                      values["since"], values.get("traffic", False), owner=owner, source=source, timeout=630,
+                      work=True, done=done)

@@ -32,11 +32,12 @@ from PySide6.QtWidgets import (
 from . import applog, backend, board as B, widgets
 from .prerequisites import Prerequisites
 from . import help_view, labels as OL, project_trust as PT, rules_tools, tables, theme
-from .files import printable
+from .files import printable, printable_text
 from .name_fields import NameButton, NameField, add_line
 from .state import choose_file, choose_folder
 from .copying import copy_entries
 from .i18n import tr
+from .short_notices import short_notice
 from . import mcp_fields as MF
 from .widgets import (
     MONO, AsyncCommand, ElidedLabel, StartControls, ask_first, background, confirm, disclosure, flow, inform, plain_label,
@@ -45,7 +46,17 @@ from .widgets import (
 
 NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
 
+
+def alive(widget):
+    """Whether WIDGET's C++ object still exists (a late result must not touch a deleted one)."""
+    try:
+        from shiboken6 import isValid
+        return isValid(widget)
+    except ImportError:  # pragma: no cover - PySide6 always has it
+        return True
+
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
+OTHER_IMAGE = "\x00other"  # the image drop-down's "Other…" (no image's name: a name is typed in then)
 REMOTE_CHECK_DELAY = 2000  # ms after an edit before another host's launcher checks the board (a dry run over SSH)
 HOST_RETRY = 60  # seconds before another host's launcher options are asked for again after a failed read
 
@@ -162,6 +173,20 @@ def wrapped(text, font, width, lines):
         if not shown[-1].endswith("…"):
             shown[-1] = metrics.elidedText(rest + " …", Qt.TextElideMode.ElideRight, width)
     return shown
+def wrapped_title(text, font, width, lines):
+    """A node's title in at most LINES lines (wrapped()); a title naming a path ("Project folder: /a/b/c") that does
+    not fit keeps the path's end - the folder's own name - and is cut in the middle: "Project folder:" over
+    "/a/…/b/c" (design review 0.1.95: the end was cut, and the folder's name was never shown)."""
+    shown = wrapped(text, font, width, lines)
+    head, colon, path = str(text).partition(": ")
+    if not colon or not path.startswith(("/", "~")) or lines < 2 or not shown or not shown[-1].endswith("…"):
+        return shown
+    first = wrapped(head + ":", font, width, 1)
+    if not first or first[0].endswith("…"):
+        return shown
+    return [first[0], QFontMetricsF(font).elidedText(" ".join(path.split()), Qt.TextElideMode.ElideMiddle, width)]
+
+
 MIME_PART = "application/x-sandbox-ai-part"  # a part dragged from the palette: its kind
 MIME_PARTS = "application/x-sandbox-ai-parts"  # parts copied (Copy, Cut): their kinds, settings and connections
 PARTS_FORMAT = "sandbox-ai-board-parts"  # the same as JSON text, for a clipboard that keeps only text
@@ -184,6 +209,22 @@ class Snapshot(QUndoCommand):
 
     def undo(self):
         self.page.restore(self.before)
+
+
+class FolderChange(QUndoCommand):
+    """Change folder…: the board's project folder from BEFORE to AFTER (its main workspace part with it: the states
+    BOARD_BEFORE and BOARD_AFTER) as one undo step."""
+
+    def __init__(self, page, text, before, after, board_before, board_after):
+        super().__init__(text)
+        self.page, self.before, self.after = page, before, after
+        self.board_before, self.board_after = board_before, board_after
+
+    def redo(self):
+        self.page.move_to_folder(self.after, self.board_after)
+
+    def undo(self):
+        self.page.move_to_folder(self.before, self.board_before)
 
 
 class PortItem(QGraphicsEllipseItem):
@@ -348,7 +389,7 @@ class NodeItem(QGraphicsRectItem):
         title_lines = QFontMetricsF(self.title_font).lineSpacing()
         detail_lines = QFontMetricsF(self.detail_font).lineSpacing()
         room = NODE_W - 2 * NODE_PAD - help_view.SIZE - 6 - (CLOSE_SIZE + 4 if getattr(self, "close_mark", None) else 0)
-        self.titles = wrapped(title, self.title_font, room, TITLE_LINES)
+        self.titles = wrapped_title(title, self.title_font, room, TITLE_LINES)
         self.details = wrapped(detail, self.detail_font, NODE_W - 2 * NODE_PAD, TEXT_LINES - max(1, len(self.titles)))
         self.header_h = max(HEADER_H, 10.0 + len(self.titles) * title_lines)
         height = max(NODE_H, self.header_h + 9.0 + len(self.details) * detail_lines + 9.0)
@@ -932,7 +973,7 @@ class PartsList(QListWidget):
         add.setEnabled(bool(item.flags() & Qt.ItemFlag.ItemIsEnabled))
         menu.addAction(tr("What is this?"), lambda: self.explain(self.row(item)))
         copy_entries(menu, self, event.pos())
-        menu.exec(event.globalPos())
+        widgets.exec_dropped(menu, event.globalPos())
 
 
 def elide(text, limit):
@@ -1003,6 +1044,9 @@ def summary(node):
             return tr("offline")
         parts = list(props.get("--profile", [])) + [o[len("--allow-"):] for o in B.PRESET_OPTIONS if props.get(o)]
         parts += list(props.get("--allow-host", []))[:3]
+        # --allow-domain as what it stands for, as `sandbox-ai net show` shows it: the name and *.DOMAIN.
+        parts += [part for value in list(props.get("--allow-domain", []))[:3]
+                  for part in (B._domain(value), "*." + B._domain(value))]
         return ", ".join(parts) or tr("the agent's provider only")
     shown = [f"{option} {value if not isinstance(value, (list, bool)) else ''}".strip()
              for option, value in props.items() if option.startswith("--") and value not in (None, "", [], False)]
@@ -1079,6 +1123,7 @@ class RulesEdit(QWidget):
         row.addWidget(add)
         row.addWidget(remove)
         row.addStretch()
+        widgets.list_menu(self.table, lambda: [remove, None, add])
         layout.addWidget(self.table)
         layout.addLayout(row)
 
@@ -1109,6 +1154,45 @@ class RulesEdit(QWidget):
         return found
 
 
+def fill_agent_combo(combo, sai, current="claude"):
+    """COMBO with sandbox-ai's agents, each with its name as data; one that has not passed its live test there (its
+    launcher's one list: sai.experimental_agent) is listed as “NAME (not live-tested yet)”, a badge only. CURRENT
+    chosen (choose_agent); read the choice with combo_agent."""
+    from . import presets as PR
+    combo.blockSignals(True)
+    try:
+        combo.clear()
+        for agent in sai.agents:
+            badge = sai.experimental_agent(agent)
+            combo.addItem(tr("{agent} (not live-tested yet)", agent=agent) if badge else agent, agent)
+            if badge:
+                combo.setItemData(combo.count() - 1, safe_tooltip(PR.experimental_text(badge)),
+                                  Qt.ItemDataRole.ToolTipRole)
+    finally:
+        combo.blockSignals(False)
+    choose_agent(combo, current)
+
+
+def choose_agent(combo, agent):
+    """Choose AGENT in an agent COMBO (fill_agent_combo); False if it is not there."""
+    index = combo.findData(agent)
+    if index >= 0:
+        combo.setCurrentIndex(index)
+    return index >= 0
+
+
+def combo_agent(combo):
+    """The agent chosen in COMBO (fill_agent_combo: its data, never the shown text with its badge)."""
+    data = combo.currentData()
+    return data if isinstance(data, str) and data else combo.currentText()
+
+
+def experimental_note(sai, agent):
+    """The words under an agent choice for AGENT: not live-tested yet in this sandbox-ai; "" for the rest."""
+    from . import presets as PR
+    return PR.experimental_text(sai.experimental_agent(agent))
+
+
 class HostCombo(QComboBox):
     """Where a start runs: this machine, or a host of `sandbox-ai hosts` (over SSH). The list is read from the hosts
     file (no SSH) and again by reload() (a page shown: a host may have been added meanwhile); hidden while there is
@@ -1130,7 +1214,8 @@ class HostCombo(QComboBox):
         try:
             others = [e for e in self.sai.host_entries() if e.get("kind") != LOCAL and e.get("name") != LOCAL] \
                 if self.sai.hosts_supported() else []
-        except Exception:  # noqa: BLE001 - a damaged hosts file: this machine still counts
+        except Exception as _exc:  # noqa: BLE001 - a damaged hosts file: this machine still counts
+            applog.swallowed("board_view", "HostCombo.reload: a damaged hosts file: this machine still counts", _exc)
             others = []
         self.blockSignals(True)
         self.clear()
@@ -1159,8 +1244,12 @@ class HostCombo(QComboBox):
 
 class BoardPage(Prerequisites, QWidget):
     """The board of one sandbox, its checks, and Apply / Dry run / Start."""
+
+    PREREQUISITE_LOG = "board"
     opened = Signal(str)  # a project folder was opened
     server_properties = Signal(str, str)  # an MCP server's Properties (its defaults for every start): name, host
+    # The same with a board's values filled in ({limits, variables}), for OK to make them the server's defaults
+    server_defaults = Signal(str, str, object)
 
     def __init__(self, sai, terminal, settings=None):
         super().__init__()
@@ -1204,6 +1293,11 @@ class BoardPage(Prerequisites, QWidget):
         new_button.setToolTip(tr("Ready boards, simple and complex (MCP servers, VPNs, LLM servers, rules), and "
                                  "your own"))
         new_button.clicked.connect(lambda: self.open_gallery())
+        # Save: the board where it belongs (the preset of yours it came from, its project file, or a new preset).
+        save = self.save_button = QPushButton(tr("Save"))
+        save.setToolTip(tr("Keep this board where it belongs (Ctrl+S): in the preset of yours it was made from, else in "
+                           "its project's file, else as a new preset of yours"))
+        save.clicked.connect(lambda: self.save_board())
         # The board as a preset of yours (with its values and folders), or the one of yours it came from updated.
         save_preset = self.save_preset_button = QPushButton(tr("Save as preset…"))
         save_preset.setToolTip(tr("Keep this board as a preset of your own, with its values, folders, notes and "
@@ -1213,6 +1307,12 @@ class BoardPage(Prerequisites, QWidget):
         wizard_button = QPushButton(tr("Wizard…"))
         wizard_button.setToolTip(tr("A new project step by step; it ends on this board"))
         wizard_button.clicked.connect(lambda: self.open_wizard())
+        # Another project folder for this very board: every part and setting stays (change_folder).
+        self.change_folder_button = QPushButton(tr("Change folder…"))
+        self.change_folder_button.setToolTip(tr(
+            "The board works on another folder: every part and setting stays, its main workspace and where its "
+            "project file and changes belong move there (nothing is written before Apply); undo takes it back"))
+        self.change_folder_button.clicked.connect(lambda: self.change_folder())
         # One undo stack per project: the board of each project (its tab) keeps its changes, undo and zoom
         # while another project is shown (sessions, keyed by folder).
         self.undo_group = QUndoGroup(self)
@@ -1253,8 +1353,8 @@ class BoardPage(Prerequisites, QWidget):
         self.cli_button.toggled.connect(lambda on: self.show_cli(on))
         # The project and its folder are named at the top of the window (its project chooser): not again here, the
         # row keeps its room for the buttons. (self.folder is still the board's record of its folder.)
-        layout.addWidget(flow(open_button, new_button, save_preset, wizard_button, undo, redo, arrange, zoom_out,
-                              zoom_in, fit, self.cli_button, self.score_button))
+        layout.addWidget(flow(open_button, new_button, save, save_preset, wizard_button, self.change_folder_button, undo,
+                              redo, arrange, zoom_out, zoom_in, fit, self.cli_button, self.score_button))
         # The board's notes (a project file not trusted yet, placeholders to fill in, restored changes) go to the
         # window's log window, one place for every message; the last one is kept here (not shown).
         # (Not in a layout, so given the page as their parent: a widget of no parent whose signal holds the page
@@ -1324,6 +1424,10 @@ class BoardPage(Prerequisites, QWidget):
         self.findings = QListWidget()
         self.findings.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.findings.itemDoubleClicked.connect(self.finding_clicked)
+        widgets.list_menu(self.findings, lambda: [(
+            tr("Show the part"), self.findings.currentItem() is not None and
+            self.findings.currentItem().data(Qt.ItemDataRole.UserRole) in self.items, tr("Not about a part"),
+            lambda: self.finding_clicked(self.findings.currentItem()))])
         findings_layout.addWidget(self.score)
         findings_layout.addWidget(self.findings, 1)
         self.findings_panel.hide()
@@ -1356,6 +1460,27 @@ class BoardPage(Prerequisites, QWidget):
         self.bypass_button.hide()
         self.bypass_button.clicked.connect(lambda: self.allow_past_tor())
         verdict_row.addWidget(self.bypass_button)
+        # A workspace folder that is not there yet: made at once (else at Start or Apply, after a yes).
+        self.create_button = QPushButton(tr("Create now"))
+        self.create_button.setToolTip(tr("Create the board's workspace folders that do not exist yet (with the "
+                                         "folders above them)"))
+        self.create_button.hide()
+        self.create_button.clicked.connect(lambda: self.create_missing())
+        verdict_row.addWidget(self.create_button)
+        # An image the start needs is not built on its host: built now in a terminal tab, then checked again.
+        self.build_commands = []
+        self.build_button = QPushButton(tr("Build now"))
+        self.build_button.setToolTip(tr("Build the images the launcher's check names (sandbox-ai build ...) in a "
+                                        "terminal tab, then check the board again"))
+        self.build_button.hide()
+        self.build_button.clicked.connect(lambda: self.build_missing())
+        verdict_row.addWidget(self.build_button)
+        # What the start's preparation does now and how far (a bar for the whole, one per item; its line opens the
+        # terminal tab where it runs), or what keeps a start from going on, with the buttons that make it.
+        from .preparing import make_panel
+        self.preparing_panel = make_panel()
+        self.preparing_panel.clicked.connect(lambda: self.show_preparing_where())
+        layout.addWidget(self.preparing_panel)
         layout.addLayout(verdict_row)
         self.apply_button = QPushButton(tr("Apply…"))
         self.apply_button.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
@@ -1395,10 +1520,11 @@ class BoardPage(Prerequisites, QWidget):
         self.set_board(B.with_backend(B.from_argv(sai, self.default_agent(), []),
                                       self.settings().get("default_backend")), None)
         help_view.on_shown_changed(self.show_help_marks)
-        # Ctrl+S saves the board: Apply (it shows the project file and what changes, then writes and trusts it).
+        # Ctrl+S saves the board where it belongs (save_board): its preset of yours, its project file (Apply: it shows
+        # the file and what changes, then writes and trusts it) or a new preset of yours.
         save = QShortcut(QKeySequence(QKeySequence.StandardKey.Save), self)
         save.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        save.activated.connect(lambda: self.apply())
+        save.activated.connect(lambda: self.save_board())
         self.edit_node, self.edit_index = None, 0  # the part whose properties are open, and Undo's index then
 
     def show_cli(self, shown):
@@ -1412,9 +1538,6 @@ class BoardPage(Prerequisites, QWidget):
     @property
     def session_suggestion(self):
         return self.start_controls.suggestion
-
-    def new_session_name(self):
-        self.start_controls.new_name()
 
     def start_session(self):
         """As a session, where the Start controls say (kept for callers)."""
@@ -1439,13 +1562,15 @@ class BoardPage(Prerequisites, QWidget):
     def read_forbidden(self):
         try:
             return self.sai.forbidden()
-        except Exception:  # noqa: BLE001 - shown on the System page
+        except Exception as _exc:  # noqa: BLE001 - shown on the System page
+            applog.swallowed("board_view", "BoardPage.read_forbidden: shown on the System page", _exc)
             return {}
 
     def read_policy(self):
         try:
             return self.sai.policy()[0]
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("board_view", "BoardPage.read_policy failed (went on without it)", _exc)
             return {}
 
     def policy(self):
@@ -1584,7 +1709,7 @@ class BoardPage(Prerequisites, QWidget):
         try:
             function()
         except ValueError as exc:
-            warn(self, tr("Board"), printable(exc))
+            warn(self, tr("Board"), printable_text(exc))
             return
         after = self.board.state()
         if after != before:
@@ -1667,12 +1792,16 @@ class BoardPage(Prerequisites, QWidget):
         if kind == "mcp" and not props:
             names = self.mcp_names()
             props = {"name": names[0] if names else ""}
+        if kind == "browser" and not props:
+            props = {"--browser": "chromium"}  # on the board: a browser (for you, until you choose otherwise)
         if kind == "service" and not props:
             taken = {n.props.get("name") for n in self.board.of_kind("service")}
             name = next(f"service{i}" if i else "service" for i in range(100) if (f"service{i}" if i else "service")
                         not in taken)
+            # The first of your images, else none yet (chosen in the guide or the inspector): never the part's own
+            # name, which names no image of yours (the guide showed "service" as its Image).
             mine = sorted(self.user_image_names() or ())
-            props = {**B.default_service(name), "image": mine[0] if mine else name}
+            props = {**B.default_service(name), "image": mine[0] if mine else ""}
 
         added = []
 
@@ -1696,9 +1825,18 @@ class BoardPage(Prerequisites, QWidget):
         node = self.board.node(node_id)
         if node is None or not guide.questions(node.kind):
             return
-        dialog = guide_view.NodeGuide(node, self.problems, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        seen = self.intro_seen()
+        dialog = guide_view.NodeGuide(node, self.problems, self, skip_intro=node.kind in seen)
+        if self.state is not None and node.kind not in seen:  # its introduction shown: skipped from now on
+            self.state.set("guide_intro_seen", sorted({*seen, node.kind}))
+        if widgets.exec_dropped(dialog) == QDialog.DialogCode.Accepted:
             guide_view.apply(self, node_id, dialog.answers())
+
+    def intro_seen(self):
+        """The kinds of part whose introduction the guide showed already (kept in the app's state): it starts at their
+        first question then ("Show the introduction" in it goes back)."""
+        seen = self.state.get("guide_intro_seen", []) if self.state is not None else []
+        return {kind for kind in seen if isinstance(kind, str)} if isinstance(seen, list) else set()
 
     def connect_nodes(self, source, target):
         if self.board.can_connect(source, target):
@@ -1800,7 +1938,7 @@ class BoardPage(Prerequisites, QWidget):
         menu = QMenu(self)
         for key, text in choices:
             menu.addAction(text).setData(key)
-        chosen = menu.exec(global_point or self.view.viewport().mapToGlobal(self.view.viewport().rect().center()))
+        chosen = widgets.exec_dropped(menu, global_point or self.view.viewport().mapToGlobal(self.view.viewport().rect().center()))
         return chosen.data() if chosen is not None else None
 
     def mount_dest(self, path):
@@ -1838,13 +1976,13 @@ class BoardPage(Prerequisites, QWidget):
                 preset = presets.import_file(self.sai, paths[0])
                 presets.add_mine(self.sai, preset)
             except (OSError, ValueError) as exc:
-                warn(self, tr("Not imported"), printable(exc))
+                warn(self, tr("Not imported"), printable_text(exc))
                 return None
             if key == "preset-board":
                 self.new_from_preset(preset)
             else:
-                inform(self, tr("Board"), tr("Imported as your preset {name}: it is under My presets in the gallery.",
-                                             name=printable(preset.title)))
+                short_notice(self, tr("Board"), tr("Imported as your preset {name}: it is under My presets in the "
+                                                   "gallery.", name=printable(preset.title)))
         elif key == "use":
             self.set_prop(node.id, "path" if node.kind == "workspace" else "source", paths[0])
         else:
@@ -1947,8 +2085,10 @@ class BoardPage(Prerequisites, QWidget):
             menu.addAction(tr("Properties"), lambda: self.show_properties(node_id))
             server = self.board.node(node_id).props if kind == "mcp" else {}
             if server.get("name") and not server.get("project"):  # the server's own (every start), on the MCP page
-                menu.addAction(tr("Defaults for every start…"),
-                               lambda name=str(server["name"]): self.server_properties.emit(name, self.host()))
+                action = menu.addAction(tr("The server's defaults (every start)…"),
+                                        lambda name=str(server["name"]): self.server_properties.emit(name, self.host()))
+                action.setToolTip(tr("The server's own limits, network, folders and variables for every start (the "
+                                     "MCP page's Properties…)"))
             if guide.questions(kind):
                 menu.addAction(tr("Wizard…"), lambda: self.guide_node(node_id))
             menu.addAction(tr("What is this?"), lambda: hit.help_mark.explain())
@@ -2051,7 +2191,7 @@ class BoardPage(Prerequisites, QWidget):
             return None
         try:
             data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return None
         if not isinstance(data, dict) or data.get("format") != PARTS_FORMAT or not isinstance(data.get("parts"), list):
             return None
@@ -2137,7 +2277,31 @@ class BoardPage(Prerequisites, QWidget):
                                                                            engine.props.get("--image-variant"))):
             self.load_user_images()
         problems = B.problems(self.sai, self.board, self.policy(), self.user_image_names())
+        missing = self.missing_folders()
+        problems += B.missing_problems(missing)
+        if getattr(self, "create_button", None) is not None:
+            self.create_button.setVisible(bool(missing))
         score, badges = B.badges(self.board, self.policy(), bases=self.image_bases)
+        self.board_findings = (problems, badges)
+        if getattr(self, "launcher_state", None) != self.board.state():
+            self.launcher_found = []  # (the launcher's problems of another board: its check of this one comes)
+        self.fill_findings()
+        self.score.setText(tr("Security score: {score} of 100", score=score))
+        self.score_button.setText(self.score.text())
+        self.refresh_palette()
+        command = B.command_line(self.sai, self.board)
+        if command != self.preview.toPlainText():  # (the same text set again was laid out again, scrolled to the top)
+            self.preview.setPlainText(command)
+        self.problems = problems
+        self.verdict.setText(tr("The launcher checks the options…"))
+        self.check_timer.start(self.check_delay())
+
+    def fill_findings(self):
+        """The board's findings (B.problems, the badges) and what the launcher's last check of this very board refused
+        about its MCP servers (B.launcher_problems: each problem on its own, on its part, before Start): the parts
+        marked, the list filled."""
+        problems, badges = getattr(self, "board_findings", ([], []))
+        problems = [*problems, *getattr(self, "launcher_found", [])]
         levels, why = {}, {}
         for problem in problems:
             if problem.node is not None and levels.get(problem.node) != "error":
@@ -2165,15 +2329,6 @@ class BoardPage(Prerequisites, QWidget):
                     item.setForeground(QBrush(QColor(color)))
                 item.setData(Qt.ItemDataRole.UserRole, node_id)
                 self.findings.addItem(item)
-        self.score.setText(tr("Security score: {score} of 100", score=score))
-        self.score_button.setText(self.score.text())
-        self.refresh_palette()
-        command = B.command_line(self.sai, self.board)
-        if command != self.preview.toPlainText():  # (the same text set again was laid out again, scrolled to the top)
-            self.preview.setPlainText(command)
-        self.problems = problems
-        self.verdict.setText(tr("The launcher checks the options…"))
-        self.check_timer.start(self.check_delay())
 
     def check(self):
         """The launcher's own verdict: a dry run of the board (no side effects), in the background. One runs at a time,
@@ -2192,7 +2347,7 @@ class BoardPage(Prerequisites, QWidget):
         self.check_running, self.check_pending = True, False
         self.checking_state = self.board.state()  # (one check at a time: the board its verdict is about)
         background(self.sai.host_dry_run, host, agent, B.check_argv(self.sai, self.board, local=host == LOCAL),
-                   timeout=120,
+                   timeout=120, what=f"the launcher's check of the board (a dry run of {agent} on {host})",
                    done=lambda result, error: self.checked(token, result, error, host))
 
     def check_delay(self):
@@ -2212,6 +2367,7 @@ class BoardPage(Prerequisites, QWidget):
         self.host_known.setdefault(key, None)
         self.host_reading.add(key)
         background(self.sai.host_launch_options, host, agent, timeout=90,
+                   what=f"reading which options the sandbox-ai on {host} takes for {agent}",
                    done=lambda found, error: self.host_options_read(host, agent, found, error))
 
     def checked(self, token, result, error, host=None):
@@ -2221,15 +2377,30 @@ class BoardPage(Prerequisites, QWidget):
             self.check_timer.start(0)
             return
         if token != self.check_token or (host is not None and host != self.host()):
+            applog.log("DEBUG", "board", "the launcher's verdict is dropped: it is about an older board or another "
+                                         "host")
             return
         plan, message = result if error is None else (None, str(error))
+        applog.changed(("board verdict", id(self)), "INFO", "board", "the launcher accepts the board's options"
+                       if plan is not None else "the launcher refuses the board's options: "
+                       + applog.tail(message, lines=4, limit=600), quiet="DEBUG")
+        # What it refused about the MCP servers, each problem in the findings (on its part) - all of them, before Start.
+        found = B.launcher_problems(self.board, message) if plan is None and error is None else []
+        if found or getattr(self, "launcher_found", None):
+            self.launcher_found, self.launcher_state = found, getattr(self, "checking_state", None)
+            self.fill_findings()
         if plan is not None:
             self.verdict.setText(tr("The launcher accepts these options."))
             self.verdict.setProperty("role", "notice-ok")
         else:
-            said = " ".join(printable((message or "").strip()[-400:]).split())
-            self.verdict.setText(tr("The launcher refuses: {message}", message=said))
+            # One line here (cut to the room it has); its lines whole in the tooltip and the window of the whole text.
+            whole = printable_text((message or "").strip())
+            said = " ".join(whole[-400:].split())
+            self.verdict.setText(tr("The launcher refuses: {message}", message=said),
+                                 whole=tr("The launcher refuses: {message}", message=whole[-20000:]))
             self.verdict.setProperty("role", "notice-error")
+        self.build_commands = B.build_offers(message) if plan is None else []
+        self.build_button.setVisible(bool(self.build_commands))
         offered = BYPASS_OFFER.search(message or "") if plan is None else None
         self.bypass_target = offered.group(1) if offered else None
         self.bypass_state = getattr(self, "checking_state", None) if offered else None
@@ -2239,6 +2410,9 @@ class BoardPage(Prerequisites, QWidget):
         self.verdict.style().unpolish(self.verdict)
         self.verdict.style().polish(self.verdict)
         self.launcher_ok = plan is not None
+        then, self.after_check = getattr(self, "after_check", None), None
+        if then is not None:  # a Start that waited for this verdict (start: checked again first)
+            then()
 
     def finding_clicked(self, item):
         node_id = item.data(Qt.ItemDataRole.UserRole)
@@ -2418,10 +2592,23 @@ class BoardPage(Prerequisites, QWidget):
         kind = node.kind
         if kind == "agent":
             agent = QComboBox()
-            agent.addItems(list(self.sai.agents))
-            agent.setCurrentText(node.props.get("agent", "claude"))
-            agent.currentTextChanged.connect(lambda text: self.set_prop(node_id, "agent", text))
+            agent.setAccessibleName(tr("Agent"))
+            fill_agent_combo(agent, self.sai, node.props.get("agent", "claude"))
+            # An agent not live-tested yet says so below the choice (a badge only: it starts like any other).
+            experimental = plain_label(experimental_note(self.sai, combo_agent(agent)), role="secondary")
+
+            def agent_chosen(_index, combo=agent, note=experimental):
+                chosen = combo_agent(combo)
+                note.setText(experimental_note(self.sai, chosen))
+                note.setVisible(bool(note.text()))
+                node_ = self.board.node(node_id)
+                if node_ is not None and node_.props.get("agent") != chosen:
+                    # (what only the agent before took goes along: one step of Undo)
+                    self.change(tr("Change {name}", name=tr("Agent")), lambda: B.switch_agent(node_.props, chosen))
+            agent.currentIndexChanged.connect(agent_chosen)
             self.inspector.addRow(tr("Agent"), agent)
+            self.inspector.addRow("", experimental)
+            experimental.setVisible(bool(experimental.text()))  # (in its place first: never a window of its own)
             self.llm_server_row(node)
             self.model_row(node)
             self.text_row(node, "arguments", tr("Agent arguments"), tr("e.g. --verbose"))
@@ -2453,7 +2640,8 @@ class BoardPage(Prerequisites, QWidget):
             if not isinstance(definition, dict):
                 try:
                     definition = self.sai.mcp_definitions().get(node.props.get("name", ""))
-                except Exception:  # noqa: BLE001 - an MCP file that does not load: said in the row
+                except Exception as _exc:  # noqa: BLE001 - an MCP file that does not load: said in the row
+                    applog.swallowed("board_view", "BoardPage.inspect_rows: an MCP file that does not load: sai…", _exc)
                     definition = None
             for label, value in B.mcp_summary(definition):
                 self.inspector.addRow(label, plain_label(value))
@@ -2509,6 +2697,12 @@ class BoardPage(Prerequisites, QWidget):
         self.user_images_failed = rows is None  # not answered: the services' images are not checked then
         self.user_images = rows if isinstance(rows, list) else []
         self.image_bases = bases if isinstance(bases, dict) else {}
+        for combo in getattr(self, "image_combos", []):  # (the guide's question, open meanwhile: its list now)
+            if alive(combo):
+                typed = combo.currentData() if combo.currentText() == combo.itemText(combo.currentIndex()) else \
+                    combo.currentText()
+                self.fill_image_combo(combo, typed if typed != OTHER_IMAGE else "")
+        self.image_combos = []
         self.refresh()
         if self.inspected in self.items and self.board.node(self.inspected) is not None and \
                 self.board.node(self.inspected).kind in ("service", "engine"):
@@ -2524,11 +2718,13 @@ class BoardPage(Prerequisites, QWidget):
             rows, bases = [], {}
             try:
                 rows = self.sai.user_images(host)
-            except Exception:  # noqa: BLE001 - an older sandbox-ai or a host that does not answer: none known
+            except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai or a host that does not answer: none known
+                applog.swallowed("board_view", "load_user_images.read: an older sandbox-ai or a host that does …", _exc)
                 rows = None
             try:
                 bases = self.sai.variant_bases(host)
-            except Exception:  # noqa: BLE001
+            except Exception as _exc:  # noqa: BLE001
+                applog.swallowed("board_view", "load_user_images.read failed (went on without it)", _exc)
                 bases = {}
             return rows, bases
 
@@ -2536,6 +2732,58 @@ class BoardPage(Prerequisites, QWidget):
             rows, bases = result if error is None and isinstance(result, tuple) else (None, {})
             self.set_user_images(rows, bases, host)
         background(read, owner=self, done=done, timeout=180)
+
+    def image_combo(self, current):
+        """A drop-down of your images to choose a service's image from (sandbox-ai images list: those pulled and built,
+        each with its kind and what it is pinned as), then "Other…" for a name typed in - CURRENT chosen, or typed in
+        when it lists no such image. Read in the background where not known yet: the list follows once read. The
+        inspector and the guide's question use it; its items' data are the names."""
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.lineEdit().setPlaceholderText(tr("Choose one of your images, or type a name…"))
+        combo.setAccessibleName(tr("Image"))
+        combo.setToolTip(tr("One of your images (sandbox-ai images list; the Images page adds them), or Other… for a "
+                            "name typed in"))
+        self.fill_image_combo(combo, current)
+        if getattr(self, "user_images", None) is None:
+            self.load_user_images()
+            waiting = getattr(self, "image_combos", [])
+            self.image_combos = [c for c in waiting if alive(c)] + [combo]
+
+        def other(_index):
+            if combo.itemData(_index) == OTHER_IMAGE:
+                combo.setCurrentIndex(-1)
+                combo.setEditText("")
+                combo.lineEdit().setFocus()
+        combo.activated.connect(other)
+        return combo
+
+    def fill_image_combo(self, combo, current):
+        """COMBO (image_combo) with your images as known now, "Other…" last, CURRENT chosen or typed in."""
+        text = str(current or "")
+        combo.blockSignals(True)
+        combo.clear()
+        rows = getattr(self, "user_images", None)
+        for entry in rows or []:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                kind = {"pulled": tr("pulled"), "built": tr("built")}.get(entry.get("kind"), "")
+                combo.addItem(f"{entry['name']} · " + (f"{kind} · " if kind else "")
+                              + printable(entry.get("ref") or entry.get("image") or ""), entry["name"])
+                combo.setItemData(combo.count() - 1, safe_tooltip(printable(entry.get("image") or "")),
+                                  Qt.ItemDataRole.ToolTipRole)
+        if rows is None:
+            combo.addItem(tr("Reading your images (sandbox-ai images list)…"), None)
+            combo.model().item(combo.count() - 1).setEnabled(False)
+        elif not rows:
+            combo.addItem(tr("No images of yours yet (the Images page adds one)"), None)
+            combo.model().item(combo.count() - 1).setEnabled(False)
+        combo.addItem(tr("Other…"), OTHER_IMAGE)
+        index = combo.findData(text) if text else -1
+        combo.setCurrentIndex(index)
+        if index < 0:
+            combo.setEditText(text)
+        combo.blockSignals(False)
 
     def user_image_names(self):
         """The names of your images, or None while they are not known (the check of the services leaves it then)."""
@@ -2579,21 +2827,11 @@ class BoardPage(Prerequisites, QWidget):
         holder = QWidget()
         row = QHBoxLayout(holder)
         row.setContentsMargins(0, 0, 0, 0)
-        image = QComboBox()
-        image.setEditable(True)
-        image.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        for entry in getattr(self, "user_images", None) or []:
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                image.addItem(f"{entry['name']} · {printable(entry.get('ref') or entry.get('image') or '')}",
-                              entry["name"])
-        index = image.findData(props.get("image"))
-        if index >= 0:
-            image.setCurrentIndex(index)
-        else:
-            image.setCurrentIndex(-1)
-            image.setEditText(str(props.get("image", "")))
+        image = self.image_combo(props.get("image"))
 
         def image_chosen(_index=None):
+            if image.currentData() == OTHER_IMAGE:
+                return  # "Other…": the field is emptied for a name typed in
             data = image.currentData()
             text = data if isinstance(data, str) and image.currentText() == image.itemText(image.currentIndex()) \
                 else image.currentText()
@@ -2705,7 +2943,7 @@ class BoardPage(Prerequisites, QWidget):
         host = self.host()
         taken = sorted(self.user_image_names() or ())
         dialog = PullDialog(self, taken) if how == "pull" else BuildImageDialog(self, taken, local=host == LOCAL)
-        if not dialog.exec():
+        if not widgets.exec_dropped(dialog):
             return
         name = dialog.chosen_name() if how == "pull" else dialog.name.text().strip()
         command = AsyncCommand(timeout=7200 if how == "build" else 3600, parent=self)
@@ -2715,7 +2953,7 @@ class BoardPage(Prerequisites, QWidget):
             self.image_commands = [c for c in self.image_commands if c is not command]
             if status != 0:
                 warn(self, tr("Board"), tr("sandbox-ai did not add the image {name}.", name=name),
-                     details=printable((err or out).strip()[-3000:]), modal=False)
+                     details=printable_text((err or out).strip()[-3000:]), modal=False)
                 return
             self.user_images = None
             self.load_user_images()
@@ -2911,8 +3149,8 @@ class BoardPage(Prerequisites, QWidget):
         self.activate(directory)  # the board shown until now is kept for its project
         node = self.board.first("kits")
         if node is not None and name in (node.props.get("--kit") or []):
-            inform(self, tr("Board"), tr("{path} uses the kit {name} already.", path=printable(directory),
-                                         name=printable(name)))
+            short_notice(self, tr("Board"), tr("{path} uses the kit {name} already.", path=printable(directory),
+                                               name=printable(name)))
             return False
 
         def update():
@@ -2991,32 +3229,47 @@ class BoardPage(Prerequisites, QWidget):
 
     def live_done(self, title, results, error):
         if error is not None:
-            warn(self, title, printable(error))
+            warn(self, title, printable_text(error))
             return
         failed = [(out + err).strip() for status, out, err in results if status != 0]
-        text = "\n".join(printable((out + err).strip()) for _, out, err in results)
+        text = "\n".join(printable_text((out + err).strip()) for _, out, err in results)
         (warn if failed else inform)(self, title, text)
 
     # -- the agent's model server: its own provider or one of yours (sandbox-ai llm) --
 
-    def set_llm_servers(self, servers, host=LOCAL):
-        self.llm_loading = False
+    def set_llm_servers(self, servers, host=LOCAL, asking=False):
+        """SERVERS of HOST for the Model choice: the list (ASKING: their models are being asked for now) or the list
+        with the models they answered."""
+        self.llm_loading = bool(asking)
         if host != self.host():  # another host was chosen meanwhile: its servers, never these
+            self.llm_loading = False
             self.load_llm_servers()
             return
         self.llm_servers = servers if isinstance(servers, list) else []
+        self.llm_asking = bool(asking)
         if self.inspected in self.items and self.board.node(self.inspected).kind == "agent":
             self.inspect_timer.start()
 
     def load_llm_servers(self):
-        """The model servers of the host it starts on (sandbox-ai llm list there, and llm models NAME for a host's
-        servers), in the background."""
+        """The model servers of the host it starts on, in the background and in two steps: every one registered there
+        (sandbox-ai llm list), shown at once; then each asked for its models (llm models NAME, all at once with a
+        short timeout: backend.host_llm_servers), shown when they answered. A server that did not answer stays listed,
+        with why."""
         if self.llm_loading:
             return
         host = self.host()
         self.llm_loading = True
-        background(lambda: self.sai.host_llm_servers(host), timeout=180,
-                   done=lambda result, error: self.set_llm_servers(result if error is None else [], host))
+
+        def listed(result, error):
+            if error is not None or not isinstance(result, list) or not result:
+                self.set_llm_servers(result if error is None else [], host)
+                return
+            self.set_llm_servers(result, host, asking=True)
+            if host != self.host():
+                return
+            background(lambda: self.sai.host_llm_servers(host, result), timeout=150,
+                       done=lambda found, failed: self.set_llm_servers(found if failed is None else result, host))
+        background(lambda: self.sai.host_llm_endpoints(host), timeout=90, done=listed)
 
     def llm_server_row(self, node):
         """Beside the agent: the model server it works with, its own provider (cloud) or a registered one as NAME or
@@ -3046,11 +3299,20 @@ class BoardPage(Prerequisites, QWidget):
             self.choose_llm_server(WL.choice_of(combo.currentData() or "", only.isChecked()))
         combo.activated.connect(lambda _index: chosen())
         only.toggled.connect(lambda _on: chosen())
+        # The picker: every model with search, sorts by name, parameters and size, and its tags (model_picker.py)
+        from .model_picker import picker_button
+        picker = picker_button(combo, lambda: WL.picker_rows(self.llm_servers or [], node.props.get("agent", "claude"),
+                                                             self.sai), lambda _value: chosen())
         row.addWidget(combo, 1)
+        row.addWidget(picker)
         row.addWidget(only)
+        self.llm_picker = picker
         self.inspector.addRow(tr("Model server"), holder)
         if self.llm_servers is None:
             self.inspector.addRow(plain_label(tr("Reading the model servers (sandbox-ai llm list)…"), role="secondary"))
+        elif getattr(self, "llm_asking", False):
+            self.inspector.addRow(plain_label(tr("Asking the model servers for their models (sandbox-ai llm models)…"),
+                                              role="secondary"))
         self.llm_combo = combo
         return combo
 
@@ -3112,7 +3374,9 @@ class BoardPage(Prerequisites, QWidget):
         node_id, long = node.id, option.long
         value = node.props.get(long)
         if option.kind == "flag":
-            widget = QCheckBox(elide(option.help.split(";")[0], 70) if option.help else OL.label(long))
+            # (its label in the app's language where there is one; sandbox-ai's help is English)
+            widget = QCheckBox(OL.label(long) if long in OL.OPTION_LABELS or not option.help
+                               else elide(option.help.split(";")[0], 70))
             widget.setChecked(bool(value))
             widget.toggled.connect(lambda on: self.set_prop(node_id, long, bool(on)))
         elif option.kind == "choice":
@@ -3224,14 +3488,20 @@ class BoardPage(Prerequisites, QWidget):
         self.change(tr("Change {name}", name="--workspace-ro"), update)
 
     def mcp_limit_rows(self, node, definition):
-        """The MCP node's own limits for this board's starts (--mcp-limits): empty fields show the server's own (its
-        defaults for every start) as such; a value typed in is checked at once by sandbox-ai's rules and kept only when
-        valid; Reset to defaults empties them. Defaults for every start…: the server's Properties (MCP page)."""
+        """The MCP part's own limits and variables for this board's starts (--mcp-limits, --mcp-env): empty fields and
+        "the server's own" show the server's (its defaults for every start) as such; a value typed in is checked at
+        once by sandbox-ai's rules and kept only when valid. Two buttons of their own size, each saying what it does:
+        "Use the server's limits" discards this board's limits (the server's defaults hold); "Save as the server's
+        defaults…" opens the server's Properties (MCP page) with this board's values filled in, for OK to store them as
+        its defaults for every start. A line says the difference."""
         node_id = node.id
         mcp = MF.mcp_module(self.sai)
         defaults = B.mcp_defaults(self.sai, definition) if self.host() == LOCAL else None
+        name = str(node.props.get("name") or "")
         fields = MF.LimitsFields(MF.limit_checks(mcp), defaults, node.props.get("limits") or {},
-                                 default_text=tr("the server's own"))
+                                 default_text=tr("the server's own"), reset_text=tr("Use the server's limits"),
+                                 reset_tip=tr("Discards this board's limits for {name}: its starts take the server's "
+                                              "own limits (its defaults for every start) again", name=name or "?"))
         fields.setToolTip(tr("This board's limits for the server (--mcp-limits); empty: the server's own. Other "
                              "limits give this board's starts an instance of the server of their own."))
 
@@ -3244,13 +3514,74 @@ class BoardPage(Prerequisites, QWidget):
             fields.setEnabled(False)
             self.inspector.addRow("", plain_label(tr("This sandbox-ai has no --mcp-limits: the server runs with its "
                                                      "own limits."), role="notice-warn"))
-        if node.props.get("project") or not node.props.get("name"):
+        variables = None
+        if isinstance(definition, dict) and ("image" in definition or "rootfs" in definition) and not \
+                node.props.get("project"):
+            rows = MF.board_rows(MF.variable_rows(self.mcp_entry(name, definition), definition),
+                                 node.props.get("variables"))
+            variables = MF.VariablesFields(rows, mcp, self.secret_names(), board=True)
+            variables.setToolTip(tr("This board's variables for the server (--mcp-env): a value that is no secret, or "
+                                    "a secret, in place of the server's own; other values give this board's starts an "
+                                    "instance of the server of their own."))
+
+            def commit_variables():
+                self.set_prop(node_id, "variables", variables.specs() or None)
+            variables.committed.connect(commit_variables)
+            self.inspector.addRow(tr("Variables for this board"), variables)
+            if not B.launcher_knows(self.sai, "--mcp-env"):
+                variables.setEnabled(False)
+                self.inspector.addRow("", plain_label(tr("This sandbox-ai has no --mcp-env: the server runs with its "
+                                                         "own variables."), role="notice-warn"))
+        if node.props.get("project") or not name:
             return
-        server = QPushButton(tr("Defaults for every start…"))
-        server.setToolTip(tr("The server's own limits, network and folders (the MCP page's Properties…)"))
-        server.clicked.connect(lambda _=False, name=node.props.get("name"): self.server_properties.emit(
-            str(name), self.host()))
-        self.inspector.addRow("", server)
+        self.inspector.addRow("", plain_label(tr("These values hold for this board's starts only. \"Use the server's "
+                                                 "limits\" discards this board's limits; \"Save as the server's "
+                                                 "defaults…\" stores the values shown as the server's own, for every "
+                                                 "start."), role="secondary"))
+        server = QPushButton(tr("Save as the server's defaults…"))
+        server.setToolTip(safe_tooltip(tr("Opens the server's Properties (MCP page) with this board's limits and "
+                                          "variables filled in: OK stores them as {name}'s defaults for every start "
+                                          "that uses it (every board and project); Cancel changes nothing",
+                                          name=name)))
+
+        def save_defaults(_=False):
+            values = {"limits": {key: str(value) for key, value in fields.values().items()},
+                      "variables": variables.specs() if variables is not None else []}
+            self.server_defaults.emit(name, self.host(), values)
+        server.clicked.connect(save_defaults)
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(server)
+        row.addStretch(1)  # its own size, not the inspector's whole width
+        self.inspector.addRow("", holder)
+        self.server_defaults_button = server
+
+    def mcp_entry(self, name, definition):
+        """The catalog entry server NAME (DEFINITION) was added from, once the catalogs are read (load_mcp_catalog):
+        the variables it takes, with their descriptions; None before."""
+        entries = getattr(self, "mcp_catalog_entries", None)
+        if entries is None:
+            self.load_mcp_catalog()
+            return None
+        source = str((definition or {}).get("source") or "")
+        return entries.get(source) or entries.get(source.rpartition(":")[2]) or entries.get(name)
+
+    def secret_names(self):
+        """The names of the secrets of the host it starts on (sandbox-ai secrets list), read in the background once
+        per host; [] until then."""
+        host = self.host()
+        known = getattr(self, "secrets_known", {})
+        self.secrets_known = known
+        if host not in known:
+            known[host] = []
+
+            def done(result, error):
+                known[host] = [name for name, _where in result[1]] if error is None and result else []
+                if known[host] and self.inspected in self.items and self.board.node(self.inspected).kind == "mcp":
+                    self.inspect_timer.start()
+            background(lambda: self.sai.host_secrets(host), owner=self, done=done, timeout=60)
+        return list(known[host])
 
     def llm_param_rows(self, node):
         """The LLM node's own parameters for this board's starts (--llm-param KEY=VALUE, forced for them): empty fields
@@ -3296,7 +3627,8 @@ class BoardPage(Prerequisites, QWidget):
     def mcp_names(self):
         try:
             return sorted(self.sai.mcp_definitions())
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("board_view", "BoardPage.mcp_names failed (went on without it)", _exc)
             return []
 
     def mcp_chooser(self, node):
@@ -3355,6 +3687,10 @@ class BoardPage(Prerequisites, QWidget):
             entries = result[0] if isinstance(result, tuple) and result else []
             self.mcp_catalog_names = sorted({str(entry.get("name")) for _prefix, entry in entries
                                              if isinstance(entry, dict) and entry.get("name")}) if not error else []
+            # By id and name: an MCP part's variables (their descriptions, required or secret) from its entry.
+            self.mcp_catalog_entries = {} if error else {
+                key: entry for _prefix, entry in entries if isinstance(entry, dict)
+                for key in (entry.get("id"), entry.get("name")) if isinstance(key, str)}
             if self.inspected in self.items and self.board.node(self.inspected).kind == "mcp":
                 self.inspect_timer.start()
         background(self.sai.mcp_catalog, owner=self, done=done, timeout=60)
@@ -3380,16 +3716,16 @@ class BoardPage(Prerequisites, QWidget):
             self.untrusted.pop(self.key_of(directory), None)
             self.load(board, directory)
             text = tr("{path} has no .sandbox-ai.json yet: Apply writes one.", path=printable(directory))
-            self.show_notice(text) if quiet else inform(self, tr("Board"), text)
+            self.show_notice(text) if quiet else short_notice(self, tr("Board"), text)
             self.show_reasked()
             return True
         except (OSError, ValueError) as exc:
             if quiet:
                 self.load(B.from_argv(self.sai, self.default_agent(), [], workspaces=[directory]), directory)
-                self.show_notice(tr("The project's .sandbox-ai.json cannot be read: {error}", error=printable(exc)),
+                self.show_notice(tr("The project's .sandbox-ai.json cannot be read: {error}", error=printable_text(exc)),
                                  "notice-error")
                 return False
-            warn(self, tr("No project configuration"), printable(exc))
+            warn(self, tr("No project configuration"), printable_text(exc))
             return False
         if review.document is None:
             if quiet:
@@ -3511,7 +3847,7 @@ class BoardPage(Prerequisites, QWidget):
                 B.Board.checked(draft, self.sai, self.policy())
             except ValueError as exc:
                 applog.log("WARNING", "board", f"{printable(directory or key)}: the changes kept in the app's state "
-                           f"file were left out ({printable(exc)})")
+                           f"file were left out ({printable_text(exc)})")
                 draft = None
             before = self.board.state()
             if draft and draft != before and not self.restore_history(entry.get("history"), before, draft):
@@ -3604,6 +3940,77 @@ class BoardPage(Prerequisites, QWidget):
             self.open_project(self.directory, quiet=True)
         self.discard_button.hide()
 
+    def change_folder(self, folder=None):
+        """Change folder…: this board on another project folder (FOLDER, else chosen, the current one preselected).
+        Every part and setting stays; its main workspace and the place of its project file and changes follow, as
+        one undo step; the folder checks run again; nothing is written there before Apply. A folder with a
+        .sandbox-ai.json of its own: asked whether that file is loaded instead (its trust checked as always) - else
+        the board's settings stay and the file is left alone (Start waits for Apply, which writes the board there)."""
+        if folder is None:
+            from .state import file_dialog, run_dialog
+            chosen = run_dialog(file_dialog(self, tr("Change folder"), self.project_folder() or "", "folder"))
+            folder = chosen[0] if chosen else None
+        if not folder:
+            applog.log("DEBUG", "board", "Change folder: no folder chosen")
+            return False
+        folder = os.path.realpath(os.path.expanduser(str(folder)))
+        if self.key_of(folder) == self.key_of(self.directory):
+            applog.log("INFO", "board", f"Change folder: {printable(folder)} is the board's folder already: nothing "
+                                        "changes")
+            return False
+        applog.log("INFO", "board", f"Change folder: from {printable(self.directory or '-')} to {printable(folder)} "
+                                    "asked (is there a project file of its own?)")
+
+        def looked(has_file, error):
+            if error is not None:
+                warn(self, tr("Change folder"), printable_text(error))
+                return
+            if has_file and confirm(self, tr("Change folder"), tr(
+                    "{path} has a project file of its own (.sandbox-ai.json). Load it into the board? (Keep: this "
+                    "board's settings stay and that file is left as it is until you apply.)", path=printable(folder)),
+                    tr("Load it"), reject=tr("Keep this board")):
+                applog.log("INFO", "board", f"Change folder: the project file of {printable(folder)} is loaded "
+                                            "instead of the board")
+                self.open_project(folder, quiet=True)  # its trust is checked as for any project opened
+                return
+            self.switch_folder(folder, own_file=bool(has_file))
+        background(lambda: os.path.isfile(os.path.join(folder, ".sandbox-ai.json")), owner=self, timeout=30,
+                   done=looked)
+        return True
+
+    def switch_folder(self, folder, own_file=False):
+        """The board on FOLDER, kept as it is (change_folder): one undo step; OWN_FILE: the folder's own project file
+        is left alone (the board does not show it: Start waits for Apply)."""
+        before_dir, before = self.directory, self.board.state()
+        board = B.Board.from_state(before)
+        workspaces = board.of_kind("workspace")
+        main = next((n for n in workspaces if self.key_of(n.props.get("path")) == self.key_of(before_dir)), None) \
+            or (workspaces[0] if workspaces else None)
+        if main is not None:
+            main.props["path"] = folder
+        if own_file:
+            self.untrusted[self.key_of(folder)] = PT.path_text(folder)
+            self.reasked = tr("{path} has a project file of its own that this board does not show: Apply writes the "
+                              "board there (it shows what changes and asks) before you start it.", path=printable(folder))
+        self.sources[self.key_of(folder)] = {"digest": None, "trusted": not own_file}
+        self.undo.push(FolderChange(self, tr("Change folder"), before_dir, folder, before, board.state()))
+        applog.log("INFO", "board", f"Change folder: the board is on {printable(folder)} now (main workspace "
+                   f"{'moved' if main is not None else 'none'}; " + ("its own project file is left alone: Start waits "
+                                                                    "for Apply)" if own_file else "no project file "
+                                                                    "there: Apply writes it)"))
+        self.show_reasked()
+        return True
+
+    def move_to_folder(self, folder, state):
+        """FolderChange's step: the board's folder FOLDER and its parts as STATE say; the checks run again, the
+        window's project follows."""
+        self.directory = str(folder) if folder else None
+        self.show_folder()
+        self.restore(state)
+        self.refresh()
+        if self.directory:
+            self.opened.emit(self.directory)
+
     def project_folder(self):
         return self.directory or (self.board.of_kind("workspace")[0].props.get("path")
                                   if self.board.of_kind("workspace") else None)
@@ -3615,9 +4022,11 @@ class BoardPage(Prerequisites, QWidget):
         gallery = PresetGallery(self.sai, self.project_folder(), self.default_agent(), self.policy(), self.board,
                                 self, self.settings().get("default_backend"), host=self.host())
         self.gallery = gallery
-        if gallery.exec() != gallery.DialogCode.Accepted or gallery.result_ is None:
+        chosen = gallery.result_ if gallery.exec() == gallery.DialogCode.Accepted else None
+        widgets.drop_after_exec(gallery)  # (made anew each time)
+        if chosen is None:
             return None
-        preset, values = gallery.result_
+        preset, values = chosen
         return self.new_from_preset(preset, values)
 
     def new_from_preset(self, preset, values=None):
@@ -3630,6 +4039,10 @@ class BoardPage(Prerequisites, QWidget):
         if isinstance(preset, str):
             preset = presets.catalogue(self.sai, self.host()).find(preset)
         directory = self.project_folder()
+        applog.log("INFO", "board", f"new board from the preset {printable(getattr(preset, 'id', '?'))} "
+                   f"({getattr(preset, 'source', '?')}) for {printable(directory or 'no folder')}"
+                   + (f", {len(values)} value(s) filled in" if values else ", its placeholders left to fill in"
+                      if values is None else ""))
         board = presets.build(self.sai, preset, directory, agent=self.default_agent(), values=values,
                               grid=self.grid(), backend=self.settings().get("default_backend"))
         self.load(board, directory, positioned=True)
@@ -3639,6 +4052,37 @@ class BoardPage(Prerequisites, QWidget):
         self.say_left_to_fill()
         self.check_prerequisites(why="preset")  # what the preset needs (an identity, an image variant) made now
         return board
+
+    def save_board(self):
+        """Save (button, Ctrl+S): the board where it belongs - into the preset of yours it was made from, at once and
+        without a question (its name, description, category and notes kept; its folders kept if it kept them), else
+        into the project file (Apply), else as a new preset of yours (Save as preset…'s dialog). "preset", "project"
+        or None (nothing saved)."""
+        from . import presets as PR
+        current = None
+        if getattr(self, "own_preset", None) is not None:
+            current = {p.id: p for p in PR.load_mine(self.sai)[0]}.get(self.own_preset.id)
+        if current is not None:
+            folders = [p.default for p in current.placeholders if p.kind == "folder" and p.default]
+            generated = PR.machine_specific(list(current.options), folders)  # from_board writes it anew
+            try:
+                preset = PR.from_board(self.sai, self.board, current.title, current.description,
+                                       current.category or "simple", ident=current.id,
+                                       keep=bool(folders) or "--workspace" in current.options,
+                                       notes=[n for n in current.notes if n != generated])
+                PR.add_mine(self.sai, preset)
+            except (OSError, ValueError) as exc:
+                warn(self, tr("Not saved"), printable_text(exc))
+                return None
+            self.own_preset = preset
+            applog.log("INFO", "board", f"Save: into your preset {printable(preset.id)} ({printable(preset.title)})")
+            self.show_notice(tr("Saved into your preset {name}.", name=printable(preset.title)), "notice-ok")
+            return "preset"
+        if self.project_folder():
+            applog.log("INFO", "board", f"Save: into the project file of {printable(self.project_folder())} (Apply)")
+            return "project" if self.apply() else None
+        applog.log("INFO", "board", "Save: no folder and no preset of yours: as a new preset (Save as preset…)")
+        return "preset" if self.save_as_preset() is not None else None
 
     def save_as_preset(self, choices=None):
         """The board as a preset of yours (SavePresetDialog unless CHOICES: name, description of several lines,
@@ -3650,10 +4094,19 @@ class BoardPage(Prerequisites, QWidget):
         current = mine.get(self.own_preset.id) if getattr(self, "own_preset", None) is not None else None
         if choices is None:
             dialog = SavePresetDialog(self, self.sai, current)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            choices = dialog.choices() if accepted else None
+            widgets.drop_after_exec(dialog)  # (made anew each time)
+            if not accepted:
+                applog.log("INFO", "board", "Save as preset: cancelled")
                 return None
-            choices = dialog.choices()
+        applog.log("INFO", "board", f"Save as preset: {printable(choices.get('title', ''))!r}, category "
+                   f"{printable(choices.get('category') or 'simple')}, folders and values kept "
+                   f"{bool(choices.get('keep', True))}" + (f", replacing {printable(current.id)}" if current is not None
+                                                           and choices.get("replace") else ""))
         preset = save_board_preset(self, self.sai, self.board, choices, replacing=current)
+        applog.log("INFO" if preset is not None else "WARNING", "board", "Save as preset: " + (
+            f"saved as {printable(preset.id)}" if preset is not None else "not saved (see the message before)"))
         if preset is not None:
             self.own_preset = preset
             self.show_notice(tr("Saved as your preset {name}: New from preset… lists it under My presets.",
@@ -3702,7 +4155,7 @@ class BoardPage(Prerequisites, QWidget):
             def text(value):
                 return value
         form = PlaceholderForm(self.sai, Left, self, agent=B.values(self.board)[0], host=self.host())
-        if widgets.AUTO_ANSWER is not None or form.exec() != QDialog.DialogCode.Accepted:
+        if widgets.AUTO_ANSWER is not None or widgets.exec_dropped(form) != QDialog.DialogCode.Accepted:
             return False
         values = {k: v for k, v in (form.values() or {}).items() if str(v or "").strip()}
         if values:
@@ -3721,6 +4174,7 @@ class BoardPage(Prerequisites, QWidget):
         wizard.written.connect(lambda board, directory: self.wizard_written(board, directory, asked=ask))
         wizard.board_wanted.connect(self.board_for_host)
         wizard.exec()
+        widgets.drop_after_exec(wizard)  # (made anew each time; it wrote what it wrote before it closed)
         return wizard
 
     def board_for_host(self):
@@ -3776,12 +4230,93 @@ class BoardPage(Prerequisites, QWidget):
             self.host_failed.pop((host, agent), None)
         if error is not None and host == self.host():
             self.host_note.setText(self.host_note.text() + " " + tr("Its options could not be read: {error}",
-                                                                    error=printable(str(error))[-200:]))
+                                                                    error=printable_text(str(error))[-200:]))
 
     # -- actions --
 
+    def missing_folders(self):
+        """[(node id, folder)] of the board's workspaces not there on this machine (B.missing_workspaces); none for a
+        start on another host (its folders are that host's)."""
+        return B.missing_workspaces(self.board) if self.host() == LOCAL else []
+
+    def create_missing(self, then=None, ask=False):
+        """Create the board's workspace folders that are not there (the launcher's checks first: refused with the
+        reason where a start would refuse it). ASK: after a short question (Start and Apply), THEN once they are
+        made. True when nothing is missing (THEN is not run then: the caller goes on)."""
+        folders = [folder for _node, folder in self.missing_folders()]
+        if not folders:
+            return True
+        if ask and not confirm(self, tr("Create the folder"), tr(
+                "This folder does not exist yet: {list}\n\nCreate it (with the folders above it) and go on?",
+                list="\n".join(printable(folder) for folder in folders)), tr("Create")):
+            return False
+
+        def made(result, error):
+            if error is not None:
+                warn(self, tr("Not created"), printable_text(error))
+                return
+            self.show_notice(tr("Created: {list}", list=", ".join(printable(folder) for folder in result)))
+            self.refresh()
+            if then is not None:
+                then()
+        background(self.sai.create_folders, folders, owner=self, work=True, source=self.create_button, timeout=60,
+                   done=made)
+        return False
+
+    def build_missing(self):
+        """Build now: the image builds the launcher's check named (B.build_offers), on the board's host, in a terminal
+        tab of the app with their progress (else in the background, their output in the log window); the board is
+        checked again at their end."""
+        commands = list(self.build_commands)
+        if not commands:
+            return
+        from . import preparing as P
+        host = self.host()
+        steps = [[" ".join(args), self.sai.command(*args) if host == LOCAL else self.sai.host_terminal(host, *args)]
+                 for args in commands]
+        in_tab = self.prerequisite_terminal()
+        # Its progress on the Board as a start's preparation's (what is built, its step, how long; the line opens
+        # the tab): "--variant NAME" a variant, else the image of an agent (or of the Tor VPN, ...).
+        # (Every item runs in CHAIN, in the tab or in the background: its status file says how far.)
+        preparation = P.Preparation([P.Item("build", args[args.index("--variant") + 1], in_tab=True)
+                                     if "--variant" in args[:-1] else P.Item("image", args[-1], in_tab=True)
+                                     for args in commands])
+        argv = self.chain_argv(preparation, steps)
+        self.build_button.setEnabled(False)
+        self.track(preparation)
+        applog.log("INFO", "board", f"Build now on {printable(host)}: " + "; ".join(
+            "sandbox-ai " + applog.argv_text(args, 200) for args in commands)
+            + (" (in a terminal tab)" if in_tab is not None else " (in the background, no terminal tab)"))
+
+        def ended(status):
+            applog.log("INFO" if status == 0 else "WARNING", "board", f"Build now ended: exit status {status}"
+                       + ("; the board is checked again" if status == 0 else " - its terminal tab (or the entry "
+                          "before) says why; the board is checked again"))
+            if alive(self):
+                self.untrack(preparation, status == 0)
+                self.build_button.setEnabled(True)
+                if status != 0:
+                    self.show_notice(tr("The build failed (exit status {status}): its terminal tab says why.",
+                                        status=status))
+                self.check()
+        if in_tab is not None and in_tab(argv, tr("Building the image"), ended=ended):
+            return
+
+        def built(result, error):
+            if error is not None or result.returncode != 0:
+                applog.log("ERROR", "board", f"{' '.join(argv[-1:])}: " + printable_text(
+                    str(error) if error is not None else (result.stdout or "") + (result.stderr or ""))[-20000:])
+            ended(1 if error is not None else result.returncode)
+        import subprocess
+        background(lambda: subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL),
+                   owner=self, work=True, timeout=4 * 3600, done=built)
+
     def errors(self):
-        return [p for p in B.problems(self.sai, self.board, self.policy()) if p.level == "error"]
+        """The board's errors, and what the launcher's check of this very board refused about its MCP servers."""
+        found = [p for p in B.problems(self.sai, self.board, self.policy()) if p.level == "error"]
+        if getattr(self, "launcher_state", None) == self.board.state():
+            found += [p for p in getattr(self, "launcher_found", []) if p.level == "error"]
+        return found
 
     def apply(self, then=None, lead=""):
         """Show the project file of the board and what changes, then write and trust exactly it (in a thread).
@@ -3795,6 +4330,8 @@ class BoardPage(Prerequisites, QWidget):
         if not main:
             inform(self, tr("Project configuration"), tr("Add a workspace first: the file is written there."))
             return False
+        if not self.create_missing(then=lambda: self.apply(then, lead), ask=True):
+            return False  # (made first, after a yes: Apply goes on then)
         # Every key that will be trusted is named, what weakens the sandbox marked, and the details show the changes
         # against the version trusted LAST (never against the file in the folder: the agent may have written it).
         intro = tr("Write {path} with this content and trust exactly it? The details show the changes against the "
@@ -3813,7 +4350,7 @@ class BoardPage(Prerequisites, QWidget):
         changed since, or another project's shown by now, is not marked as applied (what changed is no draft then,
         and would be lost)."""
         if error is not None:
-            warn(self, tr("Not written"), printable(error))
+            warn(self, tr("Not written"), printable_text(error))
             if then is not None:
                 warn(self, tr("Not started"), tr("The project file was not written, so the start that needs it "
                                                  "did not happen."))
@@ -3844,7 +4381,7 @@ class BoardPage(Prerequisites, QWidget):
         if then is not None:  # the start waited for the file: it goes on now (no second message in between)
             then()
             return
-        inform(self, tr("Project configuration"), tr("Written and trusted: {path}", path=printable(result)))
+        short_notice(self, tr("Project configuration"), tr("Written and trusted: {path}", path=printable(result)))
 
     def dry_run(self):
         agent, _, _ = B.values(self.board)
@@ -3861,15 +4398,41 @@ class BoardPage(Prerequisites, QWidget):
             return
         show_text(self, tr("Plan (dry run)"), (message + "\n\n" if message else "") + json.dumps(plan, indent=2))
 
-    def start(self, embedded=False, session=None):
+    def start(self, embedded=False, session=None, recheck=True):
         """Start exactly the board (--no-config: a project file is not merged in on top)."""
+        try:
+            agent_ = B.values(self.board)[0]
+        except Exception as exc:  # noqa: BLE001 - only for the log line
+            agent_ = f"? ({type(exc).__name__})"
+        applog.log("INFO", "board", f"Start: the board of {printable(self.directory or 'a new board')} with {agent_} "
+                   f"on {printable(self.host())}" + (f", session {printable(session)}" if session else "")
+                   + (" in a tab of the app" if embedded else "")
+                   + ("" if recheck else " (after the launcher's check)"))
         if B.placeholders(self.board) and not self.fill_in():  # asked for, by name, before anything else
+            applog.log("INFO", "board", "not started: the board's placeholders are not all filled in")
             self.say_left_to_fill()
             return False
         errors = self.errors()
+        found = getattr(self, "launcher_found", [])
+        if errors and recheck and all(problem in found for problem in errors):
+            # Only what the launcher's last check refused - an image not built, an MCP server not added: it may be
+            # there by now (built in a terminal meanwhile), and the check ran when the board last changed. Checked
+            # again, then started or refused by that verdict (a stale one said "not built" once after the build).
+            state, host = self.board.state(), self.host()
+            # (only the board the human started: one changed or another host meanwhile is not started by itself)
+            self.after_check = lambda: self.start(embedded, session, recheck=False) \
+                if self.board.state() == state and self.host() == host else None
+            self.show_notice(tr("The launcher checks the options…"))
+            applog.log("INFO", "board", "the start waits for the launcher's check again (its last check refused: "
+                       + "; ".join(applog.redact(p.text)[:200] for p in errors) + ")")
+            self.check()
+            return False
         if errors:
             warn(self, tr("Not started"), "\n".join(p.text for p in errors))
             return False
+        if not self.create_missing(then=lambda: self.start(embedded, session), ask=True):
+            applog.log("INFO", "board", "the start waits: the board's missing folders are made first (or were not)")
+            return False  # (its folders made first, after a yes: the start goes on then)
         if not any(n.props.get("path") for n in self.board.of_kind("workspace") if n in self.board.included()):
             # Without one the launcher takes the folder the app (or the SSH login) runs in, often HOME, as /work.
             warn(self, tr("Not started"), tr("Add a workspace first: without one the sandbox would get the folder the "
@@ -3906,6 +4469,9 @@ class BoardPage(Prerequisites, QWidget):
         # What it needs on the host (an identity, an image variant, a VPN profile, MCP servers) made last, once every
         # check above passed - nothing is made for a start that is refused anyway; then the start goes on.
         if self.check_prerequisites(then=lambda: self.start(embedded, session)):
+            applog.log("INFO", "board", "the start does not go on now: what it needs on the host is read, made or "
+                                        "missing (the prerequisites' lines say which: it goes on by itself once "
+                                        "made, not when something is missing)")
             return False
         if servers:
             return self.start_from_project_file(servers, embedded, session)
@@ -3960,15 +4526,22 @@ class BoardPage(Prerequisites, QWidget):
                     return False
                 argv = self.sai.host_launch_argv(host, agent, options, agent_args, session or None)
                 title = f"{printable(host)}: {agent}" + (f" ({session})" if session else "")
+                applog.log("INFO", "board", f"the start on {printable(host)} goes to a terminal ({title}), options: "
+                                            f"{applog.argv_text(options, 2000)}")
                 self.terminal(argv, title, embedded=embedded, cwd=None)
                 return True
             argv = self.sai.launch_argv(agent, options, agent_args, session or None)
             workspaces = self.board.of_kind("workspace")
             cwd = workspaces[0].props.get("path") if workspaces else None
             title = agent + (f" ({session})" if session else "")
+            applog.log("INFO", "board", f"the start goes to a terminal ({title}, in {printable(cwd or '?')}), options: "
+                                        f"{applog.argv_text(options, 2000)}")
             self.terminal(argv, title, embedded=embedded, cwd=cwd)
         except Exception as exc:  # noqa: BLE001 - the window stays; the reason is shown
-            warn(self, tr("Not started"), printable(exc))
+            import traceback
+            applog.log("WARNING", "board", f"the start failed: {applog.error_text(exc)}\n"
+                       + applog.redact("".join(traceback.format_exception(exc))[-3000:]))
+            warn(self, tr("Not started"), printable_text(exc))
             return False
         return True
 
@@ -3997,6 +4570,8 @@ class BoardPage(Prerequisites, QWidget):
                                              names=names))
             return False
         state = self.project_file_state(main, document)
+        applog.log("INFO", "board", f"the start uses the project's MCP servers {names}: its project file "
+                                    f"{printable(main)}/.sandbox-ai.json is {state}")
         if state == "same":
             return self.run_start(B.file_start_argv(self.sai, self.board), embedded, session)
         if written:  # just written and trusted, and still not the board (swapped meanwhile?): no second round

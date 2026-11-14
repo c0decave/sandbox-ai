@@ -47,7 +47,7 @@ import unicodedata
 import urllib.parse
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 KINDS = ("skills", "agents", "commands", "prompts")
 INVENTORY_VERSION = 1
 MARKETPLACE_NAME = "sandbox-ai"
@@ -279,7 +279,8 @@ def agent_summary(agent, info, installed, detail):
         elif agent == "opencode":
             parts.append("npm plugins: " + ", ".join(p + (" (off)" if state else "") for p, state in listed))
         else:
-            parts.append("plugins (ignored: not supported for Codex yet): " + ", ".join(p for p, _ in listed))
+            parts.append(f"plugins (ignored: not supported for {'Codex' if agent == 'codex' else 'Hermes'} yet): "
+                         + ", ".join(p for p, _ in listed))
     return "; ".join(parts) or "empty"
 
 
@@ -1624,13 +1625,24 @@ COMMANDS = {"list": cmd_list, "show": cmd_show, "new": cmd_new, "add-skill": cmd
             "add-hook": cmd_add_hook, "remove-hook": cmd_remove_hook, "trust-hooks": cmd_trust_hooks}
 
 
+def changing():
+    """The lock of a change of the kits (filelock.py, kit-changes.lock in sandbox-ai's state folder, outside every
+    kit): two `kits add-plugin` (add-skill, add-hook, ...) at the same moment - the app's Kits page and a terminal -
+    each read a kit's marketplaces.json or hooks.json and wrote it back whole, so one change was lost."""
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
+    return module("filelock").locked(state / "kit-changes")
+
+
 def main(argv, out=print):
     argv = list(argv)
     if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
         argv.insert(0, "list")
     a = parser().parse_args(argv)
     try:
-        return COMMANDS[a.command](a, out)
+        if a.command in ("list", "show", "trust-hooks"):  # (trust-hooks asks a question: never under the lock)
+            return COMMANDS[a.command](a, out)
+        with changing():
+            return COMMANDS[a.command](a, out)
     except (OSError, ValueError) as exc:
         print(f"sandbox-ai kits: {printable(exc)}", file=sys.stderr)
         return 1

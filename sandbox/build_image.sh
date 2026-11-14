@@ -3,10 +3,13 @@ set -euo pipefail
 script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
 script_dir=$(dirname -- "$script_path")
 usage='Usage: sandbox-ai build [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
-                        [-e|--extension-only] codex|claude|opencode|all|VARIANT [podman build options]
+                        [-e|--extension-only] codex|claude|opencode|hermes|dsh|qwen|goose|all|VARIANT
+                        [podman build options]
        sandbox-ai build [-pu|--podman-url URL] [-u|--uv VERSION] [-n|--node IMAGE] team [podman build options]
+       sandbox-ai build [-pu|--podman-url URL] cairn [podman build options]
        sandbox-ai build [-pu|--podman-url URL] [-e|--extension-only] --variant VARIANT [podman build options]
        sandbox-ai build [-pu|--podman-url URL] vpn|tor [podman build options]
+       sandbox-ai build browser [podman build options]
 
 Every build uses the newest releases unless you pin them: the newest npm release
 of the agent (looked up first, so the cached install layer is rebuilt), the
@@ -20,12 +23,33 @@ built if a lookup fails.
 
 The image is labelled with the installed agent version (sandbox-ai.agent-version).
 
+hermes builds localhost/hermes-sandbox with Hermes Agent at the release sandbox-ai
+reviewed (Containerfile.hermes: its tag and commit, its Python dependencies
+hash-pinned in Containerfile.hermes.lock); --pin and HERMES_VERSION take no other
+release; "all" builds it too.
+
+"all" builds every image sandbox-ai has: the seven agents, team, cairn, browser,
+vpn, tor and each of your variants (sandbox-ai images), one build each, so one
+that fails stops none of the others; the end says what was built and what failed.
+
+dsh builds localhost/dsh-sandbox with DeepSeek Harness, qwen localhost/qwen-sandbox
+with Qwen Code, each at the release sandbox-ai reviewed (docs/DSH_REVIEW.md,
+docs/QWEN_CODE_REVIEW.md): its npm install hash-locked in Containerfile.dsh.lock or
+Containerfile.qwen.lock (npm ci --ignore-scripts); --pin and DSH_VERSION or
+QWEN_VERSION take no other release; "all" builds both too.
+
+goose builds localhost/goose-sandbox with Goose at the release sandbox-ai reviewed
+(docs/GOOSE_REVIEW.md): the release'"'"'s Linux binary, checked against the SHA-256
+in Containerfile.goose.lock; --pin and GOOSE_VERSION take no other release, and
+"all" builds it too.
+
 Extensions (sandbox-ai images extend/new): the base image is tagged
 localhost/AGENT-sandbox:base; an agent with an extension gets it as a layer on
 top (localhost/AGENT-sandbox:latest), and building an agent also builds its
 variants (localhost/AGENT-sandbox-NAME). A VARIANT builds its agent'"'"'s base and
-that variant only; --variant VARIANT names one whose name is also a target here (the
-variant tor of the recipe tor: build tor is the image of the Tor VPN). Each layer is
+that variant only; --variant VARIANT names one whose name is also a target here (a
+variant called tor: build tor is the image of the Tor VPN); NAME@AGENT names the
+variant NAME of AGENT where several agents have one of that name. Each layer is
 labelled with the hash of its extension. A variant on one of your images (images new
 NAME --base IMAGE) gets the agent'"'"'s layers on that image instead (Debian 12; nothing
 but uv'"'"'s image is pulled), then its extension.
@@ -35,6 +59,11 @@ but uv'"'"'s image is pulled), then its extension.
 team builds localhost/team-sandbox:latest with Claude Code, Codex and OpenCode, the
 image of a start with --with AGENT (each agent at its newest release, or
 --build-arg CLAUDE_VERSION=X.Y.Z and so on; no extensions).
+
+cairn builds localhost/cairn-sandbox:latest: the team image (build team first)
+with Cairn at the commit sandbox-ai reviewed (docs/CAIRN_REVIEW.md), unchanged,
+its Python dependencies hash-pinned in Containerfile.cairn.lock, for the preset
+cairn-pentest-board (claude --with codex --image localhost/cairn-sandbox:latest).
 
 vpn builds localhost/sandbox-ai-vpn:latest, the container of --vpn with a
 WireGuard, OpenVPN, Mullvad or Tailscale profile (WireGuard, wireguard-go,
@@ -46,8 +75,31 @@ be reached the image is built without it, and the build says so at the end.
 
 tor builds localhost/sandbox-ai-tor:latest, the container of --vpn with a Tor
 profile (vpn add NAME --tor): tor, obfs4proxy, the GeoIP files, nftables. Tor is
-not a VPN; the two images share no software.'
+not a VPN; the two images share no software.
+
+browser builds localhost/sandbox-ai-browser:latest, the sandbox'"'"'s own browser
+(--browser): Debian'"'"'s chromium and firefox-esr, Xvfb, x11vnc and certutil. Its
+Debian base is pulled once and pinned by its digest (the image is labelled
+sandbox-ai.base=docker.io/library/debian@sha256:...); pin another one with
+--build-arg DEBIAN_IMAGE=REPOSITORY@sha256:DIGEST.'
 die_usage() { echo "$usage" >&2; exit 2; }
+
+# launcher.log (sandbox/launchlog.py, which rotates it): what was asked to be built, how long it took, how it ended.
+# Never a secret: a NAME=VALUE whose NAME says token, secret, password or key is written as NAME=[secret].
+build_log_file="${XDG_STATE_HOME:-$HOME/.local/state}/sandbox-ai/launcher.log"
+build_log() {
+  { mkdir -p -m 700 "${build_log_file%/*}" &&
+    (umask 077; printf '%s %s %-7s build: %s\n' "$(date '+%Y-%m-%d %H:%M:%S').000" "$$" "$1" \
+      "$(printf '%s' "$2" | tr -d '\000-\037' |
+         sed -E 's/([A-Za-z0-9_]*([Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss]|[Kk][Ee][Yy])[A-Za-z0-9_]*)=[^ ]*/\1=[secret]/g')" \
+      >>"$build_log_file"); } 2>/dev/null || true
+}
+build_started=$SECONDS
+build_log INFO "asked: sandbox-ai build $*"
+trap 'build_status=$?; build_log "$([[ $build_status == 0 ]] && echo INFO || echo WARNING)" "ended with exit status $build_status after $((SECONDS - build_started)) s$([[ $build_status == 0 ]] || echo " (its output, Podman'"'"'s error at its end, is on the terminal)")"' EXIT
+# The build that ends the script, then its exit with the build's status: it was `exec podman build`, which took the
+# EXIT trap along - the team, Cairn, Tor and browser builds left no end in launcher.log.
+last_step() { "$@"; exit $?; }
 
 podman_cmd=(podman) podman_url="" pin="" uv="" node="" agents=() variant="" variant_kind="" extension_only="" vpn="" team=""
 python=${SANDBOX_AI_PYTHON:-python3}
@@ -63,15 +115,17 @@ while [[ $# -gt 0 ]]; do
     -p|--pin) [[ $# -ge 2 && -n "$2" ]] || die_usage; pin=$2; shift 2 ;;
     -u|--uv) [[ $# -ge 2 && -n "$2" ]] || die_usage; uv=$2; shift 2 ;;
     -n|--node) [[ $# -ge 2 && -n "$2" ]] || die_usage; node=$2; shift 2 ;;
-    codex|claude|opencode) agents=("$1"); shift; break ;;
-    all) agents=(codex claude opencode); shift; break ;;
+    codex|claude|opencode|hermes|dsh|qwen|goose) agents=("$1"); shift; break ;;
+    all) agents=(codex claude opencode hermes dsh qwen goose); shift; break ;;
     vpn) vpn=vpn; shift; break ;;
     tor) vpn=tor; shift; break ;;
+    browser) vpn=browser; shift; break ;;
     team) team=1; shift; break ;;
+    cairn) team=cairn; shift; break ;;
     --variant)
-      # The variant NAME even when NAME is also a target above (the recipe "tor" makes the variant tor, while
-      # "build tor" is the Tor VPN's image).
-      [[ $# -ge 2 && "$2" =~ ^[a-z0-9][a-z0-9_.-]{0,29}$ ]] || die_usage
+      # The variant NAME even when NAME is also a target above (a variant of yours called tor, while "build tor" is
+      # the Tor VPN's image).
+      [[ $# -ge 2 && "$2" =~ ^[a-z0-9][a-z0-9_.-]{0,29}(@[a-z]{1,20})?$ ]] || die_usage
       plan=$("${images[@]}" build-plan "$2" 2>/dev/null) || {
         why=$("${images[@]}" build-plan "$2" 2>&1 >/dev/null | tail -n 1) || true
         echo "sandbox-ai build: $2 is not a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
@@ -79,11 +133,11 @@ while [[ $# -gt 0 ]]; do
       agents=("${plan%% *}") variant=$2; read -r _ variant_kind _ <<<"$plan"; shift 2; break ;;
     [a-z0-9]*)
       # A variant (sandbox-ai images new NAME --from AGENT): its agent's base, then the variant only.
-      [[ "$1" =~ ^[a-z0-9][a-z0-9_.-]{0,29}$ ]] || die_usage
+      [[ "$1" =~ ^[a-z0-9][a-z0-9_.-]{0,29}(@[a-z]{1,20})?$ ]] || die_usage
       # images.py's own refusal (no such variant, a damaged one) is said once, in this command's name
       plan=$("${images[@]}" build-plan "$1" 2>/dev/null) || {
         why=$("${images[@]}" build-plan "$1" 2>&1 >/dev/null | tail -n 1) || true
-        echo "sandbox-ai build: $1 is neither codex, claude, opencode, all, team, vpn, tor nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
+        echo "sandbox-ai build: $1 is neither codex, claude, opencode, hermes, dsh, qwen, goose, all, team, cairn, vpn, tor, browser nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
         exit 2; }
       agents=("${plan%% *}") variant=$1; read -r _ variant_kind _ <<<"$plan"; shift; break ;;
     *) die_usage ;;
@@ -102,8 +156,11 @@ fi
 # (macOS: podman is the client of podman machine's VM, which has its own systemd; never there.)
 if [[ -z "$podman_url" && "$(uname -s)" == Linux && ! -S "/run/user/$(id -u)/bus" ]]; then
   podman_cmd+=(--cgroup-manager=cgroupfs)
-  echo "sandbox-ai build: no systemd user session: building with --cgroup-manager=cgroupfs" \
-       "(sudo loginctl enable-linger $(id -un) gives one)" >&2
+  # (`sandbox-ai build all` says it once, at its first image: SANDBOX_AI_BUILD_CGROUP_SAID=1 for the others)
+  if [[ "${SANDBOX_AI_BUILD_CGROUP_SAID:-}" != 1 ]]; then
+    echo "sandbox-ai build: no systemd user session: building with --cgroup-manager=cgroupfs" \
+         "(sudo loginctl enable-linger $(id -un) gives one)" >&2
+  fi
 fi
 # Names during the build: its RUN steps (apt-get, npm, go) resolve through Podman's own network, which on some hosts
 # answers no name at all (a local resolver such as systemd-resolved's 127.0.0.53 or dnsmasq that the build's
@@ -148,12 +205,35 @@ fi
 # Every podman build and pull from here on says what it does as it goes, bounded and readable (progress.py: its
 # steps as "building the image X (step 4/12): ...", a few lines of each step's output, the time it took, the whole
 # end of a failure); every other podman command runs as it is. SANDBOX_AI_PODMAN_OUTPUT=full: podman's own output.
+raw_podman=("${podman_cmd[@]}")
 podman_cmd=("$python" -I "$script_dir/progress.py" podman "${podman_cmd[@]}")
+if [[ "$vpn" == browser ]]; then
+  [[ -z "$pin$uv$node$extension_only" ]] || {
+    echo "sandbox-ai build: --pin, --uv, --node and --extension-only apply to the agent images, not browser" >&2; exit 2; }
+  [[ -z "$podman_url" ]] || {
+    echo "sandbox-ai build: the browser runs on this machine's Podman (its display socket is the app's): build it without --podman-url" >&2; exit 2; }
+  image=localhost/sandbox-ai-browser:latest
+  # The Debian base pinned by its digest: pulled once here, built with --pull=never from exactly that one (a
+  # --build-arg DEBIAN_IMAGE=... given is used as given).
+  pinned=()
+  given_base=""
+  for arg in "$@"; do case "$arg" in *DEBIAN_IMAGE=*) given_base=1 ;; esac; done
+  if [[ -z "$given_base" ]]; then
+    base=docker.io/library/debian:bookworm-slim
+    "${raw_podman[@]}" pull -q "$base" >/dev/null || { echo "sandbox-ai build: $base could not be pulled" >&2; exit 1; }
+    digest=$("${raw_podman[@]}" image inspect --format '{{.Digest}}' "$base") || digest=""
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "sandbox-ai build: Podman names no digest for $base" >&2; exit 1; }
+    pinned=(--build-arg "DEBIAN_IMAGE=docker.io/library/debian@$digest")
+    echo "sandbox-ai build: the browser's base: docker.io/library/debian@$digest ($base)" >&2
+  fi
+  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=never ${pinned[@]+"${pinned[@]}"} \
+    --tag "$image" --label "sandbox-ai.role=browser" --file "$script_dir/Containerfile.browser" "$@" "$script_dir"
+fi
 if [[ -n "$vpn" ]]; then
   [[ -z "$pin$uv$node$extension_only" ]] || {
     echo "sandbox-ai build: --pin, --uv, --node and --extension-only apply to the agent images, not $vpn" >&2; exit 2; }
   image=localhost/sandbox-ai-$vpn:latest
-  [[ "$vpn" == vpn ]] || exec "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=newer --tag "$image" --label "sandbox-ai.role=$vpn" \
+  [[ "$vpn" == vpn ]] || last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=newer --tag "$image" --label "sandbox-ai.role=$vpn" \
     --file "$script_dir/Containerfile.$vpn" "$@" "$script_dir"
   "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=newer --tag "$image" --label "sandbox-ai.role=$vpn" \
     --file "$script_dir/Containerfile.$vpn" "$@" "$script_dir"
@@ -190,6 +270,14 @@ package() {
   esac
 }
 
+# Hermes, DSH, Qwen Code, Goose: the reviewed release only (its lock file belongs to it), never the newest.
+reviewed_version() {
+  sed -n "s/^ARG ${1^^}_VERSION=//p" "$script_dir/Containerfile.$1"
+}
+reviewed_name() {
+  case "$1" in hermes) echo Hermes ;; dsh) echo "DeepSeek Harness" ;; qwen) echo "Qwen Code" ;; goose) echo Goose ;; esac
+}
+
 team_build() {
   # Every agent at its newest release unless a --build-arg pins it; one image, no extensions.
   local extra=(--pull=newer) labels=() agent given version
@@ -209,7 +297,7 @@ team_build() {
   done
   [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
   [[ -z "$node" ]] || extra+=(--build-arg "NODE_IMAGE=$node")
-  exec "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/team-sandbox:latest --label sandbox-ai.role=team "${labels[@]}" \
+  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/team-sandbox:latest --label sandbox-ai.role=team "${labels[@]}" \
     --file "$script_dir/Containerfile.team" "${extra[@]}" "$@" "$script_dir"
 }
 
@@ -239,6 +327,30 @@ explicit_version() {
   echo "$found"
 }
 
+# Cairn on the team image: the commit sandbox-ai reviewed only (Containerfile.cairn: its commit, its lock); the team
+# image must be there (its agents are Cairn's workers), nothing else is pulled but uv's pinned image.
+cairn_build() {
+  [[ -z "$pin$extension_only$node" ]] || {
+    echo "sandbox-ai build: --pin, --node and --extension-only apply to the agent images, not cairn" >&2; exit 2; }
+  "${raw_podman[@]}" image exists localhost/team-sandbox:latest >/dev/null 2>&1 || {
+    echo "sandbox-ai build: cairn is built on the team image: sandbox-ai build team first" >&2; exit 1; }
+  local commit arg extra=()
+  commit=$(sed -n 's/^ARG CAIRN_COMMIT=//p' "$script_dir/Containerfile.cairn")
+  for arg in "$@"; do
+    case "$arg" in *CAIRN_COMMIT=*|*TEAM_IMAGE=*)
+      echo "sandbox-ai build: Cairn is built at the commit sandbox-ai reviewed, $commit, on the team image" >&2; exit 2 ;;
+    esac
+  done
+  [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
+  echo "sandbox-ai build: cairn -> $commit (on localhost/team-sandbox:latest)" >&2
+  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/cairn-sandbox:latest \
+    --label sandbox-ai.role=cairn --label "sandbox-ai.cairn-commit=$commit" ${extra[@]+"${extra[@]}"} \
+    --file "$script_dir/Containerfile.cairn" "$@" "$script_dir"
+}
+
+if [[ "$team" == cairn ]]; then
+  cairn_build "$@"
+fi
 if [[ -n "$team" ]]; then
   team_build "$@"
 fi
@@ -263,7 +375,14 @@ for agent in "${agents[@]}"; do
   if [[ -n "$given_set" && ! "$given" =~ $semver ]]; then
     echo "sandbox-ai build: ${agent^^}_VERSION expects X.Y.Z: '$given'" >&2; exit 2
   fi
-  if [[ -n "$pin" ]]; then
+  if [[ "$agent" == hermes || "$agent" == dsh || "$agent" == qwen || "$agent" == goose ]]; then
+    reviewed=$(reviewed_version "$agent")
+    for wanted in "$pin" "$given"; do
+      [[ -z "$wanted" || "${wanted#v}" == "$reviewed" ]] || {
+        echo "sandbox-ai build: $(reviewed_name "$agent") is built at the release sandbox-ai reviewed, $reviewed, not $wanted" >&2; exit 2; }
+    done
+    versions[$agent]=$reviewed pinned[$agent]=1
+  elif [[ -n "$pin" ]]; then
     versions[$agent]=$pin pinned[$agent]=1
   elif [[ -n "$given_set" ]]; then
     versions[$agent]=$given pinned[$agent]=given
@@ -285,7 +404,7 @@ for agent in "${agents[@]}"; do
     [[ "${pinned[$agent]:-}" == given ]] || extra+=(--build-arg "${agent^^}_VERSION=${versions[$agent]}")
     [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
     extra+=(--label "sandbox-ai.agent-version=${versions[$agent]}")
-    "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag "localhost/${agent}-sandbox-${variant}:base" \
+    "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag "localhost/${agent}-sandbox-${variant%%@*}:base" \
       --file "$script_dir/Containerfile.$agent" "${extra[@]}" "$@" "$script_dir"
   elif [[ -z "$extension_only" ]]; then
     # Floating base tags are refreshed; pinned ones stay what they name.

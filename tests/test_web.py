@@ -342,8 +342,6 @@ def logged_in():
     ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "high"}, ["defaults", "set", "mode", '"high"']),
     ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "lax", "confirm": True},
      ["defaults", "set", "mode", '"lax"']),
-    ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "on", "confirm": True},
-     ["defaults", "set", "telemetry", '"on"']),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": False, "confirm": True},
      ["defaults", "set", "canaries", "false"]),
     # fewer canary categories than the host has now (its default: credentials and home) is lowering: confirmed;
@@ -505,14 +503,19 @@ def logged_in():
     ("POST", "/api/hosts/ct1/mcp/files/start", {"for": "web", "restart": True, "confirm": True},
      ["mcp", "start", "--for=web", "--json", "--restart", "files"]),
     ("POST", "/api/hosts/ct1/mcp/files/stop", {"confirm": True}, ["mcp", "stop", "files"]),
-    ("POST", "/api/hosts/ct1/mcp-catalog", {}, ["mcp", "catalog"]),
+    ("POST", "/api/hosts/ct1/mcp-catalog", {}, ["mcp", "catalog", "--json"]),
     ("POST", "/api/hosts/ct1/mcp-catalog", {"catalogs": ["/home/u/catalog.json", "https://example.org/c.json"]},
-     ["mcp", "catalog", "--catalog=/home/u/catalog.json", "--catalog=https://example.org/c.json"]),
+     ["mcp", "catalog", "--json", "--catalog=/home/u/catalog.json", "--catalog=https://example.org/c.json"]),
     ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "as": "bw", "mounts": [
         {"target": "/mnt/samples", "host": "/home/u/samples", "mode": "ro"}], "env": ["VT_KEY"], "network": "full",
         "memory": "2g", "pids": 256, "no_pull": True, "backend": "both", "vpn": "home"},
      ["mcp", "add", "--as=bw", "--mount=/mnt/samples=/home/u/samples:ro", "--env=VT_KEY", "--network=full",
       "--memory=2g", "--pids=256", "--no-pull", "--backend=both", "--vpn=home", "hub:binwalk"]),
+    # the variables as `mcp add --env` takes them: NAME, NAME=VALUE (nothing of a secret's), NAME@SECRET
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "gowitness", "env": ["ALLOW_PRIVATE_TARGETS=1", "TOKEN@my_token",
+                                                                  "LABEL=a value with spaces", "EMPTY="]},
+     ["mcp", "add", "--env=ALLOW_PRIVATE_TARGETS=1", "--env=TOKEN@my_token", "--env=LABEL=a value with spaces",
+      "--env=EMPTY=", "gowitness"]),
     ("GET", "/api/hosts/ct1/git-logins", None, ["git-logins", "list", "--json"]),
     ("POST", "/api/hosts/ct1/git-logins", {"url": "http://localhost:3080", "secret": "GITEA", "user": "u.1",
                                             "confirm": True},
@@ -647,6 +650,7 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/approvals/-x", {"decision": "allow", "no_open": True}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "mode", "value": "lax"}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "on"}, 400),
+    ("POST", "/api/hosts/ct1/defaults", {"key": "telemetry", "value": "on", "confirm": True}, 400),  # always off
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": []}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": ["none"]}, 400),
     ("POST", "/api/hosts/ct1/defaults", {"key": "canaries", "value": "none"}, 400),
@@ -887,6 +891,14 @@ def test_each_action_is_one_fixed_command(logged_in, method, path, data, args):
     ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "mounts": [{"target": "/d", "host": "/h=/etc"}]}, 400),
     ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "mounts": [{"target": "d", "host": "/h"}]}, 400),
     ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["sk-the-value"]}, 400),
+    # a value is checked as `mcp add` checks it: never a secret's (by its name or its shape), one line, 1024 at most
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["GITHUB_TOKEN=abc"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["NOTE=gh" + "p_" + "A1b2C3d4" * 5]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["X=two\nlines"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["X@not-a-name"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["X=" + "v" * 1025]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["SANDBOX_AI_MCP_MOUNTS=[]"]}, 400),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "env": ["--catalog=/x"]}, 400),
     ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "network": "allowlist"}, 400),
     ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "memory": "-1"}, 400),
     ("POST", "/api/hosts/ct1/mcp", {"entry": "x", "pids": "many"}, 400),
@@ -1357,6 +1369,17 @@ def test_the_audit_log_keeps_no_secrets(logged_in):
     assert "sk-secret" not in (w.state_dir() / "audit.jsonl").read_text()
 
 
+def test_actions_and_refusals_reach_the_launcher_log_without_secrets(logged_in, home):
+    """launcher.log (sandbox/launchlog.py): who did what from where, and what was refused why - never a body."""
+    logged_in("POST", "/api/hosts/ct1/llm", {"name": "a", "kind": "lmstudio", "url": "http://x",
+                                             "api_key": "sk-secret-in-a-body"})
+    assert logged_in("POST", "/api/hosts/ct1/activity", {"session": "--all"})[0] == 400
+    text = (home / "state" / "sandbox-ai" / "launcher.log").read_text()
+    assert "webui: admin from 192.0.2.1: POST /api/hosts/ct1/llm: done" in text
+    assert "webui: admin from 192.0.2.1: POST /api/hosts/ct1/activity: refused (400)" in text
+    assert "sk-secret-in-a-body" not in text and "correct horse battery" not in text
+
+
 def test_static_files_only_the_listed_ones(logged_in):
     svc = logged_in.svc
     status, headers, body = svc.handle("GET", "/", {"Host": "localhost:8443"}, b"", "192.0.2.1")
@@ -1547,7 +1570,8 @@ def test_over_https_login_and_an_action(server):
     cookie, csrf = headers["Set-Cookie"].split(";")[0], json.loads(body)["csrf"]
     status, _, body = https(server, "GET", "/api/hosts", headers={"Cookie": cookie})
     assert status == 200 and json.loads(body)[0]["name"] == "local"
-    assert json.loads(w.listen_file().read_text())["port"] == server["port"] and w.web_port() == server["port"]
+    assert json.loads(w.listen_file().read_text())["port"] == server["port"]
+    assert w.module("agent_sandbox").web_service_port() == server["port"]  # what --allow-host-port refuses
     # Plain HTTP gets nothing.
     with socket.create_connection(("127.0.0.1", server["port"]), timeout=10) as plain:
         plain.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -2335,6 +2359,7 @@ def test_what_weakens_nothing_needs_no_confirmation(confirming):
     ({}, "mode", "low", True), ({}, "mode", "medium", False),
     ({"telemetry": "strict"}, "telemetry", "off", True), ({"telemetry": "strict"}, "telemetry", None, True),
     ({"telemetry": "on"}, "telemetry", "off", False), ({}, "telemetry", "strict", False),
+    ({"telemetry": "on"}, "telemetry", None, False), ({}, "telemetry", "off", False),  # an old on is off
     ({"canaries": ["credentials", "home", "workspace"]}, "canaries", ["credentials", "home"], True),
     ({"canaries": ["credentials", "home", "workspace"]}, "canaries", None, True),
     ({"canaries": False}, "canaries", ["home"], False), ({"canaries": "all"}, "canaries", "credentials,home", True),
@@ -2350,8 +2375,8 @@ def test_what_weakens_nothing_needs_no_confirmation(confirming):
     ({"subnet": "10.9.0.0/24"}, "subnet", "10.9.0.0/24", False),
 ])
 def test_a_default_is_lowered_by_any_step_down_from_what_the_host_has(logged_in, now, key, value, lowers):
-    """W3: compared with `defaults show` on that host: mode lax < low < medium < high < paranoid, telemetry on < off <
-    strict, canaries as a set (fewer categories, [] or none: no canary files), keep_days lower or new, more
+    """W3: compared with `defaults show` on that host: mode lax < low < medium < high < paranoid, telemetry off <
+    strict (always off: an old on counts as off), canaries as a set (fewer categories, [] or none: no canary files), keep_days lower or new, more
     preset_dirs, another subnet; unset is the default."""
     logged_in.runner.answers[("defaults", "show")] = (0, json.dumps({"values": now, "canary_categories": [
         "credentials", "home", "workspace"], "canary_default": ["credentials", "home"]}), "")
@@ -2364,8 +2389,9 @@ def test_a_default_is_lowered_by_any_step_down_from_what_the_host_has(logged_in,
 def test_the_policy_is_the_services_own_table(logged_in):
     status, out = logged_in("GET", "/api/policy")
     assert status == 200 and out["confirm"] == w.NEEDS_CONFIRM
-    assert out["order"] == {"mode": ["lax", "low", "medium", "high", "paranoid"], "telemetry": ["on", "off", "strict"]}
+    assert out["order"] == {"mode": ["lax", "low", "medium", "high", "paranoid"], "telemetry": ["off", "strict"]}
     script = (WEB / "app.js").read_text()
+    assert "the agents' own settings" not in script and '["on", N_(' not in script, "telemetry is always off: no on"
     assert 'api("GET", "/api/policy")' in script and "function needsConfirm(action)" in script
     for action in ("net-allow", "defaults-lower"):
         assert f'needsConfirm("{action}")' in script
@@ -3661,6 +3687,66 @@ def test_questions_toasts_countdowns_keys_and_the_sessions_end(tmp_path):
     assert "When it ended, 3 questions were open: 1 on local, 2 on ct1." in login
 
 
+ARGUMENTS_DRIVER = FAKE_DOM + r"""
+const rows = () => body.all().filter(n => n.attributes["data-id"]);
+const row = (k) => rows().find(r => `${r.attributes["data-host"]} ${r.attributes["data-id"]}` === k);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "approvals"; state.host = "local";', context);
+  const q = (id, extra) => Object.assign({ host: "ct1", id, run: "r1", sandbox: "web", kind: "mcp", seconds_left: 45,
+    question: "call the MCP tool post of bsky with ...", max_scope: "run" }, extra);
+  const open = [q("1-1", { details: '{\n  "text": "<b>ENDE</b>"\n}', details_whole: false }),
+    q("1-2", { details: '{"t": 1}', details_whole: true }), q("1-3", {})];
+  answer = (method, path) => (method === "GET" && path === "/api/approvals" ? { questions: open, errors: {}, age: {} } : {});
+  await vm.runInContext("pages.approvals(__main)", context); await settle();
+  const details = (k) => row(k).all().find(n => n.tagName === "details");
+  const pre = (k) => details(k).all().find(n => n.tagName === "pre");
+  result.long = [details("ct1 1-1").attributes.open, pre("ct1 1-1").textContent, pre("ct1 1-1").children.map(c => c.tagName),
+    details("ct1 1-1").all().find(n => n.tagName === "summary").textContent, pre("ct1 1-1").getAttribute("tabindex")];
+  result.short = [details("ct1 1-2").attributes.open === undefined, pre("ct1 1-2").textContent];
+  result.none = details("ct1 1-3") === undefined;
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_tool_calls_arguments_in_full_are_in_its_row(tmp_path):
+    """A tool call's arguments in full (approvals list --json "details") in a details element of its row: as text
+    (markup in them stays text), scrollable and focusable, open by itself where the question's line shortens them."""
+    result = run_driver(tmp_path, ARGUMENTS_DRIVER, "arguments")
+    assert result["long"] == ["", '{\n  "text": "<b>ENDE</b>"\n}', ["#text"], "The call's arguments in full", "0"]
+    assert result["short"] == [True, '{"t": 1}'] and result["none"] is True
+
+
+EXPERIMENTAL_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "presets"; state.host = "local";', context);
+  const list = [{ id: "coding-goose", title: "Coding with Goose", origin: "built-in",
+                  experimental: { names: ["goose"] } },
+                { id: "coding-claude", title: "Coding with Claude Code", origin: "built-in" }];
+  answer = (method, path) => (method === "GET" && path.endsWith("/presets") ? list : method === "GET" && path.endsWith("/preset-dirs") ? { dirs: [] } : {});
+  await vm.runInContext("pages.presets(__main)", context); await settle();
+  const rows = body.all().filter(n => n.tagName === "tr");
+  const row = (id) => rows.find(r => r.all().some(n => n.tagName === "td" && n.textContent === id));
+  const badge = (id) => row(id) && row(id).all().find(n => n.tagName === "span" && String(n.className).includes("experimental"));
+  result.marked = badge("coding-goose") ? [badge("coding-goose").textContent, badge("coding-goose").getAttribute("title")] : null;
+  result.plain = badge("coding-claude") === undefined && !!row("coding-claude");
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_experimental_presets_are_listed_and_marked(tmp_path):
+    """A preset that starts something not live-tested yet (presets list --json "experimental") stays in the list,
+    marked so - a badge only, nothing to enable."""
+    result = run_driver(tmp_path, EXPERIMENTAL_DRIVER, "experimental")
+    assert result["marked"] == ["not live-tested yet", "Not live-tested yet: goose"]
+    assert result["plain"] is True
+
+
 PAGE_DRIVER = FAKE_DOM + r"""
 (async () => {
   const result = {};
@@ -3825,6 +3911,57 @@ def test_the_kits_page_is_a_marketplace_browser(tmp_path):
         [k + "team/add-plugin", {"plugin": "oc-foo", "agent": "opencode", "confirm": True}],
         [k + "default/add-marketplace", {"marketplace": "acme", "source": "acme/plugins", "confirm": True}]]
     assert result["older"] == [True, True]
+
+
+MCP_ADD_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "mcp"; state.host = "ct1";', context);
+  const catalog = { problems: [], entries: [
+    { entry: "mcp:telegram", prefix: "mcp", name: "telegram", network: "full", title: "Telegram", published: true, signature: "good", catalog: "sandbox-ai-mcp",
+      env: [{ name: "TELEGRAM_BOT_TOKEN", description: "the bot's token", secret: true, required: true },
+            { name: "TELEGRAM_ALLOWED_CHATS", description: "chat ids, comma-separated", secret: false, required: false }] },
+    { entry: "hub:binwalk", prefix: "hub", name: "binwalk", network: "none", title: "binwalk", published: true, signature: "good", catalog: "axross-mcp-hub", env: [] }] };
+  answer = (method, path) => (method === "GET" ? [] : path.endsWith("/mcp-catalog") ? catalog : { output: "added" });
+  await vm.runInContext("pages.mcp(__main)", context); await settle();
+  result.help = byId("mcp-env-help").textContent;
+  button(main, "Show the catalog").fire("click"); await settle();
+  const rowOf = (entry) => main.all().find(n => n.tagName === "tr" && n.children[0] && n.children[0].textContent === entry);
+  button(rowOf("mcp:telegram"), "Add…").fire("click"); await settle();
+  result.entry = byId("mcp-entry").value;
+  result.prefilled = byId("mcp-env").value;
+  result.variables = byId("mcp-env-help").all().filter(n => n.tagName === "li").map(n => n.textContent);
+  // another entry: its own variables (none), what was filled in for the last one cleared
+  byId("mcp-env").value = "TELEGRAM_BOT_TOKEN@typed";
+  button(rowOf("hub:binwalk"), "Add…").fire("click"); await settle();
+  result.other = [byId("mcp-env").value, byId("mcp-env-help").all().filter(n => n.tagName === "li").length];
+  button(rowOf("mcp:telegram"), "Add…").fire("click"); await settle();
+  byId("mcp-env").value = "TELEGRAM_BOT_TOKEN@my_bot\n  TELEGRAM_ALLOWED_CHATS=1, 2  \n\n";
+  for (const id of ["mcp-as", "mcp-memory", "mcp-pids", "mcp-catalogs", "mcp-add-vpn", "mcp-mounts"]) byId(id).value = "";
+  calls.length = 0;
+  button(main, "Add the server").fire("click"); await settle();
+  result.sent = calls.filter(c => c.method === "POST").map(c => JSON.parse(c.body).env);
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+function __main_of() { return main; }
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_mcp_add_form_takes_values_and_secrets_and_shows_the_catalogs_variables(tmp_path):
+    """The MCP page's add form (app.js in node): Add… on a catalog entry shows the variables its catalog declares,
+    each with its description, whether it is required and whether it is a secret, and fills in the required ones by
+    name; the variables go one per line - NAME, NAME=VALUE (a value with spaces too), NAME@SECRET - as `mcp add
+    --env` takes them."""
+    result = run_driver(tmp_path, MCP_ADD_DRIVER, "mcp-add")
+    assert "NAME=VALUE" in result["help"] and "NAME@SECRET" in result["help"]
+    assert result["entry"] == "mcp:telegram" and result["prefilled"] == "TELEGRAM_BOT_TOKEN"
+    assert result["variables"] == [
+        "TELEGRAM_BOT_TOKEN - the bot's token (required, a secret: NAME or NAME@SECRET, never a value)",
+        "TELEGRAM_ALLOWED_CHATS - chat ids, comma-separated (optional, a value with NAME=VALUE)"]
+    assert result["sent"] == [["TELEGRAM_BOT_TOKEN@my_bot", "TELEGRAM_ALLOWED_CHATS=1, 2"]]
+    assert result["other"] == ["", 0]
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")
@@ -4796,22 +4933,64 @@ def test_the_net_presets_are_the_launchers():
     assert "const NET_PRESETS = " + json.dumps(list(w.NET_PRESETS)) + ";" in (WEB / "app.js").read_text()
 
 
+def test_the_mcp_catalog_with_its_variables_from_mcp_catalog_json(logged_in):
+    """`mcp catalog --json` (0.1.95): each entry with the variables its catalog declares (name, description, secret,
+    required) for the add form; what a catalog says is shown as text only (printable, bounded), a variable without a
+    proper name is left out."""
+    printed = {"entries": [
+        {"entry": "mcp:gowitness", "prefix": "mcp", "name": "gowitness", "title": "gowitness\x1b[2J", "network": "full",
+         "hosts": [], "published": True, "signature": "good", "catalog": "sandbox-ai-mcp (github.com/c0decave)",
+         "env": [{"name": "ALLOW_PRIVATE_TARGETS", "description": "1: also private addresses\x07" + "x" * 900,
+                  "secret": False, "required": False},
+                 {"name": "BAD NAME", "description": "dropped", "secret": False, "required": False},
+                 {"name": "TOKEN", "description": "bot token", "secret": True, "required": True}],
+         "tool_timeout": 630},
+        {"entry": "hub:crtsh", "prefix": "hub", "name": "crtsh", "title": "crt.sh", "network": "allowlist",
+         "hosts": ["crt.sh:443"], "published": False, "signature": "none", "env": "not a list"},
+        "not an entry"],
+        "problems": ["catalog not read: c1: 404"]}
+    logged_in.runner.answers[("mcp", "catalog")] = (0, json.dumps(printed), "")
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {})
+    assert status == 200 and logged_in.runner.calls[-1][1] == ["mcp", "catalog", "--json"]
+    first, second = out["entries"]
+    assert first["entry"] == "mcp:gowitness" and first["published"] is True and first["signature"] == "good"
+    assert "\x1b" not in first["title"] and first["catalog"] == "sandbox-ai-mcp (github.com/c0decave)"
+    assert [v["name"] for v in first["env"]] == ["ALLOW_PRIVATE_TARGETS", "TOKEN"]
+    assert first["env"][1] == {"name": "TOKEN", "description": "bot token", "secret": True, "required": True}
+    assert len(first["env"][0]["description"]) <= 500 and "\x07" not in first["env"][0]["description"]
+    assert second["network"] == "allowlist crt.sh:443" and second["env"] == [] and second["published"] is False
+    assert out["problems"] == ["catalog not read: c1: 404"]
+
+
+def test_the_mcp_catalog_of_an_older_host_is_read_from_its_lines(logged_in):
+    """A host whose sandbox-ai has no `mcp catalog --json` (before 0.1.95): its lines, as before, without variables."""
+    logged_in.runner.answers[("mcp", "catalog", "--json")] = (
+        2, "", "usage: sandbox-ai mcp [-h]\nsandbox-ai mcp: error: unrecognized arguments: --json\n")
+    logged_in.runner.answers[("mcp", "catalog")] = (0, "hub:binwalk  [none]  Binwalk firmware analysis  signed\n", "")
+    status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {})
+    assert status == 200 and [call[1] for call in logged_in.runner.calls[-2:]] == [
+        ["mcp", "catalog", "--json"], ["mcp", "catalog"]]
+    assert out["entries"][0]["entry"] == "hub:binwalk" and out["entries"][0]["env"] == []
+
+
 def test_the_mcp_catalog_and_the_activity_are_read_as_the_commands_print_them(logged_in):
-    """mcp catalog has no --json: its lines are read (entry, network, title, published, signature); activity --json
-    prints JSON lines."""
+    """mcp catalog before 0.1.95 had no --json: its lines are read (entry, network, title, published, signature);
+    activity --json prints JSON lines."""
+    logged_in.runner.answers[("mcp", "catalog", "--json")] = (
+        2, "", "sandbox-ai mcp: error: unrecognized arguments: --json\n")
     logged_in.runner.answers[("mcp", "catalog")] = (0, "hub:binwalk  [none]  Binwalk firmware analysis  signed\n"
                                                        "c0:duck  [full duckduckgo.com]  DuckDuckGo search  (not published yet)  unsigned\n"
-                                                       "garbage line\n", "sandbox-mcp: catalog not read: c1: 404\n")
+                                                       "garbage line\n", "sandbox-ai mcp: catalog not read: c1: 404\n")
     status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {})
     assert status == 200 and out["entries"] == [
         {"entry": "hub:binwalk", "prefix": "hub", "name": "binwalk", "network": "none", "title": "Binwalk firmware analysis",
-         "published": True, "signature": "good", "catalog": "axross-mcp-hub (github.com/c0decave)"},
+         "published": True, "signature": "good", "catalog": "axross-mcp-hub (github.com/c0decave)", "env": []},
         {"entry": "c0:duck", "prefix": "c0", "name": "duck", "network": "full duckduckgo.com", "title": "DuckDuckGo search",
-         "published": False, "signature": "none", "catalog": "c0"}]
+         "published": False, "signature": "none", "catalog": "c0", "env": []}]
     status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {"catalogs": ["https://example.org/mine/catalog.json"]})
     assert status == 200 and [e["catalog"] for e in out["entries"]] == ["axross-mcp-hub (github.com/c0decave)",
                                                                        "example.org/mine/catalog.json"]
-    assert out["problems"] == ["sandbox-mcp: catalog not read: c1: 404"]
+    assert out["problems"] == ["sandbox-ai mcp: catalog not read: c1: 404"]
     logged_in.runner.answers[("activity",)] = (0, '{"kind": "tool", "run": "r1"}\nnot json\n{"kind": "file"}\n', "")
     status, out = logged_in("POST", "/api/hosts/ct1/activity", {"tail": 10, "session": "web"})
     assert status == 200 and out == {"events": [{"kind": "tool", "run": "r1"}, {"kind": "file"}]}
@@ -4837,7 +5016,7 @@ def test_an_mcp_add_refused_for_its_unsigned_catalog_says_so_by_its_code(logged_
                                                        "verify (wrong key); nothing of it is used\n")
     status, out = logged_in("POST", "/api/hosts/ct1/mcp", {"entry": "hub:crtsh"})
     assert status == 502 and out["code"] == "command-failed"
-    logged_in.runner.answers[("mcp", "add")] = (0, "sandbox-mcp: crtsh added\n", "")
+    logged_in.runner.answers[("mcp", "add")] = (0, "sandbox-ai mcp: crtsh added\n", "")
     status, out = logged_in("POST", "/api/hosts/ct1/mcp", {"entry": "hub:crtsh"})
     assert status == 200 and "crtsh added" in out["output"]
 
@@ -5532,7 +5711,7 @@ def test_round_four_of_the_page(tmp_path):
                                    ["POST", "/api/hosts/ct1/teams/review/stop", {"confirm": True}]]
     assert result["teamStart"] == [{"kind": "team-start", "host": "ct1", "team": "duo", "agents": "opencode,codex",
                                     "workspace": "/srv/x", "options": '["--mode","high"]'}]
-    assert result["buildTargets"] == ["claude", "codex", "opencode", "all", "team", "vpn", "tor", "data"]
+    assert result["buildTargets"] == ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose", "all", "team", "cairn", "vpn", "tor", "browser", "data"]
     ask, before = result["imageAsk"]
     assert ask.startswith("Build /home/u/t.sh of ct1 into data?") and before == 0
     assert "Remove the variant data on ct1" in result["imageRemoveAsk"]

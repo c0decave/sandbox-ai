@@ -32,7 +32,7 @@ def test_show_set_unset(config):
     status, lines = run("show", "--json")
     shown = json.loads(lines[0])
     assert status == 0 and shown["values"] == {} and "telemetry" in shown["keys"]
-    assert shown["telemetry_levels"] == ["off", "strict", "on"] and "paranoid" in shown["modes"]
+    assert shown["telemetry_levels"] == ["off", "strict"] and "paranoid" in shown["modes"]
     assert shown["canary_default"] == ["credentials", "home"]
     assert run("set", "telemetry", "strict")[0] == 0
     assert run("set", "mode", "high")[0] == 0
@@ -71,12 +71,52 @@ def test_a_broken_file_is_left_alone(config):
 def test_the_command_line(config):
     env = {**os.environ, "SANDBOX_AI_NO_DEPRECATION": "1"}
     main = ROOT / "sandbox" / "main.py"
+    done = subprocess.run([sys.executable, "-I", str(main), "defaults", "set", "telemetry", "strict"],
+                          capture_output=True, text=True, env=env, timeout=120)
+    assert done.returncode == 0, done.stderr
     done = subprocess.run([sys.executable, "-I", str(main), "defaults", "set", "telemetry", "on"], capture_output=True,
                           text=True, env=env, timeout=120)
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 2 and "telemetry is always off" in done.stderr, "on is gone: never written"
     done = subprocess.run([sys.executable, "-I", str(main), "defaults", "set", "telemetry", "loud"],
                           capture_output=True, text=True, env=env, timeout=120)
     assert done.returncode == 2 and "telemetry is one of" in done.stderr
     done = subprocess.run([sys.executable, "-I", str(main), "defaults"], capture_output=True, text=True, env=env,
                           timeout=120)
-    assert '"on"' in done.stdout and "telemetry" in done.stdout
+    assert '"strict"' in done.stdout and "telemetry" in done.stdout
+
+
+
+def test_two_changes_at_once_keep_both(config, monkeypatch):
+    """Review round 2: `defaults set` read the file, checked the value (a launcher run: seconds) and wrote back what
+    it had read - a second `set` meanwhile (the app, the web interface, the CLI) was lost (a security mode set, then
+    dropped by the other's write). Both changes now hold the file's lock from reading to writing."""
+    import threading
+    assert run("set", "telemetry", "strict")[0] == 0
+    original, inside = d.check, threading.Event()
+
+    def slow_check(document, path):
+        inside.set()
+        threading.Event().wait(0.5)  # the other command reads meanwhile
+        return original(document, path)
+
+    monkeypatch.setattr(d, "check", slow_check)
+    first = threading.Thread(target=run, args=("set", "mode", "high"))
+    first.start()
+    assert inside.wait(30)
+    monkeypatch.setattr(d, "check", original)
+    assert run("set", "keep_days", "90")[0] == 0
+    first.join(60)
+    assert json.loads(config.read_text()) == {"version": 1, "telemetry": "strict", "mode": "high", "keep_days": 90}
+
+
+def test_an_old_on_in_the_file_is_ignored_and_never_written(config, capsys):
+    """Telemetry is always off (0.1.95): `set telemetry on` is refused; a file that still says on is read (and its
+    other keys changed) as if it did not."""
+    with pytest.raises(ValueError, match="telemetry is always off"):
+        d.cli(["set", "telemetry", "on"])
+    assert not config.exists()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({"version": 1, "telemetry": "on"}))
+    assert run("set", "mode", "high")[0] == 0
+    assert json.loads(config.read_text())["mode"] == "high"
+    assert run("unset", "telemetry")[0] == 0 and "telemetry" not in json.loads(config.read_text())

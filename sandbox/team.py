@@ -80,7 +80,7 @@ def load(name):
         data = json.loads(record_path(name).read_text())
     except FileNotFoundError:
         raise ValueError(f"no team {name}; see: sandbox-ai team list") from None
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError(f"the record of team {name} cannot be read: {exc}") from None
     members = data.get("members") if isinstance(data, dict) else None
     if not isinstance(data, dict) or data.get("name") != name or not isinstance(members, list) or len(members) < 2 \
@@ -252,7 +252,7 @@ def post(name, agent, task, out=print, run=subprocess.run):
                      input=task, capture_output=True, text=True, timeout=60, check=False)
         try:
             ident = json.loads(result.stdout.strip().splitlines()[-1])["id"] if result.returncode == 0 else None
-        except (ValueError, IndexError, KeyError, TypeError):
+        except (ValueError, IndexError, KeyError, TypeError, RecursionError):
             ident = None
         if not isinstance(ident, int):
             why = (result.stderr or "").strip().splitlines()[-1:] or [f"status {result.returncode}"]

@@ -35,6 +35,16 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "ENDING_WAIT", 0)
 
 
+@pytest.fixture
+def no_podman(monkeypatch):
+    """No Podman on this machine (on one with Podman too: a CI runner): no pod of a session runs. delete refuses while
+    Podman does not answer, so its tests must not depend on the machine's own."""
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("podman")
+    monkeypatch.setattr(m.liveness(), "RUNNER", missing)
+    m.liveness()._cache.clear()
+
+
 def fake_process(tmp_path, pid, ppid, cmdline=b"python3\0", comm="python3", start=None):
     entry = tmp_path / "proc" / str(pid)
     entry.mkdir()
@@ -121,6 +131,29 @@ def test_start_refuses_running_and_resumes_stopped(scenario, tmp_path, monkeypat
         assert data["options"] == ["--workspace", "/srv/w", "--backend", "podman"]
 
 
+def test_start_of_a_running_session_on_a_terminal_attaches_to_it(tmp_path, monkeypatch, capsys):
+    """Started again while it runs (the app's Start with the name of a running session): on a terminal its terminal
+    is attached instead of 'is running; attach with' and exit status 1; a script still gets the error; a session of
+    another agent is still refused; a paused one says how to continue it."""
+    make_session("busy", pid=77, tmp_path=tmp_path)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m.sys.stdout, "isatty", lambda: True)
+    attached = []
+    monkeypatch.setattr(m, "attach", lambda name: attached.append(name) or 0)
+    launch = Mock(return_value=0)
+    monkeypatch.setattr(m, "launch", launch)
+    a = m.launcher().parse_args(["codex", "--session", "busy"])
+    assert m.start(a, ["codex", "--session", "busy"]) == 0
+    assert attached == ["busy"] and not launch.called
+    assert "runs already: attaching" in capsys.readouterr().err
+    other = m.launcher().parse_args(["claude", "--session", "busy"])
+    with pytest.raises(ValueError, match="attach with"):
+        m.start(other, ["claude", "--session", "busy"])
+    (m.session_dir("busy") / "paused").touch()
+    with pytest.raises(ValueError, match="paused; continue it with: sandbox-ai resume busy"):
+        m.start(a, ["codex", "--session", "busy"])
+
+
 def test_start_warns_when_options_of_a_stopped_session_are_ignored(scenario, monkeypatch, capsys):
     make_session("old")
     monkeypatch.setattr(m, "launch", Mock(return_value=0))
@@ -197,7 +230,7 @@ def test_launch_clears_stale_pod_first(tmp_path, monkeypatch):
     assert order == ["clear", "popen"]
 
 
-def test_wait_ready(scenario, tmp_path):
+def test_wait_ready(scenario, tmp_path, monkeypatch):
     directory = tmp_path / "s"
     (directory / "tmux" / "tmux-0").mkdir(parents=True)
     (directory / "supervisor.log").write_text("boom: image missing\n")
@@ -208,7 +241,8 @@ def test_wait_ready(scenario, tmp_path):
         with pytest.raises(RuntimeError, match="image missing"):
             m.wait_ready(directory, Mock(poll=Mock(return_value=1), returncode=1))
     else:
-        with pytest.raises(RuntimeError, match="within 0"):
+        monkeypatch.setattr(m, "START_IDLE", 0)  # (past its time, a start that says nothing new is given up)
+        with pytest.raises(RuntimeError, match="did not become ready: it said nothing new for 0 s"):
             m.wait_ready(directory, Mock(poll=Mock(return_value=None)), timeout=0)
 
 
@@ -343,6 +377,8 @@ def test_attach(scenario, tmp_path, monkeypatch):
         return
     backend = "podman" if scenario == "happy" else "bwrap"
     make_session("z", backend=backend, pid=71, tmp_path=tmp_path)
+    (m.session_dir("z") / "tmux").mkdir(parents=True, exist_ok=True)
+    (m.session_dir("z") / "tmux" / "attach.sock").touch()  # its terminal relay is up
     client = Mock(return_value=0)
     monkeypatch.setattr(m.launcher(), "attach_client", client)
     assert m.attach("z") == 0
@@ -351,7 +387,7 @@ def test_attach(scenario, tmp_path, monkeypatch):
     assert client.call_args.args[0] == str(m.session_dir("z") / "tmux" / "attach.sock")
 
 
-def test_delete(scenario, tmp_path):
+def test_delete(scenario, tmp_path, no_podman):
     if scenario == "sad":
         make_session("d", pid=80, tmp_path=tmp_path)
         with pytest.raises(ValueError, match="Stop session"):
@@ -491,7 +527,7 @@ def test_rows_survive_damaged_sessions(scenario, tmp_path):
         assert rows[0] == ["bad", "?", "?", "damaged", "-", "-"]
 
 
-def test_delete_removes_read_only_trees(scenario, tmp_path):
+def test_delete_removes_read_only_trees(scenario, tmp_path, no_podman):
     make_session("d")
     cache = m.session_dir("d") / "home" / ("go/pkg/mod" if scenario != "edge" else "x")
     cache.mkdir(parents=True)
@@ -985,7 +1021,7 @@ def test_review_command(scenario, tmp_path, monkeypatch):
         assert "+export A=2" in found["review"]["changes"][0]["diff"]
 
 
-def test_delete_forgets_the_canaries_of_the_home(tmp_path, monkeypatch):
+def test_delete_forgets_the_canaries_of_the_home(tmp_path, monkeypatch, no_podman):
     """A kept HOME keeps its canary files from run to run, recorded outside it; deleting the start forgets them."""
     stopped_session("old", keep=True)
     home = m.session_dir("old") / "home"
@@ -1524,3 +1560,42 @@ def test_launch_records_the_app_tab_it_was_started_in(tmp_path, monkeypatch):
         monkeypatch.setenv("SANDBOX_AI_APP_TAB", value)
         assert m.launch("s", m.load("s"), []) == 0
         assert "app_tab" not in m.load("s"), value
+
+
+def test_delete_refuses_while_podman_cannot_say_whether_its_pod_runs(tmp_path, monkeypatch):
+    """Review round 2: a session whose supervisor is gone looked "stopped" when Podman did not answer (its pod may
+    still run the agent on that HOME), and delete --yes removed its directory, HOME and all, under the running pod.
+    It is refused until Podman answers (prune leaves such a session alone too)."""
+    make_session("d")
+    monkeypatch.setattr(m.liveness(), "pod_live", lambda pod, url=None, fresh=False: None)
+    with pytest.raises(ValueError, match="Podman does not answer"):
+        m.delete("d", yes=True)
+    assert m.session_dir("d").exists()
+    monkeypatch.setattr(m.liveness(), "pod_live", lambda pod, url=None, fresh=False: False)
+    assert m.delete("d", yes=True) == 0 and not m.session_dir("d").exists()
+
+
+def test_attach_waits_for_a_session_still_starting(tmp_path, monkeypatch, capsys):
+    """A running session whose terminal relay is not there yet (still starting: its image, MCP servers or VPN) is
+    waited for, instead of 'relay not reachable: No such file or directory'; a supervisor that ends meanwhile is
+    said with the end of its log."""
+    socket_path = tmp_path / "tmux" / "attach.sock"
+    socket_path.parent.mkdir()
+    monkeypatch.setattr(m, "session_dir", lambda name: tmp_path)
+    ticks = iter(range(1000))
+    monkeypatch.setattr(m, "alive", lambda name, data: True)
+
+    def sleep(seconds):
+        if next(ticks) == 3:
+            socket_path.touch()
+    m.wait_for_terminal("x", {}, socket_path, "x", sleep=sleep)
+    assert "still starting" in capsys.readouterr().err
+    socket_path.unlink()
+    monkeypatch.setattr(m, "alive", lambda name, data: False)
+    (tmp_path / "supervisor.log").write_text("agent-sandbox: Podman failed\n")
+    with pytest.raises(RuntimeError, match="ended while it started:\nagent-sandbox: Podman failed"):
+        m.wait_for_terminal("x", {}, socket_path, "x", sleep=lambda seconds: None)
+    monkeypatch.setattr(m, "alive", lambda name, data: True)
+    clock = iter(range(0, 10000, 100))
+    with pytest.raises(RuntimeError, match=r"has no terminal after \d+ s"):
+        m.wait_for_terminal("x", {}, socket_path, "x", clock=lambda: next(clock), sleep=lambda seconds: None)

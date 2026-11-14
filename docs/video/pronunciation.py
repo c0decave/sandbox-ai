@@ -87,6 +87,10 @@ LEXICON = {
     # the file manager's remote pane, keys, the credentials given to a running sandbox
     "SFTP": "S F T P", "OpenSSH": "open S S H", "Esc": "escape", "Alt": "alt",
     "git push": "git push", "secrets give": "secrets give", "git-logins give": "git logins give", "revoke": "revoke",
+    # 0.1.95: the agents added, the section Monitoring, the sandbox's own browser
+    "Hermes": "/hˈɜːmiːz/", "Qwen Code": "/kwˈɛn kˈəʊd/", "DeepSeek Harness": "deep seek harness", "Goose": "goose",
+    "Monitoring": "monitoring", "Chromium": "chromium", "VNC": "V N C", "Shift": "shift", "Chats": "chats",
+    "Bot": "bot",
 }
 
 # Words of the German narration that English texts share, said the German way on purpose (German words, names

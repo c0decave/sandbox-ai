@@ -28,8 +28,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QRadioButton, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import backend, theme
-from .files import printable
+from . import applog
+from . import backend, theme, widgets
+from .files import printable, printable_text
 from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
@@ -93,7 +94,7 @@ def reach_text(info, now=None):
         return tr("not asked yet")
     seen = info.get("seen")
     if info.get("problem"):
-        return tr("no answer (last seen {seconds} s ago)", seconds=int(now - seen)) if seen else tr("no answer")
+        return tr("no answer (last seen {ago})", ago=widgets.ago(now - seen)) if seen else tr("no answer")
     return tr("yes") if seen else tr("not asked yet")
 
 
@@ -335,6 +336,8 @@ class WebPanel(QWidget):
         self.remove_button = button(tr("Remove…"), tr("sandbox-ai web user remove NAME: its sessions end; asked "
                                                      "first"), self.remove)
         layout.addWidget(flow(self.refresh_button, self.add_button, self.reset_button, self.remove_button))
+        widgets.list_menu(self.users, lambda: [self.reset_button, self.remove_button, None, self.add_button,
+                                               self.refresh_button])
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.listen = QLineEdit()
@@ -367,7 +370,7 @@ class WebPanel(QWidget):
         self.service_url = None
         layout.addWidget(flow(self.cert_button, self.renew_button, self.vendor_button, self.serve_button,
                               self.open_button))
-        self.status = plain_label(role="secondary", selectable=True)
+        self.status = plain_label(role="secondary", selectable=True, log="hosts")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.set_host(None)
@@ -416,7 +419,7 @@ class WebPanel(QWidget):
             # as if they were current (review 6).
             self.loaded_for = None
             fill(self.users, [])
-            self.status.setText(tr("{host}: no answer", host=self.label()) + f" ({printable(str(error))[:300]})")
+            self.status.setText(tr("{host}: no answer", host=self.label()) + f" ({printable_text(str(error))[:300]})")
             self.update_buttons()
             return
         fill(self.users, [[name, since] for name, since in result])
@@ -441,7 +444,7 @@ class WebPanel(QWidget):
         try:
             argv = argv_of()
         except (OSError, ValueError) as exc:
-            warn(self, title, printable(str(exc)))
+            warn(self, title, printable_text(str(exc)))
             return
         self.in_terminal(argv, f"{printable(self.host)}: {title}")
         self.loaded_for = None  # what the terminal changes is read again with Refresh
@@ -502,10 +505,10 @@ class WebPanel(QWidget):
             return
         status, out, err = result if error is None else (1, "", str(error))
         if status != 0:
-            warn(self, title, printable((err or out).strip()[-1500:]) or tr("Failed (exit status {status}).",
+            warn(self, title, printable_text((err or out).strip()[-1500:]) or tr("Failed (exit status {status}).",
                                                                           status=status))
             return
-        self.cert.setText(printable(out.strip()[-600:]))
+        self.cert.setText(printable_text(out.strip()[-600:]))
 
     def vendor(self):
         if self.host is not None:
@@ -552,7 +555,7 @@ class WebPanel(QWidget):
             self.show_service(None, tr("It listens on {listen} of {host}: only {host} itself reaches it. Forward it "
                                        "with: ssh -N -L 8443:{listen} {host} - then open https://localhost:8443/. "
                                        "(No tunnel from here: {error})", listen=printable(listen),
-                                       host=printable(host), error=printable(str(exc))))
+                                       host=printable(host), error=printable_text(str(exc))))
             return
         self.terminal(lambda: argv, tr("web tunnel"))
         url = f"https://localhost:{port}/"
@@ -574,7 +577,7 @@ class WebPanel(QWidget):
 
     def answered(self, title, result, error, again=False):
         status, out, err = result if error is None else (1, "", str(error))
-        text = printable((out + err).strip())[-1500:]
+        text = printable_text((out + err).strip())[-1500:]
         if status != 0:
             warn(self, title, text or tr("Failed (exit status {status}).", status=status))
         else:
@@ -658,6 +661,12 @@ class HostsPage(QWidget):
                       (self.update_button, self.from_here_button, self.update_sudo),
                       (self.install_button, self.update_all_button, self.versions_button)):
             left_layout.addWidget(flow(*group))
+        widgets.list_menu(self.table, lambda: [
+            self.starts_button, self.questions_button, None, self.edit_button, self.test_button,
+            self.update_button, self.from_here_button, self.install_button, None,
+            (tr("Stop all starts on this host…"), self.host() not in (None, "local"), tr("Choose a host first"),
+             self.stop_all), self.remove_button, None,
+            self.add_button, self.update_all_button, self.versions_button, self.refresh_button])
         split.addWidget(left)
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -704,8 +713,7 @@ class HostsPage(QWidget):
         self.telemetry.setAccessibleName(tr("Telemetry"))
         for level, text in (("off", tr("off: no usage statistics, error reports, feedback or update checks "
                                        "(recommended)")),
-                            ("strict", tr("strict: also no other calls than the model's")),
-                            ("on", tr("on: the agents' own settings"))):
+                            ("strict", tr("strict: also no other calls than the model's"))):  # never on
             self.telemetry.addItem(text, level)
         compact_combo(self.telemetry, 22)  # "off: no usage statistics, …" alone was 560 px wide
         self.canaries = QComboBox()
@@ -733,7 +741,7 @@ class HostsPage(QWidget):
         form.addRow(tr("Security mode"), self.mode)
         form.addRow(tr("Canaries"), canary_row)
         form.addRow(tr("Kept starts"), keep_row)
-        form.addRow(tr("Telemetry of Claude Code, Codex and OpenCode"), self.telemetry)
+        form.addRow(tr("Telemetry of the agents (always off)"), self.telemetry)
         # The sandboxes' own networks there (--subnet, --subnet6 of every start that names none): empty, sandbox-ai's.
         self.subnet, self.subnet6 = QLineEdit(), QLineEdit()
         for field, example, name in ((self.subnet, "10.77.0.0/24", tr("Subnet (IPv4)")),
@@ -771,7 +779,7 @@ class HostsPage(QWidget):
         self.task = Task(output=self.updates)
         self.task.setAccessibleName(tr("Update or installation running"))
         layout.addWidget(self.task)
-        self.status = plain_label(role="secondary", selectable=True)
+        self.status = plain_label(role="secondary", selectable=True, log="hosts")
         layout.addWidget(self.status)
         self.entries, self.versions, self.queue, self.results = [], {}, [], []
         self.fleet, self.question_counts = {}, {}
@@ -815,7 +823,7 @@ class HostsPage(QWidget):
         try:
             self.entries = self.sai.host_entries()
         except (OSError, ValueError) as exc:
-            self.status.setText(printable(str(exc)))
+            self.status.setText(printable_text(str(exc)))
             self.entries = []
         after = [(e.get("name"), e.get("ssh")) for e in self.entries if isinstance(e, dict)]
         if announce and getattr(self, "hosts_read", False) and after != before:
@@ -934,7 +942,7 @@ class HostsPage(QWidget):
 
     def add(self):
         dialog = AddHostDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name, ssh, port, identity, description = dialog.values()
         extra = dialog.extra()
@@ -945,7 +953,7 @@ class HostsPage(QWidget):
 
         def done(result, error):
             if error:
-                warn(self, tr("Add a host"), printable(str(error)))
+                warn(self, tr("Add a host"), printable_text(str(error)))
                 return
             self.load_hosts(name)
             self.refresh_requested.emit()
@@ -953,7 +961,7 @@ class HostsPage(QWidget):
             said = [line.strip() for line in str(result or "").splitlines() if line.strip().startswith(("key:", "note:",
                                                                                                     "connection:"))]
             if said:
-                self.status.setText(printable("\n".join([name, *said])))
+                self.status.setText(printable_text("\n".join([name, *said])))
         background(lambda: self.sai.host_add(name, ssh, port, identity, description, **extra), owner=self, work=True,
                    source=self.add_button, timeout=60, done=done)
 
@@ -962,7 +970,7 @@ class HostsPage(QWidget):
         if name in (None, "local"):
             return
         dialog = EditHostDialog(self.entry(name), self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         sudo = dialog.sudo.isChecked()
         if sudo == bool(self.entry(name).get("update_sudo")):
@@ -972,7 +980,7 @@ class HostsPage(QWidget):
                 "Update sandbox-ai on {host} without sudo from now on?", host=self.label(name)), tr("Change")):
             return
         background(self.sai.host_set, name, sudo, owner=self, work=True, source=self.edit_button, timeout=60,
-                   done=lambda result, error: warn(self, tr("Edit {host}", host=name), printable(str(error)))
+                   done=lambda result, error: warn(self, tr("Edit {host}", host=name), printable_text(str(error)))
                    if error else self.load_hosts(name))
 
     def remove(self):
@@ -991,7 +999,7 @@ class HostsPage(QWidget):
 
         def done(result, error):
             if error:
-                warn(self, tr("Remove"), printable(str(error)))
+                warn(self, tr("Remove"), printable_text(str(error)))
                 return
             self.fleet.pop(name, None)
             self.question_counts.pop(name, None)
@@ -1017,6 +1025,43 @@ class HostsPage(QWidget):
             self.load_hosts()
         run_each(self.sai.host_remove, names, owner=self, source=self.remove_button, timeout=60 * len(names), done=done)
 
+    def stop_all(self):
+        """Stop all starts on the chosen host: what runs there read first (`list --json` there, in the background),
+        asked about with that list (start-stop; Cancel the default), then `hosts run HOST -- stop --all --yes`."""
+        name = self.host()
+        if name in (None, "local"):
+            return False
+        self.status.setText(tr("Asking {host} what runs…", host=name))
+
+        def listed(entries, error):
+            if error is not None or not isinstance(entries, list):
+                self.status.setText(printable_text(str(error or tr("not a list"))))
+                return
+            running = [e for e in entries if isinstance(e, dict) and e.get("kind") != "mcp"
+                       and e.get("state") in ("running", "paused", "orphaned")]
+            if not running:
+                self.status.setText(tr("Nothing runs on {host} that could be stopped.", host=name))
+                return
+            names = ", ".join(printable(str(e.get("name"))) for e in running)
+            if not ask_first(self, "start-stop", tr("Stop all"), on_host(name, tr(
+                    "Stop these {count} starts? Each ends as Stop ends it; what a session keeps stays.",
+                    count=len(running))) + "\n\n" + names, tr("Stop all")):
+                self.status.setText("")
+                return
+            self.status.setText(tr("Stopping every start on {host}…", host=name))
+
+            def stopped(result, failed):
+                status, out, err = result if failed is None else (1, "", str(failed))
+                self.status.setText(printable_text(((out or "") + (err or "")).strip())[-500:]
+                                    or tr("exit status {status}", status=status))
+                if status != 0:
+                    widgets.warn(self, tr("Stop all"), printable_text(((out or "") + (err or "")).strip())[-1500:]
+                                 or tr("exit status {status}", status=status), modal=False)
+            background(lambda: self.sai.host_run(name, "stop", "--all", "--yes", timeout=900), owner=self,
+                       work=True, timeout=930, done=stopped)
+        background(self.sai.host_json, name, "list", "--json", owner=self, timeout=90, done=listed)
+        return True
+
     def test(self):
         name = self.host()
         if name is None:
@@ -1025,13 +1070,13 @@ class HostsPage(QWidget):
 
         def done(result, error):
             if error:
-                self.status.setText(printable(str(error)))
+                self.status.setText(printable_text(str(error)))
                 return
             keys = key_lines(result)
             if result.get("error"):
-                self.status.setText(printable("\n".join([f"{name}: {result['error']}", *keys])))
+                self.status.setText(printable_text("\n".join([f"{name}: {result['error']}", *keys])))
             else:
-                self.status.setText(printable("\n".join([f"{name}: {result.get('version')}", *keys])))
+                self.status.setText(printable_text("\n".join([f"{name}: {result.get('version')}", *keys])))
             self.show_doctor(result.get("doctor") or [], name)
         background(self.sai.host_test, name, owner=self, work=True, source=self.test_button, timeout=180, done=done)
 
@@ -1045,7 +1090,7 @@ class HostsPage(QWidget):
 
         def done(result, error):
             if error:
-                self.status.setText(printable(f"{name}: {error}"))
+                self.status.setText(f"{printable(name)}: {printable_text(error)}")
                 return
             self.status.setText(tr("{host}: checked for {backend}", host=name, backend=engine))
             self.show_doctor(result, name)
@@ -1077,7 +1122,7 @@ class HostsPage(QWidget):
         if token != self.defaults_token or name != self.host():
             return  # another host was chosen meanwhile: only its own answer counts
         if error is not None or not isinstance(result, dict):
-            self.defaults_note.setText(printable(tr("{host}: no answer", host=name) + f" ({error})"))
+            self.defaults_note.setText(tr("{host}: no answer", host=printable(name)) + f" ({printable_text(error)})")
             return
         values = result.get("values") if isinstance(result.get("values"), dict) else {}
         self.defaults, self.defaults_host = dict(values), name
@@ -1176,14 +1221,14 @@ class HostsPage(QWidget):
             if error is not None:  # not known what was applied: the defaults read again say it
                 warn(self, tr("Defaults"), tr("Not known how much was saved on {host}: {error}. The values read "
                                               "again show what it has now.", host=self.label(name),
-                                              error=printable(str(error))), modal=False)
+                                              error=printable_text(str(error))), modal=False)
             else:
                 applied, refused, said = result
                 if refused is not None:
                     warn(self, tr("Defaults"), tr(
                         "Saved on {host}: {applied}. Refused: {refused} ({reason}). Not tried: {rest}.",
                         host=self.label(name), applied=", ".join(default_step(*s) for s in applied) or tr("nothing"),
-                        refused=default_step(*refused), reason=printable(said)[-500:] or "?",
+                        refused=default_step(*refused), reason=printable_text(said)[-500:] or "?",
                         rest=", ".join(default_step(*s) for s in steps[len(applied) + 1:]) or tr("nothing")),
                         modal=False)
             self.defaults_host = None
@@ -1203,7 +1248,7 @@ class HostsPage(QWidget):
 
     def versions_read(self, result, error):
         if error:
-            self.status.setText(printable(str(error)))
+            self.status.setText(printable_text(str(error)))
             return
         self.versions = result or {}
         waiting = [name for name, info in self.versions.items() if info and info.get("update")]
@@ -1323,7 +1368,7 @@ class HostsPage(QWidget):
                 self.updates.appendPlainText(printable(tr("  {host}: the update runs in a terminal tab, where sudo "
                                                           "asks for the password", host=name)))
             except (OSError, ValueError) as exc:
-                self.updates.appendPlainText(printable(f"  {exc}"))
+                self.updates.appendPlainText(printable_text(f"  {exc}"))
         self.next_update()
 
     def updates_done(self):
@@ -1351,16 +1396,17 @@ class HostsPage(QWidget):
             return
         try:
             version = self.sai.version()
-        except Exception:  # noqa: BLE001 - only shown
+        except Exception as _exc:  # noqa: BLE001 - only shown
+            applog.swallowed("hosts_page", "HostsPage.install: only shown", _exc)
             version = ""
         dialog = InstallDialog(self.entry(name), version, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         values = dialog.values()
         try:
             self.sai.host_install_args(name, **values)
         except ValueError as exc:
-            warn(self, tr("Install"), printable(str(exc)))
+            warn(self, tr("Install"), printable_text(str(exc)))
             return
         if not ask_first(self, "host-install", tr("Install sandbox-ai on {host}", host=name), tr(
                 "Install sandbox-ai on {host} {how}? An installation there is replaced.", host=self.label(name),
@@ -1394,7 +1440,7 @@ class HostsPage(QWidget):
                 self.updates.appendPlainText(printable(tr("  {host}: the installation runs in a terminal tab, where "
                                                           "sudo asks for the password", host=name)))
             except (OSError, ValueError) as exc:
-                self.updates.appendPlainText(printable(f"  {exc}"))
+                self.updates.appendPlainText(printable_text(f"  {exc}"))
         else:
             (warn if result.get("error") else inform)(self, tr("Install sandbox-ai on {host}", host=name), text,
                                                        details=printable(result.get("output") or "") or None,

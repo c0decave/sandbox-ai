@@ -32,6 +32,8 @@ def registered(tmp_path_factory):
     for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state")):
         patch.setenv(name, str(root / sub))
     patch.setenv("SANDBOX_AI_SECRETS", "file")
+    # The keys a preset's --api-key names (coding-goose: Anthropic's), kept as a user keeps them.
+    patch.setenv("SANDBOX_AI_TEST_API_KEY", "sk-ant-not-a-key")
     sai = backend.SandboxAI()
     conf = root / "wg.conf"
     conf.write_text(f"[Interface]\nPrivateKey = {base64.b64encode(os.urandom(32)).decode()}\nAddress = 10.66.0.2/32\n"
@@ -45,6 +47,7 @@ def registered(tmp_path_factory):
                 ("llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--vpn", "ts", "--model",
                  "Qwen/Qwen3-Coder")]
     commands += [("llm", "add", name, "--kind", kind, "--url", url, "--model", model) for name, kind, url, model in SERVERS]
+    commands.append(("secrets", "set", "ANTHROPIC_API_KEY", "--from-env", "SANDBOX_AI_TEST_API_KEY"))
     for command in commands:
         status, out, err = sai.call(*command)
         assert status == 0, out + err
@@ -110,7 +113,7 @@ def registered_servers(root, board):
     # The images a preset's services name, as `sandbox-ai images pull REFERENCE --as NAME` records them (unchecked).
     images = {name: {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + digit * 64,
                      "id": "sha256:" + digit * 64, "user": user}
-              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"))}
+              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"))}
     (path.parent / "user-images.json").write_text(_json.dumps({"version": 1, "images": images}))
 
 

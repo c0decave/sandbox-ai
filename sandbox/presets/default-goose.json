@@ -1,0 +1,27 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "default-goose",
+  "title": "Goose (default)",
+  "description": "Goose on your project with sandbox-ai's defaults and nothing more: only its maker's model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "translations": {
+    "de": {
+      "title": "Goose (Standard)",
+      "description": "Goose an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur das Modell seines Herstellers ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "goose"
+  ],
+  "options": [
+    "--api-key",
+    "api.anthropic.com=ANTHROPIC_API_KEY"
+  ],
+  "notes": [
+    "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once). Goose sees a placeholder, the connection proxy puts the key in on the wire, and Goose starts with its provider anthropic (its model: --model NAME, or goose configure in the sandbox). Another provider: --api-key api.openai.com=OPENAI_API_KEY or openrouter.ai=OPENROUTER_API_KEY, or a model server of yours with --llm (the preset goose-local-llm).",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-goose (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "Its telemetry is always off and cannot be turned on.",
+    "Goose is not live-tested yet (a start says so); its image first: sandbox-ai build goose (a start builds it when it is missing)."
+  ]
+}

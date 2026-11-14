@@ -55,6 +55,23 @@ def prepare_chromium(environ=None, settings=None):
     return chromium.apply_setting(backend.app_settings() if settings is None else settings, environ)
 
 
+def qt_translations(app):
+    """Qt's own words in the app's language (i18n.language()): the buttons of its dialogs (QInputDialog's Cancel -
+    Rename, New folder, SSH… -, QDialogButtonBox, QMessageBox) and a text field's context menu came in English in a
+    German app. Qt's German (qtbase_de, shipped with PySide6) is loaded and installed in APP; returned (kept by the
+    caller), or None - English, or no such file (Qt's English words then)."""
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    from . import i18n
+    code = i18n.language()
+    if code == "en":
+        return None
+    translator = QTranslator(app)
+    if not translator.load(f"qtbase_{code}", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        return None
+    app.installTranslator(translator)
+    return translator
+
+
 def self_test_report(sai, window, app):
     """The line --self-test prints: what was built and which sandbox-ai it loaded."""
     from PySide6 import __version__ as pyside_version
@@ -140,6 +157,7 @@ def main(argv=None):
     if backend.setting("debug", settings):
         applog.set_debug(True)
     i18n.set_language(settings.get("language", "system"))
+    qt_translations(app)  # (Qt's own words too: its dialogs' buttons, a field's context menu)
     from . import fonts
     fonts.use(settings, app)  # the fonts chosen in the settings, when installed; theme.apply() applies them
     theme.apply(settings.get("theme", "system"), app)

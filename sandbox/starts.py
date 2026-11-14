@@ -60,6 +60,7 @@ reach it. stop ends its pod and records the end; a kept start is then resumed as
 Standard library only.
 """
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -75,6 +76,20 @@ import time
 from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 STATE_ORDER = {"running": 0, "paused": 1, "orphaned": 1, "stopped": 2, "ended": 3, "damaged": 4}
 HISTORY_LIMIT = 256 << 10  # bytes of one name's history; beyond, the oldest entries go
 HISTORY_KEEP = 400         # entries kept when a history is trimmed
@@ -248,7 +263,7 @@ def history(name):
     for line in data.splitlines():
         try:
             entry = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(entry, dict) and isinstance(entry.get("event"), str):
             found.append(entry)
@@ -263,9 +278,14 @@ def write_history(name, found):
         return
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".history-", dir=path.parent)
-    with os.fdopen(fd, "w") as stream:
-        stream.writelines(json.dumps(entry) + "\n" for entry in found)
-    os.replace(temporary, path)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.writelines(json.dumps(entry) + "\n" for entry in found)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def move_history(old, new, ident):
@@ -311,9 +331,14 @@ def write_exit(key, run, status):
     if current is not None and isinstance(current.get("run"), str) and current["run"] != run:
         return  # the end of an earlier run, found late (net.forget_ended): the start runs again since
     fd, temporary = tempfile.mkstemp(prefix=".exit-", dir=directory)
-    with os.fdopen(fd, "w") as stream:
-        json.dump({"run": run, "status": status, "ended": now()}, stream)
-    os.replace(temporary, directory / "exit.json")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"run": run, "status": status, "ended": now()}, stream)
+        os.replace(temporary, directory / "exit.json")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def rewrite_json(path, changes):
@@ -323,9 +348,14 @@ def rewrite_json(path, changes):
         raise ValueError(f"cannot read {path}")
     data.update(changes)
     fd, temporary = tempfile.mkstemp(prefix=".rewrite-", dir=Path(path).parent)
-    with os.fdopen(fd, "w") as stream:
-        json.dump(data, stream, indent=2)
-    os.replace(temporary, path)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, indent=2)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 def keep_days():
@@ -359,7 +389,7 @@ def read_json(path):
     """The JSON object in PATH, or None (missing, unreadable, not an object)."""
     try:
         data = json.loads(Path(path).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -394,7 +424,7 @@ def start_entries(prune=True):
         if prune and sessions.prune(key):
             continue  # ended without a kept HOME: only its history is left
         data = read_json(directory / "session.json")
-        if data is None or data.get("agent") not in ("claude", "codex", "opencode") or \
+        if data is None or data.get("agent") not in AGENTS or \
                 not isinstance(data.get("options"), list):  # as `session list` judges it
             found[key] = {"name": key, "id": key, "kind": "session", "agent": None, "state": "damaged",
                           "home": None, "attachable": False, "directory": str(directory)}
@@ -403,6 +433,12 @@ def start_entries(prune=True):
             state = sessions.status(key, data)
         except (OSError, ValueError, TypeError):
             state = "damaged"
+        terminal = ("ready", "")
+        if state == "running" and hasattr(sessions, "terminal_state"):
+            try:
+                terminal = sessions.terminal_state(key, data)
+            except (OSError, ValueError, TypeError):
+                terminal = ("ready", "")
         ended = read_json(directory / "exit.json") or {}
         keep = sessions.keeps_home(data)
         used = max(value for value in (text(data.get("created")), text(data.get("started")), text(ended.get("ended")),
@@ -413,7 +449,12 @@ def start_entries(prune=True):
                       "kind": "run" if sessions.foreground(data) else "session", "agent": data["agent"],
                       "backend": text(data.get("backend")), "state": state,
                       "home": "kept" if keep else "discarded", "keep": keep,
-                      "attachable": state in ("running", "orphaned") and not sessions.foreground(data),
+                      "attachable": state in ("running", "orphaned") and not sessions.foreground(data)
+                      and terminal[0] not in ("missing", "ended"),
+                      # (a running session: whether its terminal is there yet - starting - or it runs without one)
+                      **({"terminal": terminal[0]} if state == "running" else {}),
+                      **({"terminal_log": terminal[1]} if terminal[0] in ("missing", "ended") else {}),
+                      **({"terminal_step": terminal[1]} if terminal[0] == "starting" and terminal[1] else {}),
                       "run": text(data.get("run")) if state != "stopped" or sessions.foreground(data) else None,
                       "pid": data.get("pid") if state not in ("stopped", "orphaned") else None,
                       "started": text(data.get("started")) or text(data.get("created")),
@@ -485,6 +526,22 @@ def record_services(record_):
     return found
 
 
+def record_browser(record_):
+    """The sandbox's browser (--browser) a running sandbox records in its run.json: {kind, control, profile, vnc,
+    cdp, container}, checked; None without one (or a damaged record)."""
+    value = record_.get("browser") if isinstance(record_, dict) else None
+    if not isinstance(value, dict) or value.get("kind") not in ("chromium", "firefox") or \
+            value.get("control") not in ("human", "agent", "both"):
+        return None
+    vnc = value.get("vnc")
+    vnc = vnc if isinstance(vnc, str) and vnc.startswith("/") and vnc.endswith("/vnc.sock") and len(vnc) < 4096 \
+        and "\n" not in vnc else None
+    cdp = value.get("cdp") if value.get("cdp") == "http://127.0.0.1:9222" else None
+    profile = value.get("profile") if value.get("profile") in ("fresh", "session", "dir") else "fresh"
+    return {"kind": value["kind"], "control": value["control"], "profile": profile, "vnc": vnc, "cdp": cdp,
+            "container": text(value.get("container")), "tor": value.get("tor") is True}
+
+
 def services_text(entry):
     """What the listing says of a start's services, or ""."""
     services = entry.get("services") or []
@@ -542,12 +599,18 @@ def started_for(data):
 def attach_why(entry):
     """Why the start ENTRY has no terminal to attach to, in one word for programs (None: it has one, attachable):
     "mcp" (an MCP server sandbox), "damaged", "stopped" (nothing runs), "foreground" (it runs without tmux, in
-    the foreground of its own terminal or script: a task, no terminal, --no-tmux), "paused" (resume it first).
+    the foreground of its own terminal or script: a task, no terminal, --no-tmux), "paused" (resume it first),
+    "no-terminal" (it runs without the terminal its start should have made: "terminal_log" has its log's end),
+    "ended" (its tmux session has ended - no agent any more - while its sandbox still runs: "terminal_log" too).
     The desktop app and the web interface explain each in their own words."""
     if entry.get("attachable"):
         return None
     if entry.get("kind") == "mcp":
         return "mcp"
+    if entry.get("terminal") == "missing":
+        return "no-terminal"  # it runs, without the terminal its start should have made (its log says why)
+    if entry.get("terminal") == "ended":
+        return "ended"  # its tmux session has ended (the agent and its shell window), its sandbox not (yet)
     if entry.get("state") == "damaged":
         return "damaged"
     if entry.get("state") == "orphaned":
@@ -560,8 +623,9 @@ def attach_why(entry):
 
 
 POD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
-AGENTS = ("claude", "codex", "opencode")  # the launcher's AUTH_TARGETS (a test keeps both the same)
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")  # the launcher's AUTH_TARGETS (a test keeps both the same)
 TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.py's TEAM_NAME
+VPN_TYPES = ("wireguard", "openvpn", "tailscale", "tor")  # vpn.py's TYPES
 
 
 def team_lead(team, leads):
@@ -692,6 +756,14 @@ def entries(include_all=False, prune=True):
         entry["cut"] = cut if cut and all(part in ("remote", "local", "api", "all") for part in cut.split("+")) else None
         entry["killswitch"] = bool(record_.get("net_cut"))
         entry["services"] = record_services(record_)  # --service: the containers of your images beside the agent
+        entry["browser"] = record_browser(record_)  # --browser: the app's Browser button opens its VNC socket
+        # Behind a VPN or Tor (run.json vpn_profile, vpn_type): the app opens no link of its terminal on this host
+        # unasked (it would reach it with this host's own address, past the VPN or Tor).
+        profile = record_.get("vpn_profile")
+        entry["vpn_profile"] = profile if isinstance(profile, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}",
+                                                                                  profile) else None
+        entry["vpn_type"] = record_.get("vpn_type") if record_.get("vpn_type") in VPN_TYPES and entry["vpn_profile"] \
+            else None
     break_helper_cycles(found)
     # Whom each MCP server serves: the starts that reach it, or will at their next start (sandbox-ai mcp attach); the
     # start it was started for (its mcp.json says so) first, if it is one of them. That one is named in "started_for"
@@ -820,7 +892,8 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
     printable = launcher().printable
     try:
         entry = find(name)
-    except ValueError:
+    except ValueError as exc:
+        LOG.info("starts", f"{command} {name}: no start of that name", exc)
         pod = stray_pod(name) if command == "stop" else None
         if pod is not None:
             return stop_stray_pod(pod, module("net").STOP_WAIT if wait is None else wait, out)
@@ -833,6 +906,9 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
                              f"--history {printable(name)}") from None
         raise
     shown = printable(entry["name"])
+    LOG.info("starts", f"{command} asked for {entry['name']} ({entry['kind']}, {entry['state']})"
+                       + ("; with changes: " + LOG.command_line([*workspaces, *mounts, *mcp, *options, *dropped])
+                          if changing else "") + (" (restart)" if restart else ""))
     if entry["kind"] == "mcp":
         if command == "stop":
             return module("mcp").stop(entry["id"][len("mcp-"):])
@@ -890,13 +966,65 @@ def act(command, name, out=print, wait=None, yes=False, review=False, as_json=Fa
     return pause_run(entry, record_, command == "pause")
 
 
+STOP_ALL_STATES = ("running", "paused", "orphaned")
+
+
+def stop_all(out=print, wait=None, yes=False, ask=None, inside=None):
+    """`sandbox-ai stop --all`: every start of this user on this host that runs, is paused or runs on without its
+    launcher (orphaned) - sessions, runs and tasks in the foreground; not the MCP servers, which the starts that use
+    them share - stopped one after another, each as `stop NAME` stops it (the same cleanup). Asked first with the list
+    unless YES (no terminal to ask on: refused without --yes); refused inside a sandbox (INSIDE: liveness's
+    inside_sandbox; it would see none of the host's and must not end them). 0 when every one ended, else 1."""
+    printable = launcher().printable
+    if module("liveness").inside_sandbox() if inside is None else inside:
+        raise ValueError("--all is refused inside a sandbox: run it on the host, where the starts run")
+    targets = [entry for entry in entries() if entry.get("kind") != "mcp" and entry.get("state") in STOP_ALL_STATES]
+    if not targets:
+        LOG.info("starts", "stop --all: nothing to stop (no start runs)")
+        out("nothing to stop: no start runs")
+        return 0
+    listing = ", ".join(f"{printable(e['name'])} ({e['state']})" for e in targets)
+    LOG.info("starts", f"stop --all: {len(targets)} to stop: {listing}")
+    if not yes:
+        if ask is None and not (sys.stdin.isatty() and sys.stdout.isatty()):
+            raise ValueError(f"this stops {len(targets)}: {listing}; confirm with --yes")
+        answer = (ask or input)(f"Stop these {len(targets)} starts: {listing}? [y/N] ")
+        if str(answer).strip().lower() not in ("y", "yes"):
+            LOG.info("starts", "stop --all: not confirmed; nothing stopped")
+            out("nothing stopped")
+            return 1
+    failed = []
+    for number, entry in enumerate(targets, 1):
+        shown = printable(entry["name"])
+        out(f"stopping {shown} ({number}/{len(targets)})")
+        try:
+            act("stop", entry["name"], out, wait=wait)
+        except (ValueError, RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+            failed.append(shown)
+            LOG.warning("starts", f"stop --all: {shown} was not stopped", exc)
+            print(f"sandbox-ai stop: {shown}: {printable(str(exc))}", file=sys.stderr)
+    LOG.log("WARNING" if failed else "INFO", "starts", f"stop --all: stopped {len(targets) - len(failed)} of "
+                                                     f"{len(targets)}" + (f"; not stopped: {', '.join(failed)}"
+                                                                          if failed else ""))
+    out(f"stopped {len(targets) - len(failed)} of {len(targets)}" + (f"; not stopped: {', '.join(failed)}"
+                                                                     if failed else ""))
+    return 1 if failed else 0
+
+
 def stray_pod(name):
     """The running Podman pod NAME names (agent-RUN, or RUN) that no start knows (its launcher is gone, and an older
-    version removed its run directory: gc names these), or None."""
+    version removed its run directory: gc names these), or None. Only sandbox-ai's own (liveness.OWN_POD names, or
+    its labels, as gc judges them): a pod of yours that is merely named agent-... is never stopped and removed."""
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
         return None
+    liveness = module("liveness")
     pod = name if name.startswith("agent-") else f"agent-{name}"
-    return pod if module("liveness").pod_live(pod, fresh=True) else None
+    info = (liveness.pods(fresh=True) or {}).get(pod)
+    if not info or not info["live"]:
+        return None
+    own = liveness.OWN_POD.fullmatch(pod) or liveness.RUN_LABEL in info["labels"] or \
+        liveness.SESSION_LABEL in info["labels"]
+    return pod if own else None
 
 
 def stop_stray_pod(pod, wait, out=print):
@@ -1127,8 +1255,11 @@ def row(entry, colour, mark="", under=None):
     return [t.style(mark, "muted", colour) + t.style(printable(entry["name"]), kind_style(entry), colour),
             t.style(entry["kind"], kind_style(entry), colour),
             printable(entry.get("agent") or "-"),
-            t.style(entry["state"] + (", expired" if entry.get("expired") else ""),
-                    STATE_STYLES.get(entry["state"], "muted"), colour)
+            t.style(entry["state"] + (", expired" if entry.get("expired") else "")
+                    + {"starting": " (starting)", "missing": " (no terminal: see its log)",
+                       "ended": " (no agent: its tmux session ended; see its log)"}.get(entry.get("terminal"), ""),
+                    STATE_STYLES.get(entry["state"], "muted") if entry.get("terminal") not in ("missing", "ended")
+                    else "bad", colour)
             + (t.style(f", {ASK_ALLOW_STATE}", "bad", colour) if entry.get("ask") == "allow" else ""),
             entry.get("home") or "-",
             shown_time(entry.get("started")),
@@ -1167,7 +1298,7 @@ def show(found, out=print, as_json=False, colour=None, flat=False, marks=None):
     rows = [row(entry, colour) for entry in found] if flat else grouped(found, colour, marks or tree_marks())
     # The workspace last: it is the longest and wraps at the terminal's width.
     module("textout").table(HEADERS, rows, out, indent=0, colour=colour,
-                            empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode")
+                            empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode|hermes|dsh|qwen|goose")
 
 
 def event_details(entry):
@@ -1265,10 +1396,14 @@ def parser():
                            ("stop", "end a start; what it keeps stays"),
                            ("delete", "remove a stopped start with its kept HOME")):
         sub = commands.add_parser(command, help=text_, allow_abbrev=False)
-        sub.add_argument("name", metavar="NAME")
+        sub.add_argument("name", metavar="NAME", **({"nargs": "?"} if command == "stop" else {}))
         if command == "stop":
             sub.add_argument("-w", "--wait", type=float, metavar="SECONDS",
-                             help="how long to wait for it to end (default 30)")
+                             help="how long to wait for it (each of them) to end (default 30)")
+            sub.add_argument("-a", "--all", action="store_true",
+                             help="every start of yours on this host that runs, is paused or orphaned (sessions, "
+                                  "runs, tasks; not the MCP servers), one after another; asked first with the list")
+            sub.add_argument("-y", "--yes", action="store_true", help="with --all: without asking")
         if command == "delete":
             sub.add_argument("-y", "--yes", action="store_true", help="confirm the removal of its HOME")
         if command == "resume":
@@ -1346,6 +1481,12 @@ def main(argv, out=print):
                 raise ValueError("--older-than DAYS: 0 or more")
             show_gc(gc(args.older_than, args.dry_run), out, args.json)
             return 0
+        if args.command == "stop" and (args.all or args.name is None):
+            if args.all == (args.name is not None) or (args.yes and not args.all):
+                raise ValueError("stop takes NAME, or --all (with --yes: without asking)")
+            return stop_all(out, wait=args.wait, yes=args.yes)
+        if args.command == "stop" and args.yes:
+            raise ValueError("--yes goes with --all")
         if args.command in ("attach", "pause", "resume", "stop", "delete"):
             review, restore = getattr(args, "review_home", False), getattr(args, "restore_home", False)
             if getattr(args, "json", False) and not (review or restore):

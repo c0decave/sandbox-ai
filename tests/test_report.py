@@ -664,3 +664,31 @@ def test_every_text_of_the_logs_is_shown_escaped(tmp_path):
     text = R.render(data, "md")
     assert not re.search(r"(?<!\\)\]\(#y\)", text) and "\x1b" not in text and "\x1b" not in page
     assert "\\<script\\>" in text and "\\|x" in text  # no markup, no cell of its own
+
+
+def test_the_llm_traffic_section_only_when_asked_and_never_the_conversation(tmp_path, monkeypatch):
+    logs = make_logs(tmp_path / "logs")
+    secret_words = "the secret plan of the project"
+    jsonl(logs / f"llm-traffic-20261111-100000-{RUN}.jsonl", [
+        {"version": 1, "n": 1, "time": "2026-11-11T10:05:00.000Z", "run": RUN, "source": "llm", "endpoint": "gpu",
+         "api": "chat", "model": "qwen3-coder", "status": 200, "ms": 1234, "digests": ["a", "b"],
+         "request": {"model": "qwen3-coder", "messages": [{"role": "user", "content": secret_words}]},
+         "response": {"text": f"{secret_words} {BEARER}", "tool_calls": [{"name": "bash", "arguments": "{}"}],
+                      "finish_reason": "tool_calls", "usage": {"prompt_tokens": 900, "completion_tokens": 40}},
+         "loop": {"action": "note"}},
+        {"version": 1, "n": 2, "time": "2026-11-11T10:06:00.000Z", "run": RUN, "api": "chat", "model": "qwen3-coder",
+         "status": 500, "ms": 20, "request": {}, "response": {"error": {"message": "overloaded"}}}])
+    status, text, _ = run_cli(["--log-dir", str(logs)], monkeypatch)
+    assert status == 0 and "LLM traffic" not in text
+    status, text, _ = run_cli(["--log-dir", str(logs), "--llm-traffic"], monkeypatch)
+    assert status == 0 and re.search(r"^# LLM traffic$", text, re.M) and "- [LLM traffic](#" in text
+    assert "qwen3-coder" in text and "900 / 40" in text and "2 requests" in text and "1 failed" in text
+    assert secret_words not in text and BEARER not in text and "bash" in text
+    data = json.loads(run_cli(["--log-dir", str(logs), "--llm-traffic", "--json"], monkeypatch)[1])
+    entry = data["llm_traffic"][0]
+    assert entry["run"] == RUN and entry["requests"] == 2 and entry["loop_guard"] == 1 and entry["tokens_in"] == 900
+    since = json.loads(run_cli(["--log-dir", str(logs), "--llm-traffic", "--json", "--since",
+                                "2026-11-11T10:05:30Z"], monkeypatch)[1])
+    assert since["llm_traffic"][0]["requests"] == 1
+    for kind in ("html", "pdf"):
+        assert R.render(data, kind)

@@ -1,0 +1,23 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "default-opencode",
+  "title": "OpenCode (default)",
+  "description": "OpenCode on your project with sandbox-ai's defaults and nothing more: only its maker's model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "translations": {
+    "de": {
+      "title": "OpenCode (Standard)",
+      "description": "OpenCode an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur das Modell seines Herstellers ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "opencode"
+  ],
+  "options": [],
+  "notes": [
+    "The model: opencode.ai (OpenCode Zen; your login: sandbox-ai login opencode). Its hosts are open by default; nothing else of the provider's.",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-opencode (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "Its telemetry is always off and cannot be turned on."
+  ]
+}

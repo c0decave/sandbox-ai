@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Raise the version of sandbox-ai (__version__ in sandbox/agent_sandbox.py).
+"""Raise the version of sandbox-ai (__version__ in sandbox/agent_sandbox.py) and of the app released with it
+(projects/sandbox-ai-app/sandbox_ai_app/__init__.py: the same version).
 
   scripts/bump_version.py            next patch: 0.1.17 -> 0.1.18; after 0.1.249 comes 0.2.0, after 0.49.249 1.0.0
   scripts/bump_version.py --minor    next minor: 0.1.17 -> 0.2.0; after 0.49.x comes 1.0.0
@@ -16,11 +17,11 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "sandbox" / "agent_sandbox.py"
-# The app is released with the version of sandbox-ai (projects/sandbox-ai-app/tests/test_version.py): raised with it.
-APP = ROOT / "projects" / "sandbox-ai-app" / "sandbox_ai_app" / "__init__.py"
+APP = ROOT / "projects" / "sandbox-ai-app" / "sandbox_ai_app" / "__init__.py"  # (0.1.94 left it at 0.1.93)
 PATCH_LIMIT = 250  # the patch number stays below it: 0.1.249 -> 0.2.0
 MINOR_LIMIT = 50  # the minor number stays below it: 0.49.249 -> 1.0.0
 LINE = re.compile(r'^__version__ = "([^"]+)"$', re.M)
+APP_LINE = re.compile(r'^__version__ = "([^"]+)"', re.M)  # (a comment follows it there)
 SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -48,7 +49,9 @@ def main(argv=None):
     group.add_argument("--set", metavar="X.Y.Z")
     group.add_argument("--show", action="store_true")
     parser.add_argument("--file", type=Path, default=SOURCE, help=argparse.SUPPRESS)
+    parser.add_argument("--app-file", type=Path, help=argparse.SUPPRESS)  # default: APP, with the default --file
     args = parser.parse_args(argv)
+    app = args.app_file or (APP if args.file == SOURCE else None)
 
     text = args.file.read_text()
     match = LINE.search(text)
@@ -64,12 +67,12 @@ def main(argv=None):
     else:
         new = next_version(current, args.part or "patch")
     args.file.write_text(text[:match.start(1)] + new + text[match.end(1):])
-    # The app's __version__ follows (its line keeps its comment), when this is sandbox-ai's own tree.
-    if args.file == SOURCE and APP.exists():
-        app_text = APP.read_text()
-        app_match = re.search(r'^__version__ = "([^"]+)"', app_text, re.M)
-        if app_match:
-            APP.write_text(app_text[:app_match.start(1)] + new + app_text[app_match.end(1):])
+    if app is not None and app.is_file():
+        app_text = app.read_text()
+        found = APP_LINE.search(app_text)
+        if not found:
+            sys.exit(f"bump_version: no __version__ line in {app}")
+        app.write_text(app_text[:found.start(1)] + new + app_text[found.end(1):])
     print(new)
     return 0
 

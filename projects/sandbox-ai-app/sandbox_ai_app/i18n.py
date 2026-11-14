@@ -47,6 +47,226 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # == tabs of ended starts (terminal._ended, ui.sync_tabs) ==
+    '{title} (failed)': {
+        'en': '{title} (failed)',
+        'de': '{title} (fehlgeschlagen)'},
+    '{title} (detached)': {
+        'en': '{title} (detached)',
+        'de': '{title} (getrennt)'},
+    'failed': {
+        'en': 'failed',
+        'de': 'fehlgeschlagen'},
+    # == Terminals: why a kept tab was not reopened (terminal.reopen_listed) ==
+    'Not reopened (paused: resume it first): {names}': {
+        'en': 'Not reopened (paused: resume it first): {names}',
+        'de': 'Nicht wieder geöffnet (pausiert: zuerst fortsetzen): {names}'},
+    'Not reopened (it runs without a terminal: see its log in Sandboxes & sessions): {names}': {
+        'en': 'Not reopened (it runs without a terminal: see its log in Sandboxes & sessions): {names}',
+        'de': 'Nicht wieder geöffnet (läuft ohne Terminal: siehe sein Log unter Sandboxen & Sitzungen): {names}'},
+    'Not reopened (its agent ended, its sandbox runs on: see Sandboxes & sessions): {names}': {
+        'en': 'Not reopened (its agent ended, its sandbox runs on: see Sandboxes & sessions): {names}',
+        'de': 'Nicht wieder geöffnet (sein Agent ist beendet, seine Sandbox läuft weiter: siehe Sandboxen & Sitzungen): {names}'},
+    'Not reopened (no terminal yet: attach it from Sandboxes & sessions once it has started): {names}': {
+        'en': 'Not reopened (no terminal yet: attach it from Sandboxes & sessions once it has started): {names}',
+        'de': 'Nicht wieder geöffnet (noch kein Terminal: verbinden Sie sich unter Sandboxen & Sitzungen, sobald es gestartet ist): {names}'},
+    'Not reopened (nothing to attach to): {names}': {
+        'en': 'Not reopened (nothing to attach to): {names}',
+        'de': 'Nicht wieder geöffnet (nichts zum Verbinden): {names}'},
+    'Waiting for the terminal of {names} (it still starts): its tab opens once it is there.': {
+        'en': 'Waiting for the terminal of {names} (it still starts): its tab opens once it is there.',
+        'de': 'Warte auf das Terminal von {names} (startet noch): sein Tab öffnet sich, sobald es da ist.'},
+    # == a session whose tmux session has ended (sessions.terminal_state "ended") ==
+    'no agent: its tmux session ended (see log)': {
+        'en': 'no agent: its tmux session ended (see log)',
+        'de': 'kein Agent: seine tmux-Sitzung ist beendet (siehe Log)'},
+    'Its tmux session has ended - the agent and its shell window - but its sandbox has not: there is no agent to attach to any more. Stop it, then Resume continues it. The end of its log:': {
+        'en': 'Its tmux session has ended - the agent and its shell window - but its sandbox has not: there is no agent to attach to any more. Stop it, then Resume continues it. The end of its log:',
+        'de': 'Seine tmux-Sitzung ist beendet - der Agent und sein Shell-Fenster -, seine Sandbox aber nicht: Es gibt keinen Agenten mehr zum Verbinden. Stoppen Sie sie, dann setzt Fortsetzen sie fort. Das Ende ihres Logs:'},
+    'No agent any more: its tmux session has ended (the agent and its shell window), its sandbox has not. Stop it, then resume it.': {
+        'en': 'No agent any more: its tmux session has ended (the agent and its shell window), its sandbox has not. Stop it, then resume it.',
+        'de': 'Kein Agent mehr: Seine tmux-Sitzung ist beendet (der Agent und sein Shell-Fenster), seine Sandbox nicht. Stoppen Sie sie, dann setzen Sie sie fort.'},
+    # == the LLM traffic page (traffic_page.py): what an agent and its model exchanged ==
+    'With the LLM traffic (each model request, never the conversation)': {
+        'en': 'With the LLM traffic (each model request, never the conversation)',
+        'de': 'Mit dem LLM-Verkehr (jede Modellanfrage, nie das Gespräch)'},
+    "A section on the LLM traffic log: every model request's model, status, time, tokens and what the loop guard did (sandbox-ai report --llm-traffic)": {
+        'en': "A section on the LLM traffic log: every model request's model, status, time, tokens and what the loop guard did (sandbox-ai report --llm-traffic)",
+        'de': 'Ein Abschnitt über das LLM-Verkehrsprotokoll: Modell, Status, Zeit, Tokens jeder Modellanfrage und was der Schleifenschutz tat (sandbox-ai report --llm-traffic)'},
+    'LLM traffic': {
+        'en': 'LLM traffic',
+        'de': 'LLM-Verkehr'},
+    'What an agent and its model exchanged, request by request: the messages, tool calls and results, the answer, and what the relay changed.': {
+        'en': 'What an agent and its model exchanged, request by request: the messages, tool calls and results, the answer, and what the relay changed.',
+        'de': 'Was ein Agent und sein Modell austauschten, Anfrage für Anfrage: die Nachrichten, Werkzeugaufrufe und Ergebnisse, die Antwort und was das Relay änderte.'},
+    'Pick a run with --llm and read its last request as a chat.': {
+        'en': 'Pick a run with --llm and read its last request as a chat.',
+        'de': 'Wählen Sie einen Lauf mit --llm und lesen Sie seine letzte Anfrage als Chat.'},
+    '#': {
+        'en': '#',
+        'de': '#'},
+    'Tokens in/out': {
+        'en': 'Tokens in/out',
+        'de': 'Tokens ein/aus'},
+    'Time taken': {
+        'en': 'Time taken',
+        'de': 'Dauer'},
+    'New': {
+        'en': 'New',
+        'de': 'Neu'},
+    'Not set by the agent; set by {why}': {
+        'en': 'Not set by the agent; set by {why}',
+        'de': 'Vom Agenten nicht gesetzt; gesetzt durch {why}'},
+    '{role} (reasoning)': {
+        'en': '{role} (reasoning)',
+        'de': '{role} (Reasoning)'},
+    'The loop guard added a note to {where}': {
+        'en': 'The loop guard added a note to {where}',
+        'de': 'Der Schleifenschutz fügte {where} eine Notiz hinzu'},
+    'Was {old}; changed by {why}': {
+        'en': 'Was {old}; changed by {why}',
+        'de': 'War {old}; geändert durch {why}'},
+    '{count} requests': {
+        'en': '{count} requests',
+        'de': '{count} Anfragen'},
+    'truncated': {
+        'en': 'truncated',
+        'de': 'gekürzt'},
+    '{role} → tool call {name}': {
+        'en': '{role} → tool call {name}',
+        'de': '{role} → Werkzeugaufruf {name}'},
+    'Chat': {
+        'en': 'Chat',
+        'de': 'Chat'},
+    'Run or session': {
+        'en': 'Run or session',
+        'de': 'Lauf oder Sitzung'},
+    'search the run (messages, tools, answers)': {
+        'en': 'search the run (messages, tools, answers)',
+        'de': 'den Lauf durchsuchen (Nachrichten, Werkzeuge, Antworten)'},
+    'Search': {
+        'en': 'Search',
+        'de': 'Suchen'},
+    'New requests appear as the agent sends them': {
+        'en': 'New requests appear as the agent sends them',
+        'de': 'Neue Anfragen erscheinen, sobald der Agent sie sendet'},
+    'Request': {
+        'en': 'Request',
+        'de': 'Anfrage'},
+    'New in this request': {
+        'en': 'New in this request',
+        'de': 'Neu in dieser Anfrage'},
+    'Only the messages this request added to the conversation (what is new since the request it continues); off: the whole conversation as it went to the model': {
+        'en': 'Only the messages this request added to the conversation (what is new since the request it continues); off: the whole conversation as it went to the model',
+        'de': 'Nur die Nachrichten, die diese Anfrage dem Gespräch hinzufügte (was seit der Anfrage, die sie fortsetzt, neu ist); aus: das ganze Gespräch, wie es an das Modell ging'},
+    'Open in a window': {
+        'en': 'Open in a window',
+        'de': 'In einem Fenster öffnen'},
+    'Choose a request to see what went to the model and what came back.': {
+        'en': 'Choose a request to see what went to the model and what came back.',
+        'de': 'Wählen Sie eine Anfrage, um zu sehen, was an das Modell ging und was zurückkam.'},
+    'Raw JSON': {
+        'en': 'Raw JSON',
+        'de': 'Roh-JSON'},
+    '{count} requests contain {text}': {
+        'en': '{count} requests contain {text}',
+        'de': '{count} Anfragen enthalten {text}'},
+    'Request #{n} · {model} · {time}': {
+        'en': 'Request #{n} · {model} · {time}',
+        'de': 'Anfrage #{n} · {model} · {time}'},
+    'Request #{n} · {model}': {
+        'en': 'Request #{n} · {model}',
+        'de': 'Anfrage #{n} · {model}'},
+    'Choose a request': {
+        'en': 'Choose a request',
+        'de': 'Wählen Sie eine Anfrage'},
+    'No request to export': {
+        'en': 'No request to export',
+        'de': 'Keine Anfrage zum Exportieren'},
+    'Export the LLM traffic': {
+        'en': 'Export the LLM traffic',
+        'de': 'Den LLM-Verkehr exportieren'},
+    'Exporting…': {
+        'en': 'Exporting…',
+        'de': 'Wird exportiert…'},
+    'Exported to {path}': {
+        'en': 'Exported to {path}',
+        'de': 'Exportiert nach {path}'},
+    'tool result': {
+        'en': 'tool result',
+        'de': 'Werkzeugergebnis'},
+    '(removed)': {
+        'en': '(removed)',
+        'de': '(entfernt)'},
+    "the server's or the start's parameter": {
+        'en': "the server's or the start's parameter",
+        'de': 'den Parameter des Servers oder des Starts'},
+    'raised after a cut answer': {
+        'en': 'raised after a cut answer',
+        'de': 'nach einer angehaltenen Antwort erhöht'},
+    'the loop guard': {
+        'en': 'the loop guard',
+        'de': 'den Schleifenschutz'},
+    'Field': {
+        'en': 'Field',
+        'de': 'Feld'},
+    'Value as sent': {
+        'en': 'Value as sent',
+        'de': 'Wert wie gesendet'},
+    "The relay's change": {
+        'en': "The relay's change",
+        'de': 'Änderung des Relays'},
+    'This sandbox-ai has no LLM traffic log yet; update it with: sandbox-ai update': {
+        'en': 'This sandbox-ai has no LLM traffic log yet; update it with: sandbox-ai update',
+        'de': 'Dieses sandbox-ai hat noch kein LLM-Verkehrsprotokoll; aktualisieren Sie es mit: sandbox-ai update'},
+    'No LLM traffic recorded yet: it is written while a sandbox with --llm runs (or with --llm-traffic all).': {
+        'en': 'No LLM traffic recorded yet: it is written while a sandbox with --llm runs (or with --llm-traffic all).',
+        'de': 'Noch kein LLM-Verkehr aufgezeichnet: Er wird geschrieben, während eine Sandbox mit --llm läuft (oder mit --llm-traffic all).'},
+    '(cut here: Export… holds all of it)': {
+        'en': '(cut here: Export… holds all of it)',
+        'de': '(hier gekürzt: Exportieren… enthält alles)'},
+    'Choose a request first.': {
+        'en': 'Choose a request first.',
+        'de': 'Wählen Sie zuerst eine Anfrage.'},
+    'Markdown (*.md)': {
+        'en': 'Markdown (*.md)',
+        'de': 'Markdown (*.md)'},
+    'Not exported: {error}': {
+        'en': 'Not exported: {error}',
+        'de': 'Nicht exportiert: {error}'},
+    'Tool calls: {names}': {
+        'en': 'Tool calls: {names}',
+        'de': 'Werkzeugaufrufe: {names}'},
+    'Run: {run} · {state} ({folder})': {
+        'en': 'Run: {run} · {state} ({folder})',
+        'de': 'Lauf: {run} · {state} ({folder})'},
+    'earlier': {
+        'en': 'earlier',
+        'de': 'früher'},
+    'the relay added a note': {
+        'en': 'the relay added a note',
+        'de': 'das Relay fügte eine Notiz hinzu'},
+    'Show all ({count} characters)': {
+        'en': 'Show all ({count} characters)',
+        'de': 'Alles zeigen ({count} Zeichen)'},
+    'New in this request: {new} of {total} messages': {
+        'en': 'New in this request: {new} of {total} messages',
+        'de': 'Neu in dieser Anfrage: {new} von {total} Nachrichten'},
+    'No answer recorded.': {
+        'en': 'No answer recorded.',
+        'de': 'Keine Antwort aufgezeichnet.'},
+    'This request as Markdown…': {
+        'en': 'This request as Markdown…',
+        'de': 'Diese Anfrage als Markdown…'},
+    'This request as JSON…': {
+        'en': 'This request as JSON…',
+        'de': 'Diese Anfrage als JSON…'},
+    'The whole run as Markdown…': {
+        'en': 'The whole run as Markdown…',
+        'de': 'Den ganzen Lauf als Markdown…'},
+    'The whole run as JSON lines…': {
+        'en': 'The whole run as JSON lines…',
+        'de': 'Den ganzen Lauf als JSON-Zeilen…'},
     # == presets: sandbox-ai's categories in the gallery, a board saved as a preset of yours ==
     'sandbox-ai: {category}': {
         'en': 'sandbox-ai: {category}',
@@ -105,6 +325,15 @@ TEXTS = {
     'Change the name, description, category and notes of your preset': {
         'en': 'Change the name, description, category and notes of your preset',
         'de': 'Name, Beschreibung, Kategorie und Hinweise Ihrer Vorlage ändern'},
+    'Keep this board where it belongs (Ctrl+S): in the preset of yours it was made from, else in its project\'s file, else as a new preset of yours': {
+        'en': 'Keep this board where it belongs (Ctrl+S): in the preset of yours it was made from, else in its project\'s file, else as a new preset of yours',
+        'de': 'Dieses Board dort speichern, wo es hingehört (Strg+S): in Ihrer Vorlage, aus der es entstand, sonst in der Datei seines Projekts, sonst als neue Vorlage von Ihnen'},
+    'Save the board': {
+        'en': 'Save the board',
+        'de': 'Board speichern'},
+    'Saved into your preset {name}.': {
+        'en': 'Saved into your preset {name}.',
+        'de': 'In Ihre Vorlage {name} gespeichert.'},
     'Save as preset…': {
         'en': 'Save as preset…',
         'de': 'Als Vorlage speichern…'},
@@ -136,6 +365,9 @@ TEXTS = {
     '{image} is none of your images: add it (Images page, Your images), or choose another.': {
         'en': '{image} is none of your images: add it (Images page, Your images), or choose another.',
         'de': '{image} ist keines Ihrer Images: Fügen Sie es hinzu (Seite Images, Eigene Images), oder wählen Sie ein anderes.'},
+    'Choose the image of the service {name}: one of your images (Images page, Your images).': {
+        'en': 'Choose the image of the service {name}: one of your images (Images page, Your images).',
+        'de': 'Wählen Sie das Image des Dienstes {name}: eines Ihrer Images (Seite Images, Eigene Images).'},
     'Two services are named {name}.': {
         'en': 'Two services are named {name}.',
         'de': 'Zwei Services heißen {name}.'},
@@ -1112,6 +1344,12 @@ TEXTS = {
     'Listing {path}…': {
         'en': 'Listing {path}…',
         'de': '{path} wird aufgelistet…'},
+    '{path} does not answer (a file system that hangs?); nothing was opened.': {
+        'en': '{path} does not answer (a file system that hangs?); nothing was opened.',
+        'de': '{path} antwortet nicht (ein Dateisystem, das hängt?); nichts wurde geöffnet.'},
+    '{path} does not answer (a file system that hangs?); nothing was copied.': {
+        'en': '{path} does not answer (a file system that hangs?); nothing was copied.',
+        'de': '{path} antwortet nicht (ein Dateisystem, das hängt?); nichts wurde kopiert.'},
     'Wait until the copy, move or delete running now has finished (or cancel it).': {
         'en': 'Wait until the copy, move or delete running now has finished (or cancel it).',
         'de': 'Warten Sie, bis das laufende Kopieren, Verschieben oder Löschen fertig ist (oder brechen Sie es ab).'},
@@ -1707,9 +1945,6 @@ TEXTS = {
     'media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)': {
         'en': 'media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)',
         'de': 'media: Ton, Video und Sprache (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)'},
-    'tor: torsocks and torbrowser-launcher, for a sandbox behind a Tor VPN profile': {
-        'en': 'tor: torsocks and torbrowser-launcher, for a sandbox behind a Tor VPN profile',
-        'de': 'tor: torsocks und torbrowser-launcher, für eine Sandbox hinter einem Tor-VPN-Profil'},
     "the recipe's name": {
         'en': "the recipe's name",
         'de': 'der Name des Rezepts'},
@@ -2466,9 +2701,6 @@ TEXTS = {
     '.onion names resolve and connect through Tor (with --dns every one the agent looks up).': {
         'en': '.onion names resolve and connect through Tor (with --dns every one the agent looks up).',
         'de': '.onion-Namen werden aufgelöst und durch Tor verbunden (mit --dns jeder, den der Agent nachschlägt).'},
-    "With --socks, 127.0.0.1:9050 is Tor's SocksPort (torsocks, curl --socks5-hostname); torsocks and Tor Browser in the image: sandbox-ai images recipe tor --from AGENT.": {
-        'en': "With --socks, 127.0.0.1:9050 is Tor's SocksPort (torsocks, curl --socks5-hostname); torsocks and Tor Browser in the image: sandbox-ai images recipe tor --from AGENT.",
-        'de': 'Mit --socks ist 127.0.0.1:9050 Tors SocksPort (torsocks, curl --socks5-hostname); torsocks und Tor Browser im Image: sandbox-ai images recipe tor --from AGENT.'},
     'OpenAI-compatible server': {
         'en': 'OpenAI-compatible server',
         'de': 'OpenAI-kompatibler Server'},
@@ -2548,6 +2780,18 @@ TEXTS = {
     'removed while it was copied': {
         'en': 'removed while it was copied',
         'de': 'während des Kopierens entfernt'},
+    '{count} steps still wait for a file system that does not answer (one that hangs?); nothing more is started until one of them has ended.': {
+        'en': '{count} steps still wait for a file system that does not answer (one that hangs?); nothing more is started until one of them has ended.',
+        'de': '{count} Schritte warten noch auf ein Dateisystem, das nicht antwortet (eines, das hängt?); nichts Weiteres wird begonnen, bis einer von ihnen geendet hat.'},
+    '{path} was not listed: {count} listings of this pane still wait for a file system that does not answer (one that hangs?). Try again once one of them has come.': {
+        'en': '{path} was not listed: {count} listings of this pane still wait for a file system that does not answer (one that hangs?). Try again once one of them has come.',
+        'de': '{path} wurde nicht aufgelistet: {count} Auflistungen dieses Bereichs warten noch auf ein Dateisystem, das nicht antwortet (eines, das hängt?). Versuchen Sie es erneut, sobald eine von ihnen gekommen ist.'},
+    'The change of the permissions before still waits for the file system (one that hangs?): Apply again once it has answered.': {
+        'en': 'The change of the permissions before still waits for the file system (one that hangs?): Apply again once it has answered.',
+        'de': 'Die Änderung der Berechtigungen davor wartet noch auf das Dateisystem (eines, das hängt?): Erneut „Anwenden“, sobald es geantwortet hat.'},
+    'The change of the permissions before took effect once the file system answered: {count} item(s) changed.': {
+        'en': 'The change of the permissions before took effect once the file system answered: {count} item(s) changed.',
+        'de': 'Die Änderung der Berechtigungen davor wurde wirksam, als das Dateisystem antwortete: {count} Einträge geändert.'},
     'the copy itself': {
         'en': 'the copy itself',
         'de': 'die Kopie selbst'},
@@ -2629,9 +2873,9 @@ TEXTS = {
     'The folder above (Backspace)': {
         'en': 'The folder above (Backspace)',
         'de': 'Der Ordner darüber (Rücktaste)'},
-    'List the folder again (Ctrl+R)': {
-        'en': 'List the folder again (Ctrl+R)',
-        'de': 'Den Ordner neu auflisten (Strg+R)'},
+    'List the folder again ({shortcut})': {
+        'en': 'List the folder again ({shortcut})',
+        'de': 'Den Ordner neu auflisten ({shortcut})'},
     'Sandboxes on {host}: not available here yet': {
         'en': 'Sandboxes on {host}: not available here yet',
         'de': 'Sandboxen auf {host}: hier noch nicht verfügbar'},
@@ -2689,9 +2933,6 @@ TEXTS = {
     'Take back what a rootless Podman sandbox wrote as another user (podman unshare chown)': {
         'en': 'Take back what a rootless Podman sandbox wrote as another user (podman unshare chown)',
         'de': 'Zurücknehmen, was eine rootlose Podman-Sandbox als anderer Benutzer schrieb (podman unshare chown)'},
-    'Another copy still runs.': {
-        'en': 'Another copy still runs.',
-        'de': 'Ein anderer Kopiervorgang läuft noch.'},
     'Choose a folder in both panes first.': {
         'en': 'Choose a folder in both panes first.',
         'de': 'Wählen Sie zuerst auf beiden Seiten einen Ordner.'},
@@ -2756,15 +2997,15 @@ TEXTS = {
     'Team': {
         'en': 'Team',
         'de': 'Team'},
-    'no answer, last seen {seconds} s ago': {
-        'en': 'no answer, last seen {seconds} s ago',
-        'de': 'keine Antwort, zuletzt vor {seconds} s gesehen'},
+    'no answer, last seen {ago}': {
+        'en': 'no answer, last seen {ago}',
+        'de': 'keine Antwort, zuletzt gesehen {ago}'},
     'no answer, not seen yet': {
         'en': 'no answer, not seen yet',
         'de': 'keine Antwort, noch nie gesehen'},
-    'answers, seen {seconds} s ago': {
-        'en': 'answers, seen {seconds} s ago',
-        'de': 'antwortet, vor {seconds} s gesehen'},
+    'answers, seen {ago}': {
+        'en': 'answers, seen {ago}',
+        'de': 'antwortet, gesehen {ago}'},
     'not read yet': {
         'en': 'not read yet',
         'de': 'noch nicht gelesen'},
@@ -3350,18 +3591,15 @@ TEXTS = {
     "strict: also no other calls than the model's": {
         'en': "strict: also no other calls than the model's",
         'de': 'streng: auch keine anderen Aufrufe als die des Modells'},
-    "on: the agents' own settings": {
-        'en': "on: the agents' own settings",
-        'de': 'an: die eigenen Einstellungen der Agenten'},
-    'Telemetry of Claude Code, Codex and OpenCode': {
-        'en': 'Telemetry of Claude Code, Codex and OpenCode',
-        'de': 'Telemetrie von Claude Code, Codex und OpenCode'},
+    'Telemetry of the agents (always off)': {
+        'en': 'Telemetry of the agents (always off)',
+        'de': 'Telemetrie der Agenten (immer aus)'},
     'This sandbox-ai has no telemetry setting yet: update it.': {
         'en': 'This sandbox-ai has no telemetry setting yet: update it.',
         'de': 'Dieses sandbox-ai hat noch keine Telemetrie-Einstellung: bitte aktualisieren.'},
-    'For every start, in {path}; --telemetry on the command line wins, the security modes high and paranoid allow no less than off and strict.': {
-        'en': 'For every start, in {path}; --telemetry on the command line wins, the security modes high and paranoid allow no less than off and strict.',
-        'de': 'Für jeden Start, in {path}; --telemetry auf der Befehlszeile gewinnt, die Sicherheitsmodi high und paranoid lassen nicht weniger als off und strict zu.'},
+    'Telemetry is always off, for every agent; strict also holds back their other calls. For every start, in {path}; a --telemetry option given at a start wins, the security mode paranoid allows no less than strict.': {
+        'en': 'Telemetry is always off, for every agent; strict also holds back their other calls. For every start, in {path}; a --telemetry option given at a start wins, the security mode paranoid allows no less than strict.',
+        'de': 'Die Telemetrie ist für jeden Agenten immer aus; strict hält auch ihre anderen Aufrufe zurück. Für jeden Start, in {path}; eine beim Start angegebene Option --telemetry gewinnt, der Sicherheitsmodus paranoid lässt nicht weniger als strict zu.'},
     'Refused': {
         'en': 'Refused',
         'de': 'Abgelehnt'},
@@ -3591,6 +3829,10 @@ TEXTS = {
     'let {agent} use its tool {tool} with {arguments} ({rule})': {
         'en': 'let {agent} use its tool {tool} with {arguments} ({rule})',
         'de': '{agent} sein Werkzeug {tool} mit {arguments} benutzen lassen ({rule})'},
+    'let {agent} use its tool {tool} (arguments shortened here: in full below) with {arguments} ({rule})': {
+        'en': 'let {agent} use its tool {tool} (arguments shortened here: in full below) with {arguments} ({rule})',
+        'de': '{agent} sein Werkzeug {tool} (Argumente hier gekürzt: vollständig darunter) mit {arguments} benutzen '
+              'lassen ({rule})'},
     'attach the device {device} ({rule})': {
         'en': 'attach the device {device} ({rule})',
         'de': 'das Gerät {device} anschließen ({rule})'},
@@ -3773,7 +4015,19 @@ TEXTS = {
         'de': 'Die Fragen können nicht gelesen werden: {error}'},
     '{seconds} s ago': {
         'en': '{seconds} s ago',
-        'de': 'vor {seconds} s'},
+        'de': 'vor {seconds} Sek.'},
+    '{minutes} min ago': {
+        'en': '{minutes} min ago',
+        'de': 'vor {minutes} Min.'},
+    '{hours} h ago': {
+        'en': '{hours} h ago',
+        'de': 'vor {hours} Std.'},
+    '1 day ago': {
+        'en': '1 day ago',
+        'de': 'vor 1 Tag'},
+    '{days} days ago': {
+        'en': '{days} days ago',
+        'de': 'vor {days} Tagen'},
     'no time limit': {
         'en': 'no time limit',
         'de': 'ohne Zeitlimit'},
@@ -4221,9 +4475,6 @@ TEXTS = {
     'writable': {
         'en': 'writable',
         'de': 'beschreibbar'},
-    'Variables from your environment': {
-        'en': 'Variables from your environment',
-        'de': 'Variablen aus Ihrer Umgebung'},
     'Runs': {
         'en': 'Runs',
         'de': 'Führt aus'},
@@ -4780,6 +5031,9 @@ TEXTS = {
     'A workspace path cannot contain commas or new lines.': {
         'en': 'A workspace path cannot contain commas or new lines.',
         'de': 'Ein Arbeitsordner-Pfad darf keine Kommas oder Zeilenumbrüche enthalten.'},
+    'The workspace {path} is a relative path: give the folder in full (/… or ~/…).': {
+        'en': 'The workspace {path} is a relative path: give the folder in full (/… or ~/…).',
+        'de': 'Der Arbeitsordner {path} ist ein relativer Pfad: Gib den Ordner vollständig an (/… oder ~/…).'},
     'Commit identity and push tokens (with the token proxy the agent never sees them)': {
         'en': 'Commit identity and push tokens (with the token proxy the agent never sees them)',
         'de': 'Commit-Identität und Push-Tokens (mit dem Token-Proxy sieht der Agent sie nie)'},
@@ -5152,6 +5406,27 @@ TEXTS = {
     'Every connection passes the proxy: TLS is opened with a CA for this run, every request is logged, pushes are checked.': {
         'en': 'Every connection passes the proxy: TLS is opened with a CA for this run, every request is logged, pushes are checked.',
         'de': 'Jede Verbindung läuft durch den Proxy: TLS wird mit einer CA für diesen Lauf geöffnet, jede Anfrage protokolliert, Pushes werden geprüft.'},
+    '{domain} and every host below it': {
+        'en': '{domain} and every host below it',
+        'de': '{domain} und jeder Host darunter'},
+    'Domains separated by spaces: each one and every name below it (--allow-domain: the name and *.DOMAIN in one; not for shared hosting such as github.io, nor public suffixes such as co.uk).': {
+        'en': 'Domains separated by spaces: each one and every name below it (--allow-domain: the name and *.DOMAIN in one; not for shared hosting such as github.io, nor public suffixes such as co.uk).',
+        'de': 'Domains, durch Leerzeichen getrennt: jede samt jedem Namen darunter (--allow-domain: der Name und *.DOMAIN in einem; nicht für geteiltes Hosting wie github.io und nicht für öffentliche Suffixe wie co.uk).'},
+    'Domains with every name below (TCP/443)': {
+        'en': 'Domains with every name below (TCP/443)',
+        'de': 'Domains mit jedem Namen darunter (TCP/443)'},
+    'Domains, one per line: each one and every name below it (--allow-domain; not for shared hosting such as github.io, nor public suffixes such as co.uk).': {
+        'en': 'Domains, one per line: each one and every name below it (--allow-domain; not for shared hosting such as github.io, nor public suffixes such as co.uk).',
+        'de': 'Domains, eine pro Zeile: jede samt jedem Namen darunter (--allow-domain; nicht für geteiltes Hosting wie github.io und nicht für öffentliche Suffixe wie co.uk).'},
+    'Whole domains (HTTPS)': {
+        'en': 'Whole domains (HTTPS)',
+        'de': 'Ganze Domains (HTTPS)'},
+    'Whole domains': {
+        'en': 'Whole domains',
+        'de': 'Ganze Domains'},
+    'Domains the agent may reach over HTTPS with every name below them, one per line (not github.io or co.uk).': {
+        'en': 'Domains the agent may reach over HTTPS with every name below them, one per line (not github.io or co.uk).',
+        'de': 'Domains, die der Agent samt jedem Namen darunter über HTTPS erreichen darf, eine pro Zeile (nicht github.io oder co.uk).'},
     'Further hosts (HTTPS)': {
         'en': 'Further hosts (HTTPS)',
         'de': 'Weitere Hosts (HTTPS)'},
@@ -5383,6 +5658,12 @@ TEXTS = {
     'Connection log (milliseconds)': {
         'en': 'Connection log (milliseconds)',
         'de': 'Verbindungslog (Millisekunden)'},
+    'Show short notices (toasts)': {
+        'en': 'Show short notices (toasts)',
+        'de': 'Kurze Hinweise anzeigen'},
+    'A short notice near the bottom of the window says for a moment that something is done (written, trusted, removed…) and goes by itself; no OK to click. Off: none is shown, the status bar and the log still have each.': {
+        'en': 'A short notice near the bottom of the window says for a moment that something is done (written, trusted, removed…) and goes by itself; no OK to click. Off: none is shown, the status bar and the log still have each.',
+        'de': 'Ein kurzer Hinweis unten im Fenster sagt für einen Moment, dass etwas erledigt ist (geschrieben, vertraut, entfernt…), und verschwindet von selbst; kein OK zum Klicken. Aus: keiner wird gezeigt, Statusleiste und Log haben jeden trotzdem.'},
     'Show notifications (popups)': {
         'en': 'Show notifications (popups)',
         'de': 'Benachrichtigungen anzeigen (Popups)'},
@@ -6058,9 +6339,9 @@ TEXTS = {
     'For': {
         'en': 'For',
         'de': 'Für'},
-    'Insight': {
-        'en': 'Insight',
-        'de': 'Einblick'},
+    'Monitoring': {
+        'en': 'Monitoring',
+        'de': 'Monitoring'},
     'It does not run.': {
         'en': 'It does not run.',
         'de': 'Sie läuft nicht.'},
@@ -6905,6 +7186,22 @@ TEXTS = {
     'Show from level': {
         'en': 'Show from level',
         'de': 'Ab Stufe zeigen'},
+    'Show the area': {
+        'en': 'Show the area',
+        'de': 'Den Bereich zeigen'},
+    'Show only the entries of one area (where they come from: the Board, commands, terminals, a page)': {
+        'en': 'Show only the entries of one area (where they come from: the Board, commands, terminals, a page)',
+        'de': 'Nur die Einträge eines Bereichs zeigen (woher sie kommen: das Board, Befehle, Terminals, eine Seite)'},
+    'All areas': {
+        'en': 'All areas',
+        'de': 'Alle Bereiche'},
+    'Copy for a bug report': {
+        'en': 'Copy for a bug report',
+        'de': 'Für einen Fehlerbericht kopieren'},
+    'Copy the end of app.log and launcher.log with the versions, secrets masked, to paste into a bug report': {
+        'en': 'Copy the end of app.log and launcher.log with the versions, secrets masked, to paste into a bug report',
+        'de': 'Das Ende von app.log und launcher.log mit den Versionen kopieren, Geheimnisse maskiert, zum '
+              'Einfügen in einen Fehlerbericht'},
     'Full screen': {
         'en': 'Full screen',
         'de': 'Vollbild'},
@@ -6944,9 +7241,6 @@ TEXTS = {
     'Open a tab for each session or sandbox that starts': {
         'en': 'Open a tab for each session or sandbox that starts',
         'de': 'Für jede startende Sitzung oder Sandbox einen Tab öffnen'},
-    'Reopen the terminals of running sessions at start': {
-        'en': 'Reopen the terminals of running sessions at start',
-        'de': 'Terminals laufender Sitzungen beim Start wieder öffnen'},
     'Not reopened (ended meanwhile): {names}': {
         'en': 'Not reopened (ended meanwhile): {names}',
         'de': 'Nicht wieder geöffnet (inzwischen beendet): {names}'},
@@ -7228,9 +7522,9 @@ TEXTS = {
     'Wrap lines': {
         'en': 'Wrap lines',
         'de': 'Zeilen umbrechen'},
-    'Save (Ctrl+S)': {
-        'en': 'Save (Ctrl+S)',
-        'de': 'Speichern (Strg+S)'},
+    'Save ({shortcut})': {
+        'en': 'Save ({shortcut})',
+        'de': 'Speichern ({shortcut})'},
     'Write the file back (asks first if it changed on disk meanwhile)': {
         'en': 'Write the file back (asks first if it changed on disk meanwhile)',
         'de': 'Die Datei zurückschreiben (fragt zuerst, wenn sie sich inzwischen auf der Platte geändert hat)'},
@@ -7420,9 +7714,9 @@ TEXTS = {
     'Properties…': {
         'en': 'Properties…',
         'de': 'Eigenschaften…'},
-    'Nothing to paste: copy or cut files first (Ctrl+C, Ctrl+X).': {
-        'en': 'Nothing to paste: copy or cut files first (Ctrl+C, Ctrl+X).',
-        'de': 'Nichts einzufügen: Kopieren oder ausschneiden Sie zuerst Dateien (Strg+C, Strg+X).'},
+    'Nothing to paste: copy or cut files first ({copy}, {cut}).': {
+        'en': 'Nothing to paste: copy or cut files first ({copy}, {cut}).',
+        'de': 'Nichts einzufügen: Kopieren oder ausschneiden Sie zuerst Dateien ({copy}, {cut}).'},
     'Select a file first.': {
         'en': 'Select a file first.',
         'de': 'Wählen Sie zuerst eine Datei.'},
@@ -7453,12 +7747,12 @@ TEXTS = {
     'Of the folder shown': {
         'en': 'Of the folder shown',
         'de': 'Des gezeigten Ordners'},
-    '{count} item(s) cut: Paste (Ctrl+V) moves them into the folder shown.': {
-        'en': '{count} item(s) cut: Paste (Ctrl+V) moves them into the folder shown.',
-        'de': '{count} Eintrag/Einträge ausgeschnitten: Einfügen (Strg+V) verschiebt sie in den gezeigten Ordner.'},
-    '{count} item(s) copied: Paste (Ctrl+V) copies them into the folder shown.': {
-        'en': '{count} item(s) copied: Paste (Ctrl+V) copies them into the folder shown.',
-        'de': '{count} Eintrag/Einträge kopiert: Einfügen (Strg+V) kopiert sie in den gezeigten Ordner.'},
+    '{count} item(s) cut: Paste ({shortcut}) moves them into the folder shown.': {
+        'en': '{count} item(s) cut: Paste ({shortcut}) moves them into the folder shown.',
+        'de': '{count} Eintrag/Einträge ausgeschnitten: Einfügen ({shortcut}) verschiebt sie in den gezeigten Ordner.'},
+    '{count} item(s) copied: Paste ({shortcut}) copies them into the folder shown.': {
+        'en': '{count} item(s) copied: Paste ({shortcut}) copies them into the folder shown.',
+        'de': '{count} Eintrag/Einträge kopiert: Einfügen ({shortcut}) kopiert sie in den gezeigten Ordner.'},
     'They are in this folder already.': {
         'en': 'They are in this folder already.',
         'de': 'Sie sind schon in diesem Ordner.'},
@@ -7662,6 +7956,24 @@ TEXTS = {
     'too big': {
         'en': 'too big',
         'de': 'zu groß'},
+    'refers to other files': {
+        'en': 'refers to other files',
+        'de': 'verweist auf andere Dateien'},
+    'a line of more than {count} characters without a space': {
+        'en': 'a line of more than {count} characters without a space',
+        'de': 'eine Zeile mit mehr als {count} Zeichen ohne Leerzeichen'},
+    'lists of more than {count} items': {
+        'en': 'lists of more than {count} items',
+        'de': 'Listen mit mehr als {count} Einträgen'},
+    'tables of more than {count} rows': {
+        'en': 'tables of more than {count} rows',
+        'de': 'Tabellen mit mehr als {count} Zeilen'},
+    'Only the first {count} of {total} lines are rendered: more would hold up the window ({why}). The text shows them all.': {
+        'en': 'Only the first {count} of {total} lines are rendered: more would hold up the window ({why}). The text shows them all.',
+        'de': 'Nur die ersten {count} von {total} Zeilen werden gerendert: mehr würde das Fenster aufhalten ({why}). Der Text zeigt sie alle.'},
+    'Lines are not wrapped: a line of more than {count} characters without a space would hold up the window.': {
+        'en': 'Lines are not wrapped: a line of more than {count} characters without a space would hold up the window.',
+        'de': 'Zeilen werden nicht umbrochen: eine Zeile mit mehr als {count} Zeichen ohne Leerzeichen würde das Fenster aufhalten.'},
     # == the Files page: Copy relative path, Copy path in the sandbox, quoted for the shell ==
     'Copy relative path': {
         'en': 'Copy relative path',
@@ -7855,6 +8167,29 @@ TEXTS = {
     '{name} is read-only for you (its permissions or its owner): it was not written. Change its permissions first.': {
         'en': '{name} is read-only for you (its permissions or its owner): it was not written. Change its permissions first.',
         'de': '{name} ist für Sie schreibgeschützt (durch seine Rechte oder seinen Besitzer): Es wurde nicht geschrieben. Ändern Sie zuerst seine Rechte.'},
+    # -- the file manager, review pass 19: a remote file nobody may write, a file gone while edited, a move kept --
+    '{name} is read-only (its permissions): it was not written. Change its permissions first.': {
+        'en': '{name} is read-only (its permissions): it was not written. Change its permissions first.',
+        'de': '{name} ist schreibgeschützt (durch seine Rechte): Es wurde nicht geschrieben. Ändern Sie zuerst seine '
+              'Rechte.'},
+    '{name} is no longer there: it was removed, renamed or moved since it was opened.': {
+        'en': '{name} is no longer there: it was removed, renamed or moved since it was opened.',
+        'de': '{name} ist nicht mehr da: Es wurde gelöscht, umbenannt oder verschoben, seit es geöffnet wurde.'},
+    'Save as a new file?': {
+        'en': 'Save as a new file?',
+        'de': 'Als neue Datei speichern?'},
+    '{name} is no longer there: it was removed, renamed or moved since it was opened here. Save what is shown as a new '
+    'file {name} where it was?': {
+        'en': '{name} is no longer there: it was removed, renamed or moved since it was opened here. Save what is shown '
+              'as a new file {name} where it was?',
+        'de': '{name} ist nicht mehr da: Es wurde gelöscht, umbenannt oder verschoben, seit es hier geöffnet wurde. Das '
+              'Gezeigte als neue Datei {name} dort speichern, wo es war?'},
+    'Save as a new file': {
+        'en': 'Save as a new file',
+        'de': 'Als neue Datei speichern'},
+    '{files} file(s) in {folders} folder(s), {size} copied (the source was kept)': {
+        'en': '{files} file(s) in {folders} folder(s), {size} copied (the source was kept)',
+        'de': '{files} Dateien in {folders} Ordnern, {size} kopiert (die Quelle blieb erhalten)'},
     # -- the file manager, review pass 2 --
     '{name} is on a read-only file system: it was not written.': {
         'en': '{name} is on a read-only file system: it was not written.',
@@ -8203,6 +8538,9 @@ TEXTS = {
     'A preset may not carry {options}: it copies a login in or belongs to one start.': {
         'en': 'A preset may not carry {options}: it copies a login in or belongs to one start.',
         'de': 'Eine Vorlage darf {options} nicht enthalten: es kopiert eine Anmeldung hinein oder gehört zu einem einzelnen Start.'},
+    'A preset from elsewhere may not carry {options}: it is not yours - only your command line, your defaults or a preset you save yourself chooses that.': {
+        'en': 'A preset from elsewhere may not carry {options}: it is not yours - only your command line, your defaults or a preset you save yourself chooses that.',
+        'de': 'Eine Vorlage von anderswo darf {options} nicht enthalten: Sie ist nicht Ihre - das wählen nur Ihre Befehlszeile, Ihre Vorgaben oder eine Vorlage, die Sie selbst speichern.'},
     'mcp_servers must be an object of at most 16 servers.': {
         'en': 'mcp_servers must be an object of at most 16 servers.',
         'de': 'mcp_servers muss ein Objekt mit höchstens 16 Servern sein.'},
@@ -9160,9 +9498,6 @@ TEXTS = {
     'I make it on the VPN page': {
         'en': 'I make it on the VPN page',
         'de': 'Ich lege es auf der Seite VPN an'},
-    'Still preparing what the start needs…': {
-        'en': 'Still preparing what the start needs…',
-        'de': 'Was der Start braucht, wird noch vorbereitet…'},
     'VPN profile {names}: make it on the VPN page (it needs its keys or login), then start again.': {
         'en': 'VPN profile {names}: make it on the VPN page (it needs its keys or login), then start again.',
         'de': 'VPN-Profil {names}: auf der Seite VPN anlegen (es braucht seine Schlüssel oder sein Login), dann erneut starten.'},
@@ -9192,10 +9527,10 @@ TEXTS = {
         'de': 'Der Start wird vorbereitet'},
     'building the image variant {name}': {
         'en': 'building the image variant {name}',
-        'de': 'die Image-Variante {name} bauen'},
+        'de': 'die Image-Variante {name} wird gebaut'},
     'adding the MCP server {name} (its image is pulled)': {
         'en': 'adding the MCP server {name} (its image is pulled)',
-        'de': 'den MCP-Server {name} hinzufügen (sein Image wird geladen)'},
+        'de': 'der MCP-Server {name} wird hinzugefügt (sein Image wird geladen)'},
     'see the terminal tab Preparing the start (exit status {status})': {
         'en': 'see the terminal tab Preparing the start (exit status {status})',
         'de': 'siehe den Terminal-Tab Der Start wird vorbereitet (Exit-Status {status})'},
@@ -10043,9 +10378,9 @@ TEXTS = {
     'not asked yet': {
         'en': 'not asked yet',
         'de': 'noch nicht gefragt'},
-    'no answer (last seen {seconds} s ago)': {
-        'en': 'no answer (last seen {seconds} s ago)',
-        'de': 'keine Antwort (zuletzt gesehen vor {seconds} s)'},
+    'no answer (last seen {ago})': {
+        'en': 'no answer (last seen {ago})',
+        'de': 'keine Antwort (zuletzt gesehen {ago})'},
     'no answer': {
         'en': 'no answer',
         'de': 'keine Antwort'},
@@ -10286,18 +10621,18 @@ TEXTS = {
     'Ended': {
         'en': 'Ended',
         'de': 'Beendete'},
-    'Also the starts that ended: stopped MCP servers and what else sandbox-ai list --all keeps, on this machine and every host': {
-        'en': 'Also the starts that ended: stopped MCP servers and what else sandbox-ai list --all keeps, on this machine and every host',
-        'de': 'Auch die beendeten Starts: gestoppte MCP-Server und was sandbox-ai list --all sonst aufbewahrt, auf diesem Rechner und jedem Host'},
+    'Also the starts that ended: stopped sessions (to resume or delete them), stopped MCP servers and what else sandbox-ai list --all keeps, on this machine and every host. A session that stops while it is selected stays listed until another row is selected.': {
+        'en': 'Also the starts that ended: stopped sessions (to resume or delete them), stopped MCP servers and what else sandbox-ai list --all keeps, on this machine and every host. A session that stops while it is selected stays listed until another row is selected.',
+        'de': 'Auch die beendeten Starts: gestoppte Sitzungen (um sie fortzusetzen oder zu löschen), gestoppte MCP-Server und was sandbox-ai list --all sonst aufbewahrt, auf diesem Rechner und jedem Host. Eine Sitzung, die stoppt, während sie ausgewählt ist, bleibt gelistet, bis eine andere Zeile ausgewählt wird.'},
     'Refresh the sandboxes': {
         'en': 'Refresh the sandboxes',
         'de': 'Sandboxen neu laden'},
     'Sandboxes and sessions': {
         'en': 'Sandboxes and sessions',
         'de': 'Sandboxen und Sitzungen'},
-    '{host} does not answer (last seen {seconds} s ago): its state now is not known.': {
-        'en': '{host} does not answer (last seen {seconds} s ago): its state now is not known.',
-        'de': '{host} antwortet nicht (zuletzt gesehen vor {seconds} s): sein Zustand jetzt ist unbekannt.'},
+    '{host} does not answer (last seen {ago}): its state now is not known.': {
+        'en': '{host} does not answer (last seen {ago}): its state now is not known.',
+        'de': '{host} antwortet nicht (zuletzt gesehen {ago}): sein Zustand jetzt ist unbekannt.'},
     'It ended: History… shows what happened to it.': {
         'en': 'It ended: History… shows what happened to it.',
         'de': 'Er ist beendet: Verlauf… zeigt, was mit ihm geschah.'},
@@ -10376,9 +10711,9 @@ TEXTS = {
     'unchanged (none: no limit)': {
         'en': 'unchanged (none: no limit)',
         'de': 'unverändert (none: keine Grenze)'},
-    '{state}, last seen {seconds} s ago': {
-        'en': '{state}, last seen {seconds} s ago',
-        'de': '{state}, zuletzt gesehen vor {seconds} s'},
+    '{state}, last seen {ago}': {
+        'en': '{state}, last seen {ago}',
+        'de': '{state}, zuletzt gesehen {ago}'},
     '{state}, not seen': {
         'en': '{state}, not seen',
         'de': '{state}, nicht gesehen'},
@@ -12373,6 +12708,39 @@ TEXTS = {
     'Asked because the privacy check found warnings in what is pushed.': {
         'en': 'Asked because the privacy check found warnings in what is pushed.',
         'de': 'Gefragt, weil die Datenschutzprüfung im Gepushten Warnungen fand.'},
+    # == agents and presets not live-tested yet (sandbox-ai's EXPERIMENTAL_PARTS): the gallery, the Board, the wizard ==
+    'Not live-tested yet': {
+        'en': 'Not live-tested yet',
+        'de': 'Noch nicht live getestet'},
+    'not live-tested yet': {
+        'en': 'not live-tested yet',
+        'de': 'noch nicht live getestet'},
+    '{agent} (not live-tested yet)': {
+        'en': '{agent} (not live-tested yet)',
+        'de': '{agent} (noch nicht live getestet)'},
+    'Not live-tested yet: {names}.': {
+        'en': 'Not live-tested yet: {names}.',
+        'de': 'Noch nicht live getestet: {names}.'},
+    # == a tool call's arguments in full, on the Approvals page and in the Questions window (pages.ArgumentsBox) ==
+    "The call's arguments in full": {
+        'en': "The call's arguments in full",
+        'de': 'Die Argumente des Aufrufs vollständig'},
+    'Show the arguments in full': {
+        'en': 'Show the arguments in full',
+        'de': 'Argumente vollständig zeigen'},
+    'Hide the arguments': {
+        'en': 'Hide the arguments',
+        'de': 'Argumente ausblenden'},
+    'As the call will send them (pretty-printed JSON; credentials redacted).': {
+        'en': 'As the call will send them (pretty-printed JSON; credentials redacted).',
+        'de': 'So, wie der Aufruf sie senden wird (formatiertes JSON; Zugangsdaten geschwärzt).'},
+    'call the MCP tool {tool} of {server} (arguments shortened here: in full below) with {arguments} ({rule})': {
+        'en': 'call the MCP tool {tool} of {server} (arguments shortened here: in full below) with {arguments} ({rule})',
+        'de': 'das MCP-Werkzeug {tool} von {server} (Argumente hier gekürzt: vollständig darunter) mit {arguments} '
+              'aufrufen ({rule})'},
+    "The question's line shows them shortened.": {
+        'en': "The question's line shows them shortened.",
+        'de': 'Die Zeile der Frage zeigt sie gekürzt.'},
     "Asked because the sandbox's network settings do not allow it.": {
         'en': "Asked because the sandbox's network settings do not allow it.",
         'de': 'Gefragt, weil die Netzwerk-Einstellungen der Sandbox es nicht erlauben.'},
@@ -12640,6 +13008,9 @@ TEXTS = {
     '{what}: {error}': {
         'en': '{what}: {error}',
         'de': '{what}: {error}'},
+    "{what}: allowed always for this project, as an answer to the lookup is: only the name's public addresses are opened, now and at every later start.": {
+        'en': "{what}: allowed always for this project, as an answer to the lookup is: only the name's public addresses are opened, now and at every later start.",
+        'de': '{what}: für dieses Projekt immer erlaubt, wie eine Antwort auf die Namensabfrage: nur die öffentlichen Adressen des Namens werden geöffnet, jetzt und bei jedem späteren Start.'},
     "{what}: {option} goes into the project's .sandbox-ai.json (trusted at once); every later start of the project may reach it.": {
         'en': "{what}: {option} goes into the project's .sandbox-ai.json (trusted at once); every later start of the project may reach it.",
         'de': '{what}: {option} kommt in die .sandbox-ai.json des Projekts (sofort vertraut); jeder spätere Start des Projekts darf es erreichen.'},
@@ -12656,12 +13027,6 @@ TEXTS = {
     'Limits for this board': {
         'en': 'Limits for this board',
         'de': 'Grenzen für dieses Board'},
-    'Defaults for every start…': {
-        'en': 'Defaults for every start…',
-        'de': 'Standard für jeden Start…'},
-    "The server's own limits, network and folders (the MCP page's Properties…)": {
-        'en': "The server's own limits, network and folders (the MCP page's Properties…)",
-        'de': 'Die eigenen Grenzen, das Netz und die Ordner des Servers (Eigenschaften… der MCP-Seite)'},
     "the server's own": {
         'en': "the server's own",
         'de': 'die des Servers'},
@@ -12677,12 +13042,6 @@ TEXTS = {
     'Reset to defaults': {
         'en': 'Reset to defaults',
         'de': 'Auf Standard zurücksetzen'},
-    'Empty every field: the defaults hold': {
-        'en': 'Empty every field: the defaults hold',
-        'de': 'Alle Felder leeren: Der Standard gilt'},
-    'variables of your environment, separated by spaces': {
-        'en': 'variables of your environment, separated by spaces',
-        'de': 'Variablen Ihrer Umgebung, durch Leerzeichen getrennt'},
     'Stop it now: its next start uses the change (agents that use it lose it until then)': {
         'en': 'Stop it now: its next start uses the change (agents that use it lose it until then)',
         'de': 'Jetzt stoppen: Sein nächster Start nutzt die Änderung (Agenten, die ihn nutzen, verlieren ihn bis dahin)'},
@@ -12692,9 +13051,6 @@ TEXTS = {
     'Properties of {name} on {host}': {
         'en': 'Properties of {name} on {host}',
         'de': 'Eigenschaften von {name} auf {host}'},
-    'The defaults of every start that uses it; a board can set other limits for its own starts (its MCP node).': {
-        'en': 'The defaults of every start that uses it; a board can set other limits for its own starts (its MCP node).',
-        'de': 'Der Standard jedes Starts, der ihn nutzt; ein Board kann für seine eigenen Starts andere Grenzen setzen (sein MCP-Knoten).'},
     'default': {
         'en': 'default',
         'de': 'Standard'},
@@ -12719,12 +13075,6 @@ TEXTS = {
     'Load the catalogs to set the folders its catalog entry takes besides these.': {
         'en': 'Load the catalogs to set the folders its catalog entry takes besides these.',
         'de': 'Laden Sie die Kataloge, um weitere Ordner zu setzen, die sein Katalogeintrag nimmt.'},
-    'A server that runs a command: its network, folders and VPN are its options in mcp.json; here only its limits.': {
-        'en': 'A server that runs a command: its network, folders and VPN are its options in mcp.json; here only its limits.',
-        'de': 'Ein Server, der einen Befehl ausführt: Sein Netz, seine Ordner und sein VPN sind seine Optionen in mcp.json; hier nur seine Grenzen.'},
-    'It runs: the change holds from its next start, and a start refuses it until it was stopped.': {
-        'en': 'It runs: the change holds from its next start, and a start refuses it until it was stopped.',
-        'de': 'Er läuft: Die Änderung gilt ab seinem nächsten Start, und ein Start lehnt ihn ab, bis er gestoppt wurde.'},
     'no limit': {
         'en': 'no limit',
         'de': 'keine Grenze'},
@@ -13208,4 +13558,934 @@ TEXTS = {
     '{name} is being saved right now. Close the window anyway? The save goes on, but whether it succeeds is not shown then, and what was changed after Save is not saved.': {
         'en': '{name} is being saved right now. Close the window anyway? The save goes on, but whether it succeeds is not shown then, and what was changed after Save is not saved.',
         'de': '{name} wird gerade gespeichert. Das Fenster trotzdem schließen? Das Speichern läuft weiter, aber ob es gelingt, wird dann nicht angezeigt, und was nach „Speichern“ geändert wurde, wird nicht gespeichert.'},
+    # == file manager, review pass 10 ==
+    "An agent's files": {
+        'en': "An agent's files",
+        'de': 'Dateien eines Agenten'},
+    "Treat the files of this remote system as an agent's: copied to this machine they are never executable and files that tools run are named; no set-ID or sticky bit is set there. On for sandbox-ai's hosts, where sandboxes run.": {
+        'en': "Treat the files of this remote system as an agent's: copied to this machine they are never executable and files that tools run are named; no set-ID or sticky bit is set there. On for sandbox-ai's hosts, where sandboxes run.",
+        'de': 'Die Dateien dieses entfernten Systems wie die eines Agenten behandeln: Auf diesen Rechner kopiert, sind sie nie ausführbar, und Dateien, die Werkzeuge ausführen, werden genannt; dort werden keine Set-ID- oder Sticky-Bits gesetzt. Eingeschaltet für die Hosts von sandbox-ai, auf denen Sandboxen laufen.'},
+    "Not an agent's files?": {
+        'en': "Not an agent's files?",
+        'de': 'Keine Dateien eines Agenten?'},
+    "Files of {host} are treated as an agent's: copied to this machine they are never executable, and files that tools run are named. Sandboxes of sandbox-ai run on its hosts, and their agents may have written any file there. Treat the files of this connection as your own?": {
+        'en': "Files of {host} are treated as an agent's: copied to this machine they are never executable, and files that tools run are named. Sandboxes of sandbox-ai run on its hosts, and their agents may have written any file there. Treat the files of this connection as your own?",
+        'de': 'Dateien von {host} werden wie die eines Agenten behandelt: Auf diesen Rechner kopiert, sind sie nie ausführbar, und Dateien, die Werkzeuge ausführen, werden genannt. Auf den Hosts von sandbox-ai laufen Sandboxen, und deren Agenten können dort jede Datei geschrieben haben. Die Dateien dieser Verbindung wie Ihre eigenen behandeln?'},
+    'Treat as my own': {
+        'en': 'Treat as my own',
+        'de': 'Wie meine eigenen behandeln'},
+    # == LLM servers: Models on the server (llm loaded, load, unload) ==
+    'explicit': {
+        'en': 'explicit',
+        'de': 'ausdrücklich'},
+    'JIT': {
+        'en': 'JIT',
+        'de': 'JIT'},
+    'until idle': {
+        'en': 'until idle',
+        'de': 'bis zum Leerlauf'},
+    'router (LRU)': {
+        'en': 'router (LRU)',
+        'de': 'Router (LRU)'},
+    "for the server's run": {
+        'en': "for the server's run",
+        'de': 'solange der Server läuft'},
+    'Loaded explicitly: it stays until it is unloaded.': {
+        'en': 'Loaded explicitly: it stays until it is unloaded.',
+        'de': 'Ausdrücklich geladen: Es bleibt, bis es entladen wird.'},
+    "Loaded JIT (at its first request), with an idle TTL: LM Studio may unload it when another sandbox's model is loaded: Auto-Evict; see Help > Keeping models loaded.": {
+        'en': "Loaded JIT (at its first request), with an idle TTL: LM Studio may unload it when another sandbox's model is loaded: Auto-Evict; see Help > Keeping models loaded.",
+        'de': 'Per JIT geladen (bei seiner ersten Anfrage), mit einer Leerlauf-TTL: LM Studio kann es entladen, wenn das Modell einer anderen Sandbox geladen wird: Auto-Evict; siehe Hilfe > Models auf dem Server geladen halten.'},
+    'Ollama unloads it when it was idle for its keep_alive (Expires), or when memory runs short; each request sets the time again.': {
+        'en': 'Ollama unloads it when it was idle for its keep_alive (Expires), or when memory runs short; each request sets the time again.',
+        'de': 'Ollama entlädt es, wenn es für sein keep_alive unbenutzt war (Läuft ab), oder wenn der Speicher knapp wird; jede Anfrage setzt die Zeit neu.'},
+    "llama.cpp's router unloads the least recently used model beyond --models-max or its memory.": {
+        'en': "llama.cpp's router unloads the least recently used model beyond --models-max or its memory.",
+        'de': 'Der Router von llama.cpp entlädt über --models-max oder seinen Speicher hinaus das am längsten ungenutzte Modell.'},
+    'The server serves it for as long as it runs; nothing loads or unloads it.': {
+        'en': 'The server serves it for as long as it runs; nothing loads or unloads it.',
+        'de': 'Der Server bietet es an, solange er läuft; nichts lädt oder entlädt es.'},
+    'Instance': {
+        'en': 'Instance',
+        'de': 'Instanz'},
+    'Expires': {
+        'en': 'Expires',
+        'de': 'Läuft ab'},
+    'size {size}': {
+        'en': 'size {size}',
+        'de': 'Größe {size}'},
+    'JIT (unloaded after {seconds} s idle)': {
+        'en': 'JIT (unloaded after {seconds} s idle)',
+        'de': 'JIT (entladen nach {seconds} s Leerlauf)'},
+    'not reported': {
+        'en': 'not reported',
+        'de': 'nicht gemeldet'},
+    'never (until unloaded)': {
+        'en': 'never (until unloaded)',
+        'de': 'nie (bis zum Entladen)'},
+    'The context is a number of tokens from {low} to {high}.': {
+        'en': 'The context is a number of tokens from {low} to {high}.',
+        'de': 'Der Kontext ist eine Zahl von Tokens von {low} bis {high}.'},
+    'The time is a number of seconds from 1 on; empty: it stays until it is unloaded.': {
+        'en': 'The time is a number of seconds from 1 on; empty: it stays until it is unloaded.',
+        'de': 'Die Zeit ist eine Zahl von Sekunden ab 1; leer: Es bleibt, bis es entladen wird.'},
+    'Choose a model first.': {
+        'en': 'Choose a model first.',
+        'de': 'Wählen Sie zuerst ein Modell.'},
+    'Choose a loaded model first.': {
+        'en': 'Choose a loaded model first.',
+        'de': 'Wählen Sie zuerst ein geladenes Modell.'},
+    'not a list of loaded models': {
+        'en': 'not a list of loaded models',
+        'de': 'keine Liste geladener Modelle'},
+    'Used by the running sandboxes: {names}': {
+        'en': 'Used by the running sandboxes: {names}',
+        'de': 'Genutzt von den laufenden Sandboxen: {names}'},
+    "Unload {model} from {name}? It leaves the server's memory; a later request loads it again.": {
+        'en': "Unload {model} from {name}? It leaves the server's memory; a later request loads it again.",
+        'de': '{model} aus {name} entladen? Es verlässt den Speicher des Servers; eine spätere Anfrage lädt es wieder.'},
+    'Load a model on {name}': {
+        'en': 'Load a model on {name}',
+        'de': 'Ein Modell auf {name} laden'},
+    'The model to load (sandbox-ai llm models lists them)': {
+        'en': 'The model to load (sandbox-ai llm models lists them)',
+        'de': 'Das zu ladende Modell (sandbox-ai llm models listet sie)'},
+    "Tokens the model is loaded with; empty: num_ctx of its parameters (Parameters…), else the server's own": {
+        'en': "Tokens the model is loaded with; empty: num_ctx of its parameters (Parameters…), else the server's own",
+        'de': 'Tokens, mit denen das Modell geladen wird; leer: num_ctx seiner Parameter (Parameter…), sonst der eigene Wert des Servers'},
+    'Unload after idle (seconds)': {
+        'en': 'Unload after idle (seconds)',
+        'de': 'Nach Leerlauf entladen (Sekunden)'},
+    'Ollama unloads the model after this many seconds without a request; empty: it stays until it is unloaded': {
+        'en': 'Ollama unloads the model after this many seconds without a request; empty: it stays until it is unloaded',
+        'de': 'Ollama entlädt das Modell nach so vielen Sekunden ohne Anfrage; leer: Es bleibt, bis es entladen wird'},
+    'Loading {model}…': {
+        'en': 'Loading {model}…',
+        'de': 'Lade {model}…'},
+    'Models on the server {name}': {
+        'en': 'Models on the server {name}',
+        'de': 'Modelle auf dem Server {name}'},
+    'Loaded models': {
+        'en': 'Loaded models',
+        'de': 'Geladene Modelle'},
+    'What the server may unload': {
+        'en': 'What the server may unload',
+        'de': 'Was der Server entladen kann'},
+    'Load…': {
+        'en': 'Load…',
+        'de': 'Laden…'},
+    'Unload…': {
+        'en': 'Unload…',
+        'de': 'Entladen…'},
+    'Keep loaded': {
+        'en': 'Keep loaded',
+        'de': 'Geladen halten'},
+    'Asking {name}…': {
+        'en': 'Asking {name}…',
+        'de': 'Frage {name}…'},
+    'sandbox-ai llm load refused it: {error}': {
+        'en': 'sandbox-ai llm load refused it: {error}',
+        'de': 'sandbox-ai llm load hat es abgelehnt: {error}'},
+    'Unloading {model}…': {
+        'en': 'Unloading {model}…',
+        'de': 'Entlade {model}…'},
+    '{model} is unloaded.': {
+        'en': '{model} is unloaded.',
+        'de': '{model} ist entladen.'},
+    "The model is loaded explicitly: it stays until it is unloaded, and LM Studio's Auto-Evict leaves it alone.": {
+        'en': "The model is loaded explicitly: it stays until it is unloaded, and LM Studio's Auto-Evict leaves it alone.",
+        'de': 'Das Modell wird ausdrücklich geladen: Es bleibt, bis es entladen wird, und Auto-Evict von LM Studio lässt es in Ruhe.'},
+    "What {name} has loaded now, as its API reports it, and the running sandboxes that use each model. A JIT model (LM Studio) may be unloaded when another sandbox's model is loaded: Keep loaded loads it explicitly.": {
+        'en': "What {name} has loaded now, as its API reports it, and the running sandboxes that use each model. A JIT model (LM Studio) may be unloaded when another sandbox's model is loaded: Keep loaded loads it explicitly.",
+        'de': 'Was {name} jetzt geladen hat, wie seine API es meldet, und die laufenden Sandboxen, die jedes Modell nutzen. Ein JIT-Modell (LM Studio) kann entladen werden, wenn das Modell einer anderen Sandbox geladen wird: Geladen halten lädt es ausdrücklich.'},
+    'Load a model': {
+        'en': 'Load a model',
+        'de': 'Ein Modell laden'},
+    'Load a model explicitly (sandbox-ai llm load): it stays until it is unloaded': {
+        'en': 'Load a model explicitly (sandbox-ai llm load): it stays until it is unloaded',
+        'de': 'Ein Modell ausdrücklich laden (sandbox-ai llm load): Es bleibt, bis es entladen wird'},
+    'Unload the model': {
+        'en': 'Unload the model',
+        'de': 'Das Modell entladen'},
+    'Unload the selected model or instance (sandbox-ai llm unload); asked first': {
+        'en': 'Unload the selected model or instance (sandbox-ai llm unload); asked first',
+        'de': 'Das gewählte Modell oder die gewählte Instanz entladen (sandbox-ai llm unload); mit Rückfrage'},
+    'Load the selected JIT model explicitly, so that the server does not unload it for another model (the JIT instance goes first: never twice in memory)': {
+        'en': 'Load the selected JIT model explicitly, so that the server does not unload it for another model (the JIT instance goes first: never twice in memory)',
+        'de': 'Das gewählte JIT-Modell ausdrücklich laden, damit der Server es nicht für ein anderes Modell entlädt (die JIT-Instanz geht zuerst: nie zweimal im Speicher)'},
+    'Ask the server again': {
+        'en': 'Ask the server again',
+        'de': 'Den Server erneut fragen'},
+    "LM Studio may unload {models} when another sandbox's model is loaded: Auto-Evict; see Help > Keeping models loaded. Keep loaded loads it explicitly.": {
+        'en': "LM Studio may unload {models} when another sandbox's model is loaded: Auto-Evict; see Help > Keeping models loaded. Keep loaded loads it explicitly.",
+        'de': 'LM Studio kann {models} entladen, wenn das Modell einer anderen Sandbox geladen wird: Auto-Evict; siehe Hilfe > Models auf dem Server geladen halten. Geladen halten lädt es ausdrücklich.'},
+    '{name} does not report what it has loaded.': {
+        'en': '{name} does not report what it has loaded.',
+        'de': '{name} meldet nicht, was es geladen hat.'},
+    'Loaded on {name}: {count}': {
+        'en': 'Loaded on {name}: {count}',
+        'de': 'Geladen auf {name}: {count}'},
+    "This server's API loads no model.": {
+        'en': "This server's API loads no model.",
+        'de': 'Die API dieses Servers lädt kein Modell.'},
+    'Reading its models…': {
+        'en': 'Reading its models…',
+        'de': 'Lese seine Modelle…'},
+    "This server's API unloads no model.": {
+        'en': "This server's API unloads no model.",
+        'de': 'Die API dieses Servers entlädt kein Modell.'},
+    'Select a loaded model first.': {
+        'en': 'Select a loaded model first.',
+        'de': 'Wählen Sie zuerst ein geladenes Modell.'},
+    '{model} is loaded.': {
+        'en': '{model} is loaded.',
+        'de': '{model} ist geladen.'},
+    'The running sandboxes {names} use it: their next request waits for it to load again (or fails).': {
+        'en': 'The running sandboxes {names} use it: their next request waits for it to load again (or fails).',
+        'de': 'Die laufenden Sandboxen {names} nutzen es: Ihre nächste Anfrage wartet, bis es wieder geladen ist (oder schlägt fehl).'},
+    'Unload': {
+        'en': 'Unload',
+        'de': 'Entladen'},
+    'Not unloaded.': {
+        'en': 'Not unloaded.',
+        'de': 'Nicht entladen.'},
+    'Could not unload {model}: {error}': {
+        'en': 'Could not unload {model}: {error}',
+        'de': '{model} konnte nicht entladen werden: {error}'},
+    'The sandbox-ai of {host} has no llm loaded yet: update it there (Hosts › Update).': {
+        'en': 'The sandbox-ai of {host} has no llm loaded yet: update it there (Hosts › Update).',
+        'de': 'Das sandbox-ai von {host} hat noch kein llm loaded: Aktualisieren Sie es dort (Hosts › Aktualisieren).'},
+    'Could not read what {name} has loaded: {error}': {
+        'en': 'Could not read what {name} has loaded: {error}',
+        'de': 'Was {name} geladen hat, konnte nicht gelesen werden: {error}'},
+    'It is loaded explicitly already.': {
+        'en': 'It is loaded explicitly already.',
+        'de': 'Es ist schon ausdrücklich geladen.'},
+    '{model} is loaded and the running sandboxes {names} use it: loading it again takes it from them for a moment (their next request waits for it or fails). Load it again?': {
+        'en': '{model} is loaded and the running sandboxes {names} use it: loading it again takes it from them for a moment (their next request waits for it or fails). Load it again?',
+        'de': '{model} ist geladen, und die laufenden Sandboxen {names} nutzen es: Erneutes Laden nimmt es ihnen für einen Moment (ihre nächste Anfrage wartet darauf oder schlägt fehl). Erneut laden?'},
+    'Load again': {
+        'en': 'Load again',
+        'de': 'Erneut laden'},
+    'Not loaded.': {
+        'en': 'Not loaded.',
+        'de': 'Nicht geladen.'},
+    'Models on the server…': {
+        'en': 'Models on the server…',
+        'de': 'Modelle auf dem Server…'},
+    'Models on the server': {
+        'en': 'Models on the server',
+        'de': 'Modelle auf dem Server'},
+    'What the server has loaded now (JIT or explicit, the running sandboxes using each model): load, unload and keep models loaded (sandbox-ai llm loaded, load, unload)': {
+        'en': 'What the server has loaded now (JIT or explicit, the running sandboxes using each model): load, unload and keep models loaded (sandbox-ai llm loaded, load, unload)',
+        'de': 'Was der Server jetzt geladen hat (JIT oder ausdrücklich, die laufenden Sandboxen, die jedes Modell nutzen): Modelle laden, entladen und geladen halten (sandbox-ai llm loaded, load, unload)'},
+    "JIT: LM Studio may unload it when another sandbox's model is loaded (Auto-Evict; Help > Keeping models loaded)": {
+        'en': "JIT: LM Studio may unload it when another sandbox's model is loaded (Auto-Evict; Help > Keeping models loaded)",
+        'de': 'JIT: LM Studio kann es entladen, wenn das Modell einer anderen Sandbox geladen wird (Auto-Evict; Hilfe > Models auf dem Server geladen halten)'},
+    # == terminal tabs: a link of a run behind Tor or a VPN ==
+    'This sandbox runs through Tor: {url} is not opened on this computer, which would reach it with your own address, in clear text past Tor. Copy the link and open it in Tor Browser.': {
+        'en': 'This sandbox runs through Tor: {url} is not opened on this computer, which would reach it with your own address, in clear text past Tor. Copy the link and open it in Tor Browser.',
+        'de': 'Diese Sandbox läuft über Tor: {url} wird nicht auf diesem Computer geöffnet, der es mit Ihrer eigenen Adresse erreichen würde, im Klartext an Tor vorbei. Kopieren Sie den Link und öffnen Sie ihn im Tor Browser.'},
+    'This sandbox starts behind the VPN or Tor profile {name}: {url} is not opened on this computer, which would reach it past the VPN or Tor. Copy the link and open it in a browser behind it (Tor Browser for Tor).': {
+        'en': 'This sandbox starts behind the VPN or Tor profile {name}: {url} is not opened on this computer, which would reach it past the VPN or Tor. Copy the link and open it in a browser behind it (Tor Browser for Tor).',
+        'de': 'Diese Sandbox startet hinter dem VPN- oder Tor-Profil {name}: {url} wird nicht auf diesem Computer geöffnet, der es am VPN oder an Tor vorbei erreichen würde. Kopieren Sie den Link und öffnen Sie ihn in einem Browser dahinter (Tor Browser für Tor).'},
+    "This sandbox runs through the VPN {name}: a browser on this computer opens {url} with this computer's own address, past the VPN.": {
+        'en': "This sandbox runs through the VPN {name}: a browser on this computer opens {url} with this computer's own address, past the VPN.",
+        'de': 'Diese Sandbox läuft über das VPN {name}: Ein Browser auf diesem Computer öffnet {url} mit der eigenen Adresse dieses Computers, am VPN vorbei.'},
+    'Open anyway, past the VPN': {
+        'en': 'Open anyway, past the VPN',
+        'de': 'Trotzdem öffnen, am VPN vorbei'},
+    # == Hermes Agent: its name, its features on the Board ==
+    'Hermes Agent': {
+        'en': 'Hermes Agent',
+        'de': 'Hermes Agent'},
+    '--hermes-enable is for Hermes only.': {
+        'en': '--hermes-enable is for Hermes only.',
+        'de': '--hermes-enable gilt nur für Hermes.'},
+    'Hermes: {features} turned on (their hosts open)': {
+        'en': 'Hermes: {features} turned on (their hosts open)',
+        'de': 'Hermes: {features} eingeschaltet (ihre Hosts offen)'},
+    # == Goose: its name, its features on the Board ==
+    'Goose': {
+        'en': 'Goose',
+        'de': 'Goose'},
+    '--goose-enable is for Goose only.': {
+        'en': '--goose-enable is for Goose only.',
+        'de': '--goose-enable gilt nur für Goose.'},
+    'Goose: {features} turned on (their hosts open)': {
+        'en': 'Goose: {features} turned on (their hosts open)',
+        'de': 'Goose: {features} eingeschaltet (ihre Hosts offen)'},
+    # == DeepSeek Harness and Qwen Code: their names, Qwen Code's features on the Board ==
+    'DeepSeek Harness': {
+        'en': 'DeepSeek Harness',
+        'de': 'DeepSeek Harness'},
+    'Qwen Code': {
+        'en': 'Qwen Code',
+        'de': 'Qwen Code'},
+    '--qwen-enable is for Qwen Code only.': {
+        'en': '--qwen-enable is for Qwen Code only.',
+        'de': '--qwen-enable gilt nur für Qwen Code.'},
+    'Qwen Code: {features} turned on (their hosts open)': {
+        'en': 'Qwen Code: {features} turned on (their hosts open)',
+        'de': 'Qwen Code: {features} eingeschaltet (ihre Hosts offen)'},
+    # == the sandbox's own browser (--browser): the Browser button, its window, the board ==
+    'The browser keeps its profile (logins, cookies) in {path}': {
+        'en': 'The browser keeps its profile (logins, cookies) in {path}',
+        'de': 'Der Browser behält sein Profil (Anmeldungen, Cookies) in {path}'},
+    "A browser in its own container beside the agent (Podman), on the agent's network: firewall, proxy, approvals, kill switch, VPN or Tor. For you (the Browser button shows it), for the agent (it drives it through Chrome's DevTools) or both": {
+        'en': "A browser in its own container beside the agent (Podman), on the agent's network: firewall, proxy, approvals, kill switch, VPN or Tor. For you (the Browser button shows it), for the agent (it drives it through Chrome's DevTools) or both",
+        'de': 'Ein Browser in einem eigenen Container neben dem Agenten (Podman), im Netz des Agenten: Firewall, Proxy, Rückfragen, Not-Aus, VPN oder Tor. Für Sie (der Knopf Browser zeigt ihn), für den Agenten (er steuert ihn über Chromes DevTools) oder beide'},
+    "The agent drives the browser (Chrome's DevTools at 127.0.0.1:9222 in the pod)": {
+        'en': "The agent drives the browser (Chrome's DevTools at 127.0.0.1:9222 in the pod)",
+        'de': 'Der Agent steuert den Browser (Chromes DevTools unter 127.0.0.1:9222 im Pod)'},
+    'whatever you sign in to there, the agent can use': {
+        'en': 'whatever you sign in to there, the agent can use',
+        'de': 'wo Sie sich dort anmelden, kann der Agent es nutzen'},
+    'Which browser runs beside the agent (its image: sandbox-ai build browser).': {
+        'en': 'Which browser runs beside the agent (its image: sandbox-ai build browser).',
+        'de': 'Welcher Browser neben dem Agenten läuft (sein Image: sandbox-ai build browser).'},
+    'Who drives it': {
+        'en': 'Who drives it',
+        'de': 'Wer ihn steuert'},
+    "You (in its tab in the app), the agent (Chrome's DevTools; Chromium only) or both.": {
+        'en': "You (in its tab in the app), the agent (Chrome's DevTools; Chromium only) or both.",
+        'de': 'Sie (in seinem Tab in der App), der Agent (Chromes DevTools; nur Chromium) oder beide.'},
+    '`fresh` (new at every start), `session` (kept with the session) or a folder of yours.': {
+        'en': '`fresh` (new at every start), `session` (kept with the session) or a folder of yours.',
+        'de': '`fresh` (bei jedem Start neu), `session` (mit der Sitzung behalten) oder ein Ordner von Ihnen.'},
+    'you': {
+        'en': 'you',
+        'de': 'Sie'},
+    'you and the agent': {
+        'en': 'you and the agent',
+        'de': 'Sie und der Agent'},
+    "Show the selected sandbox's own browser (--browser) as a tab in Terminals, beside its terminal: its display, your mouse and keyboard; it takes the sandbox's exit": {
+        'en': "Show the selected sandbox's own browser (--browser) as a tab in Terminals, beside its terminal: its display, your mouse and keyboard; it takes the sandbox's exit",
+        'de': 'Den eigenen Browser der gewählten Sandbox (--browser) als Tab unter Terminals zeigen, neben ihrem Terminal: seine Anzeige, Ihre Maus und Tastatur; er nimmt den Ausgang der Sandbox'},
+    'Browser: {name}': {
+        'en': 'Browser: {name}',
+        'de': 'Browser: {name}'},
+    "The browser of {name} (its own container in the sandbox's pod); right click: Open in its own window, Close tab": {
+        'en': "The browser of {name} (its own container in the sandbox's pod); right click: Open in its own window, Close tab",
+        'de': 'Der Browser von {name} (sein eigener Container im Pod der Sandbox); Rechtsklick: In eigenem Fenster öffnen, Tab schließen'},
+    'Open in its own window': {
+        'en': 'Open in its own window',
+        'de': 'In eigenem Fenster öffnen'},
+    'Back into the tabs': {
+        'en': 'Back into the tabs',
+        'de': 'Zurück in die Tabs'},
+    "Show this browser as a tab of Terminals again, beside its session's terminal": {
+        'en': "Show this browser as a tab of Terminals again, beside its session's terminal",
+        'de': 'Diesen Browser wieder als Tab unter Terminals zeigen, neben dem Terminal seiner Sitzung'},
+    "This session's options have the browser (--browser), but the run that runs now was started without it (the browser was added later - on the Board, for example - or an older sandbox-ai started it). Restart the session to start it with its browser: Restart in its terminal tab's right click, or Stop and Resume.": {
+        'en': "This session's options have the browser (--browser), but the run that runs now was started without it (the browser was added later - on the Board, for example - or an older sandbox-ai started it). Restart the session to start it with its browser: Restart in its terminal tab's right click, or Stop and Resume.",
+        'de': 'Die Optionen dieser Sitzung enthalten den Browser (--browser), aber der Lauf, der jetzt läuft, wurde ohne ihn gestartet (der Browser kam später dazu - zum Beispiel im Board - oder ein älteres sandbox-ai hat ihn gestartet). Starten Sie die Sitzung neu, damit ihr Browser mitstartet: Neu starten im Rechtsklick ihres Terminal-Tabs, oder Stoppen und Fortsetzen.'},
+    'The browser of {name} is open in Terminals': {
+        'en': 'The browser of {name} is open in Terminals',
+        'de': 'Der Browser von {name} ist unter Terminals geöffnet'},
+    "Its browser's display cannot be opened: {path} is refused ({why}).": {
+        'en': "Its browser's display cannot be opened: {path} is refused ({why}).",
+        'de': 'Die Anzeige seines Browsers lässt sich nicht öffnen: {path} wird abgelehnt ({why}).'},
+    'It does not run: its browser starts with it (Resume).': {
+        'en': 'It does not run: its browser starts with it (Resume).',
+        'de': 'Er läuft nicht: Sein Browser startet mit ihm (Fortsetzen).'},
+    'Not now: {why}': {
+        'en': 'Not now: {why}',
+        'de': 'Gerade nicht: {why}'},
+    'Only you drive this browser; the agent cannot reach it.': {
+        'en': 'Only you drive this browser; the agent cannot reach it.',
+        'de': 'Nur Sie steuern diesen Browser; der Agent erreicht ihn nicht.'},
+    'Behind Tor this is {name}, not Tor Browser: sites can fingerprint it and link its visits to each other (and to '
+    'you, if you sign in). Use Tor Browser for anonymity.': {
+        'en': 'Behind Tor this is {name}, not Tor Browser: sites can fingerprint it and link its visits to each other '
+              '(and to you, if you sign in). Use Tor Browser for anonymity.',
+        'de': 'Hinter Tor ist das {name}, kein Tor Browser: Websites können seinen Fingerabdruck nehmen und seine '
+              'Besuche miteinander verknüpfen (und mit Ihnen, wenn Sie sich anmelden). Für Anonymität nehmen Sie Tor '
+              'Browser.'},
+    'You and the agent drive this browser: whatever you sign in to here, the agent can use.': {
+        'en': 'You and the agent drive this browser: whatever you sign in to here, the agent can use.',
+        'de': 'Sie und der Agent steuern diesen Browser: Wo Sie sich hier anmelden, kann der Agent es nutzen.'},
+    'The agent drives this browser; you watch (and may take over).': {
+        'en': 'The agent drives this browser; you watch (and may take over).',
+        'de': 'Der Agent steuert diesen Browser; Sie sehen zu (und können übernehmen).'},
+    'Browser of {name}': {
+        'en': 'Browser of {name}',
+        'de': 'Browser von {name}'},
+    'not a socket': {
+        'en': 'not a socket',
+        'de': 'kein Socket'},
+    'not yours': {
+        'en': 'not yours',
+        'de': 'nicht Ihrer'},
+    'the server refused: {reason}': {
+        'en': 'the server refused: {reason}',
+        'de': 'der Server lehnte ab: {reason}'},
+    'Select a start first.': {
+        'en': 'Select a start first.',
+        'de': 'Wählen Sie zuerst einen Start.'},
+    'This start has no browser of its own (start it with --browser).': {
+        'en': 'This start has no browser of its own (start it with --browser).',
+        'de': 'Dieser Start hat keinen eigenen Browser (starten Sie ihn mit --browser).'},
+    "Its browser's display is a socket on that host: only a browser of this machine is shown here.": {
+        'en': "Its browser's display is a socket on that host: only a browser of this machine is shown here.",
+        'de': 'Die Anzeige seines Browsers ist ein Socket auf jenem Host: Hier wird nur ein Browser dieses Rechners gezeigt.'},
+    'Only the agent drives this browser (--browser-control agent): it has no display for you.': {
+        'en': 'Only the agent drives this browser (--browser-control agent): it has no display for you.',
+        'de': 'Nur der Agent steuert diesen Browser (--browser-control agent): Er hat keine Anzeige für Sie.'},
+    'not an absolute path': {
+        'en': 'not an absolute path',
+        'de': 'kein absoluter Pfad'},
+    'its folder is not yours alone': {
+        'en': 'its folder is not yours alone',
+        'de': 'sein Ordner gehört nicht Ihnen allein'},
+    'it is not there (yet)': {
+        'en': 'it is not there (yet)',
+        'de': 'er ist (noch) nicht da'},
+    "The browser's display": {
+        'en': "The browser's display",
+        'de': 'Die Anzeige des Browsers'},
+    "Connecting to the browser's display…": {
+        'en': "Connecting to the browser's display…",
+        'de': 'Verbinde mit der Anzeige des Browsers…'},
+    'Share the clipboard': {
+        'en': 'Share the clipboard',
+        'de': 'Zwischenablage teilen'},
+    'Off: nothing you copy reaches the browser, nothing copied there reaches your clipboard. On: both ways, while this window is open': {
+        'en': 'Off: nothing you copy reaches the browser, nothing copied there reaches your clipboard. On: both ways, while this window is open',
+        'de': 'Aus: Nichts, was Sie kopieren, erreicht den Browser, nichts dort Kopiertes erreicht Ihre Zwischenablage. An: in beide Richtungen, solange dieses Fenster offen ist'},
+    'Reconnect': {
+        'en': 'Reconnect',
+        'de': 'Neu verbinden'},
+    "Connect to the browser's display again": {
+        'en': "Connect to the browser's display again",
+        'de': 'Erneut mit der Anzeige des Browsers verbinden'},
+    'Connected: {width}×{height}': {
+        'en': 'Connected: {width}×{height}',
+        'de': 'Verbunden: {width}×{height}'},
+    "The browser's display socket {path} is refused: {why}": {
+        'en': "The browser's display socket {path} is refused: {why}",
+        'de': 'Der Anzeige-Socket des Browsers {path} wird abgelehnt: {why}'},
+    'not a VNC server': {
+        'en': 'not a VNC server',
+        'de': 'kein VNC-Server'},
+    'an RFB version this viewer does not speak': {
+        'en': 'an RFB version this viewer does not speak',
+        'de': 'eine RFB-Version, die diese Ansicht nicht spricht'},
+    "the server's name is too long": {
+        'en': "the server's name is too long",
+        'de': 'der Name des Servers ist zu lang'},
+    'the server names a display of {width}x{height}': {
+        'en': 'the server names a display of {width}x{height}',
+        'de': 'der Server nennt eine Anzeige von {width}x{height}'},
+    'Esc closes this window; Shift+Esc sends Esc to the browser.': {
+        'en': 'Esc closes this window; Shift+Esc sends Esc to the browser.',
+        'de': 'Esc schließt dieses Fenster; Umschalt+Esc schickt Esc an den Browser.'},
+    "Waiting for the browser's display (it starts)…": {
+        'en': "Waiting for the browser's display (it starts)…",
+        'de': 'Warte auf die Anzeige des Browsers (er startet)…'},
+    "the server asks for a password; the browser's display needs none": {
+        'en': "the server asks for a password; the browser's display needs none",
+        'de': 'der Server verlangt ein Passwort; die Anzeige des Browsers braucht keines'},
+    'the server sends a rectangle outside its display': {
+        'en': 'the server sends a rectangle outside its display',
+        'de': 'der Server schickt ein Rechteck außerhalb seiner Anzeige'},
+    "The browser's display was closed (the run ended?)": {
+        'en': "The browser's display was closed (the run ended?)",
+        'de': 'Die Anzeige des Browsers wurde geschlossen (der Lauf endete?)'},
+    'the server ended the protocol': {
+        'en': 'the server ended the protocol',
+        'de': 'der Server beendete das Protokoll'},
+    'an encoding this viewer did not ask for ({encoding})': {
+        'en': 'an encoding this viewer did not ask for ({encoding})',
+        'de': 'eine Kodierung, um die diese Ansicht nicht bat ({encoding})'},
+    'the server copies from outside its display': {
+        'en': 'the server copies from outside its display',
+        'de': 'der Server kopiert von außerhalb seiner Anzeige'},
+    'an RFB message this viewer does not know ({kind})': {
+        'en': 'an RFB message this viewer does not know ({kind})',
+        'de': 'eine RFB-Nachricht, die diese Ansicht nicht kennt ({kind})'},
+    "the server's clipboard text is too long": {
+        'en': "the server's clipboard text is too long",
+        'de': 'der Zwischenablage-Text des Servers ist zu lang'},
+    # == 0.1.95: the model servers all listed, MCP servers' variables, the MCP part's buttons, images, the guide ==
+    'This sandbox-ai has no --mcp-env: the server runs with its own variables.': {
+        'en': 'This sandbox-ai has no --mcp-env: the server runs with its own variables.',
+        'de': 'Dieses sandbox-ai kennt kein --mcp-env: Der Server läuft mit seinen eigenen Variablen.'},
+    'Choose one of your images, or type a name…': {
+        'en': 'Choose one of your images, or type a name…',
+        'de': 'Eines Ihrer Images wählen oder einen Namen eingeben…'},
+    'One of your images (sandbox-ai images list; the Images page adds them), or Other… for a name typed in': {
+        'en': 'One of your images (sandbox-ai images list; the Images page adds them), or Other… for a name typed in',
+        'de': 'Eines Ihrer Images (sandbox-ai images list; die Seite Images fügt sie hinzu), oder Anderes… für einen eingegebenen Namen'},
+    'Other…': {
+        'en': 'Other…',
+        'de': 'Anderes…'},
+    "Save as the server's defaults…": {
+        'en': "Save as the server's defaults…",
+        'de': 'Als Standard des Servers speichern…'},
+    "Opens the server's Properties (MCP page) with this board's limits and variables filled in: OK stores them as {name}'s defaults for every start that uses it (every board and project); Cancel changes nothing": {
+        'en': "Opens the server's Properties (MCP page) with this board's limits and variables filled in: OK stores them as {name}'s defaults for every start that uses it (every board and project); Cancel changes nothing",
+        'de': 'Öffnet die Eigenschaften des Servers (MCP-Seite) mit den Grenzen und Variablen dieses Boards: OK speichert sie als Standard von {name} für jeden Start, der ihn nutzt (jedes Board und Projekt); Abbrechen ändert nichts'},
+    "Use the server's limits": {
+        'en': "Use the server's limits",
+        'de': 'Grenzen des Servers nehmen'},
+    "Discards this board's limits for {name}: its starts take the server's own limits (its defaults for every start) again": {
+        'en': "Discards this board's limits for {name}: its starts take the server's own limits (its defaults for every start) again",
+        'de': 'Verwirft die Grenzen dieses Boards für {name}: Seine Starts nehmen wieder die eigenen Grenzen des Servers (seinen Standard für jeden Start)'},
+    "This board's variables for the server (--mcp-env): a value that is no secret, or a secret, in place of the server's own; other values give this board's starts an instance of the server of their own.": {
+        'en': "This board's variables for the server (--mcp-env): a value that is no secret, or a secret, in place of the server's own; other values give this board's starts an instance of the server of their own.",
+        'de': 'Die Variablen dieses Boards für den Server (--mcp-env): ein Wert, der kein Geheimnis ist, oder ein Geheimnis, anstelle der eigenen des Servers; andere Werte geben den Starts dieses Boards eine eigene Instanz des Servers.'},
+    'Variables for this board': {
+        'en': 'Variables for this board',
+        'de': 'Variablen für dieses Board'},
+    'These values hold for this board\'s starts only. "Use the server\'s limits" discards this board\'s limits; "Save as the server\'s defaults…" stores the values shown as the server\'s own, for every start.': {
+        'en': 'These values hold for this board\'s starts only. "Use the server\'s limits" discards this board\'s limits; "Save as the server\'s defaults…" stores the values shown as the server\'s own, for every start.',
+        'de': 'Diese Werte gelten nur für die Starts dieses Boards. „Grenzen des Servers nehmen“ verwirft die Grenzen dieses Boards; „Als Standard des Servers speichern…“ speichert die gezeigten Werte als die eigenen des Servers, für jeden Start.'},
+    "The server's defaults (every start)…": {
+        'en': "The server's defaults (every start)…",
+        'de': 'Standard des Servers (jeder Start)…'},
+    "The server's own limits, network, folders and variables for every start (the MCP page's Properties…)": {
+        'en': "The server's own limits, network, folders and variables for every start (the MCP page's Properties…)",
+        'de': 'Die eigenen Grenzen, das Netz, die Ordner und die Variablen des Servers für jeden Start (Eigenschaften… der MCP-Seite)'},
+    'No images of yours yet (the Images page adds one)': {
+        'en': 'No images of yours yet (the Images page adds one)',
+        'de': 'Noch keine eigenen Images (die Seite Images fügt eines hinzu)'},
+    'Asking the model servers for their models (sandbox-ai llm models)…': {
+        'en': 'Asking the model servers for their models (sandbox-ai llm models)…',
+        'de': 'Die Modellserver werden nach ihren Modellen gefragt (sandbox-ai llm models)…'},
+    'pulled': {
+        'en': 'pulled',
+        'de': 'geladen'},
+    'Show the introduction': {
+        'en': 'Show the introduction',
+        'de': 'Einführung zeigen'},
+    'What this part is, again (the first step, shown once per kind of part)': {
+        'en': 'What this part is, again (the first step, shown once per kind of part)',
+        'de': 'Was dieser Teil ist, noch einmal (der erste Schritt, einmal je Art von Teil gezeigt)'},
+    'not passed': {
+        'en': 'not passed',
+        'de': 'nicht übergeben'},
+    'The server does not get this variable': {
+        'en': 'The server does not get this variable',
+        'de': 'Der Server bekommt diese Variable nicht'},
+    'your environment or its secret': {
+        'en': 'your environment or its secret',
+        'de': 'Ihre Umgebung oder ihr Geheimnis'},
+    "Your environment's {name} when sandbox-ai starts, else the secret {name} (sandbox-ai secrets)": {
+        'en': "Your environment's {name} when sandbox-ai starts, else the secret {name} (sandbox-ai secrets)",
+        'de': '{name} aus Ihrer Umgebung, wenn sandbox-ai startet, sonst das Geheimnis {name} (sandbox-ai secrets)'},
+    'this value': {
+        'en': 'this value',
+        'de': 'dieser Wert'},
+    'A value that is no secret, kept in the definition (never a token or password)': {
+        'en': 'A value that is no secret, kept in the definition (never a token or password)',
+        'de': 'Ein Wert, der kein Geheimnis ist, in der Definition gespeichert (nie ein Token oder Passwort)'},
+    'a secret': {
+        'en': 'a secret',
+        'de': 'ein Geheimnis'},
+    'The secret chosen here (sandbox-ai secrets): its value is never in the definition': {
+        'en': 'The secret chosen here (sandbox-ai secrets): its value is never in the definition',
+        'de': 'Das hier gewählte Geheimnis (sandbox-ai secrets): Sein Wert steht nie in der Definition'},
+    "What the server's Properties say (every start)": {
+        'en': "What the server's Properties say (every start)",
+        'de': 'Was die Eigenschaften des Servers sagen (jeder Start)'},
+    'Where {name} comes from': {
+        'en': 'Where {name} comes from',
+        'de': 'Woher {name} kommt'},
+    'Value of {name}': {
+        'en': 'Value of {name}',
+        'de': 'Wert von {name}'},
+    'a value that is no secret': {
+        'en': 'a value that is no secret',
+        'de': 'ein Wert, der kein Geheimnis ist'},
+    'Secret for {name}': {
+        'en': 'Secret for {name}',
+        'de': 'Geheimnis für {name}'},
+    "a secret's name (sandbox-ai secrets)": {
+        'en': "a secret's name (sandbox-ai secrets)",
+        'de': 'Name eines Geheimnisses (sandbox-ai secrets)'},
+    'Choose a secret: letters, digits and _ (sandbox-ai secrets)': {
+        'en': 'Choose a secret: letters, digits and _ (sandbox-ai secrets)',
+        'de': 'Ein Geheimnis wählen: Buchstaben, Ziffern und _ (sandbox-ai secrets)'},
+    'Use the built-in limits': {
+        'en': 'Use the built-in limits',
+        'de': 'Die eingebauten Grenzen nehmen'},
+    'Empties every field: the built-in limits hold': {
+        'en': 'Empties every field: the built-in limits hold',
+        'de': 'Leert alle Felder: Die eingebauten Grenzen gelten'},
+    'Value or secret': {
+        'en': 'Value or secret',
+        'de': 'Wert oder Geheimnis'},
+    'optional': {
+        'en': 'optional',
+        'de': 'optional'},
+    '{name} is a secret: its value is never kept in the definition; choose a secret': {
+        'en': '{name} is a secret: its value is never kept in the definition; choose a secret',
+        'de': '{name} ist ein Geheimnis: Sein Wert wird nie in der Definition gespeichert; wählen Sie ein Geheimnis'},
+    "The defaults of every start that uses it; a board can set other limits and variables for its own starts (its MCP part). Use the built-in limits empties the limits: sandbox-ai's own hold.": {
+        'en': "The defaults of every start that uses it; a board can set other limits and variables for its own starts (its MCP part). Use the built-in limits empties the limits: sandbox-ai's own hold.",
+        'de': 'Der Standard jedes Starts, der ihn nutzt; ein Board kann für seine eigenen Starts andere Grenzen und Variablen setzen (sein MCP-Teil). „Die eingebauten Grenzen nehmen“ leert die Grenzen: Die von sandbox-ai gelten.'},
+    'This server takes no variables.': {
+        'en': 'This server takes no variables.',
+        'de': 'Dieser Server nimmt keine Variablen.'},
+    'the value {value}': {
+        'en': 'the value {value}',
+        'de': 'der Wert {value}'},
+    'the secret {secret}': {
+        'en': 'the secret {secret}',
+        'de': 'das Geheimnis {secret}'},
+    "(the server's own: {own})": {
+        'en': "(the server's own: {own})",
+        'de': '(die eigene des Servers: {own})'},
+    "Filled in with the values of the board: OK makes them this server's defaults for every start.": {
+        'en': "Filled in with the values of the board: OK makes them this server's defaults for every start.",
+        'de': 'Mit den Werten des Boards ausgefüllt: OK macht sie zum Standard dieses Servers für jeden Start.'},
+    'Load the catalogs to see the variables its catalog entry takes.': {
+        'en': 'Load the catalogs to see the variables its catalog entry takes.',
+        'de': 'Laden Sie die Kataloge, um die Variablen seines Katalogeintrags zu sehen.'},
+    'A server that runs a command: its network, folders, VPN and variables are its options in mcp.json; here only its limits.': {
+        'en': 'A server that runs a command: its network, folders, VPN and variables are its options in mcp.json; here only its limits.',
+        'de': 'Ein Server, der einen Befehl ausführt: Sein Netz, seine Ordner, sein VPN und seine Variablen sind seine Optionen in mcp.json; hier nur seine Grenzen.'},
+    'It runs: the change holds from its next start; a start meanwhile gets an instance of its own with the change.': {
+        'en': 'It runs: the change holds from its next start; a start meanwhile gets an instance of its own with the change.',
+        'de': 'Er läuft: Die Änderung gilt ab seinem nächsten Start; ein Start in der Zwischenzeit bekommt eine eigene Instanz mit der Änderung.'},
+    'a value is one line of at most 1024 characters': {
+        'en': 'a value is one line of at most 1024 characters',
+        'de': 'ein Wert ist eine Zeile mit höchstens 1024 Zeichen'},
+    'No models known yet: start the server and read its models (sandbox-ai llm check {name}), or give it a default model (sandbox-ai llm add {name} ... --model MODEL)': {
+        'en': 'No models known yet: start the server and read its models (sandbox-ai llm check {name}), or give it a default model (sandbox-ai llm add {name} ... --model MODEL)',
+        'de': 'Noch keine Modelle bekannt: Starten Sie den Server und lesen Sie seine Modelle (sandbox-ai llm check {name}), oder geben Sie ihm ein Standardmodell (sandbox-ai llm add {name} ... --model MODEL)'},
+    'No models known: the server did not answer - start it, or: sandbox-ai llm check {name}': {
+        'en': 'No models known: the server did not answer - start it, or: sandbox-ai llm check {name}',
+        'de': 'Keine Modelle bekannt: Der Server hat nicht geantwortet - starten Sie ihn, oder: sandbox-ai llm check {name}'},
+    '{server} - no models known': {
+        'en': '{server} - no models known',
+        'de': '{server} - keine Modelle bekannt'},
+    'The folder {path} does not exist: it will be created (Create now, or at Start or Apply).': {
+        'en': 'The folder {path} does not exist: it will be created (Create now, or at Start or Apply).',
+        'de': 'Den Ordner {path} gibt es nicht: Er wird angelegt (Jetzt anlegen, oder beim Start oder bei Übernehmen).'},
+    'Create now': {
+        'en': 'Create now',
+        'de': 'Jetzt anlegen'},
+    "Create the board's workspace folders that do not exist yet (with the folders above them)": {
+        'en': "Create the board's workspace folders that do not exist yet (with the folders above them)",
+        'de': 'Die Arbeitsordner des Boards anlegen, die es noch nicht gibt (mit den Ordnern darüber)'},
+    'This folder does not exist yet: {list}\n\nCreate it (with the folders above it) and go on?': {
+        'en': 'This folder does not exist yet: {list}\n\nCreate it (with the folders above it) and go on?',
+        'de': 'Diesen Ordner gibt es noch nicht: {list}\n\nAnlegen (mit den Ordnern darüber) und weitermachen?'},
+    'Not created': {
+        'en': 'Not created',
+        'de': 'Nicht angelegt'},
+    'Created: {list}': {
+        'en': 'Created: {list}',
+        'de': 'Angelegt: {list}'},
+    'Build now': {
+        'en': 'Build now',
+        'de': 'Jetzt bauen'},
+    "Build the images the launcher's check names (sandbox-ai build ...) in a terminal tab, then check the board again": {
+        'en': "Build the images the launcher's check names (sandbox-ai build ...) in a terminal tab, then check the board again",
+        'de': 'Die Images, die die Prüfung des Starters nennt (sandbox-ai build ...), in einem Terminal-Tab bauen, dann das Board erneut prüfen'},
+    'Building the image': {
+        'en': 'Building the image',
+        'de': 'Das Image wird gebaut'},
+    'The build failed (exit status {status}): its terminal tab says why.': {
+        'en': 'The build failed (exit status {status}): its terminal tab says why.',
+        'de': 'Der Bau ist fehlgeschlagen (Exit-Status {status}): Sein Terminal-Tab sagt, warum.'},
+    '{name} runs already: its terminal is opened': {
+        'en': '{name} runs already: its terminal is opened',
+        'de': '{name} läuft schon: Sein Terminal wird geöffnet'},
+    'Stop session': {
+        'en': 'Stop session',
+        'de': 'Sitzung beenden'},
+    'Restart {name}': {
+        'en': 'Restart {name}',
+        'de': '{name} neu starten'},
+    'Restarting {name}…': {
+        'en': 'Restarting {name}…',
+        'de': '{name} wird neu gestartet…'},
+    'Title of the tab': {
+        'en': 'Title of the tab',
+        'de': 'Titel des Tabs'},
+    'Focus in Sandboxes & sessions': {
+        'en': 'Focus in Sandboxes & sessions',
+        'de': 'In Sandboxen & Sitzungen zeigen'},
+    'Stop session and close tab': {
+        'en': 'Stop session and close tab',
+        'de': 'Sitzung beenden und Tab schließen'},
+    'Not a session the app knows (yet): see Sandboxes & sessions': {
+        'en': 'Not a session the app knows (yet): see Sandboxes & sessions',
+        'de': '(Noch) keine Sitzung, die die App kennt: siehe Sandboxen & Sitzungen'},
+    'The session does not run': {
+        'en': 'The session does not run',
+        'de': 'Die Sitzung läuft nicht'},
+    'Only sessions can be stopped here': {
+        'en': 'Only sessions can be stopped here',
+        'de': 'Nur Sitzungen lassen sich hier beenden'},
+    'Not available here': {
+        'en': 'Not available here',
+        'de': 'Hier nicht verfügbar'},
+    'Its command still runs: stop it first': {
+        'en': 'Its command still runs: stop it first',
+        'de': 'Sein Befehl läuft noch: Beenden Sie ihn zuerst'},
+    '{name} keeps running when only its tab is closed (attach it again from Sandboxes & sessions or the Sessions list). Stop the session too?': {
+        'en': '{name} keeps running when only its tab is closed (attach it again from Sandboxes & sessions or the Sessions list). Stop the session too?',
+        'de': '{name} läuft weiter, wenn nur ihr Tab geschlossen wird (wieder verbinden über Sandboxen & Sitzungen oder die Liste Sitzungen). Die Sitzung auch beenden?'},
+    'At start, also open a terminal for every other running session': {
+        'en': 'At start, also open a terminal for every other running session',
+        'de': 'Beim Start auch für jede andere laufende Sitzung ein Terminal öffnen'},
+    'Choose one start': {
+        'en': 'Choose one start',
+        'de': 'Wählen Sie einen Start'},
+    'Show the part': {
+        'en': 'Show the part',
+        'de': 'Den Baustein zeigen'},
+    'Not about a part': {
+        'en': 'Not about a part',
+        'de': 'Betrifft keinen Baustein'},
+    "The start's workspace: {path}": {
+        'en': "The start's workspace: {path}",
+        'de': 'Der Arbeitsordner des Starts: {path}'},
+    'Another folder…': {
+        'en': 'Another folder…',
+        'de': 'Ein anderer Ordner…'},
+    'The MCP server {name} needs a folder of {host} for {target} in its container (what it works on). Which folder does it get?': {
+        'en': 'The MCP server {name} needs a folder of {host} for {target} in its container (what it works on). Which folder does it get?',
+        'de': 'Der MCP-Server {name} braucht einen Ordner von {host} für {target} in seinem Container (woran er arbeitet). Welchen Ordner bekommt er?'},
+    'A folder on {host}': {
+        'en': 'A folder on {host}',
+        'de': 'Ein Ordner auf {host}'},
+    'MCP server {name}: not added - it needs a folder for {target} (the MCP page adds it with one).': {
+        'en': 'MCP server {name}: not added - it needs a folder for {target} (the MCP page adds it with one).',
+        'de': 'MCP-Server {name}: nicht hinzugefügt - er braucht einen Ordner für {target} (die MCP-Seite fügt ihn mit einem hinzu).'},
+    'Starting the browser…': {
+        'en': 'Starting the browser…',
+        'de': 'Der Browser startet…'},
+    'The browser did not start (see the message)': {
+        'en': 'The browser did not start (see the message)',
+        'de': 'Der Browser ist nicht gestartet (siehe die Meldung)'},
+    'The browser is open': {
+        'en': 'The browser is open',
+        'de': 'Der Browser ist offen'},
+    "The check of Chromium's sandbox failed: {error}": {
+        'en': "The check of Chromium's sandbox failed: {error}",
+        'de': 'Die Prüfung der Sandbox von Chromium ist fehlgeschlagen: {error}'},
+    'The browser could not be opened: {error}': {
+        'en': 'The browser could not be opened: {error}',
+        'de': 'Der Browser konnte nicht geöffnet werden: {error}'},
+    'no terminal (see log)': {
+        'en': 'no terminal (see log)',
+        'de': 'kein Terminal (siehe Log)'},
+    'It still starts: its terminal is not there yet (an image, MCP servers or a VPN coming up). Attach waits for it.': {
+        'en': 'It still starts: its terminal is not there yet (an image, MCP servers or a VPN coming up). Attach waits for it.',
+        'de': 'Er startet noch: Sein Terminal ist noch nicht da (ein Image, MCP-Server oder ein VPN kommen hoch). Verbinden wartet darauf.'},
+    'It runs without its terminal: its start did not make one. The end of its supervisor.log:': {
+        'en': 'It runs without its terminal: its start did not make one. The end of its supervisor.log:',
+        'de': 'Er läuft ohne sein Terminal: Sein Start hat keines gemacht. Das Ende seiner supervisor.log:'},
+    'It runs without its terminal (its start did not make one): stop it and start it again. The end of its log:': {
+        'en': 'It runs without its terminal (its start did not make one): stop it and start it again. The end of its log:',
+        'de': 'Er läuft ohne sein Terminal (sein Start hat keines gemacht): Beenden Sie ihn und starten Sie ihn neu. Das Ende seines Logs:'},
+    'Runs without its terminal: its start did not make one (its supervisor.log says why). Stop it and start it again.': {
+        'en': 'Runs without its terminal: its start did not make one (its supervisor.log says why). Stop it and start it again.',
+        'de': 'Läuft ohne sein Terminal: Sein Start hat keines gemacht (seine supervisor.log sagt, warum). Beenden Sie ihn und starten Sie ihn neu.'},
+    "With --socks, 127.0.0.1:9050 is Tor's SocksPort (curl --socks5-hostname); nothing is needed in the agent's image: the Tor container beside it carries everything.": {
+        'en': "With --socks, 127.0.0.1:9050 is Tor's SocksPort (curl --socks5-hostname); nothing is needed in the agent's image: the Tor container beside it carries everything.",
+        'de': 'Mit --socks ist 127.0.0.1:9050 Tors SocksPort (curl --socks5-hostname); im Image des Agenten ist nichts nötig: Der Tor-Container daneben trägt alles.'},
+    'text': {
+        'en': 'text',
+        'de': 'Text'},
+    'code': {
+        'en': 'code',
+        'de': 'Code'},
+    'vision': {
+        'en': 'vision',
+        'de': 'Bild-Eingabe (VL)'},
+    'image': {
+        'en': 'image',
+        'de': 'Bilderzeugung'},
+    'embedding': {
+        'en': 'embedding',
+        'de': 'Embedding'},
+    'reasoning': {
+        'en': 'reasoning',
+        'de': 'Reasoning'},
+    'Choose a model': {
+        'en': 'Choose a model',
+        'de': 'Ein Modell wählen'},
+    'Search the models': {
+        'en': 'Search the models',
+        'de': 'Die Modelle durchsuchen'},
+    'Sort by': {
+        'en': 'Sort by',
+        'de': 'Sortieren nach'},
+    'Sort: {by}': {
+        'en': 'Sort: {by}',
+        'de': 'Sortiert: {by}'},
+    'Tags': {
+        'en': 'Tags',
+        'de': 'Merkmale'},
+    'What it is for': {
+        'en': 'What it is for',
+        'de': 'Wofür es ist'},
+    'Choose': {
+        'en': 'Choose',
+        'de': 'Wählen'},
+    '{shown} of {total} models': {
+        'en': '{shown} of {total} models',
+        'de': '{shown} von {total} Modellen'},
+    'Choose a model: search, sort by name, parameters or size, filter by what it is for (text, code, vision, image, embedding, reasoning)': {
+        'en': 'Choose a model: search, sort by name, parameters or size, filter by what it is for (text, code, vision, image, embedding, reasoning)',
+        'de': 'Ein Modell wählen: suchen, nach Name, Parametern oder Größe sortieren, nach dem Zweck filtern (Text, Code, Bild-Eingabe, Bilderzeugung, Embedding, Reasoning)'},
+    'Stop all…': {
+        'en': 'Stop all…',
+        'de': 'Alle beenden…'},
+    'Stop all': {
+        'en': 'Stop all',
+        'de': 'Alle beenden'},
+    'Stop every start that runs, is paused or orphaned - sessions, runs, tasks; not the MCP servers - on this machine, or on the host chosen above (sandbox-ai stop --all); the list is shown first': {
+        'en': 'Stop every start that runs, is paused or orphaned - sessions, runs, tasks; not the MCP servers - on this machine, or on the host chosen above (sandbox-ai stop --all); the list is shown first',
+        'de': 'Jeden Start beenden, der läuft, pausiert ist oder verwaist - Sitzungen, Läufe, Aufgaben; nicht die MCP-Server - auf diesem Rechner oder dem oben gewählten Host (sandbox-ai stop --all); die Liste wird zuerst gezeigt'},
+    'Nothing runs that could be stopped.': {
+        'en': 'Nothing runs that could be stopped.',
+        'de': 'Es läuft nichts, das sich beenden ließe.'},
+    'Stop these {count} starts? Each ends as Stop ends it; what a session keeps stays.': {
+        'en': 'Stop these {count} starts? Each ends as Stop ends it; what a session keeps stays.',
+        'de': 'Diese {count} Starts beenden? Jeder endet, wie Beenden ihn beendet; was eine Sitzung behält, bleibt.'},
+    'Stop all starts on this host…': {
+        'en': 'Stop all starts on this host…',
+        'de': 'Alle Starts auf diesem Host beenden…'},
+    'Choose a host first': {
+        'en': 'Choose a host first',
+        'de': 'Wählen Sie zuerst einen Host'},
+    'Asking {host} what runs…': {
+        'en': 'Asking {host} what runs…',
+        'de': '{host} wird gefragt, was läuft…'},
+    'Nothing runs on {host} that could be stopped.': {
+        'en': 'Nothing runs on {host} that could be stopped.',
+        'de': 'Auf {host} läuft nichts, das sich beenden ließe.'},
+    'Stopping every start on {host}…': {
+        'en': 'Stopping every start on {host}…',
+        'de': 'Jeder Start auf {host} wird beendet…'},
+    'Change folder…': {
+        'en': 'Change folder…',
+        'de': 'Ordner ändern…'},
+    'Change folder': {
+        'en': 'Change folder',
+        'de': 'Ordner ändern'},
+    'The board works on another folder: every part and setting stays, its main workspace and where its project file and changes belong move there (nothing is written before Apply); undo takes it back': {
+        'en': 'The board works on another folder: every part and setting stays, its main workspace and where its project file and changes belong move there (nothing is written before Apply); undo takes it back',
+        'de': 'Das Board arbeitet in einem anderen Ordner: Jedes Teil und jede Einstellung bleibt, sein Hauptarbeitsordner und der Ort seiner Projektdatei und Änderungen ziehen dorthin um (vor Übernehmen wird nichts geschrieben); Rückgängig nimmt es zurück'},
+    "{path} has a project file of its own (.sandbox-ai.json). Load it into the board? (Keep: this board's settings stay and that file is left as it is until you apply.)": {
+        'en': "{path} has a project file of its own (.sandbox-ai.json). Load it into the board? (Keep: this board's settings stay and that file is left as it is until you apply.)",
+        'de': '{path} hat eine eigene Projektdatei (.sandbox-ai.json). In das Board laden? (Behalten: Die Einstellungen dieses Boards bleiben, und diese Datei bleibt, wie sie ist, bis Sie übernehmen.)'},
+    'Load it': {
+        'en': 'Load it',
+        'de': 'Laden'},
+    'Keep this board': {
+        'en': 'Keep this board',
+        'de': 'Dieses Board behalten'},
+    '{path} has a project file of its own that this board does not show: Apply writes the board there (it shows what changes and asks) before you start it.': {
+        'en': '{path} has a project file of its own that this board does not show: Apply writes the board there (it shows what changes and asks) before you start it.',
+        'de': '{path} hat eine eigene Projektdatei, die dieses Board nicht zeigt: Übernehmen schreibt das Board dorthin (es zeigt, was sich ändert, und fragt), bevor Sie es starten.'},
+    'making the identity {name}': {
+        'en': 'making the identity {name}',
+        'de': 'die Identität {name} wird angelegt'},
+    'making the image variant {name} from its recipe': {
+        'en': 'making the image variant {name} from its recipe',
+        'de': 'die Image-Variante {name} wird aus ihrem Rezept angelegt'},
+    'building the image of {name}': {
+        'en': 'building the image of {name}',
+        'de': 'das Image von {name} wird gebaut'},
+    'making the Tor profile {name}': {
+        'en': 'making the Tor profile {name}',
+        'de': 'das Tor-Profil {name} wird angelegt'},
+    'adding the MCP server {name}': {
+        'en': 'adding the MCP server {name}',
+        'de': 'der MCP-Server {name} wird hinzugefügt'},
+    'the image of {name}': {
+        'en': 'the image of {name}',
+        'de': 'das Image von {name}'},
+    'stage {stage}/{stages}': {
+        'en': 'stage {stage}/{stages}',
+        'de': 'Stufe {stage}/{stages}'},
+    'step {step}/{steps}': {
+        'en': 'step {step}/{steps}',
+        'de': 'Schritt {step}/{steps}'},
+    ' (exit status {status})': {
+        'en': ' (exit status {status})',
+        'de': ' (Exit-Status {status})'},
+    'Not prepared ({number} of {total}): {doing} failed{status}.': {
+        'en': 'Not prepared ({number} of {total}): {doing} failed{status}.',
+        'de': 'Nicht vorbereitet ({number} von {total}): fehlgeschlagen{status}: {doing}.'},
+    'Prepared: {list}.': {
+        'en': 'Prepared: {list}.',
+        'de': 'Vorbereitet: {list}.'},
+    'Preparing ({number} of {total}): {doing}{progress}': {
+        'en': 'Preparing ({number} of {total}): {doing}{progress}',
+        'de': 'Vorbereitung ({number} von {total}): {doing}{progress}'},
+    'Still preparing ({number} of {total}): {doing}{progress}': {
+        'en': 'Still preparing ({number} of {total}): {doing}{progress}',
+        'de': 'Noch in Vorbereitung ({number} von {total}): {doing}{progress}'},
+    ' — next: {list}': {
+        'en': ' — next: {list}',
+        'de': ' — danach: {list}'},
+    'Hide this note': {
+        'en': 'Hide this note',
+        'de': 'Diesen Hinweis ausblenden'},
+    'Preparing the start: all of it': {
+        'en': 'Preparing the start: all of it',
+        'de': 'Der Start wird vorbereitet: alles zusammen'},
+    'Click: open where it runs (its terminal tab, else the log window)': {
+        'en': 'Click: open where it runs (its terminal tab, else the log window)',
+        'de': 'Klick: öffnet, wo es läuft (seinen Terminal-Tab, sonst das Log-Fenster)'},
+    'waiting': {
+        'en': 'waiting',
+        'de': 'wartet'},
+    'failed': {
+        'en': 'failed',
+        'de': 'fehlgeschlagen'},
+    'image variant {name} of {agent}': {
+        'en': 'image variant {name} of {agent}',
+        'de': 'Image-Variante {name} von {agent}'},
+    '{thing} (not built)': {
+        'en': '{thing} (not built)',
+        'de': '{thing} (nicht gebaut)'},
+    'The start needs on {host}: {list}.': {
+        'en': 'The start needs on {host}: {list}.',
+        'de': 'Der Start braucht auf {host}: {list}.'},
+    'There: {list}.': {
+        'en': 'There: {list}.',
+        'de': 'Vorhanden: {list}.'},
+    'Missing: {list}.': {
+        'en': 'Missing: {list}.',
+        'de': 'Fehlt: {list}.'},
+    'Not answered (read again at the next start): {list}.': {
+        'en': 'Not answered (read again at the next start): {list}.',
+        'de': 'Keine Antwort (beim nächsten Start wird erneut gelesen): {list}.'},
+    'The check of what the start needs came back {count} times within {seconds} s and is stopped (a loop, a fault of the app): {list}. Nothing is started; press Start again in a moment - the log has each check.': {
+        'en': 'The check of what the start needs came back {count} times within {seconds} s and is stopped (a loop, a fault of the app): {list}. Nothing is started; press Start again in a moment - the log has each check.',
+        'de': 'Die Prüfung, was der Start braucht, kam {count}-mal binnen {seconds} s wieder und wird angehalten (eine Schleife, ein Fehler der App): {list}. Nichts wird gestartet; drücken Sie gleich noch einmal Starten - das Log hat jede Prüfung.'},
+    '. The start goes on when it is done.': {
+        'en': '. The start goes on when it is done.',
+        'de': '. Der Start geht weiter, sobald es fertig ist.'},
+    'Still checking on {host} what the start needs: {list}.': {
+        'en': 'Still checking on {host} what the start needs: {list}.',
+        'de': 'Auf {host} wird noch geprüft, was der Start braucht: {list}.'},
+    'Still preparing what the start needs: a question about it is open, or the MCP catalogs are read for the folders of its MCP servers.': {
+        'en': 'Still preparing what the start needs: a question about it is open, or the MCP catalogs are read for the folders of its MCP servers.',
+        'de': 'Was der Start braucht, wird noch vorbereitet: Eine Frage dazu ist offen, oder die MCP-Kataloge werden für die Ordner seiner MCP-Server gelesen.'},
+    'Open the Images page': {
+        'en': 'Open the Images page',
+        'de': 'Seite Images öffnen'},
+    'Open the VPN page': {
+        'en': 'Open the VPN page',
+        'de': 'Seite VPN öffnen'},
+    'Not started: the start needs what is not there yet.': {
+        'en': 'Not started: the start needs what is not there yet.',
+        'de': 'Nicht gestartet: Der Start braucht, was noch nicht da ist.'},
+    'Not made for the start:': {
+        'en': 'Not made for the start:',
+        'de': 'Für den Start nicht angelegt:'},
+    "building the Tor VPN's image first": {
+        'en': "building the Tor VPN's image first",
+        'de': 'zuerst wird das Image des Tor-VPN gebaut'},
 }

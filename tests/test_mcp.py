@@ -146,7 +146,8 @@ def test_agent_injection_per_agent(scenario):
         a = s.parse_args(["claude", "--mcp", "demo", "--", "-p", "hi"])
         cmd = s.agent_command(a, "claude")
         assert cmd[:2] == ["claude", "--mcp-config"] and cmd[-2:] == ["-p", "hi"]
-        assert json.loads(cmd[2]) == {"mcpServers": {"demo": {"command": "python3", "args": bridge}}}
+        assert json.loads(cmd[2]) == {"mcpServers": {"demo": {"command": "python3", "args": bridge,
+                                                              "timeout": s.DEFAULT_MCP_TOOL_TIMEOUT * 1000}}}
     elif scenario == "sad":
         # Custom binaries and probes get nothing injected.
         assert s.agent_command(s.parse_args(["claude", "--mcp", "demo", "--binary", "/bin/sh"]), "/bin/sh") == ["/bin/sh"]
@@ -157,7 +158,8 @@ def test_agent_injection_per_agent(scenario):
         assert 'mcp_servers.fs.command="python3"' in cmd and cmd[-2:] == ["exec", "x"]
         env = s.agent_environment(s.parse_args(["opencode", "--mcp", "demo"]))
         assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {
-            "mcp": {"demo": {"type": "local", "command": ["python3", *bridge], "enabled": True}},
+            "mcp": {"demo": {"type": "local", "command": ["python3", *bridge], "enabled": True,
+                             "timeout": s.DEFAULT_MCP_TOOL_TIMEOUT * 1000}},
             **s.OPENCODE_TELEMETRY_CONFIG}
 
 
@@ -185,30 +187,99 @@ def test_mcp_names_validated():
 def test_launcher_starts_missing_servers_before_the_sandbox(tmp_path, monkeypatch):
     order = []
     module = Mock()
-    module.ensure_running.side_effect = lambda name, a, vpn=None: order.append(("ensure", name))
+    # Each begun, then each waited for (their sandboxes come up side by side), all before the agent's own.
+    module.begin_running.side_effect = lambda name, a, vpn=None: order.append(("begin", name)) or \
+        (lambda: order.append(("ready", name)))
     module.definitions.return_value = {"demo": {}, "fs": {}}
     module.vpn_for_servers.side_effect = lambda a, names: {name: None for name in names}
+    module.start_problems.return_value = ([], {}, [])  # (checked before anything starts: tests/test_mcp_variables.py)
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(s.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(s, "run_pod", lambda *args: order.append(("sandbox",)) or 0)
     assert s.main(["codex", "--workspace", str(tmp_path / "w"), "--offline", "--no-auth", "--mcp", "demo", "--mcp", "fs"]) == 0
-    assert order == [("ensure", "demo"), ("ensure", "fs"), ("sandbox",)]
+    assert order == [("begin", "demo"), ("begin", "fs"), ("ready", "demo"), ("ready", "fs"), ("sandbox",)]
+
+
+def test_servers_begun_are_each_waited_for_and_the_earliest_error_is_raised():
+    """0.1.95, performance round 1: a start begins its MCP servers, then waits for them in order. One that fails to
+    begin stops the beginning, one that fails to come up stops nothing: every server begun is waited for (its lock let
+    go, its network checked), then the error of the earliest server in the start's order is raised."""
+    class Fake:
+        def __init__(self, fails_begin=(), fails_ready=()):
+            self.fails_begin, self.fails_ready, self.done = fails_begin, fails_ready, []
+
+        def begin_running(self, name, a, vpn=None):
+            if name in self.fails_begin:
+                raise ValueError(f"begin {name}")
+
+            def ready():
+                self.done.append(name)
+                if name in self.fails_ready:
+                    raise RuntimeError(f"ready {name}")
+            return ready
+    progress = Mock()
+    fake = Fake()
+    s.start_mcp_servers(fake, None, ["a", "b", "c"], {}, progress)
+    assert fake.done == ["a", "b", "c"] and progress.step.call_args_list[-1].args == (
+        "waiting for the MCP servers a, b, c",)
+    fake = Fake(fails_begin=["c"], fails_ready=["b"])
+    with pytest.raises(RuntimeError, match="ready b"):  # b comes before c
+        s.start_mcp_servers(fake, None, ["a", "b", "c", "d"], {}, progress)
+    assert fake.done == ["a", "b"]
+    fake = Fake(fails_begin=["b"], fails_ready=["c"])
+    with pytest.raises(ValueError, match="begin b"):
+        s.start_mcp_servers(fake, None, ["a", "b", "c"], {}, progress)
+    assert fake.done == ["a"]
+    fake = Fake(fails_ready=["a", "b"])
+    with pytest.raises(RuntimeError, match="ready a"):
+        s.start_mcp_servers(fake, None, ["a", "b"], {}, progress)
+    assert fake.done == ["a", "b"]
+
+
+def test_a_server_begun_keeps_its_lock_until_it_is_waited_for(tmp_path, monkeypatch):
+    import fcntl
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(m, "start_instance", lambda name, a, servers=None: (name, {}, "digest", None))
+    seen = []
+    monkeypatch.setattr(m, "ensure_running_locked", lambda name, a, vpn=None, instance=None, wait=True:
+                        seen.append(wait) or (lambda: "started"))
+
+    def locked():
+        fd = os.open(m.state_dir("srv") / ".lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+    import types
+    a = types.SimpleNamespace()
+    ready = m.begin_running("srv", a)
+    assert seen == [False] and locked()
+    assert ready() == "started" and not locked()
+    monkeypatch.setattr(m, "ensure_running_locked", lambda *args, **kwargs: "running")
+    assert m.begin_running("srv", a)() == "running" and not locked()
+    monkeypatch.setattr(m, "ensure_running_locked", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("x")))
+    with pytest.raises(ValueError):
+        m.begin_running("srv", a)
+    assert not locked()
 
 
 def test_dry_run_lists_mcp_without_starting(tmp_path, monkeypatch, capsys):
     module = Mock()
-    module.ensure_running.side_effect = AssertionError("must not start")
+    module.ensure_running.side_effect = module.begin_running.side_effect = AssertionError("must not start")
     module.definitions.side_effect = m.definitions
-    for name in ("start_limits", "start_mounts", "with_limits", "with_mounts", "default_limits", "instance_for",
-                 "instance_of"):
+    for name in ("start_limits", "start_mounts", "start_env", "with_limits", "with_mounts", "default_limits",
+                 "instance_for", "instance_of", "start_problems", "problems_text", "vpn_for_servers", "network_of"):
         getattr(module, name).side_effect = getattr(m, name)
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     s.main(["codex", "--mcp", "demo", "--dry-run"])
     plan = json.loads(capsys.readouterr().out)
     assert plan["mcp"] == [{"name": "demo", "instance": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock"),
                             "limits": {"memory": "8g", "cpus": m.host_cpus_default(), "pids": 4096, "tmp": "4096m"},
-                            "own_limits": False, "own_mounts": []}]
+                            "own_limits": False, "own_mounts": [], "vpn": None}]
 
 
 def test_an_unknown_server_is_refused_before_anything_starts_a_dry_run_too(tmp_path, monkeypatch):
@@ -216,8 +287,10 @@ def test_an_unknown_server_is_refused_before_anything_starts_a_dry_run_too(tmp_p
     no catalog defines is refused by its checks - its dry run too, so that a check on another host says it - not deep
     in the start, after a session was saved that then failed the same way at every resume."""
     module = Mock()
-    module.ensure_running.side_effect = AssertionError("must not start")
+    module.ensure_running.side_effect = module.begin_running.side_effect = AssertionError("must not start")
     module.definitions.side_effect = m.definitions
+    module.start_problems.side_effect = m.start_problems
+    module.problems_text.side_effect = m.problems_text
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     project = tmp_path / "research"
     project.mkdir()
@@ -309,12 +382,22 @@ def test_ensure_running(scenario, tmp_path, monkeypatch):
         m.save_state("demo", {"pid": 77, "definition": m.definition_digest(demo, "podman")})
         monkeypatch.setattr(m.subprocess, "Popen", Mock(side_effect=AssertionError("started twice")))
         assert m.ensure_running("demo", a) == "running"
-        # Same name, other definition (another project, or unknown origin): never shared.
+        # Same name, other definition (another project, or unknown origin): never shared - the start gets an instance
+        # of its own (NAME.HASH of what it runs), the running one is left as it is.
+        digest = m.definition_digest(demo, "podman")
         for state in [{"pid": 77, "definition": m.definition_digest({**demo, "workspace": "/other"}, "podman")},
                       {"pid": 77}]:
             m.save_state("demo", state)
-            with pytest.raises(ValueError, match="different definition"):
-                m.ensure_running("demo", a)
+            instance, definition, found, note = m.start_instance("demo", a)
+            assert instance == m.own_instance("demo", digest) and re.fullmatch(r"demo\.[0-9a-f]{8}", instance)
+            assert definition == demo and found == digest
+            assert "this start gets an instance of its own" in note and "sandbox-ai mcp stop demo" in note
+        # A helper or a team's board runs once: refused, with the fix.
+        m.save_state("team-x", {"pid": 77})
+        fake_supervisor(tmp_path, 78, "team-x")
+        m.save_state("team-x", {"pid": 78})
+        with pytest.raises(ValueError, match="different definition or other rules, and a team's board runs once"):
+            m.start_instance("team-x", a, {"team-x": {"command": ["x"]}})
         return
     if scenario == "sad":
         with pytest.raises(ValueError, match="Unknown MCP server: nope"):
@@ -1518,10 +1601,14 @@ def test_a_catalog_text_never_makes_another_row_and_full_network_is_said(tmp_pat
     assert m.cli(["catalog", "-c", str(path)]) == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
     assert len(lines) == 1 and lines[0].startswith("c0:helper  [full evil.example]") and lines[0].endswith("unsigned")
+    assert m.cli(["catalog", "--json", "-c", str(path)]) == 0
+    printed = capsys.readouterr().out
     web = load("webui_for_catalog_test", "webui.py")
-    api = web.Api(runner=lambda host, args, timeout=120, input=None: (0, "\n".join(lines) + "\n", ""))
+    api = web.Api(runner=lambda host, args, timeout=120, input=None: (0, printed if "--json" in args else
+                                                                         "\n".join(lines) + "\n", ""))
     entries = api.mcp_catalog({"host": "local"}, {"catalogs": [str(path)]})["entries"]
     assert [(e["entry"], e["signature"]) for e in entries] == [("c0:helper", "none")]
+    assert "\n" not in entries[0]["title"], "the JSON's title is one line too"
     out = []
     m.add("helper", catalogs=catalog(tmp_path, [{**ENTRY, "name": "helper", "network": "full"}]), pull=False,
           out=out.append, unsigned=True)
@@ -1875,7 +1962,7 @@ def test_add_creates_a_writable_folder_that_is_not_there_yet(tmp_path):
     work.mkdir()
     definition = m.add("binwalk", mounts=[f"/work={work}", f"/out={data}:rw"], catalogs=sources, pull=False,
                        out=out.append, unsigned=True)
-    assert data.is_dir() and data.stat().st_mode & 0o777 == 0o700 and f"sandbox-mcp: created {data}" in out
+    assert data.is_dir() and data.stat().st_mode & 0o777 == 0o700 and f"sandbox-ai mcp: created {data}" in out
     assert {"target": "/out", "host": str(data), "mode": "rw"} in definition["mounts"]
     with pytest.raises(ValueError, match="a read-only folder must be there") as caught:
         m.add("binwalk", mounts=[f"/work={tmp_path / 'missing'}"], catalogs=sources, pull=False, out=out.append,
@@ -1988,7 +2075,8 @@ def test_mcp_set_on_a_running_server_says_so_or_stops_it(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "stop", lambda name, timeout=30: stopped.append(name) or 0)
     said = []
     result = m.set_server("binwalk", {"pids": 256}, out=said.append)
-    assert stopped == [] and "a start refuses it until then: sandbox-ai mcp stop binwalk" in said[-1]
+    assert stopped == [] and "a start meanwhile gets an instance of its own with these settings (sandbox-ai mcp stop " \
+        "binwalk ends the old one)" in said[-1]
     result = m.set_server("binwalk", {"pids": 512}, stop_running=True, out=said.append)
     assert stopped == ["binwalk", "binwalk.0123abcd"] and result["stopped"] == stopped
 
@@ -2226,7 +2314,6 @@ def test_a_servers_tmp_is_part_of_its_limits_and_never_more_than_its_memory(monk
         m.checked_limits({"memory": "1g", "tmp": "2g"})
     with pytest.raises(ValueError, match="is more than the memory 512m"):
         m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "tmp": "1g"}, "t")  # the default memory
-    assert m.tmp_warning({"memory": "1g", "tmp": "768m"}) and m.tmp_warning({"memory": "2g", "tmp": "768m"}) is None
     definition = m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "memory": "2g", "tmp": "768m"}, "t")
     monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)
     command = m.image_command(m.server_network("pw", definition))

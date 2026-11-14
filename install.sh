@@ -122,6 +122,9 @@ if [[ -z "$mode" ]]; then
 fi
 if [[ $mode == system ]]; then
   [[ $(id -u) == 0 || -w "$prefix" ]] || die "--system needs root: sudo bash install.sh --system"
+  # For every user: what is made here is open to all and writable by its owner only, whatever root's umask (077 on
+  # hardened systems or in a root shell made every folder root's alone - the users' sandbox-ai, builds and app failed).
+  umask 022
   data_dir="$prefix/lib/sandbox-ai"
   bin_dirs=("$prefix/bin")
 else
@@ -607,22 +610,29 @@ def cmd_copy(checkout, target):
         if not os.path.exists(os.path.join(checkout, ".git")):
             raise OSError("not a git checkout")
         env = {**os.environ, "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(checkout))}
-        names = subprocess.run(["git", "-C", checkout, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        # safe.directory: root installing from a user's checkout (./install.sh --from . with sudo) - git refuses a
+        # repository of another owner ("dubious ownership") and the copy fell back to every file, sockets too.
+        safe = ["-c", "safe.directory=" + os.path.abspath(checkout)]
+        names = subprocess.run(["git", *safe, "-C", checkout, "ls-files", "-z", "--cached", "--others",
+                                "--exclude-standard"],
                                capture_output=True, check=True, text=True, env=env).stdout.split("\0")
         names = sorted({n for n in names if n and not n.startswith((".claude/", ".git/"))
                         and os.path.isfile(os.path.join(checkout, n))})
     except (OSError, subprocess.CalledProcessError):
         names = []
     if not names:
-        skip = {".git", "__pycache__", ".pytest_cache", "dist", "build", ".claude"}
+        skip = {".git", "__pycache__", ".pytest_cache", "dist", "build", ".claude", ".tt"}
         for root, dirs, files in os.walk(checkout):
             dirs[:] = [d for d in dirs if d not in skip and not d.endswith(".egg-info")]
-            names += [os.path.relpath(os.path.join(root, f), checkout) for f in files]
+            # Regular files only: a socket or FIFO (a test's leftover) cannot be copied and is no part of it.
+            names += [os.path.relpath(os.path.join(root, f), checkout) for f in files
+                      if os.path.isfile(os.path.join(root, f))]
     app = os.path.join("projects", "sandbox-ai-app")
     if os.path.isfile(os.path.join(checkout, app, "sandbox_ai_app", "__main__.py")):
         # Its own repository inside the checkout (git lists it as one directory): its tracked and new files.
         try:
-            listed = subprocess.run(["git", "-C", os.path.join(checkout, app), "ls-files", "-z", "--cached",
+            listed = subprocess.run(["git", "-c", "safe.directory=" + os.path.abspath(os.path.join(checkout, app)),
+                                     "-C", os.path.join(checkout, app), "ls-files", "-z", "--cached",
                                      "--others", "--exclude-standard"],
                                     capture_output=True, check=True, text=True).stdout.split("\0")
         except (OSError, subprocess.CalledProcessError):
@@ -630,7 +640,8 @@ def cmd_copy(checkout, target):
             for root, dirs, files in os.walk(os.path.join(checkout, app)):
                 dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", ".pytest_cache", "dist", "build"}
                            and not d.endswith(".egg-info")]
-                listed += [os.path.relpath(os.path.join(root, f), os.path.join(checkout, app)) for f in files]
+                listed += [os.path.relpath(os.path.join(root, f), os.path.join(checkout, app)) for f in files
+                           if os.path.isfile(os.path.join(root, f))]
         names = sorted(set(names) | {os.path.join(app, n) for n in listed if n and not n.startswith(".git/")
                                      and os.path.isfile(os.path.join(checkout, app, n))})
     # The MCP catalog of sandbox-ai-mcp (its own repository too): sandbox-ai mcp reads it before the web.

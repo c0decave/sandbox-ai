@@ -13,7 +13,7 @@ import os
 
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .state import choose_save, current
 from .widgets import background, plain_label, safe_tooltip, show_text, warn
@@ -134,7 +134,7 @@ class RulesetTools(QWidget):
         row.addWidget(self.show_button)
         row.addStretch(1)
         layout.addLayout(row)
-        self.result = plain_label(role="secondary", selectable=True)
+        self.result = plain_label(role="secondary", selectable=True, log="rules")
         self.result.setWordWrap(True)
         self.result.hide()
         layout.addWidget(self.result)
@@ -173,7 +173,7 @@ class RulesetTools(QWidget):
             written = write_example(path)
         except OSError as exc:
             warn(self, tr("New from example"), tr("Cannot write {path}: {error}", path=printable(path),
-                                                  error=printable(exc.strerror or exc)))
+                                                  error=printable_text(exc.strerror or exc)))
             return None
         self.add(written)
         self.show_result(tr("Written: {path}. Change it to your needs; Check reads it.", path=printable(written)))
@@ -233,7 +233,7 @@ class RulesetTools(QWidget):
 
     def shown_all(self, result, error):
         if error is not None:
-            self.show_result(tr("Not read: {error}", error=printable(error)), "notice-error")
+            self.show_result(tr("Not read: {error}", error=printable_text(error)), "notice-error")
             return
         self.result.hide()
         show_text(self, tr("All rules of this start"), all_rules_text(result))
@@ -241,7 +241,7 @@ class RulesetTools(QWidget):
     def checked(self, result, error):
         """Check's answer below the buttons."""
         if error is not None:
-            self.show_result(tr("Not checked: {error}", error=printable(error)), "notice-error")
+            self.show_result(tr("Not checked: {error}", error=printable_text(error)), "notice-error")
             return
         ok, text = result
         self.show_result("✔ " + text if ok else "✘ " + printable(text), "notice-ok" if ok else "notice-error")

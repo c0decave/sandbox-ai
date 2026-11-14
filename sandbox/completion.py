@@ -15,7 +15,6 @@ import argparse
 import contextlib
 import importlib.util
 import io
-import json
 import os
 from pathlib import Path
 import runpy
@@ -23,7 +22,7 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 FILES, DIRS = "__files__", "__dirs__"  # tell the script to complete paths
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 OTHER_COMMANDS = ("build", "update", "version", "help")
 PATH_HINTS = ("FILE", "DIR", "PATH", "KEY", "CERT")
 
@@ -136,6 +135,18 @@ def preset_names():
     return quietly(lambda: sorted(module("presets").catalog()))
 
 
+def hermes_features():
+    return quietly(lambda: [*module("hermes").FEATURES, "gateway:all"])
+
+
+def qwen_features():
+    return quietly(lambda: list(module("qwen").FEATURES))
+
+
+def goose_features():
+    return quietly(lambda: [*module("goose").FEATURES, "gateway:all"])
+
+
 def vpn_names():
     return quietly(lambda: module("vpn").list_profiles())
 
@@ -188,6 +199,7 @@ NAMED = {
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
     ("safeguards", None, "run"): run_names, ("report", None, "name"): start_names,
     ("hosts", "*", "name"): host_names, ("mcp", "*", "name"): mcp_names, ("llm", "*", "name"): llm_names,
+    ("llm", "traffic", "run"): run_names,
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,
     **{("kits", sub, "name"): plugin_kit_names for sub in ("add-plugin", "remove-plugin", "enable-plugin",
                                                             "disable-plugin", "add-marketplace", "remove-marketplace",
@@ -198,6 +210,7 @@ NAMED = {
     ("kits", "import-marketplace", "marketplace"): marketplace_names,
     ("plugins", "marketplaces", "name"): marketplace_names,
     ("approvals", "allow", "id"): question_ids, ("approvals", "deny", "id"): question_ids,
+    ("approvals", "show", "id"): question_ids,
     ("team", "*", "name"): team_names, ("approvals", "history", "run"): run_names,
     ("approvals", "ask-again", "id"): answered_ids, ("approvals", "blocked", "run"): run_names,
     ("approvals", "decided", "run"): run_names,
@@ -209,7 +222,10 @@ NAMED = {
 # Secrets are not listed: reading their names may ask the keyring to unlock, which a Tab must never do.
 VALUES = {"--kit": kit_names, "--mcp": mcp_names, "--llm": llm_names, "--vpn": vpn_names, "--preset": preset_names,
           "--session": start_names, "--name": start_names, "--for": start_names, "--host": host_names, "--helper": lambda: list(AGENTS),
-          "--with": lambda: list(AGENTS)}
+          # The team image has no Hermes, DSH or Qwen Code.
+          "--with": lambda: [agent for agent in AGENTS if agent not in ("hermes", "dsh", "qwen", "goose")],
+          "--hermes-enable": lambda: hermes_features(), "--qwen-enable": lambda: qwen_features(),
+          "--goose-enable": lambda: goose_features()}
 
 
 # A word of a command whose script reads the rest with a parser of its own: (command, word) -> that parser

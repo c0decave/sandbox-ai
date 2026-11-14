@@ -18,16 +18,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import applog
 from . import board as B
 from . import presets as PR
 from . import theme, widgets
 from . import wizard_llm as WL
 from .board_view import NODE_H, NODE_W, PathEdit, elide
-from .files import printable
+from .files import printable, printable_text
 from .model_combo import searchable
 from .i18n import language as i18n_language, tr
+from .short_notices import short_notice
 from .state import choose_file
-from .widgets import MONO, FlowLayout, ask_first, background, inform, plain_label, safe_tooltip, warn
+from .widgets import MONO, FlowLayout, ask_first, background, plain_label, safe_tooltip, warn
 
 THUMB = QSize(248, 124)
 
@@ -52,9 +54,13 @@ def fill_preset_combo(combo, catalogue, current=None):
             combo.addItem(tr(title))
             combo.model().item(combo.count() - 1).setEnabled(False)
             for preset in presets:
-                combo.addItem("   " + preset.text(preset.title), preset.key)
-                combo.setItemData(combo.count() - 1, safe_tooltip(preset.text(preset.description)),
-                                  Qt.ItemDataRole.ToolTipRole)
+                experimental = PR.experimental_text(preset.experimental)  # listed, marked, with what enables it
+                combo.addItem("   " + preset.text(preset.title) + (f" ({tr('not live-tested yet')})" if experimental
+                                                                      else ""),
+                              preset.key)
+                combo.setItemData(combo.count() - 1, safe_tooltip(
+                    "\n".join([preset.text(preset.description)] + [experimental] * bool(experimental))),
+                    Qt.ItemDataRole.ToolTipRole)
         found = select_preset(combo, catalogue, current) if current else False
     finally:
         combo.blockSignals(False)
@@ -151,6 +157,7 @@ class PresetCard(QFrame):
     """One preset: its picture, title, description, difficulty, score and what is left to fill in."""
     chosen = Signal(object)  # clicked: selected
     opened = Signal(object)  # double-clicked: created
+    menu_requested = Signal(object, object)  # right click: selected, then the gallery's menu at (card, global point)
 
     def __init__(self, preset, board, score):
         super().__init__()
@@ -178,9 +185,18 @@ class PresetCard(QFrame):
             meta.append(tr("{count} to fill in", count=to_fill))
         self.meta = plain_label(" · ".join(meta), role="secondary")
         layout.addWidget(self.meta)
+        # A preset that starts something not live-tested yet: listed and marked (sandbox-ai's one list), nothing more.
+        experimental = PR.experimental_text(preset.experimental)
+        self.experimental = None
+        if experimental:
+            self.experimental = plain_label(tr("Not live-tested yet"), role="notice-warn")
+            self.experimental.setToolTip(safe_tooltip(experimental))
+            layout.addWidget(self.experimental)
         layout.addStretch()
-        self.setToolTip(safe_tooltip("\n".join(preset.text(n) for n in preset.notes)))
-        self.setAccessibleName(preset.text(preset.title))
+        self.setToolTip(safe_tooltip("\n".join([experimental] * bool(experimental)
+                                               + [preset.text(n) for n in preset.notes])))
+        self.setAccessibleName(preset.text(preset.title) + (f" ({tr('not live-tested yet')})" if experimental
+                                                            else ""))
         self.select(False)
 
     def select(self, on):
@@ -195,6 +211,11 @@ class PresetCard(QFrame):
     def mouseDoubleClickEvent(self, event):  # noqa: N802
         self.chosen.emit(self)
         self.opened.emit(self)
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        self.chosen.emit(self)
+        self.menu_requested.emit(self, event.globalPos())
+        event.accept()
 
     def focusInEvent(self, event):  # noqa: N802
         self.chosen.emit(self)
@@ -325,7 +346,7 @@ class PresetGallery(QDialog):
         self.reading = None
         if error is not None:
             self.host_problems = [tr("The presets of {host} could not be read: {error}", host=printable(host),
-                                     error=printable(error)[-300:])]
+                                     error=printable_text(error)[-300:])]
             self.documents = PR.remembered(host)[0] if PR.remembered(host) else []
         else:
             self.documents, self.host_problems = list(result[0]), list(result[1])
@@ -365,6 +386,7 @@ class PresetGallery(QDialog):
                 card_ = PresetCard(preset, board, B.badges(board, self.policy)[0])
                 card_.chosen.connect(self.choose)
                 card_.opened.connect(lambda _card: self.create())
+                card_.menu_requested.connect(self.card_menu)
                 flow.addWidget(card_)
                 cards.append(card_)
             if key == "mine" and not presets:
@@ -437,6 +459,14 @@ class PresetGallery(QDialog):
                 self.scroll.verticalScrollBar().setValue(heading.y())
                 return
 
+    def menu_entries(self):
+        """What a right click on a card offers: the buttons for the chosen preset, as they are enabled for it."""
+        return [self.create_button, None, self.export_button, self.rename_button, self.delete_button]
+
+    def card_menu(self, card_, point):
+        from .widgets import context_menu, exec_dropped
+        exec_dropped(context_menu(self, self.menu_entries()), point)
+
     def choose(self, card_):
         if self.selected is not None and self.selected is not card_:
             self.selected.select(False)
@@ -498,7 +528,7 @@ class PresetGallery(QDialog):
 
     def demo_started(self, host, result, error):
         status, out, err = widgets.outcome(result, error)
-        said = printable((out + err).strip())[-400:]
+        said = printable_text((out + err).strip())[-400:]
         if host != "local":
             text = tr("The emulated device runs on {host}: {said}", host=printable(host), said=said) if status == 0 \
                 else tr("The emulated device did not start on {host}: {said}", host=printable(host), said=said)
@@ -519,7 +549,7 @@ class PresetGallery(QDialog):
         preset, values = self.selected.preset, {}
         if preset.placeholders and not fill_later:
             form = PlaceholderForm(self.sai, preset, self, agent=self.agent, host=self.host)
-            if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
+            if widgets.AUTO_ANSWER is None and widgets.exec_dropped(form) != QDialog.DialogCode.Accepted:
                 return False
             values = form.values()
         self.result_ = (preset, None if fill_later or values is None else values)
@@ -535,7 +565,7 @@ class PresetGallery(QDialog):
             return None
         if title is None:
             dialog = SavePresetDialog(self, self.sai)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
                 return None
             choices = dialog.choices()
         else:
@@ -554,14 +584,14 @@ class PresetGallery(QDialog):
         preset = self.selected.preset
         if choices is None:
             dialog = SavePresetDialog(self, self.sai, preset, edit=True)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
+            if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
                 return None
             choices = dialog.choices()
         try:
             changed = changed_preset(self.sai, preset, choices)
             PR.add_mine(self.sai, changed)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Not saved"), printable(exc))
+            warn(self, tr("Not saved"), printable_text(exc))
             return None
         self.populate(select=changed.key)
         return changed
@@ -574,7 +604,7 @@ class PresetGallery(QDialog):
             preset = PR.import_file(self.sai, path)
             PR.add_mine(self.sai, preset)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Not imported"), printable(exc))
+            warn(self, tr("Not imported"), printable_text(exc))
             return None
         self.populate(select=preset.key)
         return preset
@@ -591,9 +621,9 @@ class PresetGallery(QDialog):
         try:
             PR.export(self.sai, preset, path)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Not exported"), printable(exc))
+            warn(self, tr("Not exported"), printable_text(exc))
             return None
-        inform(self, tr("Export the preset"), tr("Written: {path}", path=printable(path)))
+        short_notice(self, tr("Export the preset"), tr("Written: {path}", path=printable(path)))
         return path
 
     def delete_preset(self):
@@ -606,7 +636,7 @@ class PresetGallery(QDialog):
         try:
             PR.remove_mine(self.sai, preset.id)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Delete"), printable(exc))
+            warn(self, tr("Delete"), printable_text(exc))
             return False
         self.selected = None
         self.populate()
@@ -683,7 +713,8 @@ class PlaceholderForm(QDialog):
         if "mcp" in kinds and host == "local":
             try:
                 names = sorted(sai.mcp_definitions())
-            except Exception:  # noqa: BLE001 - an mcp.json that does not load: typed in by hand
+            except Exception as _exc:  # noqa: BLE001 - an mcp.json that does not load: typed in by hand
+                applog.swallowed("preset_gallery", "PlaceholderForm.__init__: an mcp.json that does not load: t…", _exc)
                 names = []
             self.offer("mcp", [{"name": n} for n in names])
         elif "mcp" in kinds:
@@ -903,7 +934,7 @@ def save_board_preset(parent, sai, board, choices, replacing=None):
                                notes=choices.get("notes", ()))
         PR.add_mine(sai, preset)
     except (OSError, ValueError) as exc:
-        warn(parent, tr("Not saved"), printable(exc))
+        warn(parent, tr("Not saved"), printable_text(exc))
         return None
     return preset
 

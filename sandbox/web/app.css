@@ -157,6 +157,7 @@ td.countdown.bad { color: var(--bad); font-weight: 700; }
 /* a reviewed project file: what weakens it, one line each and nothing cut (they scroll), then the file itself */
 .project-marks pre { max-height: 24em; margin: 0 0 6px; }
 pre.project-file { max-height: 32em; }
+.call-arguments pre { max-height: 24em; overflow-wrap: anywhere; margin: 4px 0 0; }
 .inline-ask .confirm { display: inline-block; margin: 0 6px; }
 /* The session's end, two minutes before: on top of everything, until it is renewed or ends. */
 .session-banner {
@@ -167,6 +168,7 @@ pre.project-file { max-height: 32em; }
 tr.stale td { opacity: .6; }
 tr.stale .stale-note { font-weight: 400; }
 .badge.asking { background: var(--warn); color: var(--on-warn, var(--base)); border: 0; border-radius: 9px; padding: 0 7px; }
+.badge.experimental { background: var(--warn); color: var(--on-warn, var(--base)); border-radius: 9px; padding: 0 7px; font-size: 0.85em; }
 .badge.allows-all { background: var(--danger); color: var(--base); border-radius: 9px; padding: 0 7px; font-size: 0.85em; }
 .first-run ol { margin: 0; padding-left: 20px; }
 .first-run li { margin: 6px 0; }

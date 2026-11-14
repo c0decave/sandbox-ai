@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """sandbox-ai defaults: your defaults for every start (~/.config/sandbox-ai/defaults.json), without editing it.
 
-  sandbox-ai defaults [show] [--json]     what the file says, and which keys and values there are
+  sandbox-ai defaults [show [--json]]     what the file says, and which keys and values there are
   sandbox-ai defaults set KEY VALUE       VALUE as JSON (strict, ["credentials","home"], false, 90) or plain text
   sandbox-ai defaults unset KEY           back to sandbox-ai's own default
 
-The keys are the launcher's: telemetry (off, strict, on), mode (lax ... paranoid), canaries (false or a list of
+The keys are the launcher's: telemetry (off, strict: telemetry is always off; the former on is refused here and
+ignored where an old file still has it), mode (lax ... paranoid), canaries (false or a list of
 categories), keep_days, subnet, subnet6, preset_dirs (extra preset directories; `sandbox-ai presets dirs add DIR`
 checks where each lies), safeguard_mute (kinds of safeguard warnings never announced: `sandbox-ai safeguards kinds`),
 name_style (codename: new starts are named like brisk-otter-lantern, the default; project: AGENT-PROJECT-xxxx),
 desktop_notifications (all, the default: the launchers' desktop notifications - questions, safeguards, limits,
 alarms - while neither the app nor the web interface watches; alarms: only a canary's alarm; none: nothing),
 loop_guard (the loop guard's layers for starts with --llm, an object such as {"warn": 4, "steps": 60,
-"instructions": false}; `sandbox-ai llm set NAME --loop-guard` changes one server's).
+"instructions": false}; `sandbox-ai llm set NAME --loop-guard` changes one server's), llm_traffic (what the LLM
+traffic log records: llm, the default - the --llm server's requests -, all - the cloud provider's too -, off;
+`sandbox-ai llm traffic`), llm_traffic_limit (MiB of one request's record, 1 to 64, default 4).
 A value is checked by the launcher itself before the file is replaced
 (atomically, mode 0600); the other keys stay as they are. An option given at a start wins over the file.
 The web interface and the desktop app change other hosts' defaults through this command.
@@ -52,6 +55,24 @@ def keys():
     return sorted(launcher().DEFAULTS_KEYS - {"version"})
 
 
+_filelock = None
+
+
+def locked():
+    """The lock of a read-modify-write of defaults.json (filelock.py): `defaults set` and `unset` run by the CLI, the
+    app and the web interface at the same time never lose each other's change (a security mode set in one, dropped by
+    the other's write of what it had read before)."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock", HERE / "filelock.py")
+        with LOADING:
+            if _filelock is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _filelock = loaded
+    return _filelock.locked(launcher().defaults_file())
+
+
 def read():
     """(document, path) of the defaults file ({"version": 1} without one); a broken file is a ValueError."""
     path = launcher().defaults_file()
@@ -59,6 +80,8 @@ def read():
         document = json.loads(path.read_text())
     except FileNotFoundError:
         return {"version": 1}, path
+    except RecursionError:  # (nested deeper than Python reads: damaged)
+        raise ValueError(f"{path}: not valid JSON (nested too deeply); fix or remove it first") from None
     except (OSError, ValueError) as exc:
         raise ValueError(f"{path}: {exc}; fix or remove it first") from None
     if not isinstance(document, dict) or document.get("version") != 1:
@@ -160,21 +183,28 @@ def cli(argv, out=print):
             out(json.dumps({"path": str(path), "values": values, **describe()}, indent=2))
         else:
             out(f"{path}{'' if path.exists() else ' (none yet)'}")
+            retired = getattr(launcher(), "TELEMETRY_RETIRED", None)
             for key in keys():
-                out(f"  {key:10} {json.dumps(values[key]) if key in values else '-'}")
+                note = "  (ignored: telemetry is always off since 0.1.95; sandbox-ai defaults unset telemetry)" \
+                    if key == "telemetry" and retired is not None and values.get(key) == retired else ""
+                out(f"  {key:10} {json.dumps(values[key]) if key in values else '-'}{note}")
         return 0
     if a.key not in keys():
         raise ValueError(f"no key {a.key!r}; the keys are {', '.join(keys())}")
-    document, path = read()
-    if a.command == "set":
-        document[a.key] = parse_value(a.value)
-        if a.key == "preset_dirs":
-            check_preset_dirs(document[a.key])
-    elif document.pop(a.key, None) is None:
-        out(f"{a.key} was not set")
-        return 0
-    check(document, path)
-    write(path, document)
+    with locked():  # from reading the file to writing it back
+        document, path = read()
+        if a.command == "set":
+            document[a.key] = parse_value(a.value)
+            if a.key == "telemetry" and document[a.key] == getattr(launcher(), "TELEMETRY_RETIRED", None):
+                raise ValueError("telemetry is off or strict: the agents' telemetry is always off since 0.1.95 "
+                                 "(on is gone)")
+            if a.key == "preset_dirs":
+                check_preset_dirs(document[a.key])
+        elif document.pop(a.key, None) is None:
+            out(f"{a.key} was not set")
+            return 0
+        check(document, path)
+        write(path, document)
     out(f"{a.key} = {json.dumps(document[a.key])}" if a.command == "set" else f"{a.key} removed")
     return 0
 

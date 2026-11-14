@@ -312,7 +312,7 @@ ACTIONS = [
      [["wizard", "forget", "/srv/project/.sandbox-ai.json"]]),
     ("GET", "/mcp", None, [["mcp", "list", "--json"]]),
     ("POST", "/mcp", {"entry": "hub:capa", "unsigned": True, "confirm": True}, [["mcp", "add", "--unsigned", "hub:capa"]]),
-    ("POST", "/mcp-catalog", {"catalogs": []}, [["mcp", "catalog"]]),
+    ("POST", "/mcp-catalog", {"catalogs": []}, [["mcp", "catalog", "--json"]]),
     ("POST", "/mcp/files/start", {"vpn": "mv"}, [["mcp", "start", "--vpn=mv", "files"]]),
     ("POST", "/mcp/files/start", {"for": "web", "confirm": True}, [["mcp", "start", "--for=web", "--json", "files"]]),
     ("POST", "/mcp/files/stop", {"confirm": True}, [["mcp", "stop", "files"]]),

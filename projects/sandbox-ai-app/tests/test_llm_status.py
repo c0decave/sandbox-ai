@@ -109,6 +109,18 @@ def test_the_page_shows_what_each_server_has_loaded_and_uses(qapp, sai, monkeypa
     page.deleteLater()
 
 
+def test_a_server_that_is_not_reachable_is_said_in_the_warning_colour(qapp, sai, monkeypatch):
+    """Design review 0.1.95: "gpu: not reachable: timed out" stood in the page's ordinary grey, like any note."""
+    monkeypatch.setattr(llm_page, "background", synchronous)
+    page = llm_page.LlmPage(sai)
+    page.show()
+    assert page.server_status.property("role") == "notice-warn"
+    sai.answers[("local", ("llm", "status", "--json"))] = (0, json.dumps(STATUS[:1]), "")
+    page.status_timer.timeout.emit()
+    assert page.server_status.property("role") == "secondary", "all reachable again: the usual colour"
+    page.deleteLater()
+
+
 def test_an_older_host_is_told_to_update_and_not_asked_every_time(qapp, sai, monkeypatch):
     monkeypatch.setattr(llm_page, "background", synchronous)
     sai.answers[("local", ("llm", "status", "--json"))] = (

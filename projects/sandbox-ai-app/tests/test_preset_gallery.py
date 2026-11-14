@@ -66,7 +66,7 @@ def test_the_gallery_lists_every_preset_by_category_with_a_picture_and_its_score
     assert headings == ["Simple", "Development", "Research", "Local & remote LLM", "Privacy & VPN", "Teams & policy",
                         *[f"sandbox-ai: {dict(PR.sai_categories(gallery.sai))[key]['title']['en']}" for key in used],
                         "My presets"]
-    assert used[:3] == ["development", "research", "llm"] and "testing" in used and "other" not in used
+    assert used[:4] == ["development", "agents", "research", "llm"] and "testing" in used and "other" not in used
     card = gallery.cards[0]
     picture = card.picture.pixmap()
     assert not picture.isNull() and picture.width() >= 200

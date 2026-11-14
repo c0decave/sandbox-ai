@@ -627,14 +627,6 @@ def test_clean_models(scenario):
                           {"name": "m", "size": None, "loaded": None, "details": ""}]
 
 
-def test_local_config_path(scenario, tmp_path, monkeypatch):
-    project = {"happy": tmp_path / "app", "sad": Path("/"), "edge": tmp_path / "with space"}[scenario]
-    path = w.local_config_path(project)
-    assert path.parent == tmp_path / "cfg" / "sandbox-ai" / "opencode"
-    assert path.name.startswith({"happy": "app-", "sad": "root-", "edge": "with space-"}[scenario])
-    assert w.local_config_path(tmp_path / "other" / project.name) != path or scenario == "sad"
-
-
 def test_forget(scenario, tmp_path):
     path = tmp_path / ".sandbox-ai.json"
     path.write_text("{}")

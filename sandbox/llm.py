@@ -7,12 +7,15 @@
   sandbox-ai llm show NAME [--json]
   sandbox-ai llm remove NAME
   sandbox-ai llm models NAME [--sort name|size|loaded] [--json]
-  sandbox-ai llm check NAME [--agent claude|codex|opencode] [--model MODEL]
+  sandbox-ai llm check NAME [--agent claude|codex|opencode|hermes|dsh|qwen|goose] [--model MODEL]
   sandbox-ai llm status [NAME] [--json] [--watch SECONDS]
+  sandbox-ai llm loaded NAME [--json]
+  sandbox-ai llm load NAME MODEL [--context TOKENS] [--ttl SECONDS] [--force]
+  sandbox-ai llm unload NAME MODEL|INSTANCE [--force]
   sandbox-ai llm detect [--address IP]... [--json]
   sandbox-ai llm set NAME [--model MODEL] [--param KEY=VALUE]... [--force-param KEY=VALUE]... [--unset KEY]...
                      [--reset] [--loop-guard on|off|LAYER=VALUE]... [--evict never|allow]
-  sandbox-ai llm params [--kind KIND] [--json]
+  sandbox-ai llm params [NAME | --kind KIND] [--json]
 
 KIND is ollama, lmstudio, llamacpp, vllm or openai-compatible. URL is the server's root, with a path
 prefix if a gateway puts one in front (https://gw.example.org/ollama); each agent gets the API path it
@@ -22,6 +25,8 @@ loopback (127.0.0.1 or localhost, reached with --allow-host-port), private, CGNA
 
 A start with --llm NAME[:MODEL] opens exactly that server's address and port and configures the agent
 for it; --llm NAME:MODEL,MODEL... names several (the first is the agent's; OpenCode offers exactly these).
+OpenRouter is one: llm add openrouter -k openai-compatible -u https://openrouter.ai/api/v1 -s SECRET -m MODEL
+(with -a, its Anthropic-compatible API, for Claude Code too).
 The key (a secret of sandbox-ai secrets, never stored here) is added by the connection proxy on the wire,
 so the agent only ever sees a placeholder. Endpoints are kept in ~/.config/sandbox-ai/llm.json. An endpoint
 added with --vpn is checked, listed and watched through that VPN (llm check|models|status).
@@ -30,6 +35,12 @@ llm status shows what each server has loaded and uses now, as far as its API rep
 with their VRAM and RAM, vLLM the KV cache and the requests running and waiting, llama.cpp its slots (and requests
 with --metrics; memory in router mode), LM Studio the loaded models. The host's total RAM and VRAM are not reported by
 these APIs (llama.cpp's router mode excepted).
+
+llm loaded lists the loaded models with their instance, context, memory and how they stay loaded (LM Studio: JIT
+with an idle TTL, which Auto-Evict may unload for another model, or explicit), and the running sandboxes using them;
+llm load loads one explicitly (LM Studio, Ollama, llama.cpp in router mode; a JIT instance is replaced, never held
+twice in memory) and llm unload unloads one; an unload, or a load that replaces what is loaded, is refused while a
+running sandbox uses the model, unless --force.
 
 Standard library only.
 """
@@ -54,6 +65,20 @@ LOADING = threading.RLock()  # the lazily made request handlers
 HERE = Path(__file__).resolve().parent
 
 
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
+
+
 _filelock = None
 
 
@@ -68,6 +93,7 @@ def settings_lock(file):
         _filelock = loaded
     return _filelock.locked(file)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")  # the launcher's agents (a test keeps both the same)
 SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 HEADER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 VPN_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")  # as sandbox-ai vpn names them (vpn.PROFILE_NAME)
@@ -102,6 +128,13 @@ def printable(text):
 
 def load_secret_store_module():
     spec = importlib.util.spec_from_file_location("sandbox_secret_store_llm", HERE / "secret_store.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_traffic_module():
+    spec = importlib.util.spec_from_file_location("sandbox_llm_traffic_llm", HERE / "llm_traffic.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -294,7 +327,7 @@ def check_record(name, record):
              "models", "checked", "contexts", "params", "forced", "loop_guard", "evict"}
     if set(record) - known:
         raise ValueError(f"{where}: unknown fields {sorted(set(record) - known)}")
-    if record.get("kind") not in KINDS:
+    if not isinstance(record.get("kind"), str) or record["kind"] not in KINDS:  # (a list in a file edited by hand)
         raise ValueError(f"{where}: kind is one of {', '.join(KINDS)}")
     try:
         parsed = parse_url(record.get("url"))
@@ -561,10 +594,20 @@ class Client:
         """The JSON answer of GET PATH (POST with BODY, a dict); ValueError says what went wrong (never with a
         secret)."""
         import ssl
+        begun = time.monotonic()
+        where = f"{'POST' if body is not None else 'GET'} {self.endpoint['url']}{path}"
         try:
             status, data = self.call(path, body)
         except (OSError, ssl.SSLError) as exc:
+            # (polled by the app's model server page: said once until it answers again)
+            LOG.changed(("llm reached", self.endpoint["url"]), False, "llm",
+                        f"{where}: no answer after {time.monotonic() - begun:.1f} s: "
+                        f"{printable(getattr(exc, 'reason', exc))}", "WARNING")
             raise ValueError(f"{self.endpoint['url']}{path}: {printable(getattr(exc, 'reason', exc))}") from None
+        if LOG.state(("llm reached", self.endpoint["url"])) is False:
+            LOG.changed(("llm reached", self.endpoint["url"]), True, "llm", f"{self.endpoint['url']} answers again")
+        LOG.log("DEBUG" if status == 200 else "INFO", "llm",
+                f"{where}: HTTP {status} after {time.monotonic() - begun:.1f} s")
         if status in (401, 403):
             raise ValueError(f"{self.endpoint['url']}{path}: the server refused the key (HTTP {status})")
         if 300 <= status < 400:
@@ -661,7 +704,9 @@ def discover_raw(kind, fetch):
                                                           m.get("details", {}).get("quantization_level")) if v),
                                       m.get("modified_at")),
                  "arch": m.get("details", {}).get("family"), "parameters": m.get("details", {}).get("parameter_size"),
-                 "quantization": m.get("details", {}).get("quantization_level")}
+                 "quantization": m.get("details", {}).get("quantization_level"),
+                 # (its families: clip for a vision model, bert for an embedding model)
+                 "families": m.get("details", {}).get("families")}
                 for m in tags]
     if kind == "lmstudio":
         # LM Studio 0.4's own REST API (/api/v1/models) has each model's size (size_bytes) and its loaded instances;
@@ -673,7 +718,9 @@ def discover_raw(kind, fetch):
                      "loaded": m.get("state") == "loaded",
                      "details": m.get("quantization", ""), "type": m.get("type"), "arch": m.get("arch"),
                      "parameters": (native.get(m["id"]) or {}).get("params_string"),
-                     "quantization": m.get("quantization"), "context": m.get("max_context_length")}
+                     "quantization": m.get("quantization"), "context": m.get("max_context_length"),
+                     "capabilities": ["vision"] if m.get("type") == "vlm" or (native.get(m["id"]) or {}).get("vision")
+                     else []}
                     for m in data if m.get("type") in ("llm", "vlm")]
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -681,7 +728,9 @@ def discover_raw(kind, fetch):
             return [{"name": key, "size": m.get("size_bytes"), "loaded": bool(m.get("loaded_instances")),
                      "details": "", "type": m.get("type"), "arch": m.get("architecture"),
                      "parameters": m.get("params_string"), "quantization": lmstudio_quantization(m),
-                     "context": m.get("max_context_length")}
+                     "context": m.get("max_context_length"),
+                     "capabilities": ["vision"] if m.get("vision") or (m.get("capabilities") or {}).get("vision")
+                     is True else []}
                     for key, m in native.items() if m.get("type") == "llm"]
         # Older LM Studio, or one behind a gateway: the OpenAI-compatible listing only.
         return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
@@ -702,12 +751,45 @@ def discover_raw(kind, fetch):
             loaded = status["value"] == "loaded" if isinstance(status.get("value"), str) else (True if not status else None)
             result.append({"name": m["id"], "size": meta.get("size"), "loaded": loaded,
                            "details": with_date(f"n_ctx_train {meta['n_ctx_train']}" if meta.get("n_ctx_train")
-                                                else "", m.get("created"))})
+                                                else "", m.get("created")),
+                           "parameters": params_text(meta.get("n_params"))})
         return result
     if kind == "openai-compatible":
-        return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created"))}
+        # OpenRouter and the like name each model's modalities (architecture: input/output) and its context.
+        return [{"name": m["id"], "size": None, "loaded": None, "details": with_date("", m.get("created")),
+                 "capabilities": modality_capabilities(m.get("architecture")),
+                 "context": m.get("context_length")}
                 for m in fetch("/v1/models")["data"]]
     raise ValueError(f"Unknown server type: {kind}")
+
+
+CAPABILITIES = ("text", "code", "vision", "image", "embedding", "reasoning", "tools")
+
+
+def params_text(value):
+    """A parameter count the server gives as a number (llama.cpp's n_params): "7.2B", "350M"; None otherwise."""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return f"{value / 1e9:.1f}B" if value >= 1e9 else f"{value / 1e6:.0f}M"
+
+
+def modality_capabilities(architecture):
+    """The capabilities an OpenAI-compatible listing's ARCHITECTURE (OpenRouter: input_modalities, output_modalities,
+    modality "text+image->text") names: vision for an image input, image for an image output."""
+    if not isinstance(architecture, dict):
+        return []
+    inputs = architecture.get("input_modalities") if isinstance(architecture.get("input_modalities"), list) else []
+    outputs = architecture.get("output_modalities") if isinstance(architecture.get("output_modalities"), list) else []
+    modality = architecture.get("modality") if isinstance(architecture.get("modality"), str) else ""
+    given, _, made = modality.partition("->")
+    found = []
+    if "image" in inputs or "image" in given:
+        found.append("vision")
+    if "image" in outputs or "image" in made:
+        found.append("image")
+    if "text" in outputs or "text" in made:
+        found.append("text")
+    return found
 
 
 def clean_models(models):
@@ -732,6 +814,11 @@ def clean_models(models):
                  "quantization": word("quantization", 20),
                  "context": context if isinstance(context, int) and not isinstance(context, bool)
                  and 0 < context < 1 << 31 else None}
+        # What the server says the model can do (a list of CAPABILITIES' words), and Ollama's families (short words)
+        capabilities = model.get("capabilities") if isinstance(model.get("capabilities"), list) else []
+        extra["capabilities"] = [c for c in dict.fromkeys(capabilities) if c in CAPABILITIES] or None
+        families = model.get("families") if isinstance(model.get("families"), list) else []
+        extra["families"] = [printable(f)[:20] for f in families[:8] if isinstance(f, str) and f.strip()] or None
         result.append({**entry, **{key: value for key, value in extra.items() if value is not None}})
     return result
 
@@ -854,7 +941,9 @@ def status_raw(kind, fetch, fetch_text, models):
                     if isinstance(instance, dict):
                         config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
                         loaded.append({"name": instance.get("id") or key, "size": count(m.get("size_bytes")),
-                                       "context": config.get("context_length")})
+                                       "context": config.get("context_length"),
+                                       # an idle TTL: loaded JIT, which Auto-Evict may unload for another model
+                                       "jit": instance_ttl(instance) is not None})
         elif any(m["loaded"] is not None for m in models):
             loaded, by = [{"name": m["name"], "size": m["size"], "context": None} for m in models if m["loaded"]], \
                 ["LM Studio /api/v0/models"]
@@ -959,6 +1048,8 @@ def clean_status(status):
                 item["context"] = context
             if isinstance(entry.get("expires_at"), str) and entry["expires_at"].strip():
                 item["expires_at"] = printable(entry["expires_at"].strip())[:40]
+            if entry.get("jit") is True:
+                item["jit"] = True
             loaded.append(item)
     usage = {}
     raw = status.get("usage") if isinstance(status.get("usage"), dict) else {}
@@ -1056,6 +1147,8 @@ def status_lines(entry):
             parts.append(f"context {model['context']}")
         if model.get("expires_at"):
             parts.append(f"unloaded at {model['expires_at']}")
+        if model.get("jit"):
+            parts.append(f"JIT: {JIT_WARNING}")
         lines.append(f"  loaded: {model['name']}" + (f"  {', '.join(parts)}" if parts else ""))
     numbers = []
     if "vram_bytes" in usage:
@@ -1298,7 +1391,9 @@ def context_window(endpoint, model, get=None, client=None, behind_vpn=False):
         client = client or Client(endpoint, get, timeout=CONTEXT_TIMEOUT)
         return model_context(endpoint["kind"], client.json, model,
                              lambda path, body: client.json(path, body=body))
-    except Exception:  # noqa: BLE001 - a server that cannot say leaves the agents' defaults
+    except Exception as exc:  # noqa: BLE001 - a server that cannot say leaves the agents' defaults
+        LOG.info("llm", f"the context window of {model} at {endpoint.get('name')} is not known: the agent's own "
+                        "default stays", exc)
         return None
 
 
@@ -1509,7 +1604,7 @@ def user_loop():
     try:
         document = json.loads(read_private(path, 1 << 16, "The defaults file").decode())
         return dict(check_loop(document.get("loop_guard", {}), str(path)))
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return {}
 
 
@@ -1626,9 +1721,20 @@ def params_lines(endpoint):
     own = endpoint.get("loop_guard") or {}
     lines.append(f"  loop guard: {loop_lines(loop_config(endpoint))}"
                  + (f" (this server's own: {', '.join(f'{k}={v}' for k, v in own.items())})" if own else ""))
-    lines.append("  other models: " + ("the server may unload them (evict allow)" if endpoint.get("evict") == "allow"
-                                       else "kept loaded where the server lets it (evict never)"))
+    if local_model_server(endpoint):
+        lines.append("  other models: " + ("the server may unload them (evict allow)" if endpoint.get("evict") == "allow"
+                                           else "kept loaded where the server lets it (evict never)"))
     return lines
+
+
+def local_model_server(endpoint):
+    """True if ENDPOINT is a model server of your own that loads and unloads models (Ollama, LM Studio, llama.cpp,
+    vLLM, or an OpenAI-compatible server on the host's loopback or a local address); False for an OpenAI-compatible
+    service at a public host (OpenRouter and the like), where nothing is loaded for you."""
+    if endpoint["kind"] != "openai-compatible":
+        return True
+    parsed = endpoint["parsed"]
+    return bool(parsed["loopback"] or (parsed["address"] and address_kind(parsed["address"]) == "local"))
 
 
 def proxy_params(a, endpoint, model):
@@ -1683,6 +1789,25 @@ def loaded_context(endpoint, model, get=None, client=None, behind_vpn=False):
     return None
 
 
+def loop_notes(name, endpoint, given):
+    """What `llm set NAME --loop-guard GIVEN` says besides: a layer set while the guard is off acts only once it is
+    on; a block count at or below the warn count pauses tool use before the model was ever warned."""
+    if not given:
+        return []
+    own = endpoint.get("loop_guard") or {}
+    layers = [text for text in given if "=" in str(text)]
+    config = loop_config(endpoint)
+    notes = []
+    if layers and not config["enabled"]:
+        notes.append(f"note: the loop guard of {name} is off (" + ("this server's own setting" if own.get("enabled") is
+                     False else "your defaults") + f"): the layers apply once it is on (sandbox-ai llm set {name} "
+                     "--loop-guard on)")
+    elif config["warn"] and config["block"] and config["block"] <= config["warn"]:
+        notes.append(f"note: block ({config['block']}) comes before warn ({config['warn']}): tool use is paused "
+                     "before the model was ever warned; a block count above the warn count warns first")
+    return notes
+
+
 def set_params(args, out=print):
     """sandbox-ai llm set NAME [--model MODEL] [--param K=V]... [--force-param K=V]... [--unset K]... [--reset]
     [--loop-guard on|off|N]: the parameters of one model (every model without --model), under the store's lock."""
@@ -1730,6 +1855,8 @@ def set_params(args, out=print):
         save_store(store)
     for line in describe(found):
         out(line)
+    for note in loop_notes(args.name, found, args.loop_guard):
+        out(note)
     hint = modelfile_hint(found, args.model, effective_params(found, args.model)[0]) if args.model else None
     if hint:
         out(printable("note: " + hint))
@@ -1778,10 +1905,14 @@ def evict_notes(endpoint):
     return []
 
 
-def keep_loaded(endpoint, model, a=None, get=None, client=None, behind_vpn=False):
+def keep_loaded(endpoint, model, a=None, get=None, client=None, behind_vpn=False, runs=None):
     """evict never (the default): LM Studio loads MODEL explicitly, unless an instance of it is loaded, so that its
-    Auto-Evict never unloads it for another sandbox's model. Returns a note, or None; never raises (a model that does
-    not load is loaded by the agent's first request, as before). Not from this host for a server behind a VPN."""
+    Auto-Evict never unloads it for another sandbox's model. An instance LM Studio has loaded JIT (it carries an idle
+    TTL: instance_kept "jit") is said, and when no other running sandbox uses MODEL (RUNS: net.running(), read when
+    needed) it is replaced by an explicit one: the JIT instance unloaded first, then MODEL loaded with num_ctx (else
+    the JIT instance's context) - never twice in memory (a second load is a second instance, MODEL:2). Returns a note
+    (a warning starts with WARNING:), or None; never raises (a model that does not load is loaded by the agent's first
+    request, as before). Not from this host for a server behind a VPN."""
     if endpoint["kind"] != "lmstudio" or endpoint.get("evict") == "allow" or endpoint.get("vpn") or behind_vpn or \
             os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
         return None
@@ -1793,19 +1924,448 @@ def keep_loaded(endpoint, model, a=None, get=None, client=None, behind_vpn=False
         found = native.get(model)
         if found is None:
             return None  # an instance id or a model LM Studio does not list: its own JIT loading
-        if found.get("loaded_instances"):
-            return None
-        body = {"model": model}
+        instances = [i for i in found.get("loaded_instances") or [] if isinstance(i, dict)]
         values = effective_params(endpoint, model, start_params(a, endpoint)[0] if a is not None else None)[0]
-        if values.get("num_ctx"):
-            body["context_length"] = values["num_ctx"]
-        status, data = client.call("/api/v1/models/load", body)
+        if not instances:
+            status, _ = client.call("/api/v1/models/load", lmstudio_load_body(model, values.get("num_ctx")))
+            if status >= 300:
+                return f"LM Studio did not load {model} (HTTP {status}): left to JIT loading"
+            return f"LM Studio loaded {model} for this start (not JIT: Auto-Evict leaves it loaded; unload it in LM " \
+                   "Studio or with lms unload)"
+        if any(instance_kept("lmstudio", i) != "jit" for i in instances):
+            return None  # loaded explicitly (or LM Studio does not say how): left as it is
+        warning = f"WARNING: LM Studio has {model} loaded JIT (idle TTL): {JIT_WARNING}"
+        users = model_users(endpoint, runs, exclude=getattr(a, "run_id", None)).get(model)
+        if users:
+            return f"{warning}. The running sandbox(es) {', '.join(users)} use it, so it is left as it is; " \
+                   f"sandbox-ai llm load {endpoint['name']} {model} --force loads it explicitly"
+        context = values.get("num_ctx") or next((instance_context(i) for i in instances if instance_context(i)), None)
+        for instance in instances:
+            status, _ = client.call("/api/v1/models/unload", {"instance_id": instance.get("id") or model})
+            if status >= 300:
+                return f"{warning}. Its JIT instance did not unload (HTTP {status}): left as it is"
+        status, _ = client.call("/api/v1/models/load", lmstudio_load_body(model, context))
         if status >= 300:
-            return f"LM Studio did not load {model} (HTTP {status}): left to JIT loading"
-        return f"LM Studio loaded {model} for this start (not JIT: Auto-Evict leaves it loaded; unload it in LM " \
-               "Studio or with lms unload)"
+            return f"{warning}. Its JIT instance was unloaded, but LM Studio did not load {model} explicitly (HTTP " \
+                   f"{status}): the agent's first request loads it JIT again"
+        told = f" (context {context})" if context else ""
+        return f"LM Studio had {model} loaded JIT (Auto-Evict could unload it for another sandbox's model); no other " \
+               f"running sandbox uses it: loaded explicitly for this start{told}, the JIT instance unloaded first, " \
+               "so the model is never in memory twice"
     except Exception as exc:  # noqa: BLE001 - never fatal
         return f"LM Studio: {model} not loaded ahead ({printable(exc)[:200]}): left to JIT loading"
+
+
+# --- the models a server has loaded; loading and unloading them (llm loaded, load, unload) --------------------------
+#
+# What each server's API offers, checked against its documentation (November 2026):
+#   LM Studio 0.4  GET /api/v1/models: per model its loaded_instances [{id, config: {context_length, ...}}]
+#                  POST /api/v1/models/load {model, context_length?, ...} -> {type, instance_id, load_time_seconds,
+#                  status "loaded"}; POST /api/v1/models/unload {instance_id} -> {instance_id}.
+#                  Not in its documentation, seen by others' live tests (0.4.26): an instance with an idle TTL (loaded
+#                  JIT, or with lms load --ttl) carries remaining_ttl_seconds, one loaded without a TTL (REST, lms load)
+#                  has none; the load endpoint refuses keys it does not know (a "ttl" too: HTTP 400
+#                  "unrecognized_keys"); a second load of a model is a second instance (MODEL:2), in memory twice.
+#   Ollama         GET /api/ps: models [{name, model, size, size_vram, expires_at, context_length (newer versions)}];
+#                  POST /api/generate {model} without a prompt loads it (done_reason "load"), with keep_alive 0
+#                  unloads it ("unload"); keep_alive in seconds, negative: until it is unloaded (its FAQ), options
+#                  num_ctx the context it is loaded with. Each request sets the time again (its keep_alive, else
+#                  OLLAMA_KEEP_ALIVE): the agents' OpenAI-compatible requests carry none.
+#   llama.cpp      router mode (llama-server --models-dir or --models-preset): /v1/models with status.value per model
+#                  (loaded, loading, unloaded, sleeping, ...), POST /models/load {model} and POST /models/unload {model}
+#                  -> {success: true}; no context or TTL at the load (the router's arguments decide). One model else.
+#   vLLM           serves the model it was started with: nothing to load or unload.
+JIT_WARNING = "LM Studio may unload it when another sandbox's model is loaded: Auto-Evict; see Help > Keeping models " \
+              "loaded"
+# How a loaded instance stays loaded (llm loaded --json "kept"):
+KEPT = {"explicit": "loaded explicitly: stays until it is unloaded",
+        "jit": "JIT (idle TTL): LM Studio unloads it when idle, and Auto-Evict when it JIT-loads another model",
+        "timed": "until idle for its keep_alive (expires_at), or memory runs short",
+        "router": "the router unloads the least recently used beyond --models-max or its memory",
+        "server": "served for as long as the server runs"}
+FOREVER_YEARS = 50  # Ollama's keep_alive -1: an expires_at hundreds of years ahead
+UNLOAD_TIMEOUT = 60
+
+
+def load_net_module():
+    spec = importlib.util.spec_from_file_location("sandbox_net_llm", HERE / "net.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def running_runs():
+    """{run: record} of the sandboxes running now (sandbox-ai net's registry); {} where it cannot be read."""
+    try:
+        return load_net_module().running()
+    except Exception:  # noqa: BLE001 - who uses a model is said where it is known
+        return {}
+
+
+def model_users(endpoint, runs=None, exclude=None):
+    """{model: [the running sandboxes that use it]} on ENDPOINT: those started with --llm NAME[:MODEL,...] of it (the
+    models named; none named: the endpoint's model). RUNS: {run: record} (net.running() when None); EXCLUDE: a run id
+    left out (the start asking)."""
+    found = {}
+    for run, record in (running_runs() if runs is None else runs).items():
+        if not isinstance(record, dict) or (exclude and exclude in (run, record.get("run"))):
+            continue
+        try:
+            name, models = parse_models(record.get("llm")) if isinstance(record.get("llm"), str) else (None, [])
+        except ValueError:
+            continue
+        if name != endpoint["name"]:
+            continue
+        label = printable(str(record.get("name") or record.get("session") or run))[:64]
+        for model in models or ([endpoint["model"]] if endpoint.get("model") else []):
+            found.setdefault(model, [])
+            if label not in found[model]:
+                found[model].append(label)
+    return found
+
+
+def instance_ttl(instance):
+    """The seconds LM Studio says an instance stays loaded while idle (remaining_ttl_seconds), or None."""
+    for where in (instance, instance.get("config") if isinstance(instance.get("config"), dict) else {}):
+        value = where.get("remaining_ttl_seconds")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value < 1 << 40:
+            return int(value)
+    return None
+
+
+def instance_context(instance):
+    config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
+    return context_value(config.get("context_length"))
+
+
+def instance_kept(kind, instance):
+    """How a loaded instance stays loaded (KEPT): for LM Studio "jit" with an idle TTL, else "explicit"."""
+    if kind == "lmstudio":
+        return "jit" if instance_ttl(instance) is not None else "explicit"
+    return None
+
+
+def forever(expires):
+    """Whether an Ollama expires_at is so far ahead that the model stays until it is unloaded (keep_alive -1)."""
+    match = re.match(r"(\d{4})-", expires) if isinstance(expires, str) else None
+    return bool(match) and int(match[1]) >= time.gmtime().tm_year + FOREVER_YEARS
+
+
+def lmstudio_load_body(model, context=None):
+    """POST /api/v1/models/load's body: only keys LM Studio knows (it refuses others)."""
+    return {"model": model, **({"context_length": context} if context else {})}
+
+
+def loaded_raw(kind, fetch):
+    """What a server of KIND has loaded now: {"instances": [{model, instance, context?, size?, memory_bytes?,
+    vram_bytes?, ram_bytes?, kept?, ttl_seconds?, expires_at?, state?}], "reported_by": [...], "load": bool,
+    "unload": bool} (load/unload: whether its API can). Untrusted: see clean_loaded. ValueError: no answer."""
+    instances = []
+    if kind == "lmstudio":
+        listed = fetch("/api/v1/models")["models"]
+        for m in listed if isinstance(listed, list) else []:
+            if not isinstance(m, dict) or not isinstance(m.get("key"), str):
+                continue
+            for instance in m.get("loaded_instances") or []:
+                if not isinstance(instance, dict):
+                    continue
+                instances.append({"model": m["key"], "instance": instance.get("id") or m["key"],
+                                  "context": instance_context(instance), "size": count(m.get("size_bytes")),
+                                  "kept": instance_kept(kind, instance), "ttl_seconds": instance_ttl(instance),
+                                  "type": m.get("type")})
+        return {"instances": instances, "reported_by": ["LM Studio /api/v1/models"], "load": True, "unload": True}
+    if kind == "ollama":
+        tags = optional(fetch, "/api/tags", {})
+        sizes = {m.get("name"): m.get("size") for m in (tags.get("models") if isinstance(tags, dict) else None) or []
+                 if isinstance(m, dict)}
+        for m in fetch("/api/ps")["models"] or []:
+            if not isinstance(m, dict):
+                continue
+            memory, vram = count(m.get("size")), count(m.get("size_vram"))
+            expires = m.get("expires_at")
+            instances.append({"model": m.get("name"), "instance": m.get("name"),
+                              "size": count(sizes.get(m.get("name"))),
+                              "memory_bytes": memory, "vram_bytes": vram,
+                              "ram_bytes": memory - vram if memory is not None and vram is not None and memory >= vram
+                              else None, "context": context_value(m.get("context_length")),
+                              "kept": "explicit" if forever(expires) else "timed",
+                              "expires_at": None if forever(expires) else expires})
+        return {"instances": instances, "reported_by": ["Ollama /api/ps"], "load": True, "unload": True}
+    if kind == "llamacpp":
+        answer = fetch("/v1/models")
+        data = [m for m in answer["data"] if isinstance(m, dict)]
+        router = any(isinstance(m.get("status"), dict) for m in data)
+        props = None if router else optional(fetch, "/props")
+        for m in data:
+            status = m.get("status") if isinstance(m.get("status"), dict) else {}
+            state = status.get("value") if isinstance(status.get("value"), str) else None
+            if router and state not in ("loaded", "loading", "sleeping"):
+                continue
+            memory = m.get("memory") if isinstance(m.get("memory"), dict) else {}
+            effective = memory.get("effective") if isinstance(memory.get("effective"), dict) else {}
+            meta = m.get("meta") if isinstance(m.get("meta"), dict) else {}
+            entry = {"model": m.get("id"), "instance": m.get("id"), "size": count(meta.get("size")),
+                     "context": context_value(effective.get("n_ctx")) or argument_context(status.get("args")),
+                     "kept": "router" if router else "server", "state": state if router else None}
+            vram = ram = 0
+            for device in effective.get("devices") or []:
+                if isinstance(device, dict):
+                    used = sum(count(device.get(k)) or 0 for k in ("model", "context", "compute"))
+                    if device.get("kind") == "host":
+                        ram += used
+                    else:
+                        vram += used
+            if effective.get("devices"):
+                entry.update(vram_bytes=vram, ram_bytes=ram, memory_bytes=vram + ram)
+            if not router and isinstance(props, dict) and not entry["context"]:
+                settings = props.get("default_generation_settings")
+                entry["context"] = context_value(settings.get("n_ctx")) if isinstance(settings, dict) else None
+            instances.append(entry)
+        return {"instances": instances, "reported_by": ["llama.cpp /v1/models"], "load": router, "unload": router}
+    if kind == "vllm":
+        for m in fetch("/v1/models")["data"]:
+            if isinstance(m, dict):
+                instances.append({"model": m.get("id"), "instance": m.get("id"),
+                                  "context": context_value(m.get("max_model_len")), "kept": "server"})
+        return {"instances": instances, "reported_by": ["vLLM /v1/models"], "load": False, "unload": False}
+    return {"instances": None, "reported_by": [], "load": False, "unload": False}
+
+
+def argument_context(args):
+    """The context a llama.cpp router started a model with (its status args: -c N, --ctx-size N, -ctx N)."""
+    if not isinstance(args, list):
+        return None
+    for index, arg in enumerate(args[:-1]):
+        if arg in ("-c", "--ctx-size", "-ctx") and isinstance(args[index + 1], str) and args[index + 1].isdigit():
+            return context_value(int(args[index + 1]))
+    return None
+
+
+def clean_loaded(answer):
+    """A loaded_raw answer checked: names as models are named, numbers where numbers belong, texts terminal-safe."""
+    instances = None
+    if isinstance(answer.get("instances"), list):
+        instances = []
+        for raw in answer["instances"][:200]:
+            model, instance = raw.get("model"), raw.get("instance")
+            if not isinstance(model, str) or not MODEL_NAME.fullmatch(model):
+                continue
+            item = {"model": model, "instance": instance if isinstance(instance, str) and
+                    MODEL_NAME.fullmatch(instance) else model}
+            for key in ("size", "memory_bytes", "vram_bytes", "ram_bytes", "ttl_seconds"):
+                if count(raw.get(key)) is not None:
+                    item[key] = raw[key]
+            if context_value(raw.get("context")):
+                item["context"] = raw["context"]
+            if raw.get("kept") in KEPT:
+                item["kept"] = raw["kept"]
+            if isinstance(raw.get("expires_at"), str) and raw["expires_at"].strip():
+                item["expires_at"] = printable(raw["expires_at"].strip())[:40]
+            for key in ("state", "type"):
+                if isinstance(raw.get(key), str) and re.fullmatch(r"[a-z_-]{1,20}", raw[key]):
+                    item[key] = raw[key]
+            instances.append(item)
+    return {"instances": instances, "reported_by": [v for v in answer.get("reported_by") or [] if isinstance(v, str)],
+            "load": bool(answer.get("load")), "unload": bool(answer.get("unload"))}
+
+
+def endpoint_loaded(endpoint, client, runs=None):
+    """`llm loaded NAME --json`: {name, kind, url, read_at, instances (None: not reported), reported_by, load, unload,
+    used_by: {model: [running sandboxes]}, kept: KEPT}; ValueError when the server does not answer."""
+    try:
+        found = clean_loaded(loaded_raw(endpoint["kind"], client.json))
+    except (OSError, KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"unexpected answer from the {KINDS[endpoint['kind']]['label']}: {printable(exc)}") from None
+    users = model_users(endpoint, runs)
+    return {"name": endpoint["name"], "kind": endpoint["kind"], "url": endpoint["url"], "read_at": now_text(),
+            **found, "used_by": {model: names for model, names in users.items()}, "kept": KEPT,
+            "jit_warning": JIT_WARNING}
+
+
+def loaded_lines(entry):
+    """`llm loaded NAME` as text."""
+    lines = [f"{entry['name']}: {KINDS[entry['kind']]['label']} at {entry['url']} (read {entry['read_at']})"]
+    if entry["instances"] is None:
+        return lines + ["  what is loaded is not reported by its API"]
+    if not entry["instances"]:
+        lines.append("  no model loaded")
+    for item in entry["instances"]:
+        parts = []
+        if item["instance"] != item["model"]:
+            parts.append(f"instance {item['instance']}")
+        if item.get("context"):
+            parts.append(f"context {item['context']}")
+        if item.get("memory_bytes") is not None:
+            split = [f"{format_size(item[k])} {label}" for k, label in (("vram_bytes", "VRAM"), ("ram_bytes", "RAM"))
+                     if item.get(k) is not None]
+            parts.append(f"{format_size(item['memory_bytes'])} in memory" + (f" ({', '.join(split)})" if split else ""))
+        elif item.get("size") is not None:
+            parts.append(f"size {format_size(item['size'])}")
+        if item.get("state") and item["state"] != "loaded":
+            parts.append(item["state"])
+        kept = item.get("kept")
+        if kept == "jit":
+            parts.append(f"JIT, unloaded after {item['ttl_seconds']} s idle" if item.get("ttl_seconds") is not None
+                         else "JIT")
+        elif kept == "explicit":
+            parts.append("explicit (stays until unloaded)")
+        elif kept == "timed" and item.get("expires_at"):
+            parts.append(f"unloaded at {item['expires_at']} unless used")
+        users = entry["used_by"].get(item["model"])
+        if users:
+            parts.append(f"used by {', '.join(users)}")
+        lines.append(f"  {item['model']}" + (f"  {', '.join(parts)}" if parts else ""))
+        if kept == "jit":
+            lines.append(f"    {JIT_WARNING}")
+    if not entry["load"]:
+        lines.append(f"  the {KINDS[entry['kind']]['label']}'s API loads and unloads no model"
+                     + (" (llama.cpp: only in router mode)" if entry["kind"] == "llamacpp" else ""))
+    return [printable(line) for line in lines]
+
+
+def in_use_refusal(endpoint, model, users, what):
+    return f"{model} on {endpoint['name']} is used by the running sandbox(es) {', '.join(users)}: {what} would " \
+           f"take it from them (their next request loads it again, or fails); --force does it all the same"
+
+
+def load_model(endpoint, model, client, context=None, ttl=None, force=False, runs=None, out=print):
+    """`llm load NAME MODEL [--context N] [--ttl S] [--force]`: MODEL loaded explicitly (it stays until unloaded;
+    Ollama with --ttl: S seconds idle). A JIT instance (LM Studio) is replaced: unloaded first, so the model is never in
+    memory twice - refused while a running sandbox uses it, unless FORCE. Without --context the num_ctx of the model's
+    parameters (llm set) applies, as at a start. Returns the exit status."""
+    kind, label = endpoint["kind"], KINDS[endpoint["kind"]]["label"]
+    if kind not in ("lmstudio", "ollama", "llamacpp"):
+        why = "it serves the model it was started with" if kind == "vllm" else "its API has no way to"
+        raise ValueError(f"the {label} loads no model on request ({why})")
+    if ttl is not None and kind != "ollama":
+        raise ValueError(f"--ttl: the {label}'s API takes no time to keep a model at loading"
+                         + (" (its load endpoint refuses it: lms load --ttl S on the server's machine sets one)"
+                            if kind == "lmstudio" else ""))
+    if context is not None and kind == "llamacpp":
+        raise ValueError("--context: llama.cpp's router loads a model with the arguments of its --models-preset "
+                         "(ctx-size); its load endpoint takes none")
+    if context is None:
+        context = effective_params(endpoint, model)[0].get("num_ctx")
+    current = clean_loaded(loaded_raw(kind, client.json))
+    mine = [item for item in current["instances"] or [] if item["model"] == model]
+    users = model_users(endpoint, runs).get(model) or []
+    if kind == "lmstudio":
+        native = lmstudio_native(client.json)
+        if model not in native:
+            raise ValueError(f"LM Studio lists no model {model} (sandbox-ai llm models {endpoint['name']})")
+        explicit = [item for item in mine if item.get("kept") == "explicit"]
+        if explicit:
+            have = explicit[0].get("context")
+            if context and have and context != have:
+                instance = explicit[0]["instance"]
+                raise ValueError(f"{model} is loaded explicitly with context {have} (instance {instance}): unload it "
+                                 f"first (sandbox-ai llm unload {endpoint['name']} {instance}) to load it with "
+                                 f"{context}; a second load would hold it in memory twice")
+            out(f"{model} is loaded explicitly already (instance {explicit[0]['instance']}"
+                + (f", context {have}" if have else "") + "): it stays until it is unloaded")
+            return 0
+        if mine and users and not force:
+            raise ValueError(in_use_refusal(endpoint, model, users, "reloading it"))
+        context = context or next((item["context"] for item in mine if item.get("context")), None)
+        for item in mine:  # JIT: unloaded first, never two copies in memory
+            client.json("/api/v1/models/unload", body={"instance_id": item["instance"]})
+            out(f"unloaded the JIT instance {item['instance']} (LM Studio may unload it: Auto-Evict)")
+        answer = client.json("/api/v1/models/load", body=lmstudio_load_body(model, context))
+        instance = answer.get("instance_id") if isinstance(answer, dict) else None
+        out(printable(f"loaded {model} explicitly" + (f" as {instance}" if isinstance(instance, str) else "")
+                      + (f", context {context}" if context else "") + ": it stays until it is unloaded (Auto-Evict "
+                      "leaves it)"))
+        return 0
+    if kind == "ollama":
+        tags = [m.get("name") for m in client.json("/api/tags").get("models") or [] if isinstance(m, dict)]
+        if model not in tags:
+            raise ValueError(f"Ollama has no model {model} (ollama pull {model} on the server first)")
+        have = next((item.get("context") for item in mine if item.get("context")), None)
+        if mine and users and not force and context and have and context != have:
+            raise ValueError(in_use_refusal(endpoint, model, users, f"loading it again with context {context}"))
+        body = {"model": model, "keep_alive": ttl if ttl is not None else -1, "stream": False}
+        if context:
+            body["options"] = {"num_ctx": context}
+        answer = client.json("/api/generate", body=body)
+        if not isinstance(answer, dict) or not answer.get("done"):
+            raise ValueError(f"Ollama did not say it loaded {model}")
+        out(printable(f"loaded {model}" + (f", context {context}" if context else "")
+                      + (f": unloaded after {ttl} s idle" if ttl is not None else ": it stays until it is unloaded")))
+        out("note: each request sets Ollama's time again, and the agents' requests carry no keep_alive: with "
+            "OLLAMA_KEEP_ALIVE=-1 on the server it stays after their requests too")
+        return 0
+    if not current["load"]:
+        raise ValueError("this llama.cpp server is not in router mode (--models-dir or --models-preset): it serves "
+                         "the one model it was started with")
+    if mine and mine[0].get("state") in ("loaded", "loading"):
+        out(f"{model} is {mine[0]['state']} already")
+        return 0
+    answer = client.json("/models/load", body={"model": model})
+    if not isinstance(answer, dict) or answer.get("success") is not True:
+        raise ValueError(f"llama.cpp's router did not load {model}")
+    out(f"llama.cpp's router loads {model} (the least recently used model goes beyond --models-max)")
+    return 0
+
+
+def unload_model(endpoint, target, client, force=False, runs=None, out=print):
+    """`llm unload NAME MODEL|INSTANCE [--force]`: refused while a running sandbox uses the model, unless FORCE.
+    Returns the exit status."""
+    kind, label = endpoint["kind"], KINDS[endpoint["kind"]]["label"]
+    if kind not in ("lmstudio", "ollama", "llamacpp"):
+        raise ValueError(f"the {label} unloads no model on request (its API has no way to)")
+    current = clean_loaded(loaded_raw(kind, client.json))
+    if not current["unload"]:
+        raise ValueError("this llama.cpp server is not in router mode: it serves the one model it was started with")
+    # A model's name: every instance of it (LM Studio names the first instance as the model); else one instance.
+    chosen = [item for item in current["instances"] or [] if item["model"] == target] or \
+        [item for item in current["instances"] or [] if item["instance"] == target]
+    if not chosen:
+        out(f"{target} is not loaded on {endpoint['name']}")
+        return 1
+    model = chosen[0]["model"]
+    users = model_users(endpoint, runs).get(model) or []
+    if users and not force:
+        raise ValueError(in_use_refusal(endpoint, model, users, "unloading it"))
+    for item in chosen:
+        if kind == "lmstudio":
+            client.json("/api/v1/models/unload", body={"instance_id": item["instance"]})
+        elif kind == "ollama":
+            client.json("/api/generate", body={"model": item["model"], "keep_alive": 0, "stream": False})
+        else:
+            answer = client.json("/models/unload", body={"model": item["model"]})
+            if not isinstance(answer, dict) or answer.get("success") is not True:
+                raise ValueError(f"llama.cpp's router did not unload {item['model']}")
+        out(printable(f"unloaded {item['instance']}" + (f" (used by {', '.join(users)})" if users else "")))
+    return 0
+
+
+def manage(args, out=print, get=None, runs=None):
+    """sandbox-ai llm loaded|load|unload: from this host, or through the endpoint's VPN (llm add --vpn) as llm models
+    reaches it; the same Client (the key only where llm add accepts it, no redirect followed)."""
+    found = endpoint(args.name)
+    model = getattr(args, "model", None)
+    if model is not None and not MODEL_NAME.fullmatch(model):
+        raise ValueError(f"not a model name: {printable(model)!r}")
+    context, ttl = getattr(args, "context", None), getattr(args, "ttl", None)
+    if context is not None and not context_value(context):
+        raise ValueError(f"--context: {CONTEXT_RANGE[0]} to {CONTEXT_RANGE[1]} tokens")
+    if ttl is not None and not 1 <= ttl <= 10 ** 8:
+        raise ValueError("--ttl: 1 or more seconds (without it the model stays until it is unloaded)")
+    timeout = LOAD_TIMEOUT if args.command == "load" else UNLOAD_TIMEOUT if args.command == "unload" else TIMEOUT
+    runs = running_runs() if runs is None else runs
+    with through_vpn(found) as tunnel:
+        client = VPNClient(found, tunnel, get, timeout=timeout) if tunnel else Client(found, get, timeout=timeout)
+        if args.command == "loaded":
+            entry = endpoint_loaded(found, client, runs)
+            for line in [json.dumps(entry, indent=2)] if args.json else loaded_lines(entry):
+                out(line)
+            return 0
+        try:
+            if args.command == "load":
+                return load_model(found, model, client, context, ttl, args.force, runs, out)
+            return unload_model(found, model, client, args.force, runs, out)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"unexpected answer from the {KINDS[found['kind']]['label']}: {printable(exc)}") from None
 
 
 def where_sent(kind, key, apis):
@@ -2186,7 +2746,7 @@ def proxy_entry(a, get=None):
     key, headers = secret_values(found, get)
     return [{"name": found["name"], "scheme": parsed["scheme"], "host": parsed["host"], "port": parsed["port"],
              "addresses": list(getattr(a, "llm_addresses", []) or ([parsed["address"]] if parsed["address"] else [])),
-             "prefix": parsed["prefix"], "placeholder": PLACEHOLDER, "key": key,
+             "prefix": parsed["prefix"], "placeholder": placeholder_for(a, found), "key": key,
              "headers": [[name, value] for name, value in headers], "ca": ca_text(found),
              **proxy_params(a, found, model)}]
 
@@ -2309,11 +2869,144 @@ def codex_profile(endpoint, model, context=None):
         ""])
 
 
+def placeholder_for(a, endpoint):
+    """The placeholder the agent sends instead of ENDPOINT's key (the proxy swaps exactly it): for Hermes at
+    OpenRouter one with OpenRouter's key prefix, which Hermes requires (hermes.OPENROUTER_PLACEHOLDER)."""
+    if a.agent == "hermes" and endpoint["parsed"]["host"] == HERMES_OPENROUTER_HOST:
+        return HERMES_OPENROUTER_PLACEHOLDER
+    return PLACEHOLDER
+
+
+# hermes.py's values (kept here as well: this module loads no sibling); a test keeps both the same.
+HERMES_OPENROUTER_HOST = "openrouter.ai"
+HERMES_OPENROUTER_PLACEHOLDER = "sk-or-v1-sandbox-ai-placeholder"
+HERMES_CONFIG = "/etc/hermes/config.yaml"
+
+
+def hermes_config(a):
+    """Hermes' model section for --llm (laid into its managed configuration by hermes.llm_config's rules): the
+    provider, the URL with /v1, the model, its context window when known, the loop guard's layers."""
+    found, model = selection(a)
+    behind = bool(getattr(a, "vpn", None))
+    note = keep_loaded(found, model, a, behind_vpn=behind)
+    if note:
+        print(printable(f"agent-sandbox: {'WARNING: ' if note.startswith('WARNING: ') else ''}--llm {found['name']}: "
+                        f"{note[9:] if note.startswith('WARNING: ') else note}"), file=sys.stderr)
+    context = agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
+                            loaded_context(found, model, behind_vpn=behind))
+    loop = loop_guard_of(a, found)
+    openrouter = found["parsed"]["host"] == HERMES_OPENROUTER_HOST
+    section = {"provider": "openrouter" if openrouter else "custom", "base_url": agent_url(found), "default": model}
+    if not openrouter:
+        section["api_key"] = PLACEHOLDER
+    if context_value(context):
+        section["context_length"] = context_value(context)
+    config = {"model": section, "fallback_providers": []}
+    if loop["enabled"]:
+        config["tool_loop_guardrails"] = {"warnings_enabled": True, "hard_stop_enabled": True,
+                                          "non_interactive_hard_stop_enabled": True}
+    if loop.get("steps"):
+        config["agent"] = {"max_turns": loop["steps"]}
+    if loop.get("compaction"):
+        config["compression"] = {"enabled": True}
+    if loop.get("instructions"):
+        config["skills"] = {"auto_load": ["sandbox-ai-loop-guard"]}
+    return config
+
+
+QWEN_SETTINGS = "/etc/qwen-code/settings.json"  # qwen.py's SETTINGS (this module loads no sibling)
+GOOSE_CONFIG = "/etc/goose/config.yaml"  # goose.py's CONFIG
+GOOSE_LOOP_FILE = "/etc/goose/sandbox-ai-loop-guard.md"  # goose.py's LOOP_FILE
+DSH_PATCH = "/etc/dsh/sandbox-ai.patch.yml"  # dsh.py's PATCH
+DSH_ROUTE = "sandbox-ai"  # dsh.py's LLM_ROUTE
+
+
+def llm_context(a, found, model):
+    """The model's context window as the agent is told it (the start's num_ctx, else what the server reports)."""
+    behind = bool(getattr(a, "vpn", None))
+    note = keep_loaded(found, model, a, behind_vpn=behind)
+    if note:
+        print(printable(f"agent-sandbox: {'WARNING: ' if note.startswith('WARNING: ') else ''}--llm {found['name']}: "
+                        f"{note[9:] if note.startswith('WARNING: ') else note}"), file=sys.stderr)
+    return context_value(agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
+                                       loaded_context(found, model, behind_vpn=behind)))
+
+
+def qwen_settings(a):
+    """Qwen Code's system settings for --llm (laid over its defaults by qwen.managed_settings): OpenAI-compatible
+    auth, the model, the server as the model's provider (its /v1 URL, the context window when known, the key from
+    OPENAI_API_KEY: the placeholder), and the loop guard's turn limit and Qwen Code's own loop detection."""
+    found, model = selection(a)
+    context = llm_context(a, found, model)
+    entry = {"id": model, "name": f"{model} ({found['name']}, sandbox-ai)", "baseUrl": agent_url(found),
+             "envKey": "OPENAI_API_KEY"}
+    if context:
+        entry["generationConfig"] = {"contextWindowSize": context}
+    settings = {"security": {"auth": {"selectedType": "openai"}}, "model": {"name": model},
+                "modelProviders": {"openai": [entry]}}
+    loop = loop_guard_of(a, found)
+    if loop["enabled"]:
+        settings["model"].update({"skipLoopDetection": False, "loopProtection": "stop"})
+    if loop.get("steps"):
+        settings["model"]["maxSessionTurns"] = loop["steps"]
+    return settings
+
+
+def dsh_config(a):
+    """DSH's model for --llm (patch rows by dsh.model_rows): an OpenAI chat-completions route at the server's /v1
+    URL with the model and its context window, the key from SANDBOX_AI_LLM_KEY (the placeholder), and the loop
+    guard's instructions for its system prompt."""
+    found, model = selection(a)
+    context = llm_context(a, found, model)
+    route = {"displayName": f"{found['name']} (sandbox-ai)", "apiKeyEnv": KEY_VARIABLE, "api": "openai-completions",
+             "baseURL": agent_url(found), "models": [{"id": model, **({"contextWindow": context} if context else {})}]}
+    loop = loop_guard_of(a, found)
+    return {"route": route, "model": model, "instructions": LOOP_TEXT if loop.get("instructions") else None}
+
+
+def goose_environment(a, found, model):
+    """Goose's variables for --llm (they win over every configuration file of Goose's): its OpenAI provider at the
+    server's /v1 URL with the model, the placeholder as key, the context window when known, and the loop guard's turn
+    limit (GOOSE_MAX_TURNS) and instructions (the Top Of Mind extension adds GOOSE_MOIM_MESSAGE_FILE's text to every
+    turn; goose.files writes it)."""
+    env = {"GOOSE_PROVIDER": "openai", "GOOSE_MODEL": model, "OPENAI_BASE_URL": agent_url(found),
+           "OPENAI_API_KEY": placeholder_for(a, found)}
+    context = llm_context(a, found, model)
+    if context:
+        env["GOOSE_CONTEXT_LIMIT"] = str(context)
+    loop = loop_guard_of(a, found)
+    if loop.get("steps"):
+        env["GOOSE_MAX_TURNS"] = str(loop["steps"])
+    if loop.get("instructions"):
+        env["GOOSE_MOIM_MESSAGE_FILE"] = GOOSE_LOOP_FILE
+    return env
+
+
+def goose_loop_text(a):
+    """The loop guard's instructions for Goose's GOOSE_LOOP_FILE, or None when the guard gives none."""
+    try:
+        found, _ = selection(a)
+    except ValueError:
+        return None
+    return LOOP_TEXT if loop_guard_of(a, found).get("instructions") else None
+
+
 def agent_environment(a):
     """The agent's variables for --llm: placeholders and addresses, nothing secret."""
     found, model = selection(a)
     if a.agent == "claude":
         return claude_environment(found, model)
+    if a.agent == "goose":
+        return goose_environment(a, found, model)
+    if a.agent == "qwen":
+        # Its OpenAI-compatible auth reads these too (the system settings name the same server and model).
+        return {"OPENAI_API_KEY": PLACEHOLDER, "OPENAI_BASE_URL": agent_url(found), "OPENAI_MODEL": model}
+    if a.agent == "dsh":
+        return {KEY_VARIABLE: PLACEHOLDER}
+    if a.agent == "hermes":
+        # Hermes reads OpenRouter's key from OPENROUTER_API_KEY; every other server's from its configuration.
+        return {"OPENROUTER_API_KEY": placeholder_for(a, found)} if found["parsed"]["host"] == HERMES_OPENROUTER_HOST \
+            else {}
     if a.agent == "codex":
         return {KEY_VARIABLE: PLACEHOLDER}
     env = {"OPENCODE_CONFIG": "/root/" + OPENCODE_CONFIG, "OPENCODE_DISABLE_MODELS_FETCH": "1",
@@ -2338,6 +3031,13 @@ def loop_guard_of(a, endpoint):
 
 def agent_arguments(a):
     """Arguments put before the agent's own: Codex selects the profile written by prepare_home."""
+    if a.agent == "qwen":
+        # The loop guard's instructions: Qwen Code appends them to its system prompt for this run.
+        try:
+            found, _ = selection(a)
+        except ValueError:
+            return []
+        return ["--append-system-prompt", LOOP_TEXT] if loop_guard_of(a, found).get("instructions") else []
     return ["--profile", CODEX_PROFILE] if a.agent == "codex" else []
 
 
@@ -2345,8 +3045,14 @@ def prepare_home(a, home, replace_private, update_json_defaults, state_limit):
     """Write the agent's configuration for the endpoint into the sandbox HOME with the launcher's helpers, which never
     follow a symlink the agent planted. Returns the HOME-relative paths written."""
     found, model = selection(a)
+    if a.agent in ("hermes", "dsh", "qwen", "goose"):
+        # Their configuration is managed (/etc/hermes, /etc/dsh, /etc/qwen-code; Goose's variables), nothing in the
+        # HOME.
+        return []
     note = keep_loaded(found, model, a, behind_vpn=bool(getattr(a, "vpn", None)))
-    if note:
+    if note and note.startswith("WARNING: "):
+        print(printable(f"agent-sandbox: WARNING: --llm {found['name']}: {note[9:]}"), file=sys.stderr)
+    elif note:
         print(printable(f"agent-sandbox: --llm {found['name']}: {note}"), file=sys.stderr)
     if a.agent == "opencode":
         contexts, outputs = {}, {}
@@ -2398,17 +3104,20 @@ def plan(a):
     else:
         opens = f"{parsed['host']}:{parsed['port']} (pinned at the start)"
     config = {"opencode": "/root/" + OPENCODE_CONFIG, "codex": f"/root/.codex/{CODEX_PROFILE}.config.toml",
-              "claude": "environment (ANTHROPIC_BASE_URL ...)"}[a.agent]
+              "claude": "environment (ANTHROPIC_BASE_URL ...)", "hermes": HERMES_CONFIG, "dsh": DSH_PATCH,
+              "qwen": QWEN_SETTINGS, "goose": "environment (GOOSE_PROVIDER, OPENAI_BASE_URL ...)"}[a.agent]
     return {"name": found["name"], "kind": found["kind"], "url": found["url"], "model": model,
             # OpenCode offers exactly these (the models --llm names); none named: the endpoint's model and list.
             "models": selected_models(a) or None,
             "agent_url": agent_url(found, "anthropic" if a.agent == "claude" else "openai"),
-            "api": {"claude": "anthropic-messages", "codex": "openai-responses", "opencode": "openai-chat"}[a.agent],
+            "api": {"claude": "anthropic-messages", "codex": "openai-responses", "opencode": "openai-chat",
+                    "hermes": "openai-chat", "dsh": "openai-chat", "qwen": "openai-chat",
+                    "goose": "openai-chat"}[a.agent],
             "opens": opens, "path_prefix": parsed["prefix"] or None, "http_rule": prefix_rule(a, found),
             "config": config,
             "key_secret": found["api_key_secret"], "header_secrets": found["headers"],
             "ca": str(ca_dir() / found["ca"]) if found["ca"] else None, "vpn": found["vpn"],
-            "placeholder": PLACEHOLDER, "insecure_http": found["insecure_http"],
+            "placeholder": placeholder_for(a, found), "insecure_http": found["insecure_http"],
             "params": plan_params(a, found, model)}
 
 
@@ -2560,10 +3269,14 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
         line(False, "the server lists no model; load or pull one first")
     apis = [("claude", "/v1/messages", "the Anthropic Messages API (Claude Code)"),
             ("codex", "/v1/responses", "the OpenAI Responses API (Codex)"),
-            ("opencode", "/v1/chat/completions", "the OpenAI Chat Completions API (OpenCode)")]
+            ("opencode", "/v1/chat/completions", "the OpenAI Chat Completions API (OpenCode)"),
+            ("hermes", "/v1/chat/completions", "the OpenAI Chat Completions API (Hermes)"),
+            ("dsh", "/v1/chat/completions", "the OpenAI Chat Completions API (DeepSeek Harness)"),
+            ("qwen", "/v1/chat/completions", "the OpenAI Chat Completions API (Qwen Code)"),
+            ("goose", "/v1/chat/completions", "the OpenAI Chat Completions API (Goose)")]
     found_messages = False
     for name, path, label in apis:
-        if agent and agent != name:
+        if agent and agent != name or not agent and name in ("hermes", "dsh", "qwen", "goose"):  # OpenCode's API
             continue
         answer = probe(client, path)
         required = agent == name
@@ -2612,7 +3325,7 @@ def statuses(name=None, get=None, read=None):
                 found.append(check_record(key, store["endpoints"][key]))
             except ValueError as exc:
                 record = store["endpoints"][key] if isinstance(store["endpoints"][key], dict) else {}
-                broken.append({"name": printable(key)[:32], "kind": record.get("kind") if record.get("kind") in KINDS
+                broken.append({"name": printable(key)[:32], "kind": record["kind"] if isinstance(record.get("kind"), str) and record["kind"] in KINDS
                                else None, "url": None, "reachable": False, "error": f"unusable: {printable(exc)}"[:600],
                                "read_at": now_text(), "models": None, "loaded": None, "usage": {}, "reported_by": [],
                                "not_reported": list(REPORTABLE)})
@@ -2647,9 +3360,16 @@ def show_status(args, out, get=None, read=None):
         if not args.watch:
             return 0 if all(entry.get("reachable") for entry in found) else 1
         try:
-            time.sleep(args.watch)
+            watch_sleep(args.watch)
         except KeyboardInterrupt:
             return 0
+
+
+def watch_sleep(seconds):
+    """The pause between two readings of `llm status --watch`: a function of its own, so that a test replaces this
+    pause alone - time.sleep is every thread's (on CI a thread another test had left running took a replaced
+    time.sleep's KeyboardInterrupt, and the watch read on without a pause)."""
+    time.sleep(seconds)
 
 
 # --- the command -----------------------------------------------------------------------------------------------
@@ -2671,7 +3391,7 @@ def describe(endpoint):
     if endpoint["models"]:
         lines.append(f"  models ({endpoint['checked'] or 'listed earlier'}): {', '.join(endpoint['models'][:20])}"
                      + (" ..." if len(endpoint["models"]) > 20 else ""))
-    lines.append("  agents: " + ", ".join(a for a in ("claude", "codex", "opencode") if not agent_problem(endpoint, a)))
+    lines.append("  agents: " + ", ".join(a for a in AGENTS if not agent_problem(endpoint, a)))
     lines += params_lines(endpoint)
     if endpoint["insecure_http"]:
         lines.append("  WARNING: plain http to a public address (--insecure-http)")
@@ -2687,7 +3407,7 @@ def public_view(endpoint):
                 loop_guard=loop_config(endpoint), loop_guard_own=endpoint.get("loop_guard") or {},
                 contexts=endpoint.get("contexts") or {},
                 evict=endpoint.get("evict") or "never")
-    view["agents"] = [a for a in ("claude", "codex", "opencode") if not agent_problem(endpoint, a)]
+    view["agents"] = [a for a in AGENTS if not agent_problem(endpoint, a)]
     return view
 
 
@@ -2744,6 +3464,7 @@ def add(args, out=print, get=None):
     if old.get("models") and old.get("url") == record.get("url") and old.get("kind") == record.get("kind"):
         # The same server at the same address: its model list stays until it is read again.
         record["models"], record["checked"] = old["models"], old.get("checked")
+    add_params(args, record, old, out)  # refused here: the stored endpoint and its CA stay as they are
     if args.ca:
         source = Path(args.ca).expanduser()
         try:
@@ -2768,7 +3489,6 @@ def add(args, out=print, get=None):
         record["ca"] = old["ca"]
     elif args.name in store["endpoints"]:
         (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
-    add_params(args, record, old, out)
     store["endpoints"][args.name] = record
     save_store(store)
     for line in describe(check_record(args.name, record)):
@@ -2871,6 +3591,7 @@ def main(argv, out=print, get=None):
                          help="drop all parameters of the model (or of every model) before the others apply")
     catalogue = commands.add_parser("params", help="the sampling parameters, their ranges and the servers that take "
                                                    "them")
+    catalogue.add_argument("name", nargs="?", help="a server's name: the parameters its kind takes")
     catalogue.add_argument("-k", "--kind", choices=list(KINDS))
     catalogue.add_argument("-j", "--json", action="store_true")
     listing = commands.add_parser("list", help="the endpoints")
@@ -2896,11 +3617,39 @@ def main(argv, out=print, get=None):
                            help="a further address to look at (this host's loopback always; its LAN address "
                                 "and other machines only when named); repeatable")
     detecting.add_argument("-j", "--json", action="store_true")
+    loaded = commands.add_parser("loaded", help="the models the server has loaded now: instances, context, memory, "
+                                                "JIT or explicit, the running sandboxes using them")
+    loaded.add_argument("name")
+    loaded.add_argument("-j", "--json", action="store_true")
+    loading = commands.add_parser("load", help="load a model explicitly (it stays until unloaded); a JIT instance "
+                                               "(LM Studio) is replaced, never held twice")
+    loading.add_argument("name")
+    loading.add_argument("model")
+    loading.add_argument("-c", "--context", type=int, metavar="TOKENS",
+                         help="the context it is loaded with (default: num_ctx of its parameters, llm set; "
+                              "LM Studio and Ollama)")
+    loading.add_argument("-t", "--ttl", type=int, metavar="SECONDS",
+                         help="Ollama: unloaded after SECONDS idle (default: stays until unloaded)")
+    loading.add_argument("-f", "--force", action="store_true",
+                         help="reload a model a running sandbox uses all the same")
+    unloading = commands.add_parser("unload", help="unload a model (every instance of it) or one instance; refused "
+                                                   "while a running sandbox uses it, unless --force")
+    unloading.add_argument("name")
+    unloading.add_argument("model", metavar="MODEL|INSTANCE")
+    unloading.add_argument("-f", "--force", action="store_true",
+                           help="unload it although a running sandbox uses it")
     checking = commands.add_parser("check", help="reachability, TLS, key, models and the agents' APIs")
     checking.add_argument("name")
-    checking.add_argument("-a", "--agent", choices=["claude", "codex", "opencode"])
+    checking.add_argument("-a", "--agent", choices=list(AGENTS))
     checking.add_argument("-m", "--model")
+    traffic = load_traffic_module()
+    commands.add_parser("traffic", help="what an agent and its model exchanged, request by request (the LLM "
+                        "traffic log: messages, tool calls, the answer, the relay's changes)",
+                        parents=[traffic.parser(add_help=False)], formatter_class=argparse.RawDescriptionHelpFormatter,
+                        description=traffic.__doc__.split("\n\n")[0])
     args = parser.parse_args(argv)
+    if args.command == "traffic":
+        return traffic.main(argv[1:])
     try:
         if args.command == "add":
             with settings_lock(store_path()):  # from reading the store to writing it back (and the CA)
@@ -2908,7 +3657,10 @@ def main(argv, out=print, get=None):
         if args.command == "set":
             return set_params(args, out)
         if args.command == "params":
-            found = params_catalogue(args.kind)
+            server = endpoint(args.name) if args.name else None  # `llm params lms`: the kind of server lms
+            if server is not None and args.kind and args.kind != server["kind"]:
+                raise ValueError(f"{args.name} is {server['kind']}, not {args.kind}")
+            found = params_catalogue(server["kind"] if server is not None else args.kind)
             if args.json:
                 out(json.dumps(found, indent=2))
                 return 0
@@ -2917,6 +3669,9 @@ def main(argv, out=print, get=None):
                 out(f"{entry['name']:<20} {bounds:<20} {entry['help']}")
                 out(" " * 42 + "; ".join(f"{KINDS[k]['label']}: {where_sent(k, entry['name'], apis)}"
                                          for k, apis in entry["sent"].items()))
+            if server is not None:
+                out(f"\n{args.name}'s own values: sandbox-ai llm set {args.name} --param KEY=VALUE "
+                    f"[--model MODEL] (shown by sandbox-ai llm show {args.name})")
             return 0
         if args.command == "list":
             store = load_store()
@@ -2933,7 +3688,7 @@ def main(argv, out=print, get=None):
             if args.json:
                 out(json.dumps([public_view(e) for e in endpoints], indent=2))
             for e in [] if args.json else endpoints:
-                agents = ",".join(a for a in ("claude", "codex", "opencode") if not agent_problem(e, a))
+                agents = ",".join(a for a in AGENTS if not agent_problem(e, a))
                 out(printable(f"{e['name']}  {e['kind']}  {e['url']}  key={e['api_key_secret'] or '-'}"
                               f"{'  vpn=' + e['vpn'] if e['vpn'] else ''}  agents={agents}"))
             if not endpoints and not args.json:
@@ -2983,6 +3738,8 @@ def main(argv, out=print, get=None):
                 return show_status(args, out, get)
             except KeyboardInterrupt:
                 return 0
+        if args.command in ("loaded", "load", "unload"):
+            return manage(args, out, get)
         found = endpoint(args.name)
         if args.model and not MODEL_NAME.fullmatch(args.model):
             raise ValueError(f"--model: not a model name: {printable(args.model)!r}")

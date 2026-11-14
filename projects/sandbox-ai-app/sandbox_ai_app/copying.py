@@ -107,6 +107,7 @@ def copy_menu(view, point):
 
 def show_menu(menu, position):
     menu.exec(position)
+    menu.deleteLater()  # (made anew for each right click: it stayed a child of its view)
 
 
 def copy_entries(menu, view, point=None):

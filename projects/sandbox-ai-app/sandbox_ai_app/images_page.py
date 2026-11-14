@@ -23,10 +23,12 @@ from PySide6.QtWidgets import (
     QToolTip, QVBoxLayout, QWidget,
 )
 
+from . import applog
 from . import theme, widgets
-from .files import printable
+from .files import printable, printable_text
 from .host_choice import on_host
 from .i18n import tr
+from .short_notices import short_notice
 from .widgets import (
     MONO, AsyncCommand, Task, ask_first, button, confirm, fill, inform, plain_label, safe_tooltip, select_keys,
     selected_keys, show_text, table, warn, shown_as_text,
@@ -37,7 +39,7 @@ KINDS = ("apt", "npm", "pip")
 LOCAL = "local"
 PIN_EXAMPLE = "2.1.0"  # the same in every language
 UV_EXAMPLE = "0.9.5"
-MEDIA, TOR = "media", "tor"  # the recipes of sandbox-ai images recipe
+MEDIA = "media"  # the recipe of sandbox-ai images recipe offered here (Tor needs none: its container carries it)
 INSTRUCTIONS = ("ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM", "HEALTHCHECK", "LABEL",
                 "MAINTAINER", "ONBUILD", "RUN", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR")
 
@@ -330,6 +332,7 @@ class PackageList(QWidget):
         row.addWidget(self.add_button)
         row.addWidget(self.remove_button)
         layout.addLayout(row)
+        widgets.list_menu(self.list, lambda: [self.remove_button])
         self.problem = plain_label(role="notice-error", selectable=True)
         self.problem.hide()
         layout.addWidget(self.problem)
@@ -357,7 +360,7 @@ class PackageList(QWidget):
         value = self.entry.text().strip()
         module = self.page.module()
         reason = module.check_package(self.kind, value, self.page.agent_name) if value and module else None
-        self.problem.setText(printable(reason) if reason else "")
+        self.problem.setText(printable_text(reason) if reason else "")
         self.problem.setVisible(bool(reason))
         self.add_button.setEnabled(bool(value) and not reason)
         return reason
@@ -434,15 +437,14 @@ class BuildDialog(QDialog):
 
 
 class RecipeDialog(QDialog):
-    """`sandbox-ai images recipe media|tor --from AGENT [--as NAME]`: a variant with a ready extension."""
+    """`sandbox-ai images recipe media --from AGENT [--as NAME]`: a variant with a ready extension."""
 
     def __init__(self, parent, agents, agent):
         super().__init__(parent)
         self.setWindowTitle(tr("Variant from a recipe"))
         layout = QFormLayout(self)
         self.recipe = QComboBox()
-        for key, label in ((MEDIA, tr("media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)")),
-                           (TOR, tr("tor: torsocks and torbrowser-launcher, for a sandbox behind a Tor VPN profile"))):
+        for key, label in ((MEDIA, tr("media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)")),):
             self.recipe.addItem(label, key)
         self.agent = QComboBox()
         for name in agents:
@@ -520,7 +522,8 @@ class NewVariantDialog(QDialog):
 
 # -- your own images: from a registry or your own Containerfile (sandbox-ai images pull|build-image|list|remove) --
 
-IMAGE_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}")
+# As sandbox-ai images takes a name (images.taggable): part of an image name Podman can tag, up to 30 characters.
+IMAGE_NAME = re.compile(r"(?=.{1,30}$)[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
 IMAGE_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,510}")
 
 
@@ -556,7 +559,7 @@ def default_image_name(reference):
     path = str(reference).partition("@")[0]
     last = path.rsplit("/", 1)[-1]
     last = last.rpartition(":")[0] if ":" in last else last
-    name = re.sub(r"[^a-z0-9_.-]", "-", last.lower()).strip("._-")[:30]
+    name = re.sub(r"[^a-z0-9_.-]", "-", last.lower())[:30].strip("._-")
     return name if IMAGE_NAME.fullmatch(name or "") else ""
 
 
@@ -694,7 +697,7 @@ class BuildImageDialog(QDialog):
             try:
                 self.writable(path, what)
             except ValueError as exc:
-                return printable(str(exc))
+                return printable_text(str(exc))
             except OSError:
                 continue
         return ""
@@ -815,9 +818,11 @@ class ImagesPage(QWidget):
         for widget in (self.refresh_button, self.build_button, self.more_builds, self.new_button,
                        self.delete_button, self.more_button):
             row.addWidget(widget)
+        widgets.list_menu(self.images, lambda: [self.build_button, self.more_builds, None, self.new_button,
+                                                self.delete_button, self.more_button, None, self.refresh_button])
         row.addStretch()
         images_layout.addLayout(row)
-        self.status = plain_label(selectable=True)
+        self.status = plain_label(selectable=True, log="images")
         images_layout.addWidget(self.status)
         splitter.addWidget(images)
 
@@ -868,9 +873,12 @@ class ImagesPage(QWidget):
         self.files.setAccessibleName(tr("Files"))
         files_layout.addWidget(self.files)
         row = QHBoxLayout()
-        row.addWidget(button(tr("Add file…"), tr("Copy a host file into the extension (from a folder no sandbox "
-                                                 "can write)"), self.add_file))
-        row.addWidget(button(tr("Remove"), tr("Take the selected file out of the image"), self.remove_file))
+        file_buttons = [button(tr("Add file…"), tr("Copy a host file into the extension (from a folder no sandbox "
+                                                   "can write)"), self.add_file),
+                        button(tr("Remove"), tr("Take the selected file out of the image"), self.remove_file)]
+        for widget in file_buttons:
+            row.addWidget(widget)
+        widgets.list_menu(self.files, lambda: list(reversed(file_buttons)))
         row.addStretch()
         files_layout.addLayout(row)
         self.editor_tabs.addTab(files, tr("Files"))
@@ -915,7 +923,8 @@ class ImagesPage(QWidget):
                 module = self.sai.module("images")
                 self._module = module if hasattr(module, "check_fragment") and hasattr(module, "containerfile") \
                     else None
-            except Exception:  # noqa: BLE001 - an installation that cannot be read has no editor
+            except Exception as _exc:  # noqa: BLE001 - an installation that cannot be read has no editor
+                applog.swallowed("images_page", "ImagesPage.module: an installation that cannot be read has no …", _exc)
                 self._module = None
         return self._module
 
@@ -965,17 +974,19 @@ class ImagesPage(QWidget):
     def refresh(self):
         self.refresh_user_images()
         if self.list_command.start(self.run_argv("images", "--json")):
-            self.status.setText(tr("Asking Podman…") if self.host() == LOCAL else
-                                tr("Asking {host}…", host=self.hosts.label()))
+            widgets.set_notice(self.status, tr("Asking Podman…") if self.host() == LOCAL else
+                               tr("Asking {host}…", host=self.hosts.label()))
 
     def images_listed(self, status, out, err):
         try:
             document = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if document is None:
-            self.status.setText(tr("Cannot list the images: {error}", error=printable((err or out).strip()[-300:])))
+            widgets.set_notice(self.status, tr("Cannot list the images: {error}",
+                                               error=printable_text((err or out).strip()[-300:])), "error")
             return
+        widgets.set_notice(self.status, self.status.text())  # the usual colour again
         self.show_images(document)
 
     def show_images(self, document):
@@ -1065,12 +1076,15 @@ class ImagesPage(QWidget):
         """`sandbox-ai build [OPTIONS] TARGET` in a terminal on HOST (default: the one chosen; ssh -tt for another
         host)."""
         host = self.host() if host is None else host
+        # A variant is built as one (--variant): `build tor` would build the Tor VPN's image, not the variant tor.
+        variant = any(e["target"] == target and e["variant"] for e in getattr(self, "entries", []) or [])
         try:
             argv = self.sai.command("build", *(["--extension-only"] if options.get("extension_only") else []),
-                                    target) if host == LOCAL and not any(
-                options.get(k) for k in ("pin", "uv", "node")) else self.sai.image_build_argv(host, target, **options)
+                                    *(["--variant"] if variant else []), target) if host == LOCAL and not any(
+                options.get(k) for k in ("pin", "uv", "node")) else \
+                self.sai.image_build_argv(host, target, variant=variant, **options)
         except ValueError as exc:
-            warn(self, tr("Images"), printable(exc))
+            warn(self, tr("Images"), printable_text(exc))
             return
         title = "sandbox-ai build " + ("--extension-only " if options.get("extension_only") else "") + target
         title += "" if host == LOCAL else f" ({host})"
@@ -1089,7 +1103,7 @@ class ImagesPage(QWidget):
             return
         host = self.host()
         dialog = BuildDialog(self, target)
-        if dialog.exec():
+        if widgets.exec_dropped(dialog):
             self.start_build(target, dialog.options(), host=host)
 
     def build_all(self):
@@ -1116,10 +1130,10 @@ class ImagesPage(QWidget):
     def packages_listed(self, status, out, err):
         try:
             document = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if document is None:
-            self.status.setText(tr("Cannot read the packages: {error}", error=printable((err or out).strip()[-300:])))
+            self.status.setText(tr("Cannot read the packages: {error}", error=printable_text((err or out).strip()[-300:])))
             return
         self.package_list = [(str(p.get("kind", "")), str(p.get("name", "")), str(p.get("version", "")))
                              for p in (document if isinstance(document, list) else []) if isinstance(p, dict)]
@@ -1151,11 +1165,11 @@ class ImagesPage(QWidget):
     def extension_shown(self, status, out, err):
         try:
             document = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if not isinstance(document, dict) or "agent" not in document:
             self.set_editing(False, tr("Cannot read the extension: {error}",
-                                       error=printable((err or out).strip()[-300:])))
+                                       error=printable_text((err or out).strip()[-300:])))
             return
         self.show_description(document)
 
@@ -1200,7 +1214,7 @@ class ImagesPage(QWidget):
         if not source:
             return
         dialog = FileTargetDialog(self, source)
-        if dialog.exec():
+        if widgets.exec_dropped(dialog):
             if (self.host(), self.target) != editing or self.description is None:
                 warn(self, tr("Images"), tr("Another extension is edited now: {path} was not added.",
                                             path=printable(source)))
@@ -1324,7 +1338,7 @@ class ImagesPage(QWidget):
             return  # saved on the host before: its extension is never shown under this one (the lists were read again)
         try:
             document = json.loads(out) if out.strip() else None
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if status == 0 and isinstance(document, dict) and "agent" in document:
             self.show_description(document)
@@ -1336,7 +1350,7 @@ class ImagesPage(QWidget):
         if isinstance(document, dict) and isinstance(document.get("findings"), list):
             self.fragment.set_findings(document["findings"])
         warn(self, tr("Images"), tr("sandbox-ai did not save the extension."),
-             details=printable((err or out).strip()[-3000:]))
+             details=printable_text((err or out).strip()[-3000:]))
         self.revalidate()
 
     def revert(self):
@@ -1367,9 +1381,11 @@ class ImagesPage(QWidget):
         self.remove_image_button = button(tr("Remove…"), tr("Forget the selected image and remove it from Podman: "
                                                             "sandbox-ai images remove"), self.remove_user_image,
                                           role="danger")
-        for widget in (self.pull_button, self.build_image_button, self.remove_image_button,
-                       button(tr("Refresh"), tr("Read your images again"), self.refresh_user_images)):
+        user_refresh = button(tr("Refresh"), tr("Read your images again"), self.refresh_user_images)
+        for widget in (self.pull_button, self.build_image_button, self.remove_image_button, user_refresh):
             row.addWidget(widget)
+        widgets.list_menu(self.user_table, lambda: [self.remove_image_button, None, self.pull_button,
+                                                    self.build_image_button, None, user_refresh])
         row.addStretch()
         layout.addLayout(row)
         self.user_status = plain_label(selectable=True)
@@ -1386,7 +1402,7 @@ class ImagesPage(QWidget):
     def user_images_listed(self, status, out, err):
         try:
             document = json.loads(out) if status == 0 else None
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if not isinstance(document, list):
             text = (err or out).strip()
@@ -1428,7 +1444,7 @@ class ImagesPage(QWidget):
     def pull_image(self):
         host = self.host()
         dialog = PullDialog(self, [e["name"] for e in self.user_entries])
-        if dialog.exec():
+        if widgets.exec_dropped(dialog):
             name = dialog.chosen_name()
             self.task.run(self.run_argv(*dialog.argv(), host=host),
                           lambda status, out, err: self.user_image_added(status, out, err, name, host),
@@ -1439,7 +1455,7 @@ class ImagesPage(QWidget):
         host = self.host()
         dialog = BuildImageDialog(self, [e["name"] for e in self.user_entries], local=host == LOCAL,
                                   writable=self.location_check() if host == LOCAL else None)
-        if dialog.exec():
+        if widgets.exec_dropped(dialog):
             name, argv = dialog.name.text().strip(), dialog.argv()
             self.task.run(self.run_argv(*argv, host=host),
                           lambda status, out, err: self.user_image_added(status, out, err, name, host, argv),
@@ -1451,7 +1467,8 @@ class ImagesPage(QWidget):
         None for a sandbox-ai without it."""
         try:
             return getattr(self.sai.module("images"), "check_location", None)
-        except Exception:  # noqa: BLE001 - a sandbox-ai that does not load: its build says it
+        except Exception as _exc:  # noqa: BLE001 - a sandbox-ai that does not load: its build says it
+            applog.swallowed("images_page", "ImagesPage.location_check: a sandbox-ai that does not load: its bu…", _exc)
             return None
 
     def user_image_added(self, status, out, err, name, host=None, argv=()):
@@ -1460,7 +1477,7 @@ class ImagesPage(QWidget):
         if status != 0:
             hint = build_failed_hint(list(argv), f"{out}\n{err}")
             warn(self, tr("Images"), tr("sandbox-ai did not add the image {name}.", name=name) + (
-                "\n\n" + hint if hint else ""), details=printable((err or out).strip()[-3000:]))
+                "\n\n" + hint if hint else ""), details=printable_text((err or out).strip()[-3000:]))
             return
         inform(self, tr("Images"), tr("{name} is added, pinned. {unchecked}", name=name, unchecked=unchecked_text()),
                modal=False)
@@ -1487,7 +1504,7 @@ class ImagesPage(QWidget):
             return
         if status not in (0, -2):
             warn(self, tr("Images"), tr("sandbox-ai did not remove the image {name}.", name=name),
-                 details=printable((err or out).strip()[-3000:]))
+                 details=printable_text((err or out).strip()[-3000:]))
         self.refresh_user_images()
 
     # -- variants --
@@ -1499,8 +1516,8 @@ class ImagesPage(QWidget):
             return
         entry, host = self.entry(), self.host()
         dialog = NewVariantDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0],
-                                  module.valid_name, getattr(self, "user_entries", []))
-        if dialog.exec():
+                                  getattr(module, "taggable", module.valid_name), getattr(self, "user_entries", []))
+        if widgets.exec_dropped(dialog):
             self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked(),
                                 host=host, base=dialog.base.currentData() or None)
 
@@ -1516,12 +1533,12 @@ class ImagesPage(QWidget):
             return
         if status != 0:
             warn(self, tr("Images"), tr("sandbox-ai did not create the variant {name}.", name=name),
-                 details=printable((err or out).strip()[-3000:]))
+                 details=printable_text((err or out).strip()[-3000:]))
             return
         self.refresh()
         try:
             self.show_description(json.loads(out))
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError, RecursionError):
             pass
 
     def delete_variant(self, keep_image=False):
@@ -1589,7 +1606,7 @@ class ImagesPage(QWidget):
             return  # removed on the host before: this host's lists are read already
         if status not in (0, -2):
             warn(self, tr("Images"), tr("sandbox-ai did not delete the variant {name}.", name=name),
-                 details=printable((err or out).strip()[-3000:]))
+                 details=printable_text((err or out).strip()[-3000:]))
         if self.target == name:
             self.description, self.target = None, None
             self.set_editing(False, tr("Select an image or a variant to edit its extension."))
@@ -1600,7 +1617,7 @@ class ImagesPage(QWidget):
     def new_from_recipe(self):
         entry, host = self.entry(), self.host()
         dialog = RecipeDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0])
-        if not dialog.exec():
+        if not widgets.exec_dropped(dialog):
             return
         name = dialog.name.text().strip()
         module = self.module()
@@ -1619,9 +1636,9 @@ class ImagesPage(QWidget):
             return
         if status != 0:
             warn(self, tr("Images"), tr("sandbox-ai did not create the variant {name}.", name=recipe),
-                 details=printable((err or out).strip()[-3000:]))
+                 details=printable_text((err or out).strip()[-3000:]))
             return
-        inform(self, tr("Images"), printable(out.strip()[-3000:]) or tr("Created."), modal=False)
+        short_notice(self, tr("Images"), printable_text(out.strip()[-3000:]) or tr("Created."))
         self.refresh()
 
     def show_history(self):
@@ -1656,11 +1673,11 @@ class ImagesPage(QWidget):
             return
         try:
             document = json.loads(out) if out.strip() else None
-        except ValueError:
+        except (ValueError, RecursionError):
             document = None
         if not isinstance(document, dict):
             warn(self, tr("Images"), tr("sandbox-ai did not check the extension."),
-                 details=printable((err or out).strip()[-3000:]))
+                 details=printable_text((err or out).strip()[-3000:]))
             return
         findings = [f for f in document.get("findings") or [] if isinstance(f, dict)]
         lines = [finding_text(f) for f in findings] or [tr("No findings.")]

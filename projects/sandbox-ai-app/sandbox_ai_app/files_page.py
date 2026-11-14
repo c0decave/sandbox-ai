@@ -9,8 +9,15 @@ path or as that folder itself reached under another path (a bind mount of it: ho
 written everything, so what is copied out of it is never executable, files that tools run are
 named, links are not followed even to open a folder, and no set-ID or sticky bit is set. A sandbox's folder that is an
 entry of a host folder, or lies inside the folder copied, is copied the same way where it goes out (files.copy_entry's
-agents), and never handed to other programs by a drag or the clipboard. Replacing and deleting
-ask first. Copies, moves, deletes and owner changes run in a thread with progress and Cancel.
+agents), and never handed to other programs by a drag or the clipboard - nor is a host folder that holds one however deep,
+under any name (holds_agents: also one moved there, or mounted there). A sandbox's folder moved or renamed on this
+machine stays the agent's, also when the app is started again (its device and inode are kept in the app's state, those
+not seen for KEPT_DAYS dropped: FilesPage.keep_identities). The sandboxes'
+folders' real paths and identities are read in threads (with the list of folders, every listing and in the jobs), a
+folder chosen is opened in one: a folder on a file system that hangs holds up no window - nor does trying again leave
+one more thread waiting for good each time: a look, listing or hand-over of the same thing still on its way is waited
+for, not started again, and only so many of each wait at once (LIST_STUCK, EXPORT_STUCK, LOCAL_STUCK). Replacing and
+deleting ask first. Copies, moves, deletes and owner changes run in a thread with progress and Cancel.
 
 Every folder of both panes begins with "." and "..", whatever the list is sorted by. "." is the folder shown: a double
 click or Enter lists it again, a drop on it or a paste from its context menu goes into it, Properties shows the folder
@@ -40,19 +47,28 @@ Properties (file_properties.py).
 SSH… shows a remote system in the sandbox pane (remote.RemoteRoot, a Root like the others: the same code path for
 listing, copies both ways, the editor and Properties): connect_remote in the background, an unknown host's keys trusted
 only after a yes (trust_host), a locked key with a terminal offered; its root is the remote "/", the pane starts in the
-remote HOME, its links are named and never followed, its owners shown as numbers.
+remote HOME, its links are named and never followed, its owners shown as numbers. The files of one of sandbox-ai's
+hosts (`sandbox-ai hosts`: sandboxes run there, and their agents may have written any file) count as an agent's
+(RemoteRoot.agents): copied or moved to this machine they are never executable and files that tools run are named, and
+no set-ID or sticky bit is set there. The box "An agent's files" below the list is that choice, for the connection: on
+by default for sandbox-ai's hosts, off for any other system; turned off only after a question, kept when SSH… connects
+again.
 
 Drag and drop: between the panes and onto a folder of the same pane a drop copies, with Shift it moves - through the
 same copy and move as F5 and F6 (asking before anything is replaced). Files dropped from other programs (local files
 only) are copied in - into an agent's folder, or to a remote system that is one of sandbox-ai's hosts, only after a
 question that names them; a path that goes through a symbolic link in a sandbox's folder is refused, as in the path bar.
 Dragged out to other programs go the host pane's files and folders; from a sandbox's folder only plain files that are
-not executable (a program dropped on would get folders with hooks or executables as they are, executable bits and all).
+not executable (a program dropped on would get folders with hooks or executables as they are, executable bits and all),
+and those as copies made when they are dragged or copied, in a folder of the app's own (handed_out_folder: by their
+path in the agent's folder, the agent could turn one into a link to a file of the human's before the other program
+read it). No set-ID or sticky bit is set on a sandbox's folder itself either, also where a host folder lists it.
 
-Keys (in a list): Tab the other pane, Enter open, Backspace up, F3 view, F4 edit, Shift+F4 new file (empty, then
-edited), F5 copy, F6 move, F7 new folder, F8 or Delete delete, F2 rename, Ctrl+C copy, Ctrl+X cut, Ctrl+V paste,
-Alt+Enter properties, Ctrl+A select all, Ctrl+Shift+C copy relative paths, Ctrl+R refresh, the menu key (or Shift+F10)
-the context menu.
+Keys (in a list): Tab the other pane, Enter open, Backspace up, F3 view, F4 edit (on a folder, or a link to one, both
+say it is a folder: Enter opens it), Shift+F4 new file (empty, then edited), F5 copy, F6 move, F7 new folder, F8 or
+Delete delete (macOS: Cmd+Backspace too, as in the Finder), F2 rename, Ctrl+C copy, Ctrl+X cut, Ctrl+V paste, Alt+Enter
+properties, Ctrl+A select all, Ctrl+Shift+C copy relative paths, Ctrl+R refresh, the menu key (or Shift+F10) the
+context menu. On macOS Ctrl is the Cmd key (Qt's naming); the texts name each key as the system writes it (key_text).
 """
 from __future__ import annotations
 
@@ -65,6 +81,7 @@ import shlex
 import stat
 import sys
 import threading
+import time
 import unicodedata
 
 from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QMimeData, QPoint, QSize, QTimer, QUrl, Qt
@@ -74,13 +91,15 @@ from PySide6.QtWidgets import (
     QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSplitter, QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import files, state as app_state
+from . import applog
+from . import files, state as app_state, widgets
+from .file_editor import key_text
 from .files import printable
 from .i18n import N_, language, tr
 from .state import choose_files, choose_folder
 from .widgets import (
-    ModelTable, RowModel, Task, ask_first, background, button, confirm, fill, find_row, flow, plain_label, row_key,
-    select_keys, selected_rows, set_enabled, table, warn, shown_as_text,
+    ModelTable, RowModel, Task, ask_first, background, button, confirm, exec_dropped, fill, find_row, flow, plain_label,
+    row_key, select_keys, selected_rows, set_enabled, table, warn, shown_as_text,
 )
 
 ROOT_KINDS = {
@@ -98,6 +117,12 @@ PROGRESS_INTERVAL = 250  # ms
 # shows when it comes (a fast folder at once). Still on its way after LIST_WAIT ms: the pane says so.
 LIST_WAIT = 1500
 LIST_TIMEOUT = 120  # s: a listing that never comes back is given up (the pane says so)
+# A pane's listings still on their way after LIST_SLOW s (a file system that hangs: they may never end): past LIST_STUCK
+# of them no other folder is listed until one has come (Pane.not_listed) - each folder of a hung mount typed or chosen
+# left one more thread waiting for good. (This machine's only: a remote system's request without an answer ends its
+# connection, and every listing with it.)
+LIST_STUCK = 4
+LIST_SLOW = 1.5
 # The first two rows of every folder (never the name of an entry, never selected): the folder shown and the one above.
 HERE, UP = ".", ".."
 # What a drag between the panes and the page's clipboard carry besides the paths: a token of this app's own (what was
@@ -113,6 +138,9 @@ RECENT_KEY = "files-recent-host"  # the host pane's recent folders in the app's 
 # is the folder /Users/me/ws there. Whether a folder lies in a sandbox's is decided with names folded so (in the safe
 # direction: on a volume that tells cases apart, a folder of another case counts as the agent's too).
 FOLDED_PATHS = sys.platform == "darwin"
+# macOS: Cmd+Backspace deletes what is selected, as in the Finder (asked first, as F8 and Delete; it went up a folder,
+# as Backspace) - Qt names the Cmd key Ctrl there.
+MACOS = sys.platform == "darwin"
 
 
 def root_title(kind, label, path):
@@ -143,15 +171,114 @@ def folder_identity(path):
 
 
 def folder_identities(folders):
-    """{(st_dev, st_ino): folder} of FOLDERS (the sandboxes' folders that are there)."""
+    """{(st_dev, st_ino): folder} of FOLDERS (the sandboxes' folders that are there) - in a thread; each read in one of
+    its own and waited for RESOLVE_WAIT at most (looked_up: on a file system that hangs, the identity read last)."""
     found = {}
     for folder in folders:
         if not str(folder).startswith("/"):  # (a remote system's key in the chooser, ssh://...: no folder here)
             continue
-        identity = folder_identity(folder)
+        identity = looked_up(("identity", str(folder)), lambda folder=folder: folder_identity(folder), RESOLVE_WAIT)
         if identity is not None:
             found.setdefault(identity, folder)
     return found
+
+
+# The identities of the sandboxes' folders seen (FilesPage.keep_identities) are kept in the app's state across restarts
+# (a sandbox's folder moved or renamed on this machine stays the agent's): [st_dev, st_ino, folder, day last seen] each;
+# one not seen for KEPT_DAYS (the folder is gone - its inode may be a folder of the human's one day - or was not visited
+# since) is dropped, and at most KEPT_IDENTITIES are kept (those seen last).
+IDENTITIES_KEY = "files-agent-folders"
+KEPT_DAYS = 90
+KEPT_IDENTITIES = 200
+
+
+def today():
+    """The day (since 1970) - what the kept identities' days count in."""
+    return int(time.time() // 86400)
+
+
+def kept_identities():
+    """({(st_dev, st_ino): folder}, {(st_dev, st_ino): day seen}) kept in the app's state (IDENTITIES_KEY): those seen
+    within KEPT_DAYS, at most KEPT_IDENTITIES, those seen last; anything else in it is dropped."""
+    kept = app_state.current()
+    values = kept.get(IDENTITIES_KEY, [], list) if kept is not None else []
+    found, oldest = [], today() - KEPT_DAYS
+
+    def number(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    for value in values:
+        if isinstance(value, list) and len(value) == 4 and number(value[0]) and number(value[1]) and \
+                isinstance(value[2], str) and number(value[3]) and value[3] >= oldest:
+            found.append(((value[0], value[1]), value[2], value[3]))
+    found.sort(key=lambda item: -item[2])  # (stable: the order kept for those of one day)
+    identities, days = {}, {}
+    for identity, folder, day in found:
+        if identity not in identities and len(identities) < KEPT_IDENTITIES:
+            identities[identity], days[identity] = folder, day
+    return identities, days
+
+
+RESOLVE_WAIT = 0.3  # s: a folder's real path or identity is waited for no longer (a mount that hangs)
+AGAIN_WAIT = 0.05  # s: ... when another thread reads it already (it may hang: the value read last then)
+_looked, _looking, _looking_lock = {}, {}, threading.Lock()  # looked_up's values read last, and those on their way
+
+
+def looked_up(key, read, wait, again=AGAIN_WAIT):
+    """READ()'s value for KEY (a folder's real path, its identity), read in a thread of its own and waited for WAIT s
+    at most - AGAIN s when another one reads it already: on a file system that hangs (sshfs whose server went away,
+    NFS) the value read last for KEY (None: none yet) until it answers, one thread for KEY at a time. Read where it was
+    needed - on the GUI thread, then in the listings' and the jobs' threads - one such folder held up the whole window,
+    then every listing of the host pane (never shown), every copy (never ended, Cancel could not end it) and the list
+    of folders, also where they had nothing to do with it."""
+    with _looking_lock:
+        running = _looking.get(key)
+        mine = running is None
+        if mine:
+            running = _looking[key] = threading.Event()
+    if mine:
+        def run():
+            try:
+                _looked[key] = read()
+            except (OSError, ValueError):
+                pass
+            finally:
+                with _looking_lock:
+                    _looking.pop(key, None)
+                running.set()
+        threading.Thread(target=run, name="files-look-up", daemon=True).start()
+    running.wait(wait if mine else again)
+    return _looked.get(key)
+
+
+def given_path(path):
+    """PATH as given (~ expanded, made absolute, normalised) - no file system asked."""
+    return os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def read_real(path):
+    """The real path of PATH (~ expanded): what looked_up reads in its thread."""
+    return os.path.realpath(os.path.expanduser(str(path)))
+
+
+def real_folder(path, wait=RESOLVE_WAIT):
+    """os.path.realpath of the folder PATH (a project's, one chosen with Other folder…) for the GUI thread: as it was
+    read last (resolve_folders, in a thread), else read in a thread and waited for WAIT s at most (looked_up). On a
+    file system that hangs PATH as given (given_path) until it answers - later calls get that at once."""
+    path = str(path)
+    found = _looked.get(("real", path))
+    if found is not None:
+        return found
+    return looked_up(("real", path), lambda: read_real(path), wait, again=0) or given_path(path)
+
+
+def resolve_folders(listed, known):
+    """(the sandboxes' folders, their identities): LISTED (the chooser's: real paths already) and KNOWN (projects and
+    folders chosen, as given) read on the file system - in a thread (Pane.list, Pane.refresh_roots, the jobs), each
+    waited for RESOLVE_WAIT at most (looked_up: one on a file system that hangs as read last, or as given)."""
+    real = [looked_up(("real", str(path)), lambda path=path: read_real(path), RESOLVE_WAIT) or given_path(path)
+            for path in known]
+    folders = list(dict.fromkeys([*listed, *real]))
+    return folders, folder_identities(folders)
 
 
 def holding_folder(path, folders, identities=None):
@@ -175,6 +302,92 @@ def holding_folder(path, folders, identities=None):
         if identity in identities:
             return current
     return None
+
+
+def through_link(path, folders, identities, limit=40):
+    """Whether the absolute host PATH (as typed or given: not resolved) is resolved through a symbolic link that lies
+    in one of the sandboxes' FOLDERS (holding_folder, IDENTITIES: also one reached under another path) - whatever leads
+    there (a link to the sandbox's folder itself, a link of the host's to a link of the agent's). LIMIT: links followed
+    at most (a loop counts as through one). File-system calls: for a thread (FilesPage.through_sandbox_link)."""
+    components, current, followed = [part for part in path.split("/") if part not in ("", ".")], "/", 0
+    while components:
+        part = components.pop(0)
+        if part == "..":
+            current = os.path.dirname(current) or "/"
+            continue
+        here = os.path.join(current, part)
+        if not os.path.islink(here):
+            current = here
+            continue
+        if holding_folder(here, folders, identities) is not None:
+            return True
+        followed += 1
+        try:
+            target = os.readlink(here)
+        except OSError:
+            return False
+        if followed > limit:
+            return True
+        components = [p for p in target.split("/") if p not in ("", ".")] + components
+        current = "/" if target.startswith("/") else current
+    return False
+
+
+UNKNOWN = object()  # (sandbox_holding: not known - what was looked at did not answer)
+
+
+# s: file-system calls the GUI thread needs (where a typed path or a link leads, whether a host folder lies in a
+# sandbox's) are made in a thread and waited for no longer - on a file system that hangs (sshfs whose server went away,
+# a hard NFS mount) they held up the whole window, for good
+ANSWER_WAIT = 0.5
+_answering, _answering_lock = {}, threading.Lock()  # answered's looks on their way, by KEY
+
+
+def answered(work, wait=None, key=None):
+    """(True, WORK()) - WORK (file-system calls for the GUI thread) run in a thread and waited for WAIT s
+    (ANSWER_WAIT) at most; (False, None) when it is not done by then: the caller takes what is safe (as an agent's,
+    refused). WORK's OSError or ValueError is raised here. KEY (what WORK looks at, with everything it is given): while
+    a look of that KEY is still on its way (it did not answer in time: a file system that hangs), it is waited for
+    AGAIN_WAIT, never started anew - every F5, Properties or path typed again on a hard NFS mount left one more thread
+    waiting for good, and held up the window for WAIT again."""
+    with _answering_lock:
+        running = _answering.get(key) if key is not None else None
+        mine = running is None
+        if mine:
+            running = ({}, threading.Event())
+            if key is not None:
+                _answering[key] = running
+    box, finished = running
+    if mine:
+        def run():
+            try:
+                box["result"] = work()
+            except (OSError, ValueError) as exc:
+                box["error"] = exc
+            finally:
+                with _answering_lock:
+                    if key is not None and _answering.get(key) is running:
+                        _answering.pop(key, None)
+                finished.set()
+        threading.Thread(target=run, name="files-answer", daemon=True).start()
+    wait = ANSWER_WAIT if wait is None else wait
+    if not finished.wait(wait if mine else min(wait, AGAIN_WAIT)):
+        return False, None
+    if "error" in box:
+        raise box["error"]
+    return True, box.get("result")
+
+
+def answer_key(*given):
+    """answered's KEY of a look at GIVEN (paths, the sandboxes' folders, their identities), lists and dicts as
+    tuples."""
+    def frozen(value):
+        if isinstance(value, dict):
+            return tuple(sorted((frozen(item), frozen(other)) for item, other in value.items()))
+        if isinstance(value, (list, tuple)):
+            return tuple(frozen(item) for item in value)
+        return value
+    return frozen(given)
 
 
 def relative_to(path, folder):
@@ -318,10 +531,11 @@ def mode_text(mode):
     return f"{stat.filemode(mode)} {stat.S_IMODE(mode):04o}" if mode else ""
 
 
-def copy_name(name, number=1):
-    """The name of a copy of NAME beside it: "a (copy).txt", "a (copy 2).txt" (a folder's: "src (copy)")."""
+def copy_name(name, number=1, folder=False):
+    """The name of a copy of NAME beside it: "a (copy).txt", "a (copy 2).txt" (a FOLDER's, the whole name: "src.d
+    (copy)" - it was "src (copy).d", cut at the dot as a file's extension)."""
     stem, dot, extension = name.rpartition(".")
-    if not stem or "/" in extension:  # no extension (".bashrc": the whole name)
+    if not stem or "/" in extension or folder:  # no extension (".bashrc": the whole name)
         stem, dot, extension = name, "", ""
     mark = tr("copy") if number == 1 else tr("copy {number}", number=number)
     # At most the 255 bytes of a name: the stem cut shorter where the mark would not fit (the names of copies beside
@@ -336,6 +550,146 @@ def copy_name(name, number=1):
 
 
 LOCAL_GRACE = 0.5  # s: a local root's step not done by then (a hung NFS or FUSE mount) goes on in a thread
+# A file of an agent's handed to another program (a drag out, the clipboard) goes as a copy in a folder of the app's own
+# (handed_out_folder), never by its path in the agent's folder - the agent could turn that name into a link to a file of
+# the human's before the other program read it. At most EXPORT_LIMIT bytes at once, copied within EXPORT_WAIT s (the
+# window waits for it); the copies of the last EXPORT_KEPT hand-overs stay (the other program may read them later), and
+# those the system clipboard names (keep_handed_out); older ones and all of them at exit are removed.
+EXPORT_LIMIT = 32 << 20
+EXPORT_WAIT = 2.0
+EXPORT_KEPT = 8
+_handed_out = {"folder": None, "made": [], "kept": None}
+_handed_out_lock = threading.Lock()
+
+
+def handed_out_folder():
+    """A new folder (0700) of its own for one hand-over, in the app's folder of copies handed to other programs (made
+    once, in the system's temporary folder: TMPDIR; removed at exit); the oldest beyond EXPORT_KEPT are removed - never
+    the one the system clipboard names (keep_handed_out: each drag made one more, also one between the panes, and after
+    a few the copy of a file of an agent's copied with Ctrl+C was gone - a paste in another program found nothing)."""
+    import atexit
+    import shutil
+    import tempfile
+    with _handed_out_lock:
+        if _handed_out["folder"] is None or not os.path.isdir(_handed_out["folder"]):
+            _handed_out["folder"] = tempfile.mkdtemp(prefix="sandbox-ai-app-handed-out-")
+            _handed_out["made"] = []
+            atexit.register(shutil.rmtree, _handed_out["folder"], True)
+        made = tempfile.mkdtemp(dir=_handed_out["folder"])
+        _handed_out["made"].append(made)
+        while len(_handed_out["made"]) > EXPORT_KEPT:
+            oldest = next((folder for folder in _handed_out["made"] if folder != _handed_out["kept"]), None)
+            if oldest is None:
+                break
+            _handed_out["made"].remove(oldest)
+            shutil.rmtree(oldest, ignore_errors=True)
+        return made
+
+
+def keep_handed_out(paths=()):
+    """The hand-over folder that holds PATHS (the copies the system clipboard names now) is kept while it does
+    (handed_out_folder); none: the clipboard names none of them any more."""
+    with _handed_out_lock:
+        folders = {os.path.dirname(path) for path in paths}
+        kept = folders.pop() if len(folders) == 1 else None
+        _handed_out["kept"] = kept if kept in _handed_out["made"] else None
+
+
+# At most EXPORT_STUCK of within's threads at once: on a file system that hangs (a hard NFS mount, sshfs whose server
+# went away) a look never ends however it is given up - every drag or Ctrl+C there left one more thread waiting for
+# good.
+EXPORT_STUCK = 4
+_within, _within_lock = {"running": 0, "by_key": {}}, threading.Lock()
+
+
+def within(work, wait, name="files-export", key=None):
+    """WORK(give_up) in a thread, waited for WAIT s (the GUI thread waits): its result, or None when it failed (OSError,
+    ValueError) or was not done by then - GIVE_UP() is true from then on, and WORK stops at its next look. KEY (what
+    WORK looks at, answer_key): while a WORK of that KEY is still on its way, it is waited for (WAIT at most -
+    AGAIN_WAIT once the one who began it gave it up), never started again; and while EXPORT_STUCK of them run, none is
+    started (None at once: what needs the look is not handed out)."""
+    with _within_lock:
+        running = _within["by_key"].get(key) if key is not None else None
+        mine = running is None
+        if mine:
+            if _within["running"] >= EXPORT_STUCK:
+                return None
+            _within["running"] += 1
+            running = (threading.Event(), {}, threading.Event())
+            if key is not None:
+                _within["by_key"][key] = running
+    abandoned, box, finished = running
+    if mine:
+        def run():
+            try:
+                box["result"] = work(abandoned.is_set)
+            except (OSError, ValueError):
+                box["result"] = None
+            finally:
+                with _within_lock:
+                    _within["running"] -= 1
+                    if key is not None and _within["by_key"].get(key) is running:
+                        _within["by_key"].pop(key, None)
+                finished.set()
+        threading.Thread(target=run, name=name, daemon=True).start()
+    elif abandoned.is_set():
+        # (given up by the one who began it: waited for a moment only - every drag held up the window for EXPORT_WAIT)
+        wait = min(wait, AGAIN_WAIT)
+    if not finished.wait(wait):
+        if mine:
+            abandoned.set()
+        return None
+    return box.get("result")
+
+
+# A host folder handed to other programs is looked through for a sandbox's folder (holds_agents): at most EXPORT_FOLDERS
+# folders (within EXPORT_WAIT) - one bigger is not handed out.
+EXPORT_FOLDERS = 20000
+
+
+def holds_agents(path, folders, identities, give_up=None, limit=None):
+    """Whether the host folder PATH may hold an agent's files (in a thread: export_urls): it is one of the sandboxes'
+    FOLDERS, lies in one or holds one by its path (below(), folded; holding_folder: also one reached under another
+    path) - or a folder in it, however deep, is one of them by its identity (IDENTITIES: a sandbox's folder moved there,
+    or mounted there - a bind mount of a workspace is that folder itself, the same device and inode; one mounted
+    deep inside a folder dragged out went to the other program with it). Looked through without following a link, also
+    into what is mounted there, at most LIMIT (EXPORT_FOLDERS) folders and until GIVE_UP() is true: a folder not looked
+    through in full - or no folder any more - counts as one that holds one."""
+    if any(below(folder, path, folded=True) for folder in folders):
+        return True
+    if holding_folder(path, folders, identities) is not None:
+        return True
+    own = folder_identity(path)
+    if own is None or own in identities:
+        return True
+    limit = EXPORT_FOLDERS if limit is None else limit
+    waiting, looked = [path], 0
+    while waiting:
+        looked += 1
+        if looked > limit or (give_up is not None and give_up()):
+            return True
+        try:
+            with os.scandir(waiting.pop()) as found:
+                for entry in found:
+                    try:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if (info.st_dev, info.st_ino) in identities:
+                        return True
+                    waiting.append(entry.path)
+        except OSError:
+            continue  # (a folder the human may not read: no program of theirs reads it either)
+    return False
+
+
+# At most LOCAL_STUCK local steps wait past LOCAL_GRACE at once (a file system that hangs: they never end - every
+# Properties, rename or new folder there, and every one cancelled and tried again, left one more thread waiting for
+# good); past them a step is refused at once, saying why.
+LOCAL_STUCK = 8
+_stuck_steps, _stuck_lock = {"count": 0}, threading.Lock()
 
 
 def local_step(work, done, owner=None, grace=None, slow=None):
@@ -344,9 +698,15 @@ def local_step(work, done, owner=None, grace=None, slow=None):
     hangs (NFS, FUSE) holds up the window no longer than that, DONE comes when the step ends (True returned
     meanwhile). The local steps ran on the GUI thread, and a hung mount held up the whole window. SLOW(ended): the
     step goes on as a job of the page (its busy bar, its buttons greyed out, Cancel) - ENDED(cancelled) waits for it
-    (files.Cancelled once CANCELLED() is true); SLOW returns False where it cannot (then as without it)."""
-    import threading
-    box, finished = {}, threading.Event()
+    (files.Cancelled once CANCELLED() is true); SLOW returns False where it cannot (then as without it). While
+    LOCAL_STUCK steps still wait so, none is started: DONE gets a files.Refused at once."""
+    with _stuck_lock:
+        stuck = _stuck_steps["count"]
+    if stuck >= LOCAL_STUCK:
+        return done(None, files.Refused(tr(
+            "{count} steps still wait for a file system that does not answer (one that hangs?); nothing more is "
+            "started until one of them has ended.", count=stuck)))
+    box, finished, state = {}, threading.Event(), {"stuck": False, "ended": False}
 
     def run():
         try:
@@ -354,6 +714,10 @@ def local_step(work, done, owner=None, grace=None, slow=None):
         except BaseException as exc:  # noqa: BLE001 - handed to DONE (OSError, ValueError) or raised (anything else)
             box["error"] = exc
         finally:
+            with _stuck_lock:
+                state["ended"] = True
+                if state["stuck"]:
+                    _stuck_steps["count"] -= 1
             finished.set()
     threading.Thread(target=run, name="files-local-step", daemon=True).start()
     if finished.wait(LOCAL_GRACE if grace is None else grace):
@@ -361,6 +725,10 @@ def local_step(work, done, owner=None, grace=None, slow=None):
         if error is not None and not isinstance(error, (OSError, ValueError)):
             raise error
         return done(box.get("result"), error)
+    with _stuck_lock:
+        if not state["ended"]:
+            state["stuck"] = True
+            _stuck_steps["count"] += 1
 
     def ended(cancelled=None):
         while not finished.wait(None if cancelled is None else 0.1):
@@ -592,6 +960,7 @@ class Clip:
         self.token = secrets.token_hex(16)
         self.root, self.items, self.untrusted, self.folder_text, self.cut = root, items, untrusted, folder_text, cut
         self.problems = []  # what was refused before (host_items)
+        self.folders = frozenset()  # the names among them that were folders (copy_items: a copy beside, copy_name)
 
     def owns(self, mime):
         return mime is not None and mime.hasFormat(MIME) and bytes(mime.data(MIME)).decode("ascii", "replace") == \
@@ -653,6 +1022,7 @@ class Pane(QWidget):
         self.root, self.relative, self.entries, self.by_name = None, "", [], {}
         self.list_token = 0  # the newest listing: one that comes back after another began is dropped
         self.listing = None  # the token of the listing on its way, or None
+        self.on_way = {}  # the listings on their way, by what they list: {key: {root, waiters, began}} (Pane.list)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
@@ -700,7 +1070,8 @@ class Pane(QWidget):
                 arrow.setAccessibleName(tr("Recent"))
         self.path.installEventFilter(self)  # Alt+Down
         where.addWidget(self.path, 1)
-        where.addWidget(nav_button(tr("Refresh"), tr("List the folder again (Ctrl+R)"), self.list, "refresh"))
+        where.addWidget(nav_button(tr("Refresh"), tr("List the folder again ({shortcut})", shortcut=key_text("Ctrl+R")),
+                                   self.list, "refresh"))
         layout.addLayout(where)
         # The Name takes the room. A ModelTable: a folder of 20,000 entries is shown in one step.
         self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0, many=True,
@@ -723,6 +1094,18 @@ class Pane(QWidget):
         self.space = plain_label(role="secondary", word_wrap=False)
         self.space.setAccessibleName(tr("Free space"))
         layout.addWidget(self.space)
+        if side == "sandbox":
+            # A remote system's files: an agent's or the human's own (RemoteRoot.agents) - on for sandbox-ai's hosts,
+            # where sandboxes run and their agents may have written any file (FilesPage.connected); turned off only
+            # after a question (agents_chosen).
+            self.agents_box = QCheckBox(tr("An agent's files"))
+            self.agents_box.setToolTip(tr("Treat the files of this remote system as an agent's: copied to this machine "
+                                          "they are never executable and files that tools run are named; no set-ID or "
+                                          "sticky bit is set there. On for sandbox-ai's hosts, where sandboxes run."))
+            self.agents_box.setAccessibleName(tr("An agent's files"))
+            self.agents_box.toggled.connect(self.agents_chosen)
+            self.agents_box.hide()
+            layout.addWidget(self.agents_box)
         self.note = plain_label(role="secondary")
         self.note.hide()
         layout.addWidget(self.note)
@@ -754,7 +1137,8 @@ class Pane(QWidget):
         kinds = max((tr(kind) for kind in KINDS.values()), key=len)
         try:
             group = group_name(os.getgid())
-        except Exception:  # noqa: BLE001 - only a width
+        except Exception as _exc:  # noqa: BLE001 - only a width
+            applog.swallowed("files_page", "Pane.seed_columns: only a width", _exc)
             group = "groupname"
         row = list(SEED_ROW)
         row[1], row[5] = kinds, max([row[5], f"{user_name(os.getuid())}:{group}"], key=len)
@@ -786,10 +1170,21 @@ class Pane(QWidget):
         """True if an agent may have written what is shown: a sandbox root, or a host folder in one."""
         return self.untrusted_at(self.relative)
 
-    def untrusted_at(self, relative):
+    def untrusted_at(self, relative, unknown=True):
+        """Whether an agent may have written in the folder RELATIVE; UNKNOWN when that could not be looked at (a host
+        folder on a file system that hangs: sandbox_holding) - True where the agent's is the safe side (what is copied
+        from there, set there), None for a target (transfer_items: as the agent's, what is copied out of a sandbox's
+        folder into it kept its executable bits)."""
         if self.remote():
-            return False  # (the human's own system; what comes from it into a sandbox's folder counts as the agent's)
-        return self.side == "sandbox" or self.page.below_sandbox(self.path_at(relative))
+            # (the human's own system unless its files count as an agent's - a host of sandbox-ai's: RemoteRoot.agents;
+            # what comes from any remote system into a sandbox's folder counts as the agent's)
+            return bool(getattr(self.root, "agents", False))
+        if self.side == "sandbox":
+            return True
+        if relative == self.shown and getattr(self, "inside", False):
+            return True  # (as its listing found it, in its thread: also a sandbox's folder moved here)
+        holder = self.page.sandbox_holding(self.path_at(relative), unknown=UNKNOWN)
+        return unknown if holder is UNKNOWN else holder is not None
 
     def can_go_up(self, relative=None):
         """Whether the folder RELATIVE (default: the one shown) has one above it in this pane."""
@@ -842,11 +1237,18 @@ class Pane(QWidget):
             if self.side == "host":
                 path = os.path.expanduser(text)
                 path = os.path.normpath(path if os.path.isabs(path) else os.path.join(self.path_text(), path))
-                real = os.path.realpath(path)
-                if real != path and self.page.through_sandbox_link(path):
+                # (where it leads, in a thread - answered: a path on a file system that hangs held up the window; one
+                # that does not answer is gone to as typed, and its listing follows no link on its way)
+                folders, identities = self.page.sandbox_folders(), dict(self.page.identities)
+
+                def look():
+                    real = os.path.realpath(path)
+                    return real, real != path and through_link(path, folders, identities)
+                done, found = answered(look, key=answer_key("go", path, folders, identities))
+                if done and found[1]:
                     raise files.Refused(tr("{path} goes through a symbolic link in a sandbox's folder; it is not "
                                            "followed.", path=printable(path)))
-                return self.go(host_relative(real))
+                return self.go(host_relative(found[0] if done else path))
             else:
                 base = self.root.path.rstrip("/")
                 if text == base or text.startswith(base + "/"):
@@ -880,9 +1282,44 @@ class Pane(QWidget):
         self.roots_token, self.roots_reading = getattr(self, "roots_token", 0) + 1, True
         token, keep = self.roots_token, select or self.roots.currentData()
         extra = list(self.page.projects()) + self.page.others
-        background(lambda: self.page.sai.file_roots(extra=extra), owner=self.page, timeout=60, work=False,
-                   done=lambda roots, error: token == self.roots_token and self.show_roots(
-                       roots if error is None else [entry for entry in extra if os.path.isdir(entry[2])], keep, then))
+        known, sai = self.page.folder_sources()[1], self.page.sai
+
+        def read():
+            # (in the thread, all of it: the folders that are there when sandbox-ai cannot say - isdir on the GUI
+            # thread held up the window for a folder on a file system that hangs -, and the folders' identities)
+            # The projects and folders chosen are added here, each read for RESOLVE_WAIT at most (looked_up): sandbox-ai
+            # read their paths itself, and one on a file system that hangs left the list without any sandbox for a
+            # minute, then with the projects alone. (One that does not answer is listed as given: it opens in the
+            # background when chosen.)
+            try:
+                roots = list(sai.file_roots(extra=()))
+            except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai, Podman not answering: the folders chosen
+                applog.swallowed("files_page", "refresh_roots.read: an older sandbox-ai, Podman not answering: …", _exc)
+                roots = []
+            seen = {path for _kind, _label, path in roots}
+            for kind, label, path in extra:
+                real = looked_up(("real", str(path)), lambda path=path: read_real(path), RESOLVE_WAIT) or \
+                    given_path(path)
+                there = looked_up(("folder", real), lambda real=real: os.path.isdir(real), RESOLVE_WAIT)
+                if real not in seen and there is not False:
+                    seen.add(real)
+                    roots.append((kind, label, real))
+            return roots, resolve_folders([path for _kind, _label, path in roots if str(path).startswith("/")],
+                                          known)[1]
+
+        def read_done(found, error):
+            if token != self.roots_token:
+                return None
+            roots, identities = found if error is None else (list(extra), {})
+            before = (self.page.folder_sources()[0], set(self.page.identities))
+            self.page.keep_identities(identities)
+            shown = self.show_roots(roots, keep, then)
+            if (self.page.folder_sources()[0], set(self.page.identities)) != before:
+                # (the host pane, listed before they were known, said nothing of a sandbox's folder it shows: no note,
+                # its set-ID bits unmarked - until it was listed again by hand)
+                self.page.right.list()
+            return shown
+        background(read, owner=self.page, timeout=60, work=False, done=read_done)
         self.page.read_sandbox_paths()
 
     def show_roots(self, roots, keep, then=None):
@@ -919,7 +1356,8 @@ class Pane(QWidget):
 
     def choose_root(self):
         path = self.roots.currentData() if self.roots is not None else None
-        self.root, self.relative, self.shown = None, "", None
+        self.root, self.relative, self.shown, self.opening = None, "", None, None
+        self.open_token = token = getattr(self, "open_token", 0) + 1
         self.table.clearSelection()
         if path in self.page.remotes:
             root = self.page.remotes[path]
@@ -929,16 +1367,70 @@ class Pane(QWidget):
                 self.page.message.setText(tr("The connection to {host} has ended; SSH… connects again.",
                                              host=printable(root.label)))
         elif path:
-            try:
-                self.root = files.Root(path)
-            except OSError as exc:
-                self.page.message.setText(tr("Cannot open {path}: {error}", path=printable(path),
-                                             error=printable(exc)))
+            # Opened in a thread (local_step: done at once on a file system that answers): a folder on one that hangs
+            # (sshfs whose server went away) held up the whole window when it was chosen. Meanwhile the rows of the
+            # folder before stand for no entry (changing()).
+            self.opening = path
+
+            def opened(root, error):
+                if token != getattr(self, "open_token", 0):
+                    return False  # (another folder chosen meanwhile)
+                self.opening = None
+                after, self.after_open = getattr(self, "after_open", None), None
+                if error is not None:
+                    self.page.message.setText(tr("Cannot open {path}: {error}", path=printable(path),
+                                                 error=printable(error)))
+                else:
+                    self.root = root
+                    if after is not None and after[0] == token:  # (Recent: its folder, not the top)
+                        self.relative = after[1]  # (listed in its thread: one gone since falls back to the top)
+                return self.root_chosen()
+            local_step(lambda: files.Root(path), opened, owner=self)
+            return
+        self.root_chosen()
+
+    def root_chosen(self):
+        """The folder chosen is open (or could not be): the buttons, the notes, its listing."""
         if getattr(self.page, "buttons", None):  # (Take ownership: a sandbox's folder only, never a remote system)
             self.page.mark_active()
         if self.side == "sandbox":  # (the note about other hosts' sandboxes: not under a remote system's files)
             self.note.setVisible(bool(self.note.text()) and not self.remote())
+            self.show_agents_box()
         self.list()
+        return True
+
+    def show_agents_box(self):
+        """The choice of a remote system's pane: whether its files count as an agent's (RemoteRoot.agents)."""
+        box = getattr(self, "agents_box", None)
+        if box is None:
+            return
+        box.blockSignals(True)
+        box.setChecked(self.remote() and bool(getattr(self.root, "agents", False)))
+        box.blockSignals(False)
+        box.setVisible(self.remote())
+
+    def agents_chosen(self, on):
+        """The box "An agent's files" of a remote system's pane: ON - its files count as an agent's here (copied to this
+        machine never executable, files that tools run named, no set-ID or sticky bits set there); off only after a
+        question (sandboxes of sandbox-ai's run on its hosts: their agents may have written any file there)."""
+        root = self.root if self.remote() else None
+        if root is None:
+            return False
+        if not on and root.agents and not confirm(
+                self.page, tr("Not an agent's files?"),
+                tr("Files of {host} are treated as an agent's: copied to this machine they are never executable, and "
+                   "files that tools run are named. Sandboxes of sandbox-ai run on its hosts, and their agents may have "
+                   "written any file there. Treat the files of this connection as your own?",
+                   host=printable(root.label)), tr("Treat as my own")):
+            self.show_agents_box()
+            return False
+        if not on and self.root is root and self.agents_box.isChecked():
+            # (ticked again while the question was open - it blocks nothing: the box showed the files as an agent's,
+            # and the answer made them the human's)
+            return False
+        root.agents = bool(on)
+        self.list()
+        return True
 
     # -- the list --
 
@@ -963,7 +1455,11 @@ class Pane(QWidget):
         if remote:
             fallback = "/".join(files.parts(root.home.lstrip("/")))
         ranges, side = self.page.ranges, self.side
-        folders = [] if side == "sandbox" else self.page.sandbox_folders()  # (widgets: read here, not in the thread)
+        # (widgets read here, not in the thread; the folders' paths and identities are read there - on the GUI thread a
+        # sandbox's folder on a file system that hangs held up the window with every listing)
+        sources = ([], []) if side == "sandbox" else self.page.folder_sources()
+        kept = {} if side == "sandbox" else dict(self.page.identities)
+        agents = remote and bool(getattr(root, "agents", False))
 
         def work():
             try:
@@ -975,15 +1471,44 @@ class Pane(QWidget):
                     entries, shown, problem = [], fallback, exc
             entries = name_order(entries)
             # Whether an agent may have written there (Pane.untrusted), for the folder actually listed (also a
-            # sandbox's folder reached under another path: holding_folder).
-            inside = not remote and (side == "sandbox" or holding_folder(
-                "/" + shown, folders, folder_identities(folders)) is not None)
+            # sandbox's folder reached under another path: holding_folder; or moved here: those kept).
+            identities = {}
+            if remote:
+                inside = agents
+            elif side == "sandbox":
+                inside = True
+            else:
+                folders, identities = resolve_folders(*sources)
+                holder = holding_folder("/" + shown, folders, {**kept, **identities})
+                inside = holder is not None
+                met = folder_identity(holder) if inside and not any(holder == folder for folder in folders) else None
+                if met in kept:  # (a sandbox's folder moved here, seen again: kept_identities keeps it on)
+                    identities = {**identities, met: kept[met]}
             try:  # the free space of its file system (here: a hung file system holds up no window)
                 space = root.free_space(shown)
             except (OSError, ValueError):
                 space = None
             return entries, shown, problem, entry_rows(entries, ranges, inside, remote), inside, space, \
-                entry_sorts(entries)
+                entry_sorts(entries), identities
+        # A listing of the same folder (with all it is made of) still on its way is not started again: on a file system
+        # that hangs every Ctrl+R, Refresh or folder typed again left one more thread waiting for good. Asked for while
+        # it was on its way, the folder is listed again once it has come (what it found may be from before a change).
+        key = (id(root), answer_key(relative, fallback, side, remote, agents, sources, kept, ranges, language()))
+        shared = self.on_way.get(key)
+        waiter = {"token": token, "then": then, "answered": False, "again": shared is not None}
+        if shared is None or shared["root"] is not root:
+            # (a remote system's listings all end - a request without an answer ends its connection: a slow link's
+            # listings of folders gone through quickly were refused as if the file system hung)
+            now = time.monotonic()
+            slow = 0 if remote else sum(1 for way in self.on_way.values()
+                                        if not way["remote"] and now - way["began"] > LIST_SLOW)
+            if slow >= LIST_STUCK:  # (and no more than LIST_STUCK of a pane that wait so)
+                return self.not_listed(token, root, slow, then)
+            waiter["again"] = False
+            # (no time limit of its own: each one waiting for it has its own, LIST_TIMEOUT; a late listing never
+            # reaches a pane deleted meanwhile)
+            shared = self.start_listing(key, root, lambda done: background(work, owner=self, done=done))
+        shared["waiters"].append(waiter)
         self.listing = token
 
         def still_listing():
@@ -992,10 +1517,59 @@ class Pane(QWidget):
                 # "{path} wird aufgelistet…", and stayed)
                 self.listing_note = tr("Listing {path}…", path=printable(self.path_text()))
                 self.page.listing_says(self, self.listing_note)
+
+        def expired():
+            if not waiter["answered"]:
+                waiter["answered"] = True
+                self.listed(token, root, None, TimeoutError(tr("No answer within {seconds} s.",
+                                                               seconds=int(LIST_TIMEOUT))), then)
         QTimer.singleShot(LIST_WAIT, self, still_listing)
-        background(work, timeout=LIST_TIMEOUT, owner=self,  # (a late listing never reaches a pane deleted meanwhile)
-                   done=lambda result, error: self.listed(token, root, result, error, then))
+        QTimer.singleShot(int(LIST_TIMEOUT * 1000), self, expired)
         return True
+
+    def start_listing(self, key, root, begin):
+        """BEGIN(done): Pane.list's work in a thread for the listing KEY - what it finds goes to every one waiting for
+        it (those that asked for it once it was on its way get a listing made anew, in one thread for them all)."""
+        shared = self.on_way[key] = {"root": root, "waiters": [], "began": time.monotonic(),
+                                     "remote": bool(getattr(root, "remote", False))}
+
+        def arrived(result, error):
+            if self.on_way.get(key) is shared:
+                self.on_way.pop(key, None)
+            waiting = [waiter for waiter in shared["waiters"] if not waiter["answered"]]
+            again = [waiter for waiter in waiting if waiter["again"]]
+            for waiter in waiting:
+                if not waiter["again"]:
+                    waiter["answered"] = True
+                    self.listed(waiter["token"], root, result, error, waiter["then"])
+            if any(waiter["token"] == self.list_token for waiter in again) and root is self.root and \
+                    key not in self.on_way:
+                fresh = self.start_listing(key, root, begin)
+                for waiter in again:
+                    waiter["again"] = False
+                    fresh["waiters"].append(waiter)
+            else:
+                for waiter in again:
+                    waiter["answered"] = True
+                    self.listed(waiter["token"], root, result, error, waiter["then"])
+        begin(arrived)
+        return shared
+
+    def not_listed(self, token, root, count, then=None):
+        """The listing of TOKEN is not started (COUNT of this pane's still wait for a file system that hangs): the pane
+        stays on the folder it shows and says why (without one, as a listing that failed)."""
+        text = tr("{path} was not listed: {count} listings of this pane still wait for a file system that does not "
+                  "answer (one that hangs?). Try again once one of them has come.",
+                  path=printable(self.path_text()), count=count)
+        if self.shown is None:
+            return self.listed(token, root, None, files.Refused(text), then)
+        self.listing = None
+        self.relative = self.shown
+        self.path.setText(printable(self.path_text()))
+        self.page.listing_says(self, text, ended=True)
+        if then is not None:
+            then(False)
+        return False
 
     def listed(self, token, root, result, error, then=None):
         """Show what the listing of TOKEN found (dropped when another began since, or another root was chosen)."""
@@ -1011,7 +1585,9 @@ class Pane(QWidget):
             if then is not None:
                 then(False)
             return False
-        self.entries, relative, problem, (rows, colors), inside, space, sorts = result
+        self.entries, relative, problem, (rows, colors), inside, space, sorts, identities = result
+        self.page.keep_identities(identities)
+        self.inside = inside and not self.remote()  # (untrusted_at: the folder shown, as its thread found it)
         self.by_name = {entry.name: entry for entry in self.entries}
         listed = problem is None
         self.show_space(space)
@@ -1071,15 +1647,16 @@ class Pane(QWidget):
 
     def changing(self):
         """True while the rows are another folder's: go() (or another root) takes the new folder at once, its rows
-        come with its listing - until then no row is an entry of the folder RELATIVE (none is chosen, none opens)."""
-        return self.listing is not None and self.shown != self.relative
+        come with its listing - until then no row is an entry of the folder RELATIVE (none is chosen, none opens). So
+        while a folder chosen is still being opened (choose_root)."""
+        return getattr(self, "opening", None) is not None or self.listing is not None and self.shown != self.relative
 
     def waiting(self):
         """CHANGING(), said in the page's message: an action on entries waits for the listing."""
         if not self.changing():
             return False
         self.page.message.setText(tr("Wait until {path} is listed: the list still shows the folder before.",
-                                     path=printable(self.path_text())))
+                                     path=printable(getattr(self, "opening", None) or self.path_text())))
         return True
 
     def entry_at(self, row):
@@ -1141,36 +1718,54 @@ class Pane(QWidget):
         if entry is not None:
             self.open_entry(entry)
 
-    def open_entry(self, entry, mode="auto", read_only=False):
-        """Enter the folder ENTRY, or open the file ENTRY in the editor (MODE "auto", "text" or "hex")."""
+    def open_entry(self, entry, mode="auto", read_only=False, enter=True):
+        """Enter the folder ENTRY, or open the file ENTRY in the editor (MODE "auto", "text" or "hex"). ENTER False
+        (View, Edit: F3, F4): a folder - or a link to one - is not entered; the page says it is a folder."""
         if entry.kind == "dir":
-            if mode == "auto":
+            if mode == "auto" and enter:
                 self.go(self.path_of(entry))
             else:
                 self.page.message.setText(tr("{name} is a folder.", name=printable(entry.name)))
         elif entry.kind == "file":
             self.page.open_editor(self.root, self.path_of(entry), self.path_of_entry(entry), mode, read_only)
         elif entry.kind == "link":
-            self.open_link(entry, mode, read_only)
+            self.open_link(entry, mode, read_only, enter)
         else:
             self.page.message.setText(tr("{name} is not a regular file.", name=printable(entry.name)))
 
-    def open_link(self, entry, mode="auto", read_only=False):
+    def open_link(self, entry, mode="auto", read_only=False, enter=True):
         """A link is followed only on the host and out of every sandbox's folder (where it lies and where it points);
-        it opens the folder or the file it points to."""
+        it opens the folder (Open: ENTER) or the file it points to."""
         not_followed = tr("{name} is a symbolic link to {target}; it is not followed.", name=printable(entry.name),
                           target=printable(entry.target))
         if self.untrusted() or self.remote():  # (a remote system's links: named, never followed)
             self.page.message.setText(not_followed)
             return
         link = os.path.join(self.path_text(), entry.name)
-        real = os.path.realpath(link)
-        # (where it points, and every link on the way there: a host's link to a link of the agent's is not followed)
-        if self.page.below_sandbox(real) or self.page.through_sandbox_link(link):
+        folders, identities = self.page.sandbox_folders(), dict(self.page.identities)
+
+        def look():  # (in a thread - answered: a link to a file system that hangs held up the window)
+            real = os.path.realpath(link)
+            # (where it points, and every link on the way there: a host's link to a link of the agent's is not followed)
+            agents = holding_folder(real, folders, identities) is not None or through_link(link, folders, identities)
+            return real, agents, os.path.isdir(real), os.path.isfile(real)
+        try:
+            done, found = answered(look, key=answer_key("link", link, folders, identities))
+        except (OSError, ValueError):
+            done, found = True, (link, True, False, False)
+        if not done:
+            self.page.message.setText(tr("{path} does not answer (a file system that hangs?); nothing was opened.",
+                                         path=printable(link)))
+            return
+        real, agents, folder, plain = found
+        if agents:
             self.page.message.setText(not_followed)
-        elif os.path.isdir(real) and mode == "auto":
+        elif folder and mode == "auto" and enter:
             self.go(host_relative(real))
-        elif os.path.isfile(real) and self.page.right.root is not None:
+        elif folder:  # (View, Edit, the hex editor: as on the folder itself - F3 and F4 entered it, "not followed" was
+            # said of a link Open follows)
+            self.page.message.setText(tr("{name} is a folder.", name=printable(entry.name)))
+        elif plain and self.page.right.root is not None:
             self.page.open_editor(self.page.right.root, host_relative(real), real, mode, read_only)
         else:
             self.page.message.setText(not_followed)
@@ -1275,6 +1870,10 @@ class Pane(QWidget):
         if self.roots.currentIndex() != index:
             self.roots.setCurrentIndex(index)  # (choose_root: that root, from its top)
         if self.root is None:
+            if self.opening is not None:
+                # (a folder on a file system slower than a moment is opened in a thread: its folder RELATIVE is listed
+                # once it is open - Recent gave up, and the folder's top was shown)
+                self.after_open = (self.open_token, relative)
             return False
         return self.go_path(self.path_at(relative), exact=True)
 
@@ -1321,11 +1920,15 @@ class FilesPage(QWidget):
         # {host folder: its path in the sandbox} of the running sandboxes and sessions (backend.sandbox_paths, read in
         # the background with the list of folders): Copy relative path and Copy path in the sandbox.
         self.sandbox_paths = {}
+        # {(st_dev, st_ino): folder} of the sandboxes' folders (keep_identities): read in threads - with the list of
+        # folders and every listing -, never on the GUI thread (a folder on a file system that hangs held up the window);
+        # those of the runs before kept in the app's state (kept_identities), with the day each was seen last
+        self.identities, self.identity_days = kept_identities()
         # Connected remote systems ({key: remote.RemoteRoot}, in the sandbox pane's chooser) and how to reach them:
         # the ssh program (tests: a command that speaks SFTP), the known_hosts and ssh_config files (None: the user's).
         self.remotes, self.ssh_program, self.known_hosts, self.ssh_config = {}, "ssh", None, None
         self.ranges = files.subordinate_ranges()
-        self.message = plain_label(selectable=True)
+        self.message = plain_label(selectable=True, log="files")
         # Copied or cut items (Ctrl+C, Ctrl+X), what is dragged now, the editors and dialogs open.
         self.clipboard, self.drag, self.editors, self.dialogs = None, None, [], []
         self.left = Pane(self, "sandbox")
@@ -1456,80 +2059,114 @@ class FilesPage(QWidget):
         return getattr(self.left, "roots_reading", False)
 
     def set_project(self, path):
-        """Show the current project's folder."""
-        self.refresh_roots(select=os.path.realpath(path))
+        """Show the current project's folder (its real path read as real_folder reads it: on a file system that hangs, the
+        window waits no longer than a moment)."""
+        self.refresh_roots(select=real_folder(path))
 
     # -- the panes --
 
     def other(self, pane):
         return self.right if pane is self.left else self.left
 
+    def folder_sources(self):
+        """(the sandbox side's folders, the projects' and folders chosen as given): what sandbox_folders and
+        resolve_folders take - read from the widgets, no file system asked (the GUI thread)."""
+        listed = [path for path in (self.left.roots.itemData(i) for i in range(self.left.roots.count()))
+                  if path and str(path).startswith("/")]
+        try:
+            known = [str(entry[2]) for entry in [*self.projects(), *self.others]
+                     if isinstance(entry, (tuple, list)) and len(entry) > 2 and entry[2]]
+        except Exception as _exc:  # noqa: BLE001 - the list alone, as before
+            applog.swallowed("files_page", "FilesPage.folder_sources: the list alone, as before", _exc)
+            known = []
+        return listed, known
+
     def sandbox_folders(self):
         """The folders an agent may write: those of the sandbox side's list, and the projects and folders chosen,
         known at once (the list is read in the background: until it came, every host folder counted as the host's
-        own - a workspace opened in the host pane meanwhile kept the agent's exec bits and followed its links)."""
-        listed = [path for path in (self.left.roots.itemData(i) for i in range(self.left.roots.count())) if path]
-        try:
-            known = [os.path.realpath(os.path.expanduser(str(entry[2]))) for entry in
-                     [*self.projects(), *self.others] if isinstance(entry, (tuple, list)) and len(entry) > 2 and entry[2]]
-        except Exception:  # noqa: BLE001 - the list alone, as before
-            known = []
-        return list(dict.fromkeys(listed + known))
+        own - a workspace opened in the host pane meanwhile kept the agent's exec bits and followed its links). Their
+        real paths as read last in a thread (real_folder: never held up by a folder on a file system that hangs)."""
+        listed, known = self.folder_sources()
+        return list(dict.fromkeys(listed + [real_folder(path) for path in known]))
+
+    def keep_identities(self, found):
+        """FOUND ({(st_dev, st_ino): folder} of the sandboxes' folders, read in a thread) kept for the GUI thread - and
+        those seen before stay: a sandbox's folder moved or renamed on this machine (by a rename: the same folder) is
+        still the agent's, under its new name (it became the human's own: its links followed, its programs copied
+        executable) - also when the app is started again: kept in the app's state with the day each was seen last
+        (kept_identities; a listing in a moved one sees it too)."""
+        day, changed = today(), False
+        for identity, folder in (found or {}).items():
+            if identity not in self.identities:
+                self.identities[identity], changed = folder, True
+            if self.identity_days.get(identity) != day:
+                self.identity_days[identity], changed = day, True
+        kept = app_state.current()
+        if kept is not None and (changed or id(kept) != getattr(self, "identities_saved", None)):
+            self.identities_saved = id(kept)  # (in each state at least once: one made after the page too)
+            latest = sorted(self.identities, key=lambda identity: -self.identity_days.get(identity, 0))
+            kept.set(IDENTITIES_KEY, [[*identity, self.identities[identity], self.identity_days.get(identity, day)]
+                                      for identity in latest[:KEPT_IDENTITIES]])
+
+    def identities_reader(self):
+        """A function for a thread: the identities of the sandboxes' folders read now (resolve_folders, with the
+        sources taken here on the GUI thread) and those kept (keep_identities)."""
+        sources, kept = self.folder_sources(), dict(self.identities)
+
+        def read():
+            return {**kept, **resolve_folders(*sources)[1]}
+        return read
 
     def below_sandbox(self, path):
         return self.sandbox_holding(path) is not None
 
-    def sandbox_holding(self, path):
+    def sandbox_holding(self, path, unknown=None):
         """The outermost sandbox's folder that holds the absolute host PATH, by name or as the folder itself under
-        another path (holding_folder: a bind mount of it), as it lies on PATH's way; or None."""
+        another path (holding_folder: a bind mount of it), as it lies on PATH's way; or None. The folders on PATH's way
+        are looked at in a thread (answered; on the GUI thread they held up the window): for one that does not answer
+        (a file system that hangs) UNKNOWN, by default PATH itself - as a folder that lies in one."""
         if not path:
             return None
-        folders = self.sandbox_folders()
-        return holding_folder(path, folders, folder_identities(folders))
+        folders, identities = self.sandbox_folders(), dict(self.identities)
+        by_name = holding_folder(path, folders)  # (by the names alone: no file system asked)
+        if by_name is not None or not identities:
+            return by_name
+        done, found = answered(lambda: holding_folder(path, folders, identities),
+                               key=answer_key("holding", path, folders, identities))
+        return found if done else path if unknown is None else unknown
 
-    def holds_sandbox(self, path):
-        """Whether the absolute host PATH is a sandbox's folder, lies in one or holds one (by name, folded as
-        below(); or as that folder itself under another path)."""
-        folders = self.sandbox_folders()
-        if any(below(folder, path, folded=True) for folder in folders):
+    def held_now(self, path):
+        """Whether a sandbox's folder of now holds the host PATH: by its path (sandbox_folders), or under another path by
+        its identity as read now (resolve_folders, in a thread: answered) - not by one kept from before (keep_identities:
+        a folder moved since, its sandbox gone; or a device and inode number met again by chance - a USB stick in
+        place of another, the disks numbered anew after a reboot, the first folder of every fresh ext4 is inode 12).
+        Not known in time: False - what a target is taken for where the human's is the safe side (transfer_items)."""
+        folders, sources = self.sandbox_folders(), self.folder_sources()
+        if holding_folder(path, folders) is not None:
             return True
-        identities = folder_identities(folders)
-        return holding_folder(path, folders, identities) is not None or folder_identity(path) in identities
+
+        def look():
+            known, identities = resolve_folders(*sources)
+            return holding_folder(path, list(dict.fromkeys([*folders, *known])), identities) is not None
+        done, found = answered(look, key=answer_key("held", path, folders, sources))
+        return bool(done and found)
 
     def through_sandbox_link(self, path, limit=40):
         """Whether the absolute host PATH (as typed or given: not resolved) is resolved through a symbolic link that lies
-        in a sandbox's folder - whatever leads there (a link to the sandbox's folder itself, a link of the host's to a
-        link of the agent's). Only the path as typed was compared with the sandboxes' folders: through another path
-        to the same folder, the agent's link was followed. LIMIT: links followed at most (a loop counts as through
-        one)."""
-        components, current, followed = [part for part in path.split("/") if part not in ("", ".")], "/", 0
-        while components:
-            part = components.pop(0)
-            if part == "..":
-                current = os.path.dirname(current) or "/"
-                continue
-            here = os.path.join(current, part)
-            if not os.path.islink(here):
-                current = here
-                continue
-            if self.below_sandbox(here):
-                return True
-            followed += 1
-            try:
-                target = os.readlink(here)
-            except OSError:
-                return False
-            if followed > limit:
-                return True
-            components = [p for p in target.split("/") if p not in ("", ".")] + components
-            current = "/" if target.startswith("/") else current
-        return False
+        in a sandbox's folder (through_link, in a thread: answered - one that does not answer counts as through one).
+        Only the path as typed was compared with the sandboxes' folders: through another path to the same folder, the
+        agent's link was followed."""
+        folders, identities = self.sandbox_folders(), dict(self.identities)
+        done, found = answered(lambda: through_link(path, folders, identities, limit),
+                               key=answer_key("through", path, folders, identities, limit))
+        return found if done else True
 
     def remote_hosts(self):
         """The names of the other hosts (`sandbox-ai hosts`), as kept on this machine (no SSH)."""
         try:
             return sorted(self.sai.host_statuses(cached=True) or {})
-        except Exception:  # noqa: BLE001 - an older sandbox-ai, no hosts: none shown
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai, no hosts: none shown
+            applog.swallowed("files_page", "FilesPage.remote_hosts: an older sandbox-ai, no hosts: none shown", _exc)
             return []
 
     def mark_active(self):
@@ -1569,12 +2206,12 @@ class FilesPage(QWidget):
         control = bool(plain & Qt.KeyboardModifier.ControlModifier)
         if control:
             # Ctrl alone: with Shift or Alt it is the window's (Ctrl+Shift+X: the emergency stop of every sandbox) -
-            # but Ctrl+Shift+C, Copy relative path.
+            # but Ctrl+Shift+C, Copy relative path. (macOS: Cmd+Backspace, Delete.)
             if key == Key.Key_C and plain & Qt.KeyboardModifier.ShiftModifier and \
                     not plain & Qt.KeyboardModifier.AltModifier:
                 return True
             return not plain & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier) and \
-                key in (Key.Key_A, Key.Key_C, Key.Key_R, Key.Key_V, Key.Key_X)
+                key in (Key.Key_A, Key.Key_C, Key.Key_R, Key.Key_V, Key.Key_X, *((Key.Key_Backspace,) if MACOS else ()))
         if key == Key.Key_F10:
             return bool(plain & Qt.KeyboardModifier.ShiftModifier)  # (F10 alone: the window's)
         return key in (Key.Key_F2, Key.Key_F3, Key.Key_F4, Key.Key_F5, Key.Key_F6, Key.Key_F7, Key.Key_F8,
@@ -1593,6 +2230,8 @@ class FilesPage(QWidget):
             return True
         if control and (shift or alt) and key in (Key.Key_A, Key.Key_C, Key.Key_R, Key.Key_V, Key.Key_X):
             return False  # the window's keys (Ctrl+Shift+X: the emergency stop), never the list's
+        if MACOS and control and not (shift or alt) and key == Key.Key_Backspace:
+            key, control = Key.Key_Delete, False  # Cmd+Backspace: Delete, as in the Finder (it went up a folder)
         self.activate(pane)
         changing = (Key.Key_F2, Key.Key_F5, Key.Key_F6, Key.Key_F7, Key.Key_F8, Key.Key_Delete)
         new_file = key == Key.Key_F4 and shift  # Shift+F4: a new file (F4 alone edits the current one)
@@ -1698,7 +2337,11 @@ class FilesPage(QWidget):
         """WORK(cancelled) on ROOT, then DONE(result, error) on the GUI thread: at once for a local root, as the job of
         the page's Task for a remote one (its busy bar and Cancel; a request that stalls is interrupted once Cancel
         was pressed and INTERRUPT_AFTER passed). Returns DONE's result for a local root; for a remote one whether the
-        job began (one at a time, as copies are)."""
+        job began (one at a time, as copies are). Never while a job runs: a rename, a new folder or the permissions
+        asked for before it began (their dialogs block nothing) changed what a copy or move was working on."""
+        if self.task.running:
+            self.message.setText(tr("Wait until the copy, move or delete running now has finished (or cancel it)."))
+            return False
         if not getattr(root, "remote", False):
             # (a step on a file system that hangs goes on as the page's job: its buttons greyed out - a copy or a delete
             # started meanwhile worked on what it changes - and Cancel, which gives the page back)
@@ -1742,7 +2385,9 @@ class FilesPage(QWidget):
             self.progress, self.progress_text = progress, text
             self.timer.start()
         else:
-            self.message.setText(tr("Another copy still runs."))
+            # (whatever the job running is - a delete, a permission change of Properties: "Another copy still runs." was
+            # said of a copy there was none of)
+            self.message.setText(tr("Wait until the copy, move or delete running now has finished (or cancel it)."))
         return started
 
     def show_progress(self):
@@ -1772,9 +2417,11 @@ class FilesPage(QWidget):
                     source.path_text())
         return self.transfer_items(clip, target, target.relative, move)
 
-    def transfer_items(self, clip, target, target_dir, move=False):
+    def transfer_items(self, clip, target, target_dir, move=False, began=None):
         """Copy (MOVE: move) the items of CLIP into the folder TARGET_DIR of the TARGET pane, in a thread: through
-        files.copy_entry and files.move_entry (links not followed, budgets, Cancel; replacing asks first)."""
+        files.copy_entry and files.move_entry (links not followed, budgets, Cancel; replacing asks first). BEGAN(): once
+        the job has begun - after the question about what exists there, which may come after this returns (a remote
+        target, a file system slower than a moment)."""
         if target.root is None:
             self.message.setText(tr("Choose a folder in both panes first."))
             return False
@@ -1784,8 +2431,20 @@ class FilesPage(QWidget):
         src_root, dst_root, untrusted, items = clip.root, target.root, clip.untrusted, list(clip.items)
         refused = list(clip.problems)  # (paths refused before: named in the report too)
         target_text = target.path_at(target_dir)
-        target_untrusted = target.untrusted_at(target_dir)  # (before the question, as the rest)
+        target_untrusted = target.untrusted_at(target_dir, unknown=None)  # (before the question, as the rest)
+        if target_untrusted is None:  # (a host folder on a file system that hangs: neither the agent's nor the human's)
+            self.message.setText(tr("{path} does not answer (a file system that hangs?); nothing was copied.",
+                                    path=printable(target_text)))
+            return False
+        # (a remote system's files counted as an agent's since they were copied or cut - the box ticked meanwhile: they
+        # came executable, as the choice of the moment of Ctrl+C had it; the stricter choice counts)
+        untrusted = untrusted or bool(getattr(src_root, "agents", False))
         remote = getattr(src_root, "remote", False) or getattr(dst_root, "remote", False)
+        if target_untrusted and not remote and target.side == "host":
+            # (between this machine's folders, a target is an agent's only where a sandbox's folder of now holds it -
+            # held_now: one kept from before may be a folder of the human's whose device and inode met one by chance,
+            # and what came out of a sandbox's folder went in as within the sandboxes' folders, executable, unnamed)
+            target_untrusted = self.held_now(target_text)
         if getattr(src_root, "remote", False) and target_untrusted:
             untrusted = True  # what comes from a remote system into a sandbox's folder counts as the agent's
         out = untrusted and not target_untrusted
@@ -1796,30 +2455,36 @@ class FilesPage(QWidget):
         # A sandbox's folder met in what goes where no agent writes - the folder copied itself, or one in it: an entry of
         # a host folder of the human's (~/projects/ws, or ~/projects with ws in it) went as the human's own, its
         # executables executable, its hooks unnamed (files.copy_entry's AGENTS: that part as the agent's).
-        agents = frozenset() if target_untrusted or getattr(src_root, "remote", False) else \
-            frozenset(folder_identities(self.sandbox_folders()))
+        # (read in the job's thread: identities_reader)
+        agents = frozenset() if target_untrusted or getattr(src_root, "remote", False) else self.identities_reader()
+        def then(overwrite):
+            started = self.start_transfer(src_root, dst_root, items, target_dir, target_text, overwrite, untrusted,
+                                          target_untrusted, refused, out, move, agents)
+            if started and began is not None:
+                began()
+            return started
         return self.ask_replace([new or name for name, _, new in items], clip.folder_text, dst_root, target_dir,
-                                target_text, then=lambda overwrite: self.start_transfer(
-                                    src_root, dst_root, items, target_dir, target_text, overwrite, untrusted,
-                                    target_untrusted, refused, out, move, agents))
+                                target_text, then=then)
 
     def start_transfer(self, src_root, dst_root, items, target_dir, target_text, overwrite, untrusted,
                        target_untrusted, refused, out, move, agents=frozenset()):
-        """The copy or move of transfer_items, once it is known whether to replace (OVERWRITE)."""
+        """The copy or move of transfer_items, once it is known whether to replace (OVERWRITE). AGENTS: the sandboxes'
+        folders' identities, or a function that reads them (in the job's thread)."""
         progress = files.Progress()
 
         def work(cancelled):
             done, problems = [], list(refused)
+            found = frozenset(agents()) if callable(agents) else agents
             for name, path, new in items:
                 try:
                     if move:
                         done.append(files.move_entry(src_root, path, dst_root, target_dir, overwrite=overwrite,
                                                      untrusted=untrusted, target_untrusted=target_untrusted,
-                                                     cancelled=cancelled, progress=progress, agents=agents))
+                                                     cancelled=cancelled, progress=progress, agents=found))
                     else:
                         done.append(files.copy_entry(src_root, path, dst_root, target_dir, overwrite=overwrite,
                                                      untrusted=untrusted, name=new, cancelled=cancelled,
-                                                     progress=progress, agents=agents))
+                                                     progress=progress, agents=found))
                 except files.Cancelled as exc:
                     problems.append(str(exc))
                     break
@@ -1863,11 +2528,16 @@ class FilesPage(QWidget):
 
     def report(self, done, problems, copied_out=False, moved=False):
         lines = []
-        if done:
-            values = dict(files=sum(r.files for r in done), folders=sum(r.directories for r in done),
-                          size=files.size_text(sum(r.bytes for r in done)))
-            lines.append(tr("{files} file(s) in {folders} folder(s), {size} moved", **values) if moved else
-                         tr("{files} file(s) in {folders} folder(s), {size} copied", **values))
+        # (a move whose source was kept as a whole - something in it skipped or changed, or cancelled after the copy -
+        # was copied only: it was counted as moved, "... moved", beside "The source was kept")
+        whole = [r for r in done if not moved or r.moved or r.left]
+        kept = [r for r in done if moved and not (r.moved or r.left)]
+        for part, text in ((whole, N_("{files} file(s) in {folders} folder(s), {size} moved") if moved else
+                            N_("{files} file(s) in {folders} folder(s), {size} copied")),
+                           (kept, N_("{files} file(s) in {folders} folder(s), {size} copied (the source was kept)"))):
+            if part:
+                lines.append(tr(text, files=sum(r.files for r in part), folders=sum(r.directories for r in part),
+                                size=files.size_text(sum(r.bytes for r in part))))
         skipped = [p for r in done for p in r.skipped]
         if skipped:
             lines.append(tr("skipped: {list}", list=", ".join(f"{printable(p)} ({printable(why)})"
@@ -1947,21 +2617,32 @@ class FilesPage(QWidget):
         file dialog): each one's folder resolved, the entry itself not (a link is refused when it is copied). A path
         that goes through a symbolic link in a sandbox's folder is refused, as in the path bar; one in a sandbox's
         folder is copied as the agent's (never executable on the host)."""
-        items, problems, untrusted = [], [], False
-        for path in paths:
-            path = os.path.normpath(os.path.abspath(os.fspath(path)))
-            name, folder = os.path.basename(path), os.path.dirname(path)
-            real = os.path.realpath(folder)
-            if not name or path == "/":
-                problems.append(tr("Choose a file or folder to copy."))
-                continue
-            if real != folder and self.through_sandbox_link(folder):
-                problems.append(tr("{path} goes through a symbolic link in a sandbox's folder; it is not followed.",
-                                   path=printable(path)))
-                continue
-            whole = os.path.join(real, name)
-            untrusted = untrusted or self.below_sandbox(whole)
-            items.append((name, host_relative(whole), None))
+        folders, identities = self.sandbox_folders(), dict(self.identities)
+        given = [os.path.normpath(os.path.abspath(os.fspath(path))) for path in paths]
+
+        def look():  # (in a thread - answered: files of a file system that hangs held up the window)
+            items, problems, untrusted = [], [], False
+            for path in given:
+                name, folder = os.path.basename(path), os.path.dirname(path)
+                if not name or path == "/":
+                    problems.append(tr("Choose a file or folder to copy."))
+                    continue
+                real = os.path.realpath(folder)
+                if real != folder and through_link(folder, folders, identities):
+                    problems.append(tr("{path} goes through a symbolic link in a sandbox's folder; it is not "
+                                       "followed.", path=printable(path)))
+                    continue
+                whole = os.path.join(real, name)
+                untrusted = untrusted or holding_folder(whole, folders, identities) is not None
+                items.append((name, host_relative(whole), None))
+            return items, problems, untrusted
+        try:
+            done, found = answered(look, key=answer_key("items", given, folders, identities, language()))
+        except (OSError, ValueError) as exc:
+            done, found = True, ([], [printable(exc)], True)
+        items, problems, untrusted = found if done else ([], [tr(
+            "{path} does not answer (a file system that hangs?); nothing was copied.",
+            path=", ".join(printable(path) for path in given[:3]) + (" …" if len(given) > 3 else ""))], True)
         root = self.right.root if self.right.root is not None else files.Root("/", sandbox=False)
         clip = Clip(root, items, untrusted, tr("this machine"))
         clip.problems = problems
@@ -1981,7 +2662,8 @@ class FilesPage(QWidget):
         if not clip.items:
             return False
         root = target.root  # (what the questions name: a question blocks nothing, the pane may show another by the answer)
-        if foreign and target.remote() and self.sandbox_host(target.root) and not confirm(
+        lab = foreign and target.remote() and self.sandbox_host(target.root)
+        if lab and not confirm(
                 self, tr("Copy files of another program to {host}?", host=printable(target.root.label)),
                 tr("{count} item(s) that another program put on the clipboard or dropped here would be copied into "
                    "{folder} on {host}, a host of sandbox-ai's where sandboxes run and agents may read them. An agent "
@@ -1991,7 +2673,13 @@ class FilesPage(QWidget):
                 details="\n".join(printable(os.path.join("/", path)) for _name, path, _new in clip.items)):
             self.message.setText(tr("Nothing was copied."))
             return False
-        if foreign and target.untrusted_at(target_dir) and not confirm(
+        # (a remote system whose files count as an agent's: asked as one - unless it was asked about as sandbox-ai's host)
+        inside = target.untrusted_at(target_dir, unknown=None)
+        if inside is None:  # (a host folder on a file system that hangs: said before the question, as transfer_items)
+            self.message.setText(tr("{path} does not answer (a file system that hangs?); nothing was copied.",
+                                    path=printable(target.path_at(target_dir))))
+            return False
+        if foreign and not lab and inside and not confirm(
                 self, tr("Copy files of another program into the agent's folder?"),
                 tr("{count} item(s) that another program put on the clipboard or dropped here would be copied into "
                    "{folder}, where the agent reads them. An agent that reaches your desktop can put any of your files "
@@ -2037,7 +2725,8 @@ class FilesPage(QWidget):
         from .markdown_view import is_markdown
         if mode == "auto" and not read_only and is_markdown(entry.name):
             mode = "text"  # F4 edits
-        pane.open_entry(entry, mode, read_only)
+        # (a link to a folder as the folder itself: F3 and F4 entered it, on the folder they say it is one)
+        pane.open_entry(entry, mode, read_only, enter=False)
         return True
 
     def open_editor(self, root, relative, shown, mode="auto", read_only=False):
@@ -2106,17 +2795,22 @@ class FilesPage(QWidget):
         items = [(entry.name, pane.path_of(entry)) for entry in entries] or [("", pane.relative)]
         relative, text, untrusted, sandbox = pane.relative, pane.path_text(), pane.untrusted(), pane.side == "sandbox"
         root = pane.root
-        return on_root(root, lambda: files.entry_infos(root, items),
+        # (the sandboxes' folders' identities read in the thread too: identities_reader)
+        reader = None if getattr(root, "remote", False) else self.identities_reader()
+        return on_root(root, lambda: (files.entry_infos(root, items), reader() if reader is not None else {}),
                        lambda found, error: self.show_properties(pane, root, items, text, untrusted, sandbox, relative,
-                                                                 found, error), owner=self)
+                                                                 *(found if error is None else (None, None)), error),
+                       owner=self)
 
-    def show_properties(self, pane, root, items, text, untrusted, sandbox, relative, found, error):
-        """The Properties dialog of ITEMS, with what files.entry_infos FOUND (in a thread for a remote root)."""
+    def show_properties(self, pane, root, items, text, untrusted, sandbox, relative, found, agents, error):
+        """The Properties dialog of ITEMS, with what files.entry_infos FOUND (in a thread for a remote root) and the
+        sandboxes' folders' AGENTS (identities, read there too)."""
         from .file_properties import PropertiesDialog
         if error is not None:
             self.message.setText(printable(error))
             return None
         dialog = PropertiesDialog(self, root, items, text, untrusted, changed=self.refresh_panes, infos=found,
+                                  agents=frozenset(agents or ()), busy=lambda: self.task.running, job=self.root_job,
                                   owner=None if getattr(root, "remote", False) else lambda root, shown, folders: self.ask_owner(Chosen(
                                       root, shown, relative, text, untrusted, sandbox, folders)))
         self.keep(self.dialogs, dialog)
@@ -2131,7 +2825,8 @@ class FilesPage(QWidget):
         found = []
         try:
             entries = self.sai.host_entries()
-        except Exception:  # noqa: BLE001 - an older sandbox-ai, no hosts file: none
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai, no hosts file: none
+            applog.swallowed("files_page", "FilesPage.sandbox_targets: an older sandbox-ai, no hosts file: none", _exc)
             entries = []
         for entry in entries:
             if not isinstance(entry, dict) or entry.get("kind") != "ssh" or not entry.get("ssh"):
@@ -2201,8 +2896,10 @@ class FilesPage(QWidget):
             root.sandbox_endpoints = {found for found in (remote.endpoint_of(host, config, ssh) for host in hosts)
                                       if found is not None}
             return root
-        background(connect, owner=self, timeout=120, work=False,
-                   done=lambda root, error: self.connected(target, root, error))
+        # (no time limit as a whole: each step has its own - ssh's ConnectTimeout, REQUEST_TIMEOUT a request, 10 s for
+        # each `ssh -G`; 120 s for all of them said "No answer" to a connection that was still being made, which nobody
+        # took once it was: its ssh ran on unused)
+        background(connect, owner=self, work=False, done=lambda root, error: self.connected(target, root, error))
         return True
 
     def connected(self, target, root, error):
@@ -2225,6 +2922,10 @@ class FilesPage(QWidget):
                 warn(self, tr("Host key changed"), printable(error))
             return False
         old = self.remotes.get(root.key)
+        # Whether its files count as an agent's (RemoteRoot.agents): by default for one of sandbox-ai's hosts - its
+        # sandboxes' agents may have written any file there (copied to this machine, a program kept its executable bit
+        # and an .envrc went unnamed); the human's choice for the connection before stays with one made again.
+        root.agents = bool(old.agents) if old is not None and old is not root else self.sandbox_host(root)
         if old is not None and old is not root:
             background(old.close, owner=self, timeout=30, done=lambda *_: None)  # (ssh's end is waited for)
             # What is still open on the old connection goes on through the new one (the same system and folder): an
@@ -2353,8 +3054,7 @@ class FilesPage(QWidget):
         return menu
 
     def exec_menu(self, menu, where):
-        menu.exec(where)
-        menu.deleteLater()
+        exec_dropped(menu, where)  # (made for this one use: freed once it closed - widgets.exec_dropped)
 
     def menu(self, pane, at_row=True):
         """The context menu of PANE (AT_ROW: for its selection, else for the folder shown)."""
@@ -2389,7 +3089,7 @@ class FilesPage(QWidget):
         if entries:
             file_like = one is not None and one.kind in ("file", "link")
             add(tr("Open"), lambda: pane.open_entry(one), "Return", one is not None)
-            add(tr("View"), lambda: pane.open_entry(one, read_only=True), "F3", file_like)
+            add(tr("View"), lambda: pane.open_entry(one, read_only=True, enter=False), "F3", file_like)
             add(tr("Edit"), lambda: pane.open_entry(one, "text"), "F4", file_like)
             add(tr("Open with the hex editor"), lambda: pane.open_entry(one, "hex"), None, file_like)
             add(tr("View as Markdown"), lambda: pane.open_entry(one, "markdown", read_only=True), None, file_like)
@@ -2409,7 +3109,14 @@ class FilesPage(QWidget):
                 not busy and other.root is not None)
             menu.addSeparator()
             add(tr("Rename…"), lambda: self.rename_dialog(pane, one), "F2", one is not None and not busy)
-            add(tr("Delete…"), lambda: self.delete_selected(pane, entries), "Del", not busy)
+            add(tr("Delete…"), lambda: self.delete_selected(pane, entries), "Ctrl+Backspace" if MACOS else "Del",
+                not busy)
+            # The buttons below the panes that have no entry above: as they are now (for this pane's selection).
+            for key in ("chmod", "chown", "own"):
+                found = self.buttons.get(key)
+                if found is not None and widgets.shown_button(found, pane):
+                    add(widgets.button_text(found), found.click, None, found.isEnabled(),
+                        None if found.isEnabled() else found.toolTip())
         menu.addSeparator()
         add(tr("New folder…"), lambda: self.mkdir_dialog(pane), "F7", has_root and not busy)
         add(tr("New file…"), lambda: self.new_file_dialog(pane), "Shift+F4", has_root and not busy)
@@ -2447,18 +3154,20 @@ class FilesPage(QWidget):
             return False
         clip = Clip(pane.root, [(entry.name, pane.path_of(entry), None) for entry in entries], pane.untrusted(),
                     pane.path_text(), cut)
+        clip.folders = frozenset(entry.name for entry in entries if entry.kind == "dir")
         self.clipboard = clip
-        mime = QMimeData()
-        mime.setData(MIME, clip.token.encode("ascii"))
-        mime.setText("\n".join(printable(pane.path_of_entry(entry)) for entry in entries))
-        urls = self.export_urls(pane, entries)
-        if urls:
-            mime.setUrls(urls)
-        QGuiApplication.clipboard().setMimeData(mime)
-        self.message.setText(tr("{count} item(s) cut: Paste (Ctrl+V) moves them into the folder shown.",
-                                count=len(entries)) if cut else
-                             tr("{count} item(s) copied: Paste (Ctrl+V) copies them into the folder shown.",
-                                count=len(entries)))
+        text = "\n".join(printable(pane.path_of_entry(entry)) for entry in entries)
+        # (the files other programs may get: those known at once now, the others once looked at - export_later)
+        ready, later = self.export_work(pane, entries)
+        keep_handed_out(ready)  # (the copies of what the clipboard named before may go now)
+        QGuiApplication.clipboard().setMimeData(self.clip_mime(clip, text, ready))
+        if later is not None:
+            self.export_later(clip, text, ready, later)
+        # (the keys as the system writes them: on macOS Cmd+V, not the Ctrl+V the text said)
+        self.message.setText(tr("{count} item(s) cut: Paste ({shortcut}) moves them into the folder shown.",
+                                count=len(entries), shortcut=key_text("Ctrl+V")) if cut else
+                             tr("{count} item(s) copied: Paste ({shortcut}) copies them into the folder shown.",
+                                count=len(entries), shortcut=key_text("Ctrl+V")))
         return True
 
     def pasted(self):
@@ -2491,7 +3200,8 @@ class FilesPage(QWidget):
             return self.paste_clip(found[1], pane, target_dir)
         if found is not None:
             return self.copy_paths(found[1], pane, target_dir, foreign=True)
-        self.message.setText(tr("Nothing to paste: copy or cut files first (Ctrl+C, Ctrl+X)."))
+        self.message.setText(tr("Nothing to paste: copy or cut files first ({copy}, {cut}).", copy=key_text("Ctrl+C"),
+                                cut=key_text("Ctrl+X")))
         return False
 
     def paste_clip(self, clip, pane, target_dir):
@@ -2506,7 +3216,8 @@ class FilesPage(QWidget):
         if same:  # a copy beside the original, under a name of its own (a local root: a remote one is refused above)
             # (on_root: done at once - or, on a file system that hangs, when the names are read: its result came back
             # as True then, and unpacking it failed)
-            root, names = pane.root, [copy_name(name, n) for name, _, _ in clip.items for n in range(1, 21)]
+            root, names = pane.root, [copy_name(name, n, name in clip.folders) for name, _, _ in clip.items
+                                      for n in range(1, 21)]
             return on_root(root, lambda: set(files.exists_in(root, target_dir, names)),
                            lambda taken, error: self.paste_beside(clip, pane, target_dir, taken, error, root),
                            owner=self)
@@ -2523,66 +3234,112 @@ class FilesPage(QWidget):
             # got the copies - in its folder of that name)
             self.message.setText(tr("The folder shown changed meanwhile; nothing was done."))
             return False
-        items = []
+        # (each name given is taken from then on: two long names that differ only near their end are cut to one name
+        # for their copies, and the second copy was refused - "already exists there")
+        items, taken = [], set(taken)
         for name, path, _ in clip.items:
-            new = next((copy_name(name, n) for n in range(1, 21) if copy_name(name, n) not in taken), None)
+            folder = name in clip.folders
+            new = next((copy_name(name, n, folder) for n in range(1, 21) if copy_name(name, n, folder) not in taken),
+                       None)
             if new is None:
                 self.message.setText(tr("{name}: too many copies here already.", name=printable(name)))
                 return False
+            taken.add(new)
             items.append((name, path, new))
         return self.paste_items(Clip(clip.root, items, clip.untrusted, clip.folder_text), pane, target_dir)
 
     def paste_items(self, clip, pane, target_dir):
-        started = self.transfer_items(clip, pane, target_dir, move=clip.cut)
-        if started and clip.cut:
-            self.clipboard = None  # moved: a second paste has nothing to move
+        def began():
+            # (once the move has begun - not when the paste returned: the question whether to replace what exists may
+            # come after that, and answered No, nothing was moved and the cut was gone all the same)
+            if self.clipboard is clip:
+                self.clipboard = None  # moved: a second paste has nothing to move
             # (nor from the system clipboard: it named the files where they were, and a second paste copied from there)
             if clip.owns(QGuiApplication.clipboard().mimeData()):
                 QGuiApplication.clipboard().clear()
-        return started
+        return self.transfer_items(clip, pane, target_dir, move=clip.cut, began=began if clip.cut else None)
 
     def export_urls(self, pane, entries):
         """The file URLs of ENTRIES that other programs may get (a drag out, the clipboard): never a link or a special
         file; from a sandbox's folder only plain files that are not executable (a folder could hold hooks or
-        programs, which another program would copy as they are, executable bits and all)."""
-        untrusted = pane.untrusted()
+        programs, which another program would copy as they are, executable bits and all), and those as copies made now
+        (handed_out_folder: what the agent does to its files afterwards reaches no other program). What export_work
+        leaves to a thread is waited for EXPORT_WAIT (the GUI thread waits: a drag needs them as it begins)."""
+        ready, later = self.export_work(pane, entries)
+        found = None if later is None else within(later, EXPORT_WAIT, "files-export", key=getattr(later, "key", None))
+        return [file_url(path) for path in (ready if found is None else found)]
+
+    def export_work(self, pane, entries):
+        """([paths of ENTRIES other programs may get at once], LATER(give_up) or None): LATER, for a thread, gives the
+        paths of all that may go (export_urls), those at once among them, in the order of ENTRIES - looking until
+        GIVE_UP() is true. LATER.key: what it looks at (within's KEY: a look of the same still on its way is waited for,
+        not started again)."""
         if pane.remote() or pane.root is None:
-            return []  # (a remote file is no local one another program could take)
-        if not untrusted:
-            # (never a folder that is a sandbox's or holds one: ~/projects/ws listed in ~/projects went out as it is)
-            return [file_url(pane.path_of_entry(entry)) for entry in entries if entry.kind == "file" or
-                    entry.kind == "dir" and not self.holds_sandbox(pane.path_of_entry(entry))]
+            return [], None  # (a remote file is no local one another program could take)
+        if not pane.untrusted():
+            # Never a folder that is a sandbox's or holds one, however deep (holds_agents: ~/projects/ws listed in
+            # ~/projects went out as it is; so did ~/projects with a workspace moved into it, or one mounted deep
+            # inside) - looked through in a thread: what is not known by then stays.
+            paths = [pane.path_of_entry(entry) for entry in entries]
+            ready = [path for path, entry in zip(paths, entries) if entry.kind == "file"]
+            folders = [path for path, entry in zip(paths, entries) if entry.kind == "dir"]
+            if not folders:
+                return ready, None
+            sources, kept = self.folder_sources(), dict(self.identities)
+
+            def plain_folders(give_up):
+                known, identities = resolve_folders(*sources)
+                identities = {**kept, **identities}
+                free = {path for path in folders if not holds_agents(path, known, identities, give_up)}
+                return [path for path, entry in zip(paths, entries)
+                        if entry.kind == "file" or entry.kind == "dir" and path in free]
+            plain_folders.key = answer_key("folders", paths, [entry.kind for entry in entries], sources, kept)
+            return ready, plain_folders
         # An agent's: as they are now, not as they were listed - it may have made a file executable since, or put a link
-        # to a folder in its place (lstat relative to the folder opened once, never through a link). In a thread, waited
-        # for LOCAL_GRACE (the GUI thread waits for it): a file system that does not answer by then gives nothing out.
+        # to a folder in its place (lstat relative to the folder opened once, never through a link). In a thread: a file
+        # system that does not answer in time gives nothing out.
+        # (the URL named the file in the agent's folder: the agent could swap it for a link to a key of the human's
+        # between the drop and the other program's read - a mail program attached the key)
         root, relative, names = pane.root, pane.relative, [entry.name for entry in entries if entry.kind == "file"]
+        if not names:
+            return [], None
 
-        def plain_files():
-            found, folder = [], root.open_dir(relative)
-            try:
-                for name in names:
-                    try:
-                        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
-                    except (OSError, ValueError):
-                        continue
-                    if stat.S_ISREG(info.st_mode) and not info.st_mode & (0o111 | files.SPECIAL_BITS):
-                        found.append(name)
-            finally:
-                os.close(folder)
-            return found
-        box, finished = {}, threading.Event()
+        def plain_files(give_up):  # (in a thread: files.copy_aside reads and writes the files)
+            return files.copy_aside(root, relative, names, handed_out_folder, EXPORT_LIMIT, give_up)
+        plain_files.key = ("aside", id(root), answer_key(root.path, relative, names))
+        return [], plain_files
 
-        def run():
-            try:
-                box["names"] = plain_files()
-            except (OSError, ValueError):
-                box["names"] = []
-            finally:
-                finished.set()
-        threading.Thread(target=run, name="files-export-check", daemon=True).start()
-        if not finished.wait(LOCAL_GRACE):
-            return []
-        return [file_url(os.path.join(pane.path_text(), name)) for name in box["names"]]
+    def export_later(self, clip, text, ready, later):
+        """The system clipboard of CLIP (Ctrl+C, Ctrl+X) gets the files LATER(give_up) finds (export_work: in a thread,
+        given up after EXPORT_WAIT) instead of those READY - once it is done, if the clipboard still holds CLIP then.
+        The GUI thread waited for them: every Ctrl+C of a big folder held up the window, also for a paste in the other
+        pane."""
+        deadline = time.monotonic() + EXPORT_WAIT
+
+        def look():
+            # (through within, as a drag: on a file system that hangs the look never ends - one waiting for the same is
+            # not started again, and no more than EXPORT_STUCK wait; this thread ends a moment after the deadline)
+            return within(lambda give_up: later(lambda: give_up() or time.monotonic() > deadline), EXPORT_WAIT + 1,
+                          "files-export", key=getattr(later, "key", None))
+
+        def done(found, error):
+            board = QGuiApplication.clipboard()
+            if error is not None or not found or self.clipboard is not clip or not clip.owns(board.mimeData()):
+                return  # (copied, cut or pasted again meanwhile, or another program's on the clipboard by now)
+            if list(found) != list(ready):
+                keep_handed_out(found)  # (an agent's files' copies: kept while the clipboard names them)
+                board.setMimeData(self.clip_mime(clip, text, found))
+        background(look, owner=self, timeout=EXPORT_WAIT + 30, done=done)
+
+    @staticmethod
+    def clip_mime(clip, text, paths=()):
+        """What the system clipboard gets for CLIP: its token, the paths as TEXT, the file URLs of PATHS."""
+        mime = QMimeData()
+        mime.setData(MIME, clip.token.encode("ascii"))
+        mime.setText(text)
+        if paths:
+            mime.setUrls([file_url(path) for path in paths])
+        return mime
 
     # -- drag and drop --
 
@@ -2839,16 +3596,23 @@ class FilesPage(QWidget):
         kinds = chosen.kinds if len(chosen.kinds) == len(chosen.items) else [None] * len(chosen.items)
         mixed = "dir" in kinds and any(kind != "dir" for kind in kinds)
         searchable = mode | (mode & 0o444) >> 2
+        # (a sandbox's folder listed in a host folder of the human's - ~/projects/ws seen from ~/projects - is the
+        # agent's itself: it got set-ID and sticky bits, only a folder shown inside it was refused them)
+        # (their identities read in the job's thread: identities_reader)
+        reader = None if getattr(chosen.root, "remote", False) else self.identities_reader()
+        # (a remote system whose files count as an agent's by now - the box ticked after they were chosen: as one)
+        special = not chosen.untrusted and not getattr(chosen.root, "agents", False)
 
         def work(cancelled):
             changed, problems = 0, []
+            agents = frozenset(reader()) if reader is not None else frozenset()
             for (name, path), kind in zip(chosen.items, kinds):
                 if cancelled():
                     problems.append(tr("Cancelled."))
                     break
                 try:
-                    chosen.root.chmod_entry(path, searchable if mixed and kind == "dir" else mode,
-                                            special=not chosen.untrusted)
+                    chosen.root.chmod_entry(path, searchable if mixed and kind == "dir" else mode, special=special,
+                                            **({"agents": agents} if agents else {}))
                     changed += 1
                 except (OSError, ValueError) as exc:
                     problems.append(f"{printable(name)}: {printable(exc)}")
@@ -2882,7 +3646,8 @@ class FilesPage(QWidget):
     def ask_owner(self, chosen):
         """The owner and group for the items of CHOSEN (taken before the dialog opened), then chown_items."""
         dialog = OwnerDialog(self, len(chosen.items), chosen.folders)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        # (freed once answered: each Owner… left its dialog behind, a child of the page as long as the window lived)
+        if exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return False
         uid, gid, recursive = dialog.values()
         if uid == -1 and gid == -1:

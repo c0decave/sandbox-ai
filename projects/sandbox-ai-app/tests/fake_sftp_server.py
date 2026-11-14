@@ -1,6 +1,6 @@
 """A small SFTP version 3 server on stdin and stdout for the tests of remote.py: it serves this machine's files as
 OpenSSH's sftp-server does (paths as given, "." the folder it was started in), the requests remote.Sftp sends and the
-extensions posix-rename@openssh.com and statvfs@openssh.com.
+extensions posix-rename@openssh.com, statvfs@openssh.com and lsetstat@openssh.com.
 
 Its HOME (what "." is): FAKE_SFTP_HOME. Faults for the tests (environment): FAKE_SFTP_HANG=READDIR (or another
 request's name) - that request is never answered; FAKE_SFTP_NO_EXTENSIONS=1 - no extensions; FAKE_SFTP_LOG=path -
@@ -15,8 +15,11 @@ FAKE_SFTP_READ_FAIL_AT=offset - a READ from that offset on fails (an I/O error);
 looked up ignoring their case (a macOS server: a.txt is A.txt), and RENAME refuses a name that "exists" so (as
 OpenSSH's sftp-server: link(), or a stat() of the new name); FAKE_SFTP_NO_CHOWN=1 - a SETSTAT of the owner fails (no
 root there); FAKE_SFTP_NO_CREATE=1 - an OPEN that would create a file is refused (a folder you may not write); FAKE_SFTP_FOREIGN=name - a file of that name is said to belong to UID 4242, group 4343 (another user's,
-with no chown done), and a SETSTAT of an owner is only logged ("CHOWN uid:gid"). Otherwise SETSTAT sets the owner and
-group it is given (as OpenSSH's sftp-server does)."""
+with no chown done), and a SETSTAT of an owner is only logged ("CHOWN uid:gid"); FAKE_SFTP_HOME_ANSWER=text - REALPATH
+of "." (the remote HOME) is answered with that text, as a malicious server may ("/a/../../b"); FAKE_SFTP_ROOT_ANSWER the
+same for REALPATH of "/". Otherwise SETSTAT sets the
+owner and group it is given (as OpenSSH's sftp-server does). lsetstat@openssh.com refuses a link (as OpenSSH's on Linux)
+and is logged, hung and stalled as "SETSTAT"."""
 import errno
 import os
 import stat
@@ -132,9 +135,34 @@ class Parse:
         return mode
 
 
+def setstat(ident, path, mode, p):
+    """SETSTAT (and lsetstat@openssh.com, once it is known PATH is no link): the owner, the bits, the times given."""
+    if p.owner is not None:
+        if no_chown:
+            status(ident, 3, "Permission denied")
+            return
+        if foreign:
+            if log:
+                with open(log, "a") as stream:
+                    stream.write(f"CHOWN {p.owner[0]}:{p.owner[1]}\n")
+        else:
+            os.chown(path, *p.owner)
+    if mode is not None:
+        os.chmod(path, mode & 0o7777)
+    if p.times is not None:
+        os.utime(path, p.times)
+    status(ident, 0)
+
+
 def handle(ident, kind, p):
     if kind == 16:  # REALPATH
-        path = os.path.realpath(p.path() or ".")
+        asked = p.path() or "."
+        path = os.path.realpath(asked)
+        answer = {".": "FAKE_SFTP_HOME_ANSWER", "/": "FAKE_SFTP_ROOT_ANSWER"}.get(asked)
+        if answer and os.environ.get(answer):
+            path = os.environ[answer]
+            send(NAME, struct.pack(">II", ident, 1) + string(path) + string(path) + attrs(os.stat(".")))
+            return
         send(NAME, struct.pack(">II", ident, 1) + string(path) + string(path) + attrs(os.stat(path)))
     elif kind in (7, 17):  # LSTAT, STAT
         path = p.path()
@@ -212,21 +240,7 @@ def handle(ident, kind, p):
     elif kind == 9:  # SETSTAT
         path = p.path()
         mode = p.attrs()
-        if p.owner is not None:
-            if no_chown:
-                status(ident, 3, "Permission denied")
-                return
-            if foreign:
-                if log:
-                    with open(log, "a") as stream:
-                        stream.write(f"CHOWN {p.owner[0]}:{p.owner[1]}\n")
-            else:
-                os.chown(path, *p.owner)
-        if mode is not None:
-            os.chmod(path, mode & 0o7777)
-        if p.times is not None:
-            os.utime(path, p.times)
-        status(ident, 0)
+        setstat(ident, path, mode, p)
     elif kind == 18:  # RENAME: refuses an existing name, as OpenSSH's does (a link, then the old name removed)
         old, new = p.path(), p.path()
         if os.path.lexists(new):
@@ -242,6 +256,13 @@ def handle(ident, kind, p):
         if name == "posix-rename@openssh.com":
             os.rename(p.path(), p.path())
             status(ident, 0)
+        elif name == "lsetstat@openssh.com":  # (as OpenSSH's: fchmodat(AT_SYMLINK_NOFOLLOW) - a link is refused)
+            path = p.path()
+            mode = p.attrs()
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                status(ident, 4, "Failure")
+                return
+            setstat(ident, path, mode, p)
         elif name == "statvfs@openssh.com":
             info = os.statvfs(p.path())
             send(EXTENDED_REPLY, struct.pack(">I", ident) + struct.pack(
@@ -265,21 +286,32 @@ def main():
         kind, body = data[0], data[1:]
         if kind == 1:  # INIT
             extensions = b"" if os.environ.get("FAKE_SFTP_NO_EXTENSIONS") else \
-                string("posix-rename@openssh.com") + string("1") + string("statvfs@openssh.com") + string("2")
+                string("posix-rename@openssh.com") + string("1") + string("statvfs@openssh.com") + string("2") + \
+                string("lsetstat@openssh.com") + string("1")
             send(2, struct.pack(">I", 3) + extensions)
             continue
         p = Parse(body)
         ident = p.u32()
+        name = NAMES.get(kind, kind)
+        if kind == 200:  # (lsetstat@openssh.com is named, logged and stalled as the SETSTAT it stands for)
+            start = p.at
+            try:
+                name = "SETSTAT" if p.string() == b"lsetstat@openssh.com" else name
+            except Exception:  # noqa: BLE001
+                pass
+            p.at = start
         if log:
             with open(log, "a") as stream:
                 start = p.at
                 try:
+                    if kind == 200 and name == "SETSTAT":
+                        p.string()  # (the extension's name: the path follows)
                     shown = p.path() if kind not in (4, 5, 6, 12) else ""
                 except Exception:  # noqa: BLE001
                     shown = ""
                 p.at = start
-                stream.write(f"{NAMES.get(kind, kind)} {shown}\n")
-        if NAMES.get(kind) == hang or NAMES.get(kind) in stalled():
+                stream.write(f"{name} {shown}\n")
+        if name == hang or name in stalled():
             time.sleep(3600)
         try:
             handle(ident, kind, p)

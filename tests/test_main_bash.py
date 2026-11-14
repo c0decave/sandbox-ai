@@ -39,3 +39,34 @@ def test_the_real_bash_here():
         pytest.skip("no bash")
     assert m.bash_version(executable) >= (4, 0) and m.find_bash() == m.find_bash()
     assert m.bash_version("/nonexistent/bash") is None
+
+
+def test_build_all_builds_every_image_and_goes_on_after_a_failure(tmp_path, monkeypatch):
+    """`sandbox-ai build all` builds ALL of sandbox-ai's images - the seven agents, team, Cairn, browser, VPN, Tor and
+    every variant of yours - each on its own, so one failure stops none of the others."""
+    import json
+    import subprocess
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    variant = tmp_path / "sandbox-ai" / "images" / "tor"
+    variant.mkdir(parents=True)
+    (variant / "image.json").write_text(json.dumps({"version": 1, "agent": "dsh", "apt": [], "npm": [], "pip": [],
+                                                    "files": []}))
+    monkeypatch.setattr(m, "find_bash", lambda: "/bin/bash")
+    calls, said = [], []
+
+    def run(command, check=False, env=None):
+        calls.append(command[2:])
+        assert (env or {}).get("SANDBOX_AI_BUILD_CGROUP_SAID") == (None if len(calls) == 1 else "1")
+        return subprocess.CompletedProcess(command, 1 if "qwen" in command else 0)
+    assert m.build_all_wanted(["-pu", "unix:///x", "all", "--no-cache"])
+    assert not m.build_all_wanted(["qwen"]) and not m.build_all_wanted(["--variant", "all"])
+    assert m.build_all(["-pu", "unix:///x", "--uv", "0.9", "all", "--no-cache"], run=run, out=said.append) == 1
+    names = [call[call.index("--variant") + 1] if "--variant" in call else call[-2] for call in calls]
+    assert names == ["codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose", "team", "cairn", "browser",
+                     "vpn", "tor", "tor"]
+    assert all(call[-1] == "--no-cache" for call in calls)
+    assert calls[0][:4] == ["--podman-url", "unix:///x", "--uv", "0.9"]
+    assert calls[9] == ["browser", "--no-cache"]  # the browser's build takes none of those options
+    assert calls[12][-3:] == ["--variant", "tor", "--no-cache"]
+    assert "12 of 13 built; failed: qwen" in said[-1]
+    assert m.build_all(["--pin", "1.2.3", "all"], run=run, out=said.append) == 2

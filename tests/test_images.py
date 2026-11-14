@@ -1,10 +1,12 @@
 """sandbox-ai images, with podman replaced by recorded answers: listing, packages, extensions (validator,
 changes, variants, history), the extension layer of sandbox-ai build and --image-variant."""
+import fnmatch
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -223,7 +225,7 @@ def test_extend_new_remove_and_history(config, capsys, tmp_path):
     assert "--image-variant gpu" in capsys.readouterr().out
     assert im.agent_of("gpu") == "claude" and im.variants() == [("gpu", "claude")]
     assert im.describe("gpu")["apt"] == ["ripgrep=14.1.0-1"] and im.describe("gpu")["available"] == ["tool.sh"]
-    assert im.main(["new", "gpu", "--from", "codex"]) == 1, "exists already"
+    assert im.main(["new", "gpu", "--from", "claude"]) == 1, "exists already (for that agent)"
     for name in ("claude", "all", "vpn", "Upper", "a/b", "x" * 31):  # vpn: sandbox-ai build vpn
         assert im.main(["new", name, "--from", "codex"]) == 1
     assert im.main(["new", "empty", "--from", "codex", "--empty", "--json"]) == 0
@@ -323,8 +325,8 @@ def test_layers_are_built_on_the_base_and_labelled(config, tmp_path, capsys):
     assert im.main(["new", "web", "--from", "claude"]) == 0
     assert im.main(["new", "other", "--from", "codex", "--empty"]) == 0
     status = {row["target"]: row["status"] for row in im.images(run=engine)}
-    assert status == {"claude": "outdated", "codex": "not-built", "opencode": "not-built", "web": "not-built",
-                      "other": "not-built"}
+    assert status == {"claude": "outdated", "codex": "not-built", "opencode": "not-built", "hermes": "not-built",
+                      "dsh": "not-built", "qwen": "not-built", "goose": "not-built", "web": "not-built", "other": "not-built"}
     capsys.readouterr()
     assert im.main(["layer", "claude", "--variants"], run=engine) == 0
     builds = [call for call in engine.calls if call[1] == "build"]
@@ -345,7 +347,7 @@ def test_layers_are_built_on_the_base_and_labelled(config, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "base rebuilt: rebuild" in out and "web (claude)" in out and "extension changed: rebuild" in out
     # An extension with errors is not built; the others are.
-    directory = config / "config" / "sandbox-ai" / "images" / "web"
+    directory = config / "config" / "sandbox-ai" / "images" / "variants" / "claude" / "web"
     (directory / "Containerfile.fragment").write_text("FROM alpine\n")
     assert im.main(["layer", "claude", "--variants"], run=engine) == 1
     assert "FROM is not allowed" in capsys.readouterr().err
@@ -450,8 +452,11 @@ def test_image_variant_option(config):
     a = s.parse_args(["claude", "-iv", "web"])
     assert a.image == "localhost/claude-sandbox-web:latest"
     s.check_image_variant(a)
-    for argv, message in ((["codex", "--image-variant", "web"], "variant of claude"),
-                          (["claude", "--image-variant", "nope"], "no such variant"),
+    # Another agent's variant is made for this one too (a preset or board switched to another agent).
+    adopted = s.parse_args(["codex", "--image-variant", "web"])
+    s.check_image_variant(adopted)
+    assert adopted.image == "localhost/codex-sandbox-web:latest"
+    for argv, message in ((["claude", "--image-variant", "nope"], "no such variant"),
                           (["claude", "--image-variant", "web", "--image", "localhost/x"], "exclude each other"),
                           (["claude", "--image-variant", "web", "--backend", "bwrap"], "only to the Podman")):
         with pytest.raises(ValueError, match=message):
@@ -464,25 +469,18 @@ def test_image_variant_option(config):
     s.check_policy(s.parse_args(["claude", "-iv", "web"]), {"version": 1, "forbid": ["--image-variant=other"]})
 
 
-def test_the_tor_recipe(config):
-    """`images recipe tor`: torsocks from main, torbrowser-launcher from Debian's contrib section (the fragment adds
-    it), the agent's own fragment kept before it; the validator accepts the result."""
+def test_tor_needs_no_recipe_and_a_variant_called_tor_still_works(config):
+    """No recipe tor (the user's decision, live use 2026-11-14): Tor networking needs nothing in the agent's image - the
+    Tor container beside it carries everything. A variant of yours called tor stays an ordinary variant: started with
+    --image-variant tor, built with --variant (`build tor` is the Tor VPN's image)."""
+    assert "tor" not in im.RECIPES
     lines = []
-    assert im.main(["recipe", "tor", "--from", "claude"], out=lines.append) == 0
-    assert "sandbox-ai build --variant tor" in lines[-1] and "--image-variant tor" in lines[-1]
-    document = json.loads((im.config_root() / "tor" / "image.json").read_text())
-    assert document["apt"] == ["torsocks"] and "tor" not in document["apt"]  # tor itself runs in the VPN container
-    fragment = (im.config_root() / "tor" / im.FRAGMENT).read_text()
-    assert "Components: contrib" in fragment and "torbrowser-launcher" in fragment
-    assert "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg" in fragment
-    assert im.errors(im.check(document, fragment, {})) == []
-    text = im.containerfile("tor", document, fragment)
-    assert text.index("torsocks") < text.index("torbrowser-launcher")
-    # The agent's own fragment stays, the recipe's follows it.
-    assert im.main(["extend", "codex", "--fragment", "-"], out=lines.append, stdin=io.StringIO("RUN true\n")) == 0
-    assert im.main(["recipe", "tor", "--from", "codex", "--as", "tor-codex"], out=lines.append) == 0
-    codex = (im.config_root() / "tor-codex" / im.FRAGMENT).read_text()
-    assert codex.index("RUN true") < codex.index("torbrowser-launcher")
+    with pytest.raises(SystemExit):  # (not among the recipes argparse offers)
+        im.main(["recipe", "tor", "--from", "claude"], out=lines.append)
+    assert im.main(["new", "tor", "--from", "claude", "--empty"], out=lines.append) == 0
+    assert im.variant_image("claude", "tor") == "localhost/claude-sandbox-tor:latest"
+    assert im.build_command("tor") == "sandbox-ai build --variant tor"
+    assert im.build_command("media") == "sandbox-ai build media"
 
 
 def test_the_dev_recipe(config):
@@ -492,14 +490,14 @@ def test_the_dev_recipe(config):
     lines = []
     assert im.main(["recipe", "dev", "--from", "claude"], out=lines.append) == 0
     assert "sandbox-ai build dev" in lines[-1] and "--image-variant dev" in lines[-1]
-    document = json.loads((im.config_root() / "dev" / "image.json").read_text())
+    document = json.loads((im.config_root() / "variants" / "claude" / "dev" / "image.json").read_text())
     for package in ("podman", "fuse-overlayfs", "slirp4netns", "passt", "uidmap", "nftables", "iproute2", "tor",
                     "git", "python3-venv", "busybox-static", "libegl1", "libgl1", "libxkbcommon0", "libfontconfig1",
                     "libdbus-1-3", "xvfb", "spectrwm", "xdotool", "x11-apps"):
         assert package in document["apt"], package
     assert all("=" not in package for package in document["apt"])  # Debian's own versions of the release
     assert not document.get("npm") and not document.get("pip") and not document.get("files")
-    path = im.config_root() / "dev" / im.FRAGMENT  # the agent's own fragment, copied (none here)
+    path = im.config_root() / "variants" / "claude" / "dev" / im.FRAGMENT  # the agent's own fragment, copied (none here)
     fragment = path.read_text() if path.exists() else ""
     assert im.errors(im.check(document, fragment, {})) == []
     text = im.containerfile("dev", document, fragment)
@@ -508,6 +506,56 @@ def test_the_dev_recipe(config):
     with pytest.raises(ValueError, match="exists already"):
         im.recipe("dev", "claude")
 
+
+def test_the_django_recipe(config):
+    """`images recipe django` (the showcase preset showcase-full-stack): Django 5.2 LTS and psycopg 3 in a venv of
+    their own from sandbox-ai's lockfile (every wheel pinned by version and SHA-256, pip --require-hashes --no-deps
+    --only-binary, no build step), TypeScript from an npm lockfile (SHA-512, npm ci --ignore-scripts), psql and libpq
+    from Debian; nothing installed from a range, the validator accepts it."""
+    lines = []
+    assert im.main(["recipe", "django", "--from", "codex"], out=lines.append) == 0
+    assert "sandbox-ai build django" in lines[-1] and "--image-variant django" in lines[-1]
+    document, fragment, files = im.load("django")
+    assert im.errors(im.check(document, fragment, files)) == []
+    assert {"postgresql-client", "libpq5"} <= set(document["apt"]) and not document["npm"] and not document["pip"]
+    assert {e["target"] for e in document["files"]} == {"/opt/django/requirements.txt", "/opt/django/package.json",
+                                                        "/opt/django/package-lock.json"}
+    for name in ("requirements.txt", "package.json", "package-lock.json"):
+        assert files[name] == (im.RECIPE_FILES / "django" / name).read_bytes(), name
+    text = im.containerfile("django", document, fragment)
+    assert "python3 -m venv /opt/django/venv" in text
+    assert "pip install --no-cache-dir --require-hashes --no-deps --only-binary :all: -r /opt/django/requirements.txt" \
+        in text
+    assert "cd /opt/django" in text and "npm ci --omit=dev --ignore-scripts" in text and "npm install" not in text
+    assert "/usr/local/bin/django-admin" in text and "/usr/local/bin/tsc" in text and "curl" not in text
+    # The lockfiles: one exact version and hash per package, nothing else named.
+    requirements = (im.RECIPE_FILES / "django" / "requirements.txt").read_text()
+    pins = re.findall(r"^([a-z0-9-]+)==(\S+) \\\n\s+--hash=sha256:([0-9a-f]{64})$", requirements, re.M)
+    assert {name for name, _, _ in pins} == {"django", "asgiref", "sqlparse", "psycopg", "typing-extensions"}
+    assert dict((name, version) for name, version, _ in pins)["django"].startswith("5.2.")
+    named = [line for line in requirements.splitlines() if line and not line.startswith(("#", " "))]
+    assert len(named) == len(pins), "every requirement pinned with its hash"
+    lock = json.loads((im.RECIPE_FILES / "django" / "package-lock.json").read_text())
+    manifest = json.loads((im.RECIPE_FILES / "django" / "package.json").read_text())
+    assert manifest["private"] is True and manifest["dependencies"] == {"typescript": "6.0.3"}
+    entries = {path: entry for path, entry in lock["packages"].items() if path}
+    assert list(entries) == ["node_modules/typescript"] and entries["node_modules/typescript"]["version"] == "6.0.3"
+    assert re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", entries["node_modules/typescript"]["integrity"])
+    assert not entries["node_modules/typescript"].get("hasInstallScript")
+    assert "django" in im.RECIPES and "Django" in im.RECIPES["django"]["description"]
+
+
+def test_the_packaging_ships_the_recipes_and_service_images():
+    """The recipes' lockfiles (json and txt) and sandbox-ai's own Containerfiles go into the wheel and the sdist."""
+    tomllib = pytest.importorskip("tomllib")
+    patterns = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]["package-data"]["sandbox_ai"]
+    assert {"recipes/*/*.json", "recipes/*/*.txt", "service-images/*/*"} <= set(patterns)
+    manifest = (ROOT / "MANIFEST.in").read_text()
+    assert "graft sandbox/recipes" in manifest and "graft sandbox/service-images" in manifest
+    shipped = {path.relative_to(ROOT / "sandbox").as_posix() for path in (ROOT / "sandbox").glob("recipes/*/*")}
+    shipped |= {path.relative_to(ROOT / "sandbox").as_posix() for path in (ROOT / "sandbox").glob("service-images/*/*")}
+    for path in shipped:
+        assert any(fnmatch.fnmatch(path, pattern) for pattern in patterns), path
 
 
 # -- names during the build: Podman's own network, else the host's, else a clear stop --
@@ -579,10 +627,73 @@ def test_a_network_given_to_the_build_is_left_as_given(tmp_path, monkeypatch):
 
 
 def test_a_missing_variant_of_a_recipes_name_points_to_the_recipe(tmp_path, monkeypatch):
-    """`images new tor` makes an empty variant without the Tor tools: for a recipe's name the refusal says to make it
-    from the recipe and build it."""
+    """`images new media` makes an empty variant without the media tools: for a recipe's name the refusal says to make
+    it from the recipe and build it."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    with pytest.raises(ValueError, match=r"images recipe tor --from opencode && sandbox-ai build --variant tor"):
-        im.variant_image("opencode", "tor")
+    with pytest.raises(ValueError, match=r"images recipe media --from opencode && sandbox-ai build media"):
+        im.variant_image("opencode", "media")
     with pytest.raises(ValueError, match=r"images new other --from opencode"):
         im.variant_image("opencode", "other")
+
+
+def test_a_recipes_variant_for_each_agent_that_needs_it(config, fake_engine, capsys):
+    """User report from live use (2026-11-14): a dsh start wanted the variant tor while tor was claude's - a variant
+    name belonged to one agent. Now each agent has its own variants (images/variants/AGENT/NAME): a recipe's variant
+    (media) for claude and for dsh, each its own image (localhost/AGENT-sandbox-media), and where a name is a variant
+    of several agents its commands take it as NAME@AGENT."""
+    assert im.main(["recipe", "media", "--from", "claude"], out=[].append) == 0
+    lines = []
+    assert im.main(["recipe", "media", "--from", "dsh"], out=lines.append) == 0, "no clash with claude's tor"
+    assert im.variants() == [("media", "claude"), ("media", "dsh")]
+    assert im.variant_image("dsh", "media") == "localhost/dsh-sandbox-media:latest"
+    assert im.variant_image("claude", "media") == "localhost/claude-sandbox-media:latest"
+    with pytest.raises(ValueError, match="media is a variant of claude and dsh: name one of them, e.g. media@claude"):
+        im.agent_of("media")
+    assert im.agent_of("media@dsh") == "dsh" and im.describe("media@dsh")["target"] == "media@dsh"
+    assert im.build_command(im.shown_target("media", "dsh")) == "sandbox-ai build media@dsh"
+    targets = dict(im.targets())
+    assert targets["media@claude"] == "claude" and targets["media@dsh"] == "dsh"
+    assert im.main(["extend", "media@dsh", "--add-apt", "jq"]) == 0
+    assert "jq" in im.describe("media@dsh")["apt"] and "jq" not in im.describe("media@claude")["apt"]
+    assert im.build_plan("media@dsh") == ("dsh", "variant", 0)
+    assert [e["agent"] for e in im.history("media@dsh") if e["action"] == "new"] == ["dsh"]
+    # The build of one: its own image, the other untouched.
+    result = builder("--variant", "media@dsh")
+    assert result.returncode == 0, result.stderr
+    tags = [c[c.index("--tag") + 1] for c in fake_engine() if c[0] == "build"]
+    assert tags[-1] == "localhost/dsh-sandbox-media:latest" and "localhost/claude-sandbox-media:latest" not in tags
+    # Removed: the other stays, and is a plain name again.
+    assert im.main(["remove", "media@claude", "--keep-image"]) == 0
+    assert im.variants() == [("media", "dsh")] and im.agent_of("media") == "dsh"
+    with pytest.raises(ValueError, match="exists already"):
+        im.new_variant("media", "dsh")
+
+
+def test_variants_of_before_move_to_their_agents_folder(config):
+    """A variant of before (images/NAME, one agent per name) is moved to images/variants/AGENT/NAME the first time the
+    variants are read; its extension and history stay."""
+    old = im.config_root() / "web"
+    old.mkdir(parents=True)
+    (old / "image.json").write_text(json.dumps({**im.empty_document("claude"), "apt": ["jq"]}))
+    (old / im.FRAGMENT).write_text("RUN true\n")
+    assert im.variants() == [("web", "claude")]
+    moved = im.config_root() / "variants" / "claude" / "web"
+    assert not old.exists() and (moved / "image.json").exists() and (moved / im.FRAGMENT).read_text() == "RUN true\n"
+    assert im.describe("web")["apt"] == ["jq"] and im.describe("web")["path"] == str(moved)
+    # An agent's own extension stays where it is.
+    assert im.main(["extend", "claude", "--add-apt", "ripgrep"]) == 0
+    assert (im.config_root() / "claude" / "image.json").exists() and im.variants() == [("web", "claude")]
+
+
+def test_a_start_names_the_build_of_its_own_agents_variant(config):
+    """image_fix (what a start says, and builds, when the variant's image is missing): the agent's own variant -
+    NAME@AGENT where another agent has one of that name."""
+    spec = importlib.util.spec_from_file_location("launcher_for_variants", ROOT / "sandbox/agent_sandbox.py")
+    s = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(s)
+    assert im.main(["recipe", "media", "--from", "dsh"], out=[].append) == 0
+    a = s.parse_args(["dsh", "--image-variant", "media"])
+    assert s.image_fix(a, "dsh", "localhost/dsh-sandbox-media:latest") == "sandbox-ai build --variant media"
+    assert im.main(["recipe", "media", "--from", "claude"], out=[].append) == 0
+    assert s.image_fix(a, "dsh", "localhost/dsh-sandbox-media:latest") == "sandbox-ai build --variant media@dsh"
+    assert s.variant_base(a) is None  # (on the agent's own base)

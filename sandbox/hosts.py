@@ -50,16 +50,29 @@ import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
+import importlib.util
 import tempfile
 import threading
 import time
 
-LOADING = threading.RLock()  # the lazily loaded helper modules below
+HERE = Path(__file__).resolve().parent
 
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 LOCAL = "local"
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 TARGET = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}@)?(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])")
@@ -219,6 +232,8 @@ def load(path=None):
         raise ValueError(f"{path}: too large")
     try:
         document = json.loads(data.decode("utf-8"))
+    except RecursionError:  # (nested deeper than Python reads: damaged)
+        raise ValueError(f"{path}: not valid JSON (nested too deeply)") from None
     except (UnicodeDecodeError, ValueError) as exc:
         raise ValueError(f"{path}: not valid JSON ({exc})") from None
     hosts = document.get("hosts") if isinstance(document, dict) else None
@@ -398,8 +413,11 @@ def ensure_master(entry, path, runner=subprocess.run, deadline=None):
                      "-o", f"ControlPersist={CONTROL_PERSIST}", "-f", "-N", "--", entry["ssh"]]
             ok = runner(start, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         timeout=budget(CONNECT_TIMEOUT + 5)).returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            LOG.debug("hosts", f"the shared SSH connection to {entry['ssh']} could not be checked or started", exc)
             ok = False
+        if not ok:
+            LOG.debug("hosts", f"no shared SSH connection to {entry['ssh']}: each command connects on its own")
         note_master(path, fd, ok)
         return ok
     finally:
@@ -490,7 +508,8 @@ def argv(name, args, tty=False, path=None, sudo=None, control=None):
 def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, sudo=None):
     """(exit status, stdout, stderr) of `sandbox-ai ARGS` on host NAME; 255 when SSH itself failed, 124 when it
     did not end within TIMEOUT seconds (starting the shared connection included)."""
-    deadline = time.monotonic() + timeout
+    begun = time.monotonic()
+    deadline = begun + timeout
     control = entry = None
     if name != LOCAL and runner is subprocess.run:  # (tests give a runner of their own: one command each)
         entry = load(path).get(name)
@@ -509,7 +528,26 @@ def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, s
             status, out, err, _ = run_once(name, args, input, max(deadline - time.monotonic(),
                                                                   min(timeout, CONNECT_TIMEOUT + 5)),
                                            timeout, path, runner, sudo, None)
+    ran(name, f"sandbox-ai {LOG.command_line(args)}", begun, status, err)
     return status, out, err
+
+
+def ran(name, what, begun, status, err):
+    """The line of a command on host NAME in launcher.log: DEBUG when it worked, INFO with the end of its error output
+    when the command said no; that SSH could not reach the host (255, no answer: 124, no ssh: 127) once until it
+    answers again (the app polls the hosts' status)."""
+    text = f"{name}: {what} ({time.monotonic() - begun:.1f} s): exit status {status}"
+    unreachable = status in (124, 127, 255)
+    key = ("host reached", name)
+    if unreachable:
+        LOG.changed(key, False, "hosts", f"{text}: {LOG.tail(err)}", "WARNING")
+        return
+    if LOG.state(key) is False:
+        LOG.changed(key, True, "hosts", f"{name} answers again")
+    if status == 0:
+        LOG.debug("hosts", text)
+    else:
+        LOG.info("hosts", f"{text}: {LOG.tail(err)}")
 
 
 # What ssh itself says when the shared connection could not even open a session (nothing reached the remote host):
@@ -555,7 +593,7 @@ def run_json(name, args, timeout=120, path=None, runner=subprocess.run):
     status, out, err = run(name, args, timeout=timeout, path=path, runner=runner)
     try:
         return json.loads(out)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ValueError(f"{name}: sandbox-ai {' '.join(args[:2])}: exit status {status}: "
                          f"{printable((err or out).strip()[-500:])}") from None
 
@@ -846,7 +884,7 @@ def load_statuses():
         fd = os.open(status_file(), os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             data = json.loads(stream.read(LIMIT).decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return {}
     return {name: value for name, value in data.items() if isinstance(value, dict)} if isinstance(data, dict) else {}
 
@@ -856,10 +894,15 @@ def save_statuses(data):
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=".hosts-status-", dir=path.parent)
-        with os.fdopen(fd, "w") as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            json.dump(data, stream, indent=1)
-        os.replace(temporary, path)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                json.dump(data, stream, indent=1)
+            os.replace(temporary, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
     except OSError:
         pass  # a cache: without it the hosts are asked again next time
 
@@ -1177,16 +1220,23 @@ def remote_shell(entry, script, input=None, timeout=60, runner=subprocess.run, t
     """(status, stdout bytes, stderr text) of SCRIPT run by sh on host ENTRY (`sh -c SCRIPT`: whatever the user's
     login shell is, fish or csh too; no sandbox-ai needed); INPUT: bytes on its standard input."""
     command = [*ssh_base(entry, tty), f"sh -c {shlex.quote(script)}"]
+    name, begun = entry.get("ssh") if isinstance(entry, dict) else "?", time.monotonic()
+    what = f"a shell script ({len(script)} characters)"
     if tty:
-        return runner(command).returncode, b"", ""
+        status = runner(command).returncode
+        ran(name, what, begun, status, "")
+        return status, b"", ""
     try:
         done = runner(command, input=input if input is not None else b"", capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
+        ran(name, what, begun, 124, f"no answer within {timeout} s")
         return 124, b"", f"no answer within {timeout} s"
     except OSError as exc:
+        ran(name, what, begun, 127, f"{command[0]}: {exc.strerror}")
         return 127, b"", f"{command[0]}: {exc.strerror}"
     err = done.stderr.decode("utf-8", "replace") if isinstance(done.stderr, bytes) else (done.stderr or "")
     out = done.stdout if isinstance(done.stdout, bytes) else (done.stdout or "").encode()
+    ran(name, what, begun, done.returncode, err)
     return done.returncode, out, err
 
 
@@ -1604,6 +1654,11 @@ def cli(argv_, out=print):
         return 0
     if a.command == "test":
         result = test(a.name)
+        LOG.log("INFO" if result["ssh"] and not result["error"] else "WARNING", "hosts",
+                f"test {a.name}: " + (f"ssh ok, {result['version']}" if result["ssh"] else "ssh failed")
+                + (f"; {result['error']}" if result["error"] else "")
+                + "".join(f"; doctor {c['status']}: {c.get('check')}: {c.get('detail')}" for c in result["doctor"] or []
+                          if isinstance(c, dict) and c.get("status") in ("warn", "fail")))
         if a.json:
             out(json.dumps(result, indent=2))
         else:
@@ -1624,7 +1679,27 @@ def cli(argv_, out=print):
     if not args:
         raise ValueError("sandbox-ai hosts run NAME -- ARGS...")
     command = argv(a.name, args, tty=sys.stdin.isatty())
-    return subprocess.run(command).returncode
+    begun = time.monotonic()
+    status = subprocess.run(command).returncode
+    # (its output went to this terminal, not here: only how it ended - 255: SSH did not reach the host. Asked for,
+    # so said each time, not once per change as the polls' ran())
+    text = f"{a.name}: sandbox-ai {LOG.command_line(args)} (hosts run, {time.monotonic() - begun:.1f} s): exit " \
+           f"status {status}"
+    if status == 255:
+        LOG.warning("hosts", f"{text}: SSH did not reach {a.name} ({hosts_entry_text(a.name)}; ssh's message is on "
+                             "the terminal; check it with: sandbox-ai hosts test " + a.name + ")")
+    else:
+        LOG.log("DEBUG" if status == 0 else "INFO", "hosts", text)
+    return status
+
+
+def hosts_entry_text(name):
+    """How host NAME is reached (ssh USER@HOST:PORT), for a line of the log."""
+    try:
+        entry = load().get(name) or {}
+    except (OSError, ValueError):
+        return "its entry unreadable"
+    return f"ssh {entry.get('ssh')}" + (f":{entry['port']}" if entry.get("port") else "")
 
 
 def module_version():

@@ -275,11 +275,6 @@ class Corner(QObject):
         super().__init__(target)
         self.target, self.button = target, button
         self.header = header_of(target)
-        if self.header is not None:
-            # The (?) sits over the last column's title: that title keeps room for it ("Runnin(?)g" before), only
-            # while the (?)s are shown (the setting help_buttons).
-            self.header.setStyleSheet(self.header.styleSheet() + " QHeaderView[helpRoom=\"true\"]::section:last "
-                                      f"{{ padding-right: {HEADER_ROOM}px; }}")
         target.installEventFilter(self)
         if isinstance(target, QAbstractScrollArea):
             target.verticalScrollBar().rangeChanged.connect(lambda *_: self.place())
@@ -287,9 +282,11 @@ class Corner(QObject):
         self.place()
 
     def make_room(self):
-        """While the (?)s are shown, the header draws no title under its corner: its viewport ends HEADER_ROOM before
-        the table's (a title scrolled there is cut at that edge, never covered: review 6 L2, "Answ(?)" on a table
-        that scrolls sideways), and the last title keeps that room too (scrolled to the end)."""
+        """While the (?)s are shown (the setting help_buttons), the header draws no title under its corner: its
+        viewport ends HEADER_ROOM before the table's (a title scrolled there is cut at that edge, never covered: review
+        6 L2, "Answ(?)" on a table that scrolls sideways; "Runnin(?)g" before). That is all the room the (?) needs: a
+        padding of the last title for it as well (until 0.1.95) was not counted in the title's width and cut it on
+        both sides ("tat" for State)."""
         header = self.header
         if header is None or bool(header.property("helpRoom")) == _SHOWN[0]:
             return

@@ -145,6 +145,8 @@ def load():
         raise ValueError(f"{file} must be a regular file of yours with mode 0600")
     try:
         data = json.loads(file.read_text())
+    except RecursionError:  # (nested deeper than Python reads: damaged)
+        raise ValueError(f"{file}: not valid JSON (nested too deeply)") from None
     except (OSError, ValueError) as exc:
         raise ValueError(f"{file}: {exc}") from None
     logins = data.get("logins") if isinstance(data, dict) and data.get("version") == 1 else None
@@ -161,11 +163,17 @@ def load():
 def save(logins):
     file = path()
     file.parent.mkdir(parents=True, exist_ok=True)
-    temporary = file.with_name(f".{file.name}.{os.getpid()}")
+    # A name of its own each time, gone again when the write fails: one left behind (a full disk, a kill) by this
+    # PID never refuses a later save.
+    temporary = file.with_name(f".{file.name}.{os.getpid()}-{os.urandom(4).hex()}")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w") as stream:
-        json.dump({"version": 1, "logins": logins}, stream, indent=2)
-    os.replace(temporary, file)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"version": 1, "logins": logins}, stream, indent=2)
+        os.replace(temporary, file)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def server(url):

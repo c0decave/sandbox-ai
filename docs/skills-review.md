@@ -15,11 +15,12 @@ network, what was left out and why, and how sandbox-ai keeps it in check. Review
 - **At least 14 days old.** Every pin is the newest first-parent commit of the default branch committed on or before
   2026-10-28 (the release is 2026-11-12). Where newer commits exist, what they add is said below.
 - **One copy for every agent.** A built-in kit's `skills/` folder is shared by its agent folders (`claude/`,
-  `codex/`, `opencode/`, each marked with a `.shared-skills` file; only sandbox-ai's own kits can do this, see
+  `codex/`, `opencode/`, `hermes/`, `dsh/`, `qwen/`, `goose/`, each marked with a `.shared-skills` file; only sandbox-ai's own kits can do this, see
   `kits.shared_skills`). A start copies the skills read-only to where each agent looks: `~/.claude/skills`
   (Claude Code), `~/.agents/skills` (Codex), `~/.config/opencode/skills` (OpenCode 1.19.5; it takes a skill whose
   `name` matches its folder, `^[a-z0-9]+(-[a-z0-9]+)*$`, with a description of at most 1024 characters - every
-  vendored skill passes, tested). Nothing is installed, fetched or built at a start.
+  vendored skill passes, tested), `~/.agents/skills` for Hermes too (its external skills: sandbox/hermes.py) and for DeepSeek Harness (its shared
+  agents root) and for Goose, `~/.qwen/skills` (Qwen Code). Nothing is installed, fetched or built at a start.
 - **Off by default.** No kit is part of a start unless it is named: `--kit NAME`, `"options": ["--kit", "NAME"]` in
   the project's `.sandbox-ai.json`, or *Use in the current project* on the app's Kits & plugins page. Reasons: each
   skill's description goes into every session's context and steers the agent; superpowers changes how the agent
@@ -30,8 +31,8 @@ network, what was left out and why, and how sandbox-ai keeps it in check. Review
   Superpowers' SessionStart hook is not part of the kit.
 - **Telemetry off.** With the default `--telemetry off` (and `strict`), every sandbox gets
   `HYPERFRAMES_NO_TELEMETRY=1`, `DO_NOT_TRACK=1`, `HYPERFRAMES_NO_UPDATE_CHECK=1`, `HYPERFRAMES_NO_AUTO_INSTALL=1`,
-  `HYPERFRAMES_NO_OPTIONAL_INSTALL=1`, `HYPERFRAMES_SKIP_SKILLS=1` and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Only
-  `--telemetry on` leaves them out.
+  `HYPERFRAMES_NO_OPTIONAL_INSTALL=1`, `HYPERFRAMES_SKIP_SKILLS=1` and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Nothing
+  leaves them out: telemetry is always off (since 0.1.95 there is no `--telemetry on`, and `--env` cannot undo them).
 - **The sandbox still holds.** Whatever a skill tells the agent to run, it runs inside the sandbox: its firewall and
   connection proxy (no host the start does not allow; `registry.npmjs.org` only with `--allow-npm`), its read-only
   kit copies, approvals, the privacy check of pushes, the kill switch. The review below assumes that and names the
@@ -267,7 +268,7 @@ packages), `.gitignore`/`.gitkeep`.
     `DO_NOT_TRACK=1`, and `track()` returns before it writes an id or calls `fetch`. `tests/test_vendored_skills.py`
     runs that very file under Node with a stub `fetch`: with the environment a sandbox gets, zero calls and no
     `~/.hyperframes`; without it (the control), one POST.
-  sandbox-ai sets both variables in every sandbox unless `--telemetry on`; and PostHog's host is not on any
+  sandbox-ai sets both variables in every sandbox (telemetry is always off); and PostHog's host is not on any
   allow-list, so the firewall refuses it anyway.
 - **risk (handled): downloads and updates at run time.** The CLI checks npm for updates and can install a newer CLI
   in the background (`autoUpdate`), installs optional packages on first use (`HYPERFRAMES_NO_OPTIONAL_INSTALL`),
@@ -406,10 +407,10 @@ own (`--kit tdd`, `--kit superpowers`); choose one to avoid two TDD procedures c
 
 `tests/test_vendored_skills.py`: every vendored file equals the pinned upstream file (SHA-256 and git blob id) and
 nothing unlisted is in a kit; every pin is at least 14 days old; licences and NOTICE are there; every skill is valid
-for Claude Code, Codex and OpenCode; a dry start with `--kit NAME` lists the skills for each agent and a start stages
+for Claude Code, Codex, OpenCode, Hermes, DeepSeek Harness, Qwen Code and Goose; a dry start with `--kit NAME` lists the skills for each agent and a start stages
 them read-only where each agent looks; without the kit no vendored skill is there; no vendored kit has hooks or
 plugins, and hallmark-hook's hook is unapproved until trusted; nothing is installed from the network; every sandbox
-gets the telemetry switches (not with `--telemetry on`); the vendored hyperframes telemetry code sends nothing with
+gets the telemetry switches (always: there is no `--telemetry on`); the vendored hyperframes telemetry code sends nothing with
 them (run under Node); the recipes pin every npm package by SHA-512, run no install scripts and use Debian's browser;
 `sandbox-ai kits list --json` shows every kit with its skills per agent. The app's Kits & plugins page lists the kits
 and adds one to the current project (`projects/sandbox-ai-app/tests/test_kits_page.py`).

@@ -142,6 +142,48 @@ def test_a_preset_with_a_brain_folder_asks_for_it_and_gives_it_to_its_server(env
     form.deleteLater()
 
 
+SHOWCASES = ("showcase", "showcase-full-stack", "showcase-vpn", "showcase-local-llm", "showcase-second-opinion")
+
+
+def test_the_showcases_are_demos_in_both_languages_and_keep_what_they_show_on_the_board(env):
+    """2026-11-12, more showcase presets: in the gallery's demos (Learning, games & demos), each with its German title;
+    built into a board, each keeps what it shows: two services, a VPN with its check, an LLM server's parameters and
+    loop guard, a helper agent."""
+    sai, root, _ = env
+    gallery = gallery_of(sai, root)
+    by_key = {key: [c.preset.name for c in cards] for _, _, cards, key in gallery.sections}
+    assert set(SHOWCASES) <= set(by_key[f"{PR.SAI_CATEGORY}:fun"])
+    gallery.deleteLater()
+    i18n.set_language("de")
+    catalogue = PR.catalogue(sai)
+    for name in SHOWCASES:
+        preset = catalogue.find(f"sandbox-ai:sai-{name}")
+        assert preset.text(preset.title).startswith("Schaufenster:"), name
+    i18n.set_language("en")
+    argv = {}
+    for name in SHOWCASES[1:]:
+        preset = catalogue.find(f"sandbox-ai:sai-{name}")
+        values = {p.marker: p.default or ("home" if p.marker.startswith("<vpn:") else "x")
+                  for p in preset.placeholders}
+        board = PR.build(sai, preset, root / "project", agent="codex", values=values)
+        assert not B.placeholders(board), name
+        argv[name] = B.to_argv(sai, board)
+    stack = argv["showcase-full-stack"]
+    assert stack.count("--service") == 2 and any(v.startswith("db:image=postgres,port=5432") for v in stack)
+    assert any(v.startswith("web:image=web,port=8080") for v in stack)
+    assert {"--allow-pypi", "--allow-npm", "--allow-github"} <= set(stack)
+    vpn = argv["showcase-vpn"]
+    assert vpn[vpn.index("--vpn") + 1] == "home" and "--dns" in vpn and "api.ipify.org" in vpn
+    llm = argv["showcase-local-llm"]
+    assert llm[llm.index("--llm") + 1] == "ollama" and "--no-provider-defaults" in llm
+    params = [llm[i + 1] for i, v in enumerate(llm) if v == "--llm-param"]
+    # (the board writes the guard switched on as its layer: loop_guard=on is loop_guard.enabled=on)
+    assert {"temperature=0.6", "max_tokens=8192", "loop_guard.warn=2", "loop_guard.block=4"} <= set(params), params
+    assert "loop_guard=on" in params or "loop_guard.enabled=on" in params, params
+    helper = argv["showcase-second-opinion"]
+    assert helper[helper.index("--helper") + 1] == "codex"
+
+
 # --- a board saved as a preset of yours, with everything it has -------------------------------------------------
 
 def rich_board(sai, root):
@@ -323,3 +365,43 @@ def test_the_dialog_and_rename(env):
     assert not gallery.rename_button.isEnabled() and gallery.rename_preset({"title": "x"}) is None
     for widget in (dialog, for_it, edit, gallery):
         widget.deleteLater()
+
+
+def test_save_keeps_the_board_where_it_belongs(env, monkeypatch):
+    """Save (button, Ctrl+S) beside Save as preset…: a board made from a preset of yours is saved into it at once (its
+    name, description, category and notes kept, no question, no second copy of the note about this computer's
+    paths); a board with a project folder is applied to its project file; any other is saved as a new preset of yours
+    (the dialog of Save as preset…)."""
+    from PySide6.QtGui import QKeySequence
+    from sandbox_ai_app import board_view
+    from sandbox_ai_app.board_view import BoardPage
+    sai, root, _ = env
+    page = BoardPage(sai, lambda *a, **k: None, lambda: {"board_grid": 20})
+    assert page.save_button.text() == "Save"
+    page.board = rich_board(sai, root)
+    first = page.save_as_preset({"title": "Mine", "description": "two\nlines", "category": "testing",
+                                 "notes": ["my note"], "keep": True})
+    page.new_from_preset(first, {p.marker: p.default for p in first.placeholders})
+    page.board.first("limits").props["--memory"] = "6g"
+    monkeypatch.setattr(board_view, "ask_first", lambda *a, **k: pytest.fail("Save asks nothing"), raising=False)
+    assert page.save_board() == "preset"
+    mine = PR.load_mine(sai)[0]
+    assert [p.id for p in mine] == ["my-mine"] and "6g" in mine[0].options, "saved into it, not added"
+    assert (mine[0].title, mine[0].description, mine[0].category) == ("Mine", "two\nlines", "testing")
+    assert mine[0].notes.count("my note") == 1 and len(mine[0].notes) == len(first.notes), "no note twice"
+    assert page.save_board() == "preset" and len(PR.load_mine(sai)[0][0].notes) == len(first.notes)
+
+    applied = []
+    page.own_preset = None
+    page.directory = str(root / "project")
+    monkeypatch.setattr(page, "apply", lambda *a, **k: applied.append(True) or True)
+    assert page.save_board() == "project" and applied == [True]
+
+    page.directory = None
+    page.board = B.from_argv(sai, "claude", ["--allow-pypi"], [])
+    dialogs = []
+    monkeypatch.setattr(page, "save_as_preset", lambda choices=None: dialogs.append(choices) or None)
+    assert page.save_board() is None and dialogs == [None], "no preset, no folder: Save as preset…'s dialog"
+    keys = [s.key() for s in page.findChildren(board_view.QShortcut)]
+    assert QKeySequence(QKeySequence.StandardKey.Save) in keys
+    page.deleteLater()

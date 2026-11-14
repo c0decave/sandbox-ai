@@ -339,12 +339,13 @@ def test_a_start_with_ask_allow(m):
     assert run.config["ask"] is True and run.run_record["ask"] == "allow"
     assert "--ask allow: nothing is asked, every question is allowed at once" in run.err
     assert "a canary's alarm still pauses the sandbox" in run.err
-    watch = dict(threads)["watch"]
-    assert watch == {"auto": True, "interval": 0.2} and dict(threads)["serve_browser"] == {"auto": True}
+    watch, browser = dict(threads)["watch"], dict(threads)["serve_browser"]
+    assert browser.pop("listen") is s.RUNTIME.listen_unix  # the launcher's own runtime: none loaded for it
+    assert watch == {"auto": True, "interval": 0.2} and browser == {"auto": True}
     assert m.plan("--ask", "allow")["ask"] == "allow" and m.plan()["ask"] == "on" and m.plan("-Q", "off")["ask"] == "off"
     plain = recorded_threads(m)
-    assert m.run().run_record["ask"] == "on" and dict(plain)["watch"] == {} and dict(plain)["serve_browser"] == {
-        "auto": False}
+    assert m.run().run_record["ask"] == "on" and dict(plain)["watch"] == {}
+    assert {key: value for key, value in dict(plain)["serve_browser"].items() if key != "listen"} == {"auto": False}
     nothing = m.run("--no-proxy", "--ask", "allow")
     assert nothing.run_record["ask"] is None and "--ask allow does nothing here" in nothing.err
 

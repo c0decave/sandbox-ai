@@ -37,7 +37,6 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
-import shutil
 import signal
 import stat
 import subprocess
@@ -538,7 +537,7 @@ def write_json(path, document):
 def read_json(path):
     try:
         document = json.loads(Path(path).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return document if isinstance(document, dict) else None
 
@@ -915,7 +914,7 @@ class Plan:
             for line in data[:end].splitlines():
                 try:
                     event = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if isinstance(event, dict):
                     self.handle(event)
@@ -1252,18 +1251,29 @@ def masked(token):
     return token[:6] + "…" if len(token) > 10 else "…"
 
 
+def changed(path):
+    """PATH's modification time, 0 when it is gone (a start drops the old records while a list sorts them) or a link
+    to nothing."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0
+
+
 def list_runs(out=print, as_json=False):
     runs = []
-    for path in sorted((state_root() / "runs").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for path in sorted((state_root() / "runs").glob("*.json"), key=changed, reverse=True):
         record = read_json(path)
         if record is None:
             continue
         status = record.get("status")
         if status == "active" and not launcher_alive(record):
             status = "abandoned"
-        events = read_events(record.get("run", path.stem))
-        runs.append({"run": record.get("run", path.stem), "started": record.get("started"), "status": status,
-                     "canaries": len(record.get("canaries", [])), "events": len(events),
+        run = record["run"] if isinstance(record.get("run"), str) else path.stem
+        planted = record.get("canaries")
+        events = read_events(run)
+        runs.append({"run": run, "started": record.get("started"), "status": status,
+                     "canaries": len(planted) if isinstance(planted, (list, dict)) else 0, "events": len(events),
                      "alerts": sum(1 for e in events if e.get("action") not in ("log", None) and e.get("canary"))})
     if as_json:
         out(json.dumps(runs, indent=2))
@@ -1417,7 +1427,7 @@ def model_requests(log_dir, run, hosts):
                         continue
                     try:
                         record = json.loads(line)
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         continue
                     if not isinstance(record, dict):
                         continue
@@ -1543,7 +1553,7 @@ def show_log(run=None, out=print, as_json=False):
         logs = [log_entries(resolve_run(run))]
     else:
         logs = []
-        for path in sorted((state_root() / "runs").glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        for path in sorted((state_root() / "runs").glob("*.json"), key=changed, reverse=True):
             if path.name.endswith(".events.jsonl") or not RUN_NAME.fullmatch(path.stem):
                 continue
             if read_events(path.stem):

@@ -120,8 +120,8 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 def test_pages_and_preview(window, env):
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
         "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "MANAGE",
-        "File manager", "Kits & plugins", "MCP servers", "LLM servers", "Images", "Credentials", "Teams", "INSIGHT",
-        "Connections", "Activity", "Statistics",
+        "File manager", "Kits & plugins", "MCP servers", "LLM servers", "Images", "Credentials", "Teams", "MONITORING",
+        "Connections", "Activity", "LLM traffic", "Statistics",
         "SYSTEM", "System", "Hosts", "Help"]
     launch = window.launch
     launch.agent.setCurrentText("codex")
@@ -328,7 +328,9 @@ def test_sandboxes_lists_and_manages_the_other_hosts_starts(window, wait, monkey
     assert page.stop_button.isEnabled() and page.session_buttons["pause"].isEnabled()
     assert not page.session_buttons["resume"].isEnabled()
     # While it runs, what it may reach, its workspaces, devices and limits are changed there; its log is there.
-    assert all(b.isEnabled() for b in page.run_named.values()), "its log too: the Connections page reads it there"
+    assert all(b.isEnabled() for key, b in page.run_named.items() if key != "browser"), \
+        "its log too: the Connections page reads it there"
+    assert "no browser of its own" in page.run_named["browser"].toolTip()  # (started without --browser)
     # The Host filter: all, this machine, each host.
     assert page.host_filter.isVisibleTo(page)
     assert [page.host_filter.itemData(i) for i in range(page.host_filter.count())] == [None, "local", "ct1", "ct2"]
@@ -504,6 +506,23 @@ def test_approvals_are_read_in_the_background(window, env, wait):
     page.poll_soon()
     assert page.open.rowCount() == 0, "the scan runs in a thread; its result arrives through the event loop"
     assert wait(lambda: page.open.rowCount() == 1 or page.poll_soon())
+
+
+def test_approvals_asked_and_refused_in_are_shown_whole(window, env):
+    """Design review 0.1.95: "39…go" and "no ti…limit" - the columns were fitted while these cells were still
+    empty (they are set after the rows), so they kept the width of their titles."""
+    run = fake_run(env)
+    ask(run, "1700000000-1-4", seconds_ago=15, kind="dns", name="pypi.org")
+    ask(run, "1700000000-1-5", seconds_ago=5, kind="browser", url="https://login.example/device")
+    page = window.approvals
+    window.show_page("approvals", raise_window=False)
+    page.poll()
+    metrics = page.open.fontMetrics()
+    for row in range(page.open.rowCount()):
+        for column in (3, 4):
+            item = page.open.item(row, column)
+            bold = QtGui.QFontMetrics(item.font()) if item.font().bold() else metrics
+            assert page.open.columnWidth(column) >= bold.horizontalAdvance(item.text()) + 8, (column, item.text())
 
 
 def test_approvals_countdown_reaches_refused(window, env):
@@ -887,7 +906,7 @@ def test_images_editor_validates_saves_and_makes_variants(window, env, wait):
     page.create_variant("web", "claude")
     assert wait(lambda: not page.task.running, 30)
     assert page.description["target"] == "web" and page.description["apt"] == ["jq", "ripgrep"]
-    assert (env / "config" / "sandbox-ai" / "images" / "web" / "image.json").exists()
+    assert (env / "config" / "sandbox-ai" / "images" / "variants" / "claude" / "web" / "image.json").exists()
     page.create_variant("claude", "codex")
     assert wait(lambda: not page.task.running, 30)
     assert "did not create the variant claude" in widgets.SHOWN[-1][1]
@@ -903,7 +922,7 @@ def test_images_editor_validates_saves_and_makes_variants(window, env, wait):
     page.images.selectRow(0)
     page.delete_variant()
     assert wait(lambda: not page.task.running, 30)
-    assert not (env / "config" / "sandbox-ai" / "images" / "web").exists() and page.description is None
+    assert not (env / "config" / "sandbox-ai" / "images" / "variants" / "claude" / "web").exists() and page.description is None
     # The theme changes the colours at once.
     theme.apply("dark")
     try:
@@ -973,7 +992,7 @@ def test_credentials_page_logins_and_secrets(window, env, wait):
     page = window.credentials
     page.refresh()  # in a thread: asking the keyring may take seconds
     assert wait(lambda: not widgets.busy(page))
-    assert [page.logins.item(r, 0).text() for r in range(page.logins.rowCount())] == list(window.sai.agents)
+    assert [page.logins.item(r, 0).text() for r in range(page.logins.rowCount())] == list(window.sai.login_agents())
     assert "private files" in page.backend_label.text()
     page.name.setText("DEMO_TOKEN")
     page.value.setText("very-secret-value")
@@ -1033,6 +1052,8 @@ def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path
     (session / "home").mkdir(parents=True)
     (session / "session.json").write_text(json.dumps({"agent": "claude", "options": [], "backend": "podman",
                                                       "workspace": str(env), "cwd": str(env), "created": "x"}))
+    monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [])
+    window.sandboxes.show_ended.setChecked(True)  # a stopped session is listed with "Ended" only
     read_now(window.sandboxes)
     window.sandboxes.table.selectRow(widgets.find_row(window.sandboxes.table, "session:work"))
     window.sandboxes.session("attach-app")
@@ -1076,6 +1097,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     window.sandboxes.show_allowed()
     assert time.monotonic() - began < 3, "the commands run in the background"
     live_mcp = [window.sandboxes.run_named[key] for key in ("add-mcp", "remove-mcp")]  # for kept starts only
+    live_mcp.append(window.sandboxes.run_named["browser"])  # for a start with --browser only
     buttons = [window.system.privacy_button, window.system.check_button, window.launch.dry_button,
                window.mcp.load_button, *[b for b in window.sandboxes.run_buttons if b not in live_mcp]]
     assert not any(button.isEnabled() for button in buttons), "the buttons that started them wait"
@@ -1365,7 +1387,11 @@ def test_results_of_background_jobs_do_not_block(window, monkeypatch, wait):
     assert QtWidgets.QApplication.activeModalWidget() is None
     shown = [w for w in QtWidgets.QApplication.topLevelWidgets() if w.isVisible()
              and isinstance(w, (QtWidgets.QMessageBox, QtWidgets.QDialog))]
-    assert len(shown) >= 2
+    assert len(shown) >= 1
+    # A job that worked only says so: a short notice in the window, no box (test_live_regressions_toasts).
+    from sandbox_ai_app import short_notices
+    assert short_notices.SHOWN[-1] == ("session stop", "stopped")
+    assert any(n.text == "stopped" for n in window.findChildren(short_notices.Notice))
     for widget in shown:
         widget.close()
     widgets.AUTO_ANSWER = True
@@ -1485,6 +1511,38 @@ class FakeTray:
 
     def hide(self):
         pass
+
+
+def test_the_keyboard_starts_in_the_navigation(window, qapp):
+    """Design review 0.1.95: with the focus visible, the window opened with its ring on the small « button that folds
+    the navigation (the first in the tab order): the keyboard starts in the navigation instead, on the page shown."""
+    window.show()
+    window.activateWindow()
+    qapp.processEvents()
+    assert qapp.focusWidget() is window.nav
+
+
+def orange_dot(icon):
+    picture = icon.pixmap(64, 64).toImage()
+    return picture.pixelColor(51, 13).name() == "#e8710a"
+
+
+def test_the_window_and_the_tray_show_the_app_s_icon_with_a_dot_while_questions_wait(window):
+    """Design review 0.1.95: theme.app_icon (a shield, an orange dot while a question waits) was never used: the
+    window had no icon of its own and the tray showed Qt's question-mark icon, the same with or without questions."""
+    assert not window.windowIcon().isNull() and not orange_dot(window.windowIcon())
+    icons = []
+
+    class Tray(FakeTray):
+        def setIcon(self, icon):  # noqa: N802
+            icons.append(icon)
+    window.tray = Tray()
+    window.pending_count = 2
+    window.show_question_count()
+    assert icons and orange_dot(icons[-1])
+    window.pending_count = 0
+    window.show_question_count()
+    assert not orange_dot(icons[-1])
 
 
 def test_closing_hides_to_the_tray_and_answering_goes_on(window, env, monkeypatch, wait):
@@ -1953,7 +2011,7 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
     window.fold_all(True)
     assert nav.isRowHidden(rows["connections"]) and nav.isRowHidden(rows["hosts"])
     assert not nav.isRowHidden(rows["launch"])  # the current page's section stays open
-    assert set(window.state.get("nav_collapsed")) == {"Running", "Insight", "Manage", "System"}
+    assert set(window.state.get("nav_collapsed")) == {"Running", "Monitoring", "Manage", "System"}
     window.show_page("hosts", raise_window=False)  # e.g. Ctrl+number, a tour, a link
     assert not nav.isRowHidden(rows["hosts"]) and window.current_page() == "hosts"
     window.fold_all(False)
@@ -2068,6 +2126,33 @@ def test_a_session_started_in_the_app_leaves_the_tab_of_a_run_started_elsewhere(
                       "run:claude-proj-cli1": instance("run", "claude-proj-cli1")})
     keys = {window.tabs.entry(i)["key"] for i in range(window.tabs.count())}
     assert window.tabs.count() == before + 2 and {"session:work", "run:claude-proj-cli1"} <= keys
+
+
+def test_a_start_with_the_name_of_a_running_session_opens_its_terminal(window, env, monkeypatch, tmp_path):
+    """Regression (live use): Start with the name of a session that runs already ran `sandbox-ai claude --session
+    NAME` again, and the tab ended with "Session NAME is running; attach with: ..." and exit status 1. Now its
+    terminal is opened (sandbox-ai session attach NAME, its open tab reused); a stopped one, another agent's or one
+    of another host still starts as asked."""
+    from sandbox_ai_app import terminal
+    opened = []
+    monkeypatch.setattr(terminal, "available", lambda: (True, ""))
+    monkeypatch.setattr(window.terminals, "open", lambda argv, title, directory=None, done=None: opened.append(argv))
+    page = window.sandboxes
+
+    def session(name, state="running", agent="claude", host="local"):
+        return backend.Instance("session", f"session:{name}", name, session=name, agent=agent, state=state, host=host)
+    page.instances = {"session:work": session("work"), "session:old": session("old", "stopped"),
+                      "session:cx": session("cx", agent="codex"),
+                      "session:far": session("far", host="box")}
+    window.in_terminal(window.sai.launch_argv("claude", [], session="work"), "claude (work)", embedded=True)
+    assert opened[-1] == window.sai.command("session", "attach", "work")
+    for name in ("old", "cx", "far", "new"):
+        argv = window.sai.launch_argv("claude", [], session=name)
+        window.in_terminal(argv, "claude", embedded=True)
+        assert opened[-1] == argv
+    argv = window.sai.launch_argv("claude", [], ["--session", "work"])  # the agent's own argument: no session
+    window.in_terminal(argv, "claude", embedded=True)
+    assert opened[-1] == argv
 
 
 @pytest.mark.parametrize("language", ("en", "de"))
@@ -2417,6 +2502,8 @@ def test_resuming_a_stopped_kept_start_shows_what_changed_in_its_home(window, mo
     monkeypatch.setattr(window.sai, "review_home", review_home)
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
     monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: ran.append((name, args)) or (0, "", ""))
+    monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [])
+    page.show_ended.setChecked(True)  # stopped sessions are listed with "Ended" only
     read_now(page)
     page.refresh_remote()
     assert wait(lambda: page.table.rowCount() == 2, 15)
@@ -2454,6 +2541,8 @@ def test_deleting_a_session_asks_with_cancel_as_the_default(window, monkeypatch,
     monkeypatch.setattr(window.sai, "instances", lambda: ([stopped], []))
     calls = []
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
+    monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [])
+    page.show_ended.setChecked(True)  # a stopped session is listed with "Ended" only
     read_now(page)
     page.table.selectRow(0)
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
@@ -2522,7 +2611,7 @@ def test_fold_all_folds_the_navigation_and_the_trees_of_the_page_shown(window, q
     assert top.isExpanded() and not window.nav.isRowHidden(window.nav_rows["launch"])
     window.set_compact_nav(True)
     window.actions["nav-fold"].trigger()
-    assert "Insight" not in window.collapsed and "Project" in window.collapsed, "kept for the titles"
+    assert "Monitoring" not in window.collapsed and "Project" in window.collapsed, "kept for the titles"
     assert not window.nav.isRowHidden(window.nav_rows["launch"]), "the strip shows every page"
     assert "strip of icons" in window.statusBar().currentMessage()
     window.set_compact_nav(False)

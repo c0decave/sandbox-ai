@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -200,8 +201,8 @@ def test_mcp_add_says_its_pull(monkeypatch):
     lines, seen = [], []
     mcp.pull_image("ghcr.io/c0decave/fetch-mcp:1.2", "fetch", lines.append, popen=fake_popen(PULL, seen=seen))
     assert seen == [["podman", "pull", "ghcr.io/c0decave/fetch-mcp:1.2"]]
-    assert lines[0] == "sandbox-mcp: pulling the image of fetch…"
-    assert "sandbox-mcp: pulling the image of fetch: 3 layers fetched" in lines
+    assert lines[0] == "sandbox-ai mcp: pulling the image of fetch…"
+    assert "sandbox-ai mcp: pulling the image of fetch: 3 layers fetched" in lines
     with pytest.raises(subprocess.CalledProcessError):
         mcp.pull_image("x", "fetch", lines.append, popen=fake_popen("Error: denied\n", status=125))
 
@@ -248,6 +249,55 @@ def test_a_sessions_terminal_says_what_its_supervisor_says_while_it_starts(tmp_p
     assert lines[-1] == "agent-sandbox: ready in 64 s"
 
 
+def test_on_a_terminal_a_sessions_start_is_a_progress_bar_of_its_steps(tmp_path, monkeypatch):
+    """User report from live use (2026-11-14): "agent-sandbox: still starting (17 s)…" lines. On a terminal the start
+    is now one line drawn again in place: a bar of its steps (MCP servers, VPN, kits, the sandbox, its terminal - those
+    it has), the step now, the time so far; what is no step (a warning) above it; at the end the full bar and "ready in
+    N s". Not on a terminal (a log, a script, SANDBOX_AI_PROGRESS=lines): the plain lines as before."""
+    progress = load("sandbox_ai_progress_bar_test", "progress.py")
+    sessions = load("sandbox_ai_sessions_bar_test", "sessions.py")
+    directory = tmp_path / "s"
+    (directory / "tmux").mkdir(parents=True)
+    log = directory / "supervisor.log"
+    log.write_text("")
+    clock, written = Clock(), []
+    script = iter(["agent-sandbox: starting the MCP server fetch (its image is pulled once, its sandbox started)…\n",
+                   "", "agent-sandbox: warning: the kit egm is old\n",
+                   "agent-sandbox: preparing the kits and plugins…\n",
+                   "agent-sandbox: starting the sandbox: its firewall, connection proxy and the agent…\n", "READY"])
+
+    def sleep(_seconds):
+        clock.now += 8
+        piece = next(script)
+        if piece == "READY":
+            (directory / "tmux" / "attach.sock").touch()
+        elif piece:
+            with open(log, "a") as stream:
+                stream.write(piece)
+    monkeypatch.setattr(sessions.time, "sleep", sleep)
+    bar = progress.Bar(["mcp", "kits", "pod", "terminal"], write=written.append, clock=clock)
+    process = type("Running", (), {"returncode": None, "poll": lambda self: None})()
+    sessions.wait_ready(directory, process, timeout=600, follow=0, clock=clock, bar=bar)
+    text = "".join(written)
+    drawn = [piece for piece in written if piece.startswith("\ragent-sandbox: [")]
+    assert drawn and all(piece.endswith("\x1b[K") for piece in drawn), "drawn again in place, never a new line"
+    assert any("] 1/4 MCP servers: starting the MCP server fetch" in piece for piece in drawn)
+    assert any("] 2/4 kits: preparing the kits" in piece for piece in drawn)
+    assert any("] 3/4 sandbox: starting the sandbox" in piece for piece in drawn)
+    assert "agent-sandbox: warning: the kit egm is old\n" in text, "what is no step: a line of its own, above"
+    assert "still starting" not in text
+    assert written[-1] == "\r\x1b[Kagent-sandbox: [####################] ready in 48 s\n"
+    # Where the bar goes: a terminal; plain lines for a log, a script, or when asked.
+    tty = type("Tty", (), {"isatty": lambda self: True})()
+    assert progress.bar_wanted(tty, {}) is True
+    assert progress.bar_wanted(tty, {"SANDBOX_AI_PROGRESS": "lines"}) is False
+    assert progress.bar_wanted(tty, {"TERM": "dumb"}) is False
+    assert progress.bar_wanted(type("Pipe", (), {"isatty": lambda self: False})(), {}) is False
+    assert sessions.start_steps(SimpleNamespace(mcp=["fetch"], vpn="home", kit=[], no_default_kit=False)) == \
+        ["mcp", "vpn", "kits", "pod", "terminal"]
+    assert sessions.start_steps(SimpleNamespace(mcp=[], vpn=None, kit=[], no_default_kit=True)) == ["pod", "terminal"]
+
+
 def test_the_launcher_says_each_phase(tmp_path, monkeypatch, capsys):
     """The launcher's steps before the agent: the MCP servers (pulled and started), the VPN, the kits, the sandbox -
     said in the order they run (here up to the first MCP server: the rest needs Podman)."""
@@ -269,7 +319,7 @@ def test_the_launcher_says_each_phase(tmp_path, monkeypatch, capsys):
         def vpn_for_servers(self, a, names):
             return {}
 
-        def ensure_running(self, name, a, vpn=None):
+        def begin_running(self, name, a, vpn=None):
             raise Stop(name)
 
         def __getattr__(self, name):

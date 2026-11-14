@@ -13,6 +13,7 @@ browser (login_browser.py) or the system browser, as Settings say.
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Qt, Signal, Slot
@@ -46,9 +47,21 @@ def preview(text, limit=PREVIEW):
     return "".join(shown) + ("…" if len(str(text)) > limit else "")
 
 
+URL_QUERY = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s?#]+)[?#]\S*", re.I)
+
+
+def for_log(text):
+    """A bar's TEXT for the log: redacted, and every address without its query (a sign-in's code and state travel
+    there)."""
+    from . import applog
+    return URL_QUERY.sub(r"\1?…", applog.redact(text))
+
+
 class TerminalBar(QFrame):
     """A line above a terminal: a sentence and its buttons (a question), or a note that goes by itself. One at a
-    time: a new one replaces the one shown (a question replaced counts as Cancel)."""
+    time: a new one replaces the one shown (a question replaced counts as Cancel). Each into the log (LOGGED; a
+    sign-in's bar is not: it shows the login's code)."""
+    logged = True
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,11 +96,16 @@ class TerminalBar(QFrame):
         without a choice (×, Esc, replaced)."""
         self.finish()
         self.timer.stop()
+        if self.logged:
+            from . import applog
+            applog.log({"error": "WARNING", "warn": "INFO"}.get(level, "INFO" if choices else "DEBUG"),
+                       "terminal", f"bar: {for_log(text)[:600]}"
+                       + (f" [{', '.join(str(label) for label, _ in choices)}]" if choices else ""))
         self.label.setText(str(text))
         self.setProperty("level", level)
         for index, (label, callback) in enumerate(choices):
             button = QPushButton(str(label))
-            button.clicked.connect(lambda _=False, f=callback: self.chosen(f))
+            button.clicked.connect(lambda _=False, f=callback, chosen=label: self.chosen(f, chosen))
             if index == 0:
                 button.setDefault(True)
             self.row.insertWidget(self.row.count() - 1, button)
@@ -103,7 +121,11 @@ class TerminalBar(QFrame):
         if seconds:
             self.timer.start(int(seconds * 1000))
 
-    def chosen(self, callback):
+    def chosen(self, callback, label=None):
+        if self.logged:
+            from . import applog
+            applog.log("INFO", "terminal", f"bar: chosen {label if label is not None else '?'}: "
+                                           f"{for_log(self.label.text())[:200]}")
         self.cancelled = None
         self.hide_bar()
         callback()
@@ -178,7 +200,7 @@ class TerminalHelper(QObject):
     def selection_text(self, payload):
         try:
             data = json.loads(payload)
-        except ValueError:
+        except (ValueError, RecursionError):
             return ""
         if not isinstance(data, dict):
             return ""
@@ -276,7 +298,7 @@ class TerminalHelper(QObject):
             rows = [str(r) for r in data["rows"]][:200]
             wrapped = [bool(w) for w in data.get("wrapped", [])][:200]
             cols, first, target = int(data["cols"]), int(data["first"]), int(data["target"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, RecursionError):
             return "[]"
         found = T.links_in_rows(rows, wrapped, max(1, min(cols, 1000)), first=first, touching=target)
         return json.dumps([{"url": link.url, "start": list(link.start), "end": list(link.end)} for link in found])

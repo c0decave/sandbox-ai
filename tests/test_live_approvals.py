@@ -603,3 +603,34 @@ def test_an_exception_goes_into_your_own_rules_in_place_and_the_projects_into_it
             ap.exception_rule({"question_kind": "http", "method": "POST", "url": f"https://a.example{path}"})
     rule, _ = ap.exception_rule({"question_kind": "http", "method": "POST", "url": "https://a.example/v1//a/b/"})
     assert rule["path"] == "/v1/a/b" and rt.Ruleset.http_rule(rule)["path"] == ["/v1/a/b"]
+
+
+def test_allowing_an_answered_lookup_again_opens_only_its_public_addresses(live, monkeypatch):
+    """Bug hunt: `approvals allow ID --scope run|always` on a lookup that was refused (unanswered, denied) became
+    `net allow --allow-host NAME` - which opens every address the agent's name resolves to, this host's and the LAN's
+    included - while an answer to the open question opens only its public ones (a name the agent controls may point
+    anywhere). Now the same holds: only public addresses, none at all refused; "always" is remembered as an answered
+    lookup is (approved.json, public addresses at every later start), never as the project's --allow-host."""
+    question = {"id": "1700000000-1-7", "kind": "dns", "name": "rebind.evil.example"}
+    calls = []
+
+    def fake_main(argv, out=print, resolver=None, **kwargs):
+        calls.append((argv, resolver(["rebind.evil.example"]) if resolver else None))
+        return 0
+    monkeypatch.setattr(net, "main", fake_main)
+    monkeypatch.setattr(ap, "redecide", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ap, "policy_allows_host", lambda name: True)
+    monkeypatch.setattr(ap, "resolve", lambda name: ["192.168.1.10", "127.0.0.1"])
+    for scope in ("run", "always"):
+        with pytest.raises(ValueError, match="non-public"):
+            ap.decide_again(("claude-1", live["record"], question), "allow", scope)
+    assert calls == []
+    monkeypatch.setattr(ap, "resolve", lambda name: ["192.168.1.10", "93.184.216.34"])
+    assert ap.decide_again(("claude-1", live["record"], question), "allow", "run", out=lambda line: None) == 0
+    assert calls == [(["allow", "claude-1", "--allow-host", "rebind.evil.example"],
+                      {"rebind.evil.example": ["93.184.216.34"]})]
+    calls.clear()
+    assert ap.decide_again(("claude-1", live["record"], question), "allow", "always", out=lambda line: None) == 0
+    assert calls == [(["allow", "claude-1", "--allow-host", "rebind.evil.example"],
+                      {"rebind.evil.example": ["93.184.216.34"]})]
+    assert ap.approved_for(live["record"]["workspace"])["hosts"] == ["rebind.evil.example"]

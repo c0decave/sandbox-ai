@@ -5,7 +5,8 @@ files.EDIT_LIMIT; a bigger file shows its first part, read-only).
 The file is read and written through its pane's files.Root (Root.read_file, Root.write_file), as every other
 operation of the file manager: relative to open directories, never through a symbolic link, a FIFO or a device, and
 the file is never run. Saving writes a temporary file beside it and renames it over the old one; when the file changed
-on disk since it was opened (the agent wrote it meanwhile), saving asks before it replaces it. Text that cannot be
+on disk since it was opened (the agent wrote it meanwhile), saving asks before it replaces it; when it is no longer
+there (removed, renamed or moved meanwhile), before it saves it anew where it was (files.Gone). Text that cannot be
 written back exactly as it was read (mixed line endings, a paragraph separator) opens read-only: the hex editor
 changes it byte by byte. Invisible and direction-changing characters (Trojan Source) are named above the text.
 
@@ -33,7 +34,7 @@ import sys
 
 from PySide6.QtCore import QEvent, QRect, QUrl, Qt, Signal
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFontMetrics, QKeySequence, QPainter, QPalette, QShortcut, QTextCursor, QTextDocument,
+    QColor, QDesktopServices, QFontMetrics, QKeySequence, QPainter, QPalette, QShortcut, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QCheckBox, QDialog, QHBoxLayout, QLineEdit, QPlainTextEdit, QPushButton, QSplitter,
@@ -41,10 +42,10 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import isValid
 
-from . import files, theme
+from . import applog, files, theme
 from .files import printable
 from .i18n import tr
-from .markdown_view import ImageSource, MarkdownView, is_markdown
+from .markdown_view import LONG_RUN, LONG_WORD, ImageSource, MarkdownView, is_markdown
 from .widgets import MONO, ask_first, background, button, confirm, plain_label, safe_tooltip, set_enabled
 
 BYTES_PER_LINE = 16
@@ -101,17 +102,107 @@ def editor_text(edit):
     return edit.document().toRawText().replace("\u2029", "\n").replace("\u2028", "\n")
 
 
-def changed_bytes(data, original, block=4096):
-    """The offsets where DATA differs from ORIGINAL (as far as both go). Compared a BLOCK at a time, byte by byte only
-    in the blocks that differ: a few changes in a big file are found at once (byte by byte in Python, 4 MiB took
-    150 ms)."""
+class ChangedBytes:
+    """The offsets of the bytes the hex view marks as changed: one byte each in a mask (a set of them took about 70
+    bytes an offset - a character typed at the start of a text of 5 MiB, then the hex view, marked every byte after it:
+    350 MB, and half a second in Python). In, add, len, iteration and == (with another, or a set of offsets) as a
+    set's."""
+
+    def __init__(self, mask=b""):
+        self.mask = bytearray(mask)
+
+    def add(self, offset):
+        if offset >= len(self.mask):
+            self.mask.extend(bytes(offset + 1 - len(self.mask)))
+        self.mask[offset] = 1
+
+    def __contains__(self, offset):
+        return isinstance(offset, int) and 0 <= offset < len(self.mask) and self.mask[offset] == 1
+
+    def __len__(self):
+        return self.mask.count(1)
+
+    def __bool__(self):
+        return 1 in self.mask
+
+    def __iter__(self):
+        at = self.mask.find(1)
+        while at >= 0:
+            yield at
+            at = self.mask.find(1, at + 1)
+
+    def __eq__(self, other):
+        if isinstance(other, ChangedBytes):
+            return self.mask.rstrip(bytes(1)) == other.mask.rstrip(bytes(1))
+        if isinstance(other, (set, frozenset)):
+            return len(self) == len(other) and all(offset in self for offset in other)
+        return NotImplemented
+
+    __hash__ = None
+
+    def copy(self):
+        return ChangedBytes(self.mask)
+
+    def __repr__(self):
+        return f"ChangedBytes({sorted(self)[:20]}{'...' if len(self) > 20 else ''})"
+
+
+NONZERO = bytes([0] + [1] * 255)  # (bytes.translate: a byte that differs becomes 1)
+
+
+def changed_bytes(data, original):
+    """The offsets where DATA differs from ORIGINAL (as far as both go), as ChangedBytes: the two XORed as numbers, each
+    byte that is not 0 a change (byte by byte in Python, 4 MiB took 150 ms, and a set of them 70 bytes each)."""
     end = min(len(data), len(original))
-    found = set()
-    for start in range(0, end, block):
-        stop = min(start + block, end)
-        if data[start:stop] != original[start:stop]:
-            found.update(at for at in range(start, stop) if data[at] != original[at])
-    return found
+    if not end:
+        return ChangedBytes()
+    differ = int.from_bytes(data[:end], "big") ^ int.from_bytes(original[:end], "big")
+    return ChangedBytes(differ.to_bytes(end, "big").translate(NONZERO))
+
+
+ASTRAL = re.compile("[\U00010000-\U0010ffff]")
+
+
+class DocumentText:
+    """The text of a QTextDocument as the find bar searches it: what was typed is found as it was typed (Qt's own
+    QTextDocument.find reads every non-breaking space of the text as a space - one typed or pasted into the find field
+    was never found, and a space found one), and positions go both ways between Python's characters and the
+    document's (UTF-16 units: a character beyond U+FFFF is two). TEXT: the document's raw text, a position of it a
+    position of the document (blocks apart by U+2029, an image or a table's frame a character each)."""
+
+    def __init__(self, document):
+        self.text = document.toRawText()
+        self.astral = [found.start() for found in ASTRAL.finditer(self.text)]  # (as characters)
+        self.astral_units = [at + count for count, at in enumerate(self.astral)]  # (as the document's positions)
+
+    def unit(self, index):
+        """The document's position of the character INDEX."""
+        return index + bisect.bisect_left(self.astral, index) if self.astral else index
+
+    def index(self, unit):
+        """The character at the document's position UNIT."""
+        return unit - bisect.bisect_left(self.astral_units, unit) if self.astral else unit
+
+    def find(self, pattern, at, backward=False, length=1):
+        """(start, end) characters of the first match of PATTERN that starts at AT or later (BACKWARD: the last one that
+        starts before AT; LENGTH: how many characters a match has), or None."""
+        if not backward:
+            found = pattern.search(self.text, at)
+            return found.span() if found is not None else None
+        end, size = min(len(self.text), at - 1 + length), 4096
+        while at > 0:  # (a window before AT, wider each time: never every match of the text in Python)
+            begin, last = max(0, at - size), None
+            for last in pattern.finditer(self.text, begin, end):
+                pass
+            if last is not None or begin == 0:
+                return last.span() if last is not None else None
+            size *= 4
+        return None
+
+
+def text_pattern(needle, case=True):
+    """NEEDLE as a regular expression of itself (nothing in it is a pattern), CASE: in its letter case only."""
+    return re.compile(re.escape(needle), 0 if case else re.IGNORECASE)
 
 
 def hex_needle(text):
@@ -146,7 +237,7 @@ class HexView(QAbstractScrollArea):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.buffer, self.edited = bytearray(), set()
+        self.buffer, self.edited = bytearray(), ChangedBytes()
         self.read_only, self.cursor, self.low, self.in_ascii = True, 0, False, False
         self.found = None  # (offset, length) of the match the find bar shows, marked
         self.setFont(MONO)
@@ -160,7 +251,7 @@ class HexView(QAbstractScrollArea):
     # -- contents --
 
     def set_data(self, data, read_only=False):
-        self.buffer, self.edited, self.found = bytearray(data), set(), None
+        self.buffer, self.edited, self.found = bytearray(data), ChangedBytes(), None
         self.read_only, self.cursor, self.low = read_only, 0, False
         self.verticalScrollBar().setValue(0)
         self.update_scroll()
@@ -366,7 +457,8 @@ class FindBar(QWidget):
     Shift+F3) go round the end of the file, Match case, how many there are (counted up to MATCH_LIMIT). In the text view
     Replace replaces the match shown and goes on to the next one, Replace all every one (one step to undo); in the hex
     view it finds the text typed (UTF-8) or, with Hex bytes, the bytes typed as hex digits - the hex editor never
-    changes a file's size, so nothing is replaced there. Escape closes the bar."""
+    changes a file's size, so nothing is replaced there. Escape closes the bar. What was typed is found as it was typed
+    (DocumentText: a non-breaking space is no space)."""
 
     def __init__(self, editor):
         super().__init__(editor)
@@ -476,13 +568,17 @@ class FindBar(QWidget):
 
     # -- finding --
 
-    def flags(self, backward=False):
-        flags = QTextDocument.FindFlag(0)
-        if self.case.isChecked():
-            flags |= QTextDocument.FindFlag.FindCaseSensitively
-        if backward:
-            flags |= QTextDocument.FindFlag.FindBackward
-        return flags
+    def pattern(self, needle):
+        """What the text is searched for: NEEDLE as it was typed (text_pattern), in its case with Match case."""
+        return text_pattern(needle, self.case.isChecked())
+
+    @staticmethod
+    def selecting(document, known, span):
+        """A QTextCursor of DOCUMENT that selects SPAN, (start, end) characters of KNOWN (its DocumentText)."""
+        cursor = QTextCursor(document)
+        cursor.setPosition(known.unit(span[0]))
+        cursor.setPosition(known.unit(span[1]), QTextCursor.MoveMode.KeepAnchor)
+        return cursor
 
     def say(self, text):
         self.status.setText(text)
@@ -503,22 +599,17 @@ class FindBar(QWidget):
             self.say("")
             return False
         document, cursor = edit.document(), edit.textCursor()
-        start = QTextCursor(cursor)
-        if incremental:  # (typing on: the match grows where it is)
-            start.setPosition(cursor.selectionStart())
-        elif backward:
-            start.setPosition(cursor.selectionStart())
-        else:
-            start.setPosition(cursor.selectionEnd())
-        found = document.find(needle, start, self.flags(backward))
-        if found.isNull():  # round the end
-            around = QTextCursor(document)
-            around.movePosition(QTextCursor.MoveOperation.End if backward else QTextCursor.MoveOperation.Start)
-            found = document.find(needle, around, self.flags(backward))
-        if found.isNull():
+        known, pattern = DocumentText(document), self.pattern(needle)
+        # (typing on: the match grows where it is; backward: the one before the match shown)
+        at = known.index(cursor.selectionStart() if incremental or backward else cursor.selectionEnd())
+        span = known.find(pattern, at, backward, len(needle))
+        if span is None:  # round the end
+            span = known.find(pattern, len(known.text) + 1 if backward else 0, backward, len(needle))
+        if span is None:
             edit.setExtraSelections([])
             self.say(tr("No match"))
             return False
+        found = self.selecting(document, known, span)
         edit.setTextCursor(found)
         edit.ensureCursorVisible()
         mark = QTextEdit.ExtraSelection()
@@ -526,17 +617,18 @@ class FindBar(QWidget):
         mark.format.setBackground(edit.palette().color(QPalette.ColorRole.Highlight))
         mark.format.setForeground(edit.palette().color(QPalette.ColorRole.HighlightedText))
         edit.setExtraSelections([mark])
-        starts = self.text_matches(needle)
-        self.say_count(bisect.bisect_left(starts, found.selectionStart()), starts, found.selectionStart())
+        starts = self.text_matches(known, pattern)
+        self.say_count(bisect.bisect_left(starts, span[0]), starts, span[0])
         return True
 
-    def text_matches(self, needle):
-        """Where the matches of NEEDLE start in the text (at most MATCH_LIMIT of them)."""
-        document, starts = self.edit().document(), []
-        found = document.find(needle, 0, self.flags())
-        while not found.isNull() and len(starts) < MATCH_LIMIT:
-            starts.append(found.selectionStart())
-            found = document.find(needle, found.selectionEnd(), self.flags())
+    @staticmethod
+    def text_matches(known, pattern):
+        """Where the matches of PATTERN start in KNOWN (a DocumentText; at most MATCH_LIMIT of them), as characters."""
+        starts = []
+        for found in pattern.finditer(known.text):
+            starts.append(found.start())
+            if len(starts) >= MATCH_LIMIT:
+                break
         return starts
 
     def say_count(self, index, starts, at):
@@ -602,29 +694,36 @@ class FindBar(QWidget):
         edit, needle = self.editor.text, self.find.text()
         cursor = edit.textCursor()
         if cursor.hasSelection():
-            same = edit.document().find(needle, cursor.selectionStart(), self.flags())
-            if not same.isNull() and (same.selectionStart(), same.selectionEnd()) == \
-                    (cursor.selectionStart(), cursor.selectionEnd()):
+            known = DocumentText(edit.document())
+            same = self.pattern(needle).match(known.text, known.index(cursor.selectionStart()))
+            if same is not None and known.unit(same.end()) == cursor.selectionEnd():
                 cursor.insertText(self.replacement.text())
                 edit.setTextCursor(cursor)
         return self.search()
 
     def replace_all(self):
-        """Replace every match, as one step to undo; returns how many."""
+        """Replace every match, as one step to undo; returns how many. The text from the first match on is given anew
+        in one change (each match replaced on its own laid its whole line out again: on the long line of a minified
+        file Replace all took minutes, the window hung)."""
         if not self.can_replace():
             return 0
         edit, needle, new = self.editor.text, self.find.text(), self.replacement.text()
-        document, count = edit.document(), 0
-        block = QTextCursor(document)
-        block.beginEditBlock()
-        try:
-            found = document.find(needle, 0, self.flags())
-            while not found.isNull():
-                found.insertText(new)
-                count += 1
-                found = document.find(needle, found.position(), self.flags())
-        finally:
-            block.endEditBlock()
+        document = edit.document()
+        known, pattern = DocumentText(document), self.pattern(needle)
+        first = pattern.search(known.text)
+        count = 0
+        if first is not None:
+            # (the replacement as it was typed: a backslash in it is no reference to a group)
+            rest, count = pattern.subn(lambda _found: new, known.text[first.start():])
+            scrolled = edit.verticalScrollBar().value(), edit.horizontalScrollBar().value()
+            cursor = QTextCursor(document)
+            cursor.beginEditBlock()
+            cursor.setPosition(known.unit(first.start()))
+            cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+            cursor.insertText(rest)
+            cursor.endEditBlock()
+            edit.verticalScrollBar().setValue(scrolled[0])
+            edit.horizontalScrollBar().setValue(scrolled[1])
         edit.setExtraSelections([])
         self.say(tr("Replaced {count}", count=count) if count else tr("No match"))
         return count
@@ -649,6 +748,7 @@ class EditorWindow(QDialog):
         self.decoded = False  # the file is text (UTF-8): it can be shown as Markdown
         self.original, self.identity, self.bom, self.newline, self.view = b"", None, False, "\n", None
         self.loading, self.saving, self.truncated, self.dirty, self.text_ok = False, False, False, False, False
+        self.text_bytes = None  # the bytes the text widget was given (read-only text: what it shows still)
         self.name = relative.rsplit("/", 1)[-1]
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
@@ -657,7 +757,7 @@ class EditorWindow(QDialog):
         self.where = plain_label(printable(shown), role="secondary")
         self.where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.where)
-        self.notice = plain_label(selectable=True)
+        self.notice = plain_label(selectable=True, log="editor")
         self.notice.hide()
         layout.addWidget(self.notice)
         self.stack = QStackedWidget()
@@ -666,7 +766,7 @@ class EditorWindow(QDialog):
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.text.setAccessibleName(tr("Text of the file"))
         self.text.setTabStopDistance(QFontMetrics(MONO).horizontalAdvance(" ") * 4)
-        self.text.document().modificationChanged.connect(lambda changed: changed and self.mark_dirty())
+        self.text.document().modificationChanged.connect(self.modification_changed)
         self.text.cursorPositionChanged.connect(self.show_position)
         self.hex = HexView()
         self.hex.changed.connect(self.mark_dirty)
@@ -700,15 +800,16 @@ class EditorWindow(QDialog):
         self.preview_check.setToolTip(tr("The Markdown rendered beside the text, as you type"))
         self.preview_check.toggled.connect(self.show_preview)
         self.wrap = QCheckBox(tr("Wrap lines"))
-        self.wrap.toggled.connect(lambda on: self.text.setLineWrapMode(
-            QPlainTextEdit.LineWrapMode.WidgetWidth if on else QPlainTextEdit.LineWrapMode.NoWrap))
+        self.wrap.toggled.connect(self.wrap_lines)
         self.position = plain_label(role="secondary", word_wrap=False)
         self.find_button = button(tr("Find…"), tr("Find and replace ({find}, {replace})", find=key_text(
             QKeySequence.StandardKey.Find), replace=key_text(REPLACE_KEY)), lambda: self.find_bar.open())
         # Save, Reload, Cancel: Cancel (Escape) closes without saving - asking first about changes not saved; a file
         # that is only viewed has Close.
-        self.save_button = button(tr("Save (Ctrl+S)"), tr("Write the file back (asks first if it changed on disk "
-                                                          "meanwhile)"), lambda: self.save())
+        # (the key as the system writes it: on macOS Cmd+S - the button said Ctrl+S there)
+        self.save_button = button(tr("Save ({shortcut})", shortcut=key_text(QKeySequence.StandardKey.Save)),
+                                  tr("Write the file back (asks first if it changed on disk meanwhile)"),
+                                  lambda: self.save())
         self.reload_button = button(tr("Reload"), tr("Read the file again from disk"), lambda: self.reload())
         self.cancel_button = button(tr("Cancel"), "", self.cancel)
         for widget in (self.as_text, self.as_hex, self.as_markdown, self.edit_button, self.preview_check, self.wrap):
@@ -759,6 +860,12 @@ class EditorWindow(QDialog):
                 "Close without saving (asks first about changes not saved; Escape, {shortcut})",
                 shortcut=key_text("Ctrl+W"))))
 
+    def place(self):
+        """Which file this window shows, for the log: its root (this machine's folder, a sandbox, HOST over SFTP) and
+        its path there."""
+        root = getattr(self, "root", None)
+        return f"{printable(getattr(root, 'label', None) or '?')}: {printable(getattr(self, 'relative', '') or '')}"
+
     def say(self, text, warning=False):
         self.notice.setText(text)
         self.notice.setStyleSheet(f"color: {theme.color('warn')};" if warning else "")
@@ -772,11 +879,19 @@ class EditorWindow(QDialog):
         self.hex.read_only = True
         self.say(tr("Reading {name}…", name=printable(self.name)))
         root, relative = self.root, self.relative
-        background(lambda: root.read_file(relative), owner=self, timeout=120, done=self.loaded)
+        applog.log("INFO", "files", f"editor: opening {self.place()}" + (" (remote, over SFTP)" if getattr(
+            root, "remote", False) else "") + (" read-only" if self.read_only else ""))
+        # (a remote file: no time limit for the read as a whole - its requests have theirs (remote.REQUEST_TIMEOUT); a
+        # big file far away took longer than 120 s and was said not to open, while the read went on. A local one on a
+        # file system that hangs: given up after 120 s.)
+        background(lambda: root.read_file(relative), owner=self, done=self.loaded,
+                   timeout=None if getattr(root, "remote", False) else 120)
 
     def loaded(self, result, error):
         self.loading = False
         if error is not None:
+            applog.log("WARNING", "files", f"editor: {self.place()} cannot be opened: {applog.error_text(error)}"
+                       + (" (a Reload: the window keeps what it showed)" if self.view is not None else ""))
             self.say(tr("Cannot open {name}: {error}", name=printable(self.name), error=printable(error)), True)
             if self.view is not None:  # (a Reload: the window stays as it was - it said "read-only" from then on and
                 self.reload_view = None  # could not save any more, while its text still took what was typed)
@@ -816,18 +931,27 @@ class EditorWindow(QDialog):
             if split is None:
                 notes.append(tr("This text has mixed line endings or characters the editor would change: it is shown "
                                 "read-only; the hex editor changes it byte by byte."))
+                notes += self.fit_wrap(decoded)
                 self.text.setPlainText(decoded)
+                self.text_bytes = result.data
             else:
+                notes += self.fit_wrap(split[0])
                 self.text.setPlainText(split[0])
                 self.bom, self.newline = split[1], split[2]
+                self.text_bytes = None
             warning = text_warning(decoded)
             if warning and want in ("text", "markdown"):
                 notes.append(warning)
         else:
             self.text.setPlainText("")
+            self.text_bytes = None
         self.text.document().setModified(False)
         self.dirty = False
         self.show_view(want)
+        applog.log("INFO", "files", f"editor: {self.place()} opened ({files.size_text(len(result.data))}"
+                   + (f" of {files.size_text(result.size)}" if result.truncated else "") + f", shown as {want}"
+                   + (", read-only" if self.read_only else "") + ")" + (
+                       "\n" + applog.tail("\n".join(notes), lines=4) if notes else ""))
         self.say("\n".join(notes), warning=bool(notes))
         self.title()
 
@@ -836,7 +960,8 @@ class EditorWindow(QDialog):
         self.stack.setCurrentWidget({"text": self.text_page, "markdown": self.markdown}.get(view, self.hex))
         self.text.setReadOnly(self.read_only or not self.text_ok)
         self.wrap.setVisible(view == "text")
-        set_enabled(self.as_text, view != "text" and self.text_ok)
+        # (a text it cannot give back exactly is shown read-only, also again after the hex view)
+        set_enabled(self.as_text, view != "text" and (self.text_ok or self.decoded))
         set_enabled(self.as_hex, view != "hex")
         set_enabled(self.as_markdown, view != "markdown" and self.decoded)
         # Markdown: the rendering, and Edit (the text) beside it; the text of a Markdown file: Preview.
@@ -867,9 +992,44 @@ class EditorWindow(QDialog):
             self.position.setText(tr("Line {line}, column {column}", line=cursor.blockNumber() + 1,
                                      column=cursor.positionInBlock() + 1))
 
+    def wrap_lines(self, on):
+        """Wrap lines: the text wrapped at the window's width - not when a line holds more than LONG_RUN characters
+        without a space (Qt wraps such a line in time that grows with its square: 1 MB of a minified file held up the
+        window for about 40 s): the box goes off again, and the window says why."""
+        if on:
+            notes = self.fit_wrap(editor_text(self.text))
+            if notes:
+                self.say(notes[0], True)
+                return
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth if on else QPlainTextEdit.LineWrapMode.NoWrap)
+
+    def fit_wrap(self, text):
+        """Before TEXT is shown: Wrap lines off where TEXT has a line it could not wrap in time (wrap_lines); what the
+        window says then ([] when nothing)."""
+        if not self.wrap.isChecked() and self.text.lineWrapMode() == QPlainTextEdit.LineWrapMode.NoWrap:
+            return []
+        if not LONG_WORD.search(text):
+            return []
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.wrap.blockSignals(True)
+        self.wrap.setChecked(False)
+        self.wrap.blockSignals(False)
+        return [tr("Lines are not wrapped: a line of more than {count} characters without a space would hold up the "
+                   "window.", count=LONG_RUN)]
+
     def mark_dirty(self):
         if not self.dirty:
             self.dirty = True
+            self.title()
+
+    def modification_changed(self, changed):
+        """The text was changed - or undone to where it was last read or saved (Qt's own clean state): then nothing is
+        left to save if it is what the file holds (it kept the "* " and asked to discard changes there were none of)."""
+        if changed:
+            self.mark_dirty()
+        elif self.dirty and self.view in ("text", "markdown") and not (self.loading or self.saving) and \
+                self.contents() == self.original:
+            self.dirty = False
             self.title()
 
     # -- the views --
@@ -898,18 +1058,37 @@ class EditorWindow(QDialog):
             data = self.contents()
             edited = self.hex.edited if data == self.hex.data() else changed_bytes(data, self.original)
             self.hex.set_data(data, self.read_only)
-            self.hex.edited = set(edited)
+            self.hex.edited = edited.copy()
         else:
             data = self.hex.data()
             decoded = files.text_of(data)
             split = split_text(decoded) if decoded is not None else None
             if split is None:
+                if decoded is not None and data == self.original:
+                    # The file's text as it was read or saved (mixed line endings, a lone CR ...): read-only, as after
+                    # a Reload; the hex view changes it byte by byte. (The text widget showed the text as it was
+                    # opened - also after other bytes were saved from the hex view; a text that could be edited and
+                    # was saved there with a lone CR was refused from then on.)
+                    if self.text_bytes != data:
+                        dirty = self.dirty
+                        notes = self.fit_wrap(decoded)
+                        if notes:
+                            self.say(notes[0], True)
+                        self.text.setPlainText(decoded)
+                        self.text.document().setModified(False)
+                        self.text_bytes, self.dirty = data, dirty
+                    self.text_ok = False
+                    self.show_view(view)
+                    return True
                 self.say(tr("These bytes are no text the editor can show unchanged (UTF-8 without NUL bytes, one kind "
                             "of line ending)."), True)
                 return False
             dirty = self.dirty
+            notes = self.fit_wrap(split[0])
+            if notes:
+                self.say(notes[0], True)
             self.text.setPlainText(split[0])
-            self.bom, self.newline = split[1], split[2]
+            self.bom, self.newline, self.text_bytes = split[1], split[2], None
             # (text that can be given back exactly now - the hex editor mended a text that could not: contents() gave
             # the file as it was read for it, and a Save from the text or Markdown view lost what was mended)
             self.text_ok = self.decoded = True
@@ -941,8 +1120,13 @@ class EditorWindow(QDialog):
         return self.switch("text")
 
     def zoom(self, steps):
-        """Ctrl+Plus, Ctrl+Minus, Ctrl+0: the rendering larger, smaller, as it was (the preview in the text view)."""
-        (self.preview if self.view == "text" else self.markdown).zoom_by(steps)
+        """Ctrl+Plus, Ctrl+Minus, Ctrl+0: the rendering larger, smaller, as it was (the preview in the text view) - only
+        one that is shown (in the hex view, or the text view without Preview, the rendering not shown was zoomed: nothing
+        changed on the screen, and it came back larger later)."""
+        if self.view == "markdown":
+            self.markdown.zoom_by(steps)
+        elif self.view == "text" and not self.preview.isHidden():
+            self.preview.zoom_by(steps)
 
     def open_link(self, url):
         """A link clicked in the rendering (never followed there): http(s) opens in the browser once the human said
@@ -977,9 +1161,15 @@ class EditorWindow(QDialog):
         data = self.contents() if data is None else data
         root, relative, expected = self.root, self.relative, None if replace else self.identity
         mode = getattr(self, "file_mode", None)
+        applog.log("INFO", "files", f"editor: saving {self.place()} ({files.size_text(len(data))}"
+                   + (", replacing a file changed on disk" if replace else "") + (", in place" if in_place else "")
+                   + ")")
         self.busy(True)
+        # No time limit: a save that took longer (a big file to a slow remote system) said "Not saved: No answer within
+        # 120 s" and gave Save and Reload back while it went on and replaced the file. It ends by itself - a remote
+        # request without an answer ends its connection (remote.REQUEST_TIMEOUT) - and closing the window meanwhile
+        # says it is still saving (may_close).
         background(lambda: root.write_file(relative, data, expected, in_place=in_place, mode=mode), owner=self,
-                   timeout=120,
                    work=True, done=lambda result, error: self.saved(result, error, data, replace, in_place))
         return True
 
@@ -992,6 +1182,12 @@ class EditorWindow(QDialog):
 
     def saved(self, result, error, data, replaced=False, in_place=False):
         name = printable(self.name)
+        if error is not None:
+            applog.log("INFO" if isinstance(error, (files.NoTemporary, files.Changed)) else "WARNING", "files",
+                       f"editor: {self.place()} not saved: {applog.error_text(error)}" + (
+                           " - asked what to do" if isinstance(error, (files.NoTemporary, files.Changed)) else ""))
+        else:
+            applog.log("INFO", "files", f"editor: {self.place()} saved ({files.size_text(len(data))})")
         if isinstance(error, files.NoTemporary):
             # (its folder may not be written: no temporary file beside it - or a new file renamed over it would not
             # keep its owner, group or ACL (files.NotKept, which says which): the file itself, if the human says so)
@@ -1008,6 +1204,19 @@ class EditorWindow(QDialog):
             self.busy(False)
             if in_place:
                 return self.save(replace=replaced, data=data, in_place=True)
+            self.say(tr("Not saved: {error}", error=printable(error)), True)
+            return False
+        if isinstance(error, files.Gone):
+            # (removed, renamed or moved - also from the Files page - since it was opened: it asked to replace "the
+            # changed file" and to Reload, which can only fail; Save makes a new file there - said so, asked each time)
+            again = confirm(self, tr("Save as a new file?"), tr(
+                "{name} is no longer there: it was removed, renamed or moved since it was opened here. Save what is "
+                "shown as a new file {name} where it was?", name=name), tr("Save as a new file"))
+            if not isValid(self):
+                return False
+            self.busy(False)
+            if again:  # (a new file: never in place - there is none to write into)
+                return self.save(replace=True, data=data)
             self.say(tr("Not saved: {error}", error=printable(error)), True)
             return False
         if isinstance(error, files.Changed):
@@ -1036,8 +1245,8 @@ class EditorWindow(QDialog):
             if self.on_saved is not None:
                 self.on_saved()
             return True
-        if self.view == "hex":
-            self.hex.edited = set()
+        if self.hex.data() == data:  # (also saved from another view: the bytes changed in the hex view are saved)
+            self.hex.edited = ChangedBytes()
             self.hex.viewport().update()
         self.text.document().setModified(False)
         self.dirty = False

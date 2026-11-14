@@ -45,6 +45,18 @@ WATCHED = (
     ".claude/skills", ".claude/plugins", ".claude/output-styles", ".claude/CLAUDE.md",
     ".codex/config.toml", ".codex/AGENTS.md", ".codex/AGENTS.override.md", ".codex/prompts", ".codex/skills",
     ".codex/rules", ".config/opencode", ".opencode",
+    # the shared skills root (Codex, Hermes, DSH, Goose: the agent's own beside the kits')
+    ".agents/skills",
+    # Hermes: its configuration (MCP servers, hooks), keys, skills, plugins, persona, scheduled jobs
+    ".hermes/config.yaml", ".hermes/.env", ".hermes/skills", ".hermes/plugins", ".hermes/hooks", ".hermes/SOUL.md",
+    ".hermes/cron",
+    # Qwen Code: its settings (MCP servers, tool commands), context file, extensions, commands, agents
+    ".qwen/settings.json", ".qwen/QWEN.md", ".qwen/extensions", ".qwen/commands", ".qwen/agents",
+    # DeepSeek Harness: its instructions, skills and profiles
+    ".dsh/AGENTS.md", ".dsh/skills", ".dsh/profiles",
+    # Goose: its configuration (extensions it starts), hints, skills, recipes, tool permissions
+    ".config/goose/config.yaml", ".config/goose/.goosehints", ".config/goose/AGENTS.md", ".config/goose/skills",
+    ".config/goose/recipes", ".config/goose/permission.yaml",
 )
 # Python runs these at every start of an interpreter (site-packages of the user).
 PYTHON_STARTUP = re.compile(r"\.local/lib/python[0-9.]+/site-packages/(?:[^/]+\.pth|sitecustomize\.py|usercustomize\.py)")
@@ -55,7 +67,7 @@ CLAUDE_KEYS = ("mcpServers", "allowedTools", "enabledMcpjsonServers", "disabledM
 CLAUDE_STATE_LIMIT = 64 << 20
 # Contents that are never kept or shown: keys, tokens, credentials.
 SECRET = re.compile(r"(^|/)(\.ssh/(?!config$|known_hosts|authorized_keys|[^/]*\.pub$).+|\.git-credentials|"
-                    r"\.netrc|\.pypirc|\.npmrc|\.yarnrc(\.yml)?)$|token|secret|credential|password|\.key$",
+                    r"\.netrc|\.pypirc|\.npmrc|\.yarnrc(\.yml)?|\.env)$|token|secret|credential|password|\.key$",
                     re.IGNORECASE)
 FILE_LIMIT = 64 << 20    # bytes hashed per file (beyond: the rest is not read; size still counts)
 TEXT_LIMIT = 64 << 10    # bytes of a file's text kept for the differences
@@ -227,7 +239,7 @@ def load(directory):
     """The manifest recorded in DIRECTORY, or None (never recorded: a start before 0.1.30, or damaged)."""
     try:
         data = json.loads((Path(directory) / MANIFEST).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or data.get("version") != VERSION or not isinstance(data.get("files"), dict):
         return None
@@ -391,7 +403,7 @@ def save_review(directory, review):
 def saved_review(directory):
     try:
         data = json.loads((Path(directory) / REVIEW).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) and data.get("version") == VERSION else None
 

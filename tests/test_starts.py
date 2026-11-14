@@ -62,6 +62,9 @@ def make_start(key, tmp_path=None, pid=None, paused=False, **fields):
     if pid:
         data.update(pid=pid, started="2026-11-02T09:30:00Z")
         fake_process(tmp_path, pid, ["python3", "agent_sandbox.py", "--tmux-socket-dir", directory / "tmux"])
+        if not fields.get("no_terminal"):
+            (directory / "tmux" / "attach.sock").touch()  # its terminal relay (sessions.terminal_state)
+    data.pop("no_terminal", None)
     if paused:
         (directory / "paused").touch()
     sessions.save(key, data)
@@ -194,6 +197,91 @@ def test_entries_say_why_nothing_can_be_attached(scenario, tmp_path):
         assert all(e["attach_why"] is None for e in listed() if e["attachable"])
 
 
+def test_a_running_session_without_its_terminal_says_so(tmp_path, monkeypatch):
+    """User report from live use (2026-11-14): a session listed as running had no terminal yet - attach failed. Now
+    list --json says "terminal": starting while its start goes on (it began less than READY_TIMEOUT ago, or its
+    supervisor wrote to its log lately), "missing" (not attachable, attach_why no-terminal, "terminal_log": the end of
+    its supervisor.log) once nothing more comes; "ready" with its relay there."""
+    make_start("web", tmp_path, pid=41)
+    make_start("slow", tmp_path, pid=42, no_terminal=True)
+    make_start("stuck", tmp_path, pid=43, no_terminal=True)
+    log = sessions.session_dir("slow") / "supervisor.log"
+    log.write_text("agent-sandbox: starting the MCP server fetch (its image is pulled once, its sandbox started)…\n"
+                   "podman: Copying blob 1/3\n")
+    stuck = sessions.session_dir("stuck") / "supervisor.log"
+    stuck.write_text("agent-sandbox: starting\nError: the VPN tunnel did not come up\n")
+    os.utime(stuck, (1, 1))  # said nothing for long
+    found = {e["name"]: e for e in listed()}
+    assert found["web"]["terminal"] == "ready" and found["web"]["attachable"] is True
+    assert found["slow"]["terminal"] == "starting" and found["slow"]["attachable"] is True
+    assert found["slow"]["terminal_step"].startswith("starting the MCP server fetch")  # where its start is
+    assert found["stuck"]["terminal"] == "missing" and found["stuck"]["attachable"] is False
+    assert found["stuck"]["attach_why"] == "no-terminal"
+    assert found["stuck"]["terminal_log"].endswith("Error: the VPN tunnel did not come up")
+    lines = []
+    st.show(listed(), out=lines.append)
+    text = "\n".join(lines)
+    assert "running (no terminal: see its log)" in text and "running (starting)" in text
+    # A start that began a moment ago: starting, whatever its log says.
+    data = sessions.load("stuck")
+    assert sessions.terminal_state("stuck", data, clock=lambda: sessions.utc_seconds(data["started"]) + 5)[0] == \
+        "starting"
+    import calendar
+    for text in ("2026-11-02T09:30:00Z", "2000-02-29T23:59:59Z", "1999-01-01T00:00:00Z"):
+        assert sessions.utc_seconds(text) == calendar.timegm(sessions.time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    assert sessions.terminal_state("stuck", {**data, "mode": "foreground"}) == ("ready", "")
+
+
+def test_stop_all_stops_every_start_one_after_another(monkeypatch, capsys):
+    """`sandbox-ai stop --all` (user wish, live use 2026-11-14): every running, paused or orphaned start of this user
+    on this host - sessions, runs, tasks; not the MCP servers - each as `stop NAME` stops it, asked first with the
+    list unless --yes, refused inside a sandbox; a summary, and exit status 1 when one did not stop. Fakes only: no
+    start, no Podman, no tmux is touched."""
+    listed = [{"name": "web", "kind": "session", "state": "running"},
+              {"name": "held", "kind": "session", "state": "paused"},
+              {"name": "claude-1a2b", "kind": "run", "state": "running"},
+              {"name": "lost", "kind": "run", "state": "orphaned"},
+              {"name": "old", "kind": "session", "state": "stopped"},
+              {"name": "mcp-fetch", "kind": "mcp", "state": "running"}]
+    stopped = []
+
+    def act(command, name, out=print, wait=None, **kw):
+        assert command == "stop"
+        if name == "lost":
+            raise ValueError("its pod could not be stopped")
+        stopped.append((name, wait))
+    monkeypatch.setattr(st, "entries", lambda *a, **k: listed)
+    monkeypatch.setattr(st, "act", act)
+    lines = []
+    assert st.stop_all(lines.append, wait=5, yes=True, inside=False) == 1, "one did not stop"
+    assert stopped == [("web", 5), ("held", 5), ("claude-1a2b", 5)], "one after another; not the MCP server"
+    assert lines[-1] == "stopped 3 of 4; not stopped: lost"
+    assert "sandbox-ai stop: lost: its pod could not be stopped" in capsys.readouterr().err
+    # Asked first with the list; no answer yes: nothing stops.
+    stopped.clear()
+    asked = []
+    assert st.stop_all(lines.append, ask=lambda text: asked.append(text) or "n", inside=False) == 1
+    assert stopped == [] and "web (running), held (paused), claude-1a2b (running), lost (orphaned)" in asked[0]
+    assert lines[-1] == "nothing stopped"
+    listed[3]["state"] = "stopped"
+    assert st.stop_all(lines.append, ask=lambda text: "yes", inside=False) == 0 and lines[-1] == "stopped 3 of 3"
+    # No terminal to ask on: refused without --yes; inside a sandbox: refused.
+    monkeypatch.setattr(st.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(ValueError, match="confirm with --yes"):
+        st.stop_all(lines.append, inside=False)
+    with pytest.raises(ValueError, match="refused inside a sandbox"):
+        st.stop_all(lines.append, yes=True, inside=True)
+    # Nothing runs: said, nothing done.
+    monkeypatch.setattr(st, "entries", lambda *a, **k: [listed[4], listed[5]])
+    assert st.stop_all(lines.append, yes=True, inside=False) == 0 and lines[-1] == "nothing to stop: no start runs"
+    # The command line: NAME or --all; --yes only with --all.
+    calls = []
+    monkeypatch.setattr(st, "stop_all", lambda out, wait=None, yes=False: calls.append((wait, yes)) or 0)
+    assert st.main(["stop", "--all", "--yes", "--wait", "7"]) == 0 and calls == [(7.0, True)]
+    assert st.main(["stop"]) == 1 and st.main(["stop", "web", "--all"]) == 1 and st.main(["stop", "web", "--yes"]) == 1
+    assert "stop takes NAME, or --all" in capsys.readouterr().err
+
+
 def test_show(scenario, tmp_path):
     lines = []
     if scenario == "happy":
@@ -203,7 +291,7 @@ def test_show(scenario, tmp_path):
         assert lines[1].split() == ["web", "session", "codex", "running", "kept", "2026-11-02", "09:30", "/srv/app"]
     elif scenario == "sad":
         st.show([], lines.append)
-        assert lines == ["nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode"]
+        assert lines == ["nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode|hermes|dsh|qwen|goose"]
     else:
         # Names and workspaces come from files the sandbox may have influenced: shown escaped.
         register("claude-1", name="evil\x1b[2Jname", workspace="/w/\x07bell")
@@ -1005,7 +1093,7 @@ def old_show(found, out):
              printable(e.get("workspace") or ("serves " + ", ".join(e["serves"]) if e.get("serves") else "-"))]
             for e in found]
     t.table(["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"], rows, out, indent=0,
-            colour=False, empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode")
+            colour=False, empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode|hermes|dsh|qwen|goose")
 
 
 def a_registry(tmp_path):

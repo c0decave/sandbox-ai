@@ -15,14 +15,16 @@ import threading
 import time
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QProcess, QRect,
+    QAbstractItemModel, QAbstractTableModel, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QProcess, QRect,
     QSize, Qt, QTimer, Signal, Slot,
 )
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QTextDocument, QTextOption
+from PySide6.QtGui import (
+    QAction, QBrush, QColor, QFont, QFontMetrics, QPainter, QPalette, QTextDocument, QTextOption,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel,
-    QLayout, QLineEdit,
-    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+    QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QScrollArea, QSizePolicy, QSpacerItem, QStyle, QStyledItemDelegate, QTabBar,
     QTableView, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
 )
 
@@ -75,6 +77,23 @@ def number(value):
     return text
 
 
+def ago(seconds):
+    """How long ago SECONDS were, in the largest unit that fits: "55 s ago", "3 min ago", "2 h ago", "4 days ago"
+    (German "vor 55 Sek.", "vor 3 Min.", "vor 2 Std.", "vor 4 Tagen"): every relative time of the app."""
+    try:
+        seconds = max(0, int(seconds))
+    except (TypeError, ValueError, OverflowError):
+        return "?"
+    if seconds < 60:
+        return tr("{seconds} s ago", seconds=seconds)
+    if seconds < 3600:
+        return tr("{minutes} min ago", minutes=seconds // 60)
+    if seconds < 86400:
+        return tr("{hours} h ago", hours=seconds // 3600)
+    days = seconds // 86400
+    return tr("1 day ago") if days == 1 else tr("{days} days ago", days=days)
+
+
 def local_time(text, seconds=False):
     """A time as sandbox-ai writes it (UTC, 2026-11-03T10:00:00Z) in local time, or the text itself."""
     from .backend import parse_time
@@ -85,10 +104,31 @@ def local_time(text, seconds=False):
     return time.strftime(pattern + (":%S" if seconds else ""), time.localtime(moment))
 
 
-def plain_label(text="", word_wrap=True, role=None, selectable=False):
+class LoggedLabel(QLabel):
+    """A page's status line whose every new text goes into the log (once per change): at INFO - DEBUG for progress
+    (a text ending in "…") or a QUIET one, WARNING while it is coloured as an error - from LOG_WHERE (the page).
+    What the human read there ("Select files first.", "Cannot open …: Permission denied") can be followed in the
+    log."""
+    log_where, quiet = "app", False
+
+    def setText(self, text):  # noqa: N802
+        text = str(text)
+        if text and text != self.text() and not getattr(self, "_noticed", False):
+            role = self.property("role") or ""
+            # ("Reading…", "Asking box…": progress at DEBUG - it alternates with the outcome at every refresh)
+            level = "WARNING" if role == "notice-error" else "DEBUG" if self.quiet or \
+                text.rstrip().endswith(("…", "...")) else "INFO"
+            applog.log(level, self.log_where, f"status: {said(text)}")
+        super().setText(text)
+
+
+def plain_label(text="", word_wrap=True, role=None, selectable=False, log=None):
     """A label that never interprets its text as HTML (texts from logs and questions come from the agent).
-    SELECTABLE: a message, a status or a refusal - its text can be marked and copied (Ctrl+C, its context menu)."""
-    label = QLabel()
+    SELECTABLE: a message, a status or a refusal - its text can be marked and copied (Ctrl+C, its context menu).
+    LOG: the page's name in the log - each new text is logged (LoggedLabel)."""
+    label = LoggedLabel() if log else QLabel()
+    if log:
+        label.log_where = str(log)
     label.setTextFormat(Qt.TextFormat.PlainText)
     label.setWordWrap(word_wrap)
     label.setText(str(text))
@@ -97,6 +137,43 @@ def plain_label(text="", word_wrap=True, role=None, selectable=False):
     if selectable:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
                                       | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+    return label
+
+
+NOTICE_ROLES = {"ok": "notice-ok", "warn": "notice-warn", "error": "notice-error"}
+
+
+NOTICE_LEVELS = {"error": "WARNING", "warn": "INFO", "ok": "INFO"}  # a status line's level in the log (else DEBUG)
+
+
+def log_notice(widget, text, level=None, details=None):
+    """A page's status line or notice, as it changes, into the log: an error at WARNING, a warning or a success at
+    INFO, any other note at DEBUG."""
+    try:
+        where = where_of(widget)
+    except Exception:  # noqa: BLE001
+        where = "app"
+    applog.log(NOTICE_LEVELS.get(level, "DEBUG"), where, f"{level or 'note'}: {said(text)}" +
+               (f"\n{applog.tail(details)}" if details else ""))
+
+
+def set_notice(label, text, level=None):
+    """TEXT in LABEL, a page's status line, in the colour of LEVEL ("ok", "warn", "error"; None: the label's own,
+    e.g. secondary): what went wrong does not look like any other note (design review 0.1.95)."""
+    if label.property("plain_role") is None:
+        label.setProperty("plain_role", label.property("role") or "")
+    role = NOTICE_ROLES.get(level) or label.property("plain_role") or None
+    if text and text != label.text():  # (once per change: a page that sets the same line at every poll says it once)
+        log_notice(label, text, level)
+    label._noticed = True  # (a LoggedLabel: said here already, with its level)
+    try:
+        label.setText(text)
+    finally:
+        label._noticed = False
+    if label.property("role") != role:
+        label.setProperty("role", role)
+        label.style().unpolish(label)
+        label.style().polish(label)
     return label
 
 
@@ -141,16 +218,22 @@ class ElidedLabel(QLabel):
     def minimumSizeHint(self):  # noqa: N802
         return QSize(0, super().minimumSizeHint().height())
 
-    def setText(self, text):  # noqa: N802
+    def setText(self, text, whole=None):  # noqa: N802
+        """TEXT on the one line; WHOLE (default TEXT: a message of several lines, its line breaks kept) in the
+        tooltip, the copy and the window of the whole text."""
         super().setText(str(text))
-        self.setToolTip(safe_tooltip(text) if text else "")
+        self.whole = str(whole) if whole else str(text)
+        self.setToolTip(safe_tooltip(self.whole) if text else "")
+
+    def whole_text(self):
+        return getattr(self, "whole", None) or self.text() if self.text() else ""
 
     def copy_text(self):
-        QApplication.clipboard().setText(self.text())
+        QApplication.clipboard().setText(self.whole_text())
 
     def show_whole(self):
         if self.text():
-            show_text_window(self, tr("Whole text"), self.text())
+            show_text_window(self, tr("Whole text"), self.whole_text())
 
     def contextMenuEvent(self, event):  # noqa: N802
         """Copy the whole text (also Ctrl+C after a click), or show it whole in a window to mark a part."""
@@ -160,7 +243,7 @@ class ElidedLabel(QLabel):
         menu = QMenu(self)
         menu.addAction(tr("Copy"), self.copy_text)
         menu.addAction(tr("Show the whole text…"), self.show_whole)
-        menu.exec(event.globalPos())
+        exec_dropped(menu, event.globalPos())
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802
         self.show_whole()
@@ -395,11 +478,12 @@ class MessageDialog(QDialog):
     def _fit(self, text):
         """The text's room: as wide as its longest line (at most MESSAGE_SIZE and the screen less a margin), as
         high as it needs there (at most MESSAGE_SIZE); beyond that it scrolls."""
-        screen = (self.screen() or QApplication.primaryScreen())
-        room = screen.availableGeometry().size() if screen is not None else QSize(*MESSAGE_SIZE) * 2
+        area = screen_area(self.parentWidget() or self)
+        room = area.size() if area is not None else QSize(*MESSAGE_SIZE) * 2
         metrics = self.text.fontMetrics()
         widest = max((metrics.horizontalAdvance(line) for line in text.split("\n")), default=0) + 8
-        width = max(min(widest, MESSAGE_SIZE[0], room.width() - 160), min(320, room.width() - 160), 120)
+        # (the icon and the margins beside the text: about 80 px; a phone's screen leaves the text the rest)
+        width = max(min(widest, MESSAGE_SIZE[0], room.width() - 160), min(320, room.width() - 100), 120)
         # (measured a scroll bar narrower, with a line to spare: QPlainTextEdit lays out a little differently)
         height = min(text_height(text, self.text.font(), width - 24) + metrics.lineSpacing(), MESSAGE_SIZE[1],
                      max(120, room.height() // 2))
@@ -478,11 +562,53 @@ def _box(parent, icon, title_text, text, details=None):
     return box
 
 
+def where_of(parent):
+    """The page (or window) a message is shown on, for its log line: its class name - the page's own (SandboxesPage),
+    never the scroll area the window keeps it in (every message of a page said "PageScroll")."""
+    try:
+        page = page_of(parent) if parent is not None else None
+        shown = page or parent
+        if shown is None:
+            return "app"
+        inner = shown.widget() if type(shown).__name__ == "PageScroll" and hasattr(shown, "widget") else None
+        if inner is None and type(shown).__name__ == "PageScroll":  # (a widget of the page: the page it is on)
+            inner = next((w for w in _parents(parent) if type(w).__name__.endswith(("Page", "Dialog"))), None)
+        return type(inner or shown).__name__
+    except Exception:  # noqa: BLE001 - a log line must never fail
+        return "app"
+
+
+def _parents(widget):
+    while widget is not None:
+        yield widget
+        widget = widget.parentWidget()
+
+
+def said(text, limit=1200):
+    """A message's text for the log (redacted, at most LIMIT characters)."""
+    text = applog.redact(text)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def log_message(parent, title_text, text, details=None, warning=False):
+    """What a message told the human, into the log: a warning at WARNING (a refusal, a failure: "Not started"), else
+    INFO; with the tail of its details."""
+    applog.log("WARNING" if warning else "INFO", where_of(parent), f"{'warning' if warning else 'message'} shown: "
+               f"{said(title_text, 200)}: {said(text)}" + (f"\n{applog.tail(details)}" if details else ""))
+
+
+def log_answer(parent, title_text, text, answer):
+    """A question and the human's answer, into the log."""
+    applog.log("INFO", where_of(parent), f"asked: {said(title_text, 200)}: {said(text, 600)} -> answer: "
+               f"{said(answer, 200)}")
+
+
 def inform(parent, title_text, text, details=None, warning=False, modal=True):
     """A message with OK; inform() returns at once - no one waits for an OK (an event loop waiting for it would hold
     back every answer given meanwhile: nested loops return last-in, first-out). MODAL: the page PARENT is on waits
     behind a veil until OK (show_veiled); not MODAL (the outcome of a finished background job): nothing is veiled,
     the Approvals page stays usable while it is open."""
+    log_message(parent, title_text, text, details, warning)
     if AUTO_ANSWER is not None:
         SHOWN.append((title_text, text, details))
         return
@@ -750,6 +876,27 @@ def show_veiled(dialog):
     return dialog
 
 
+def drop_after_exec(dialog):
+    """Delete DIALOG (run with exec(), its answer read) once the caller is back in the event loop, unless it is still
+    shown: a dialog made anew for each use is a child of its window and otherwise stayed, closed, for as long as the
+    window lived (Settings… about 4 MB each time). Anything not a widget (a test's stand-in) is left alone."""
+    try:
+        if isinstance(dialog, QWidget) and not dialog.isVisible():
+            dialog.deleteLater()
+    except RuntimeError:  # deleted already
+        pass
+
+
+def exec_dropped(dialog, *args):
+    """DIALOG.exec(*ARGS) for a dialog, message box or menu made for this one use (a child of its window), dropped
+    once the caller is back in the event loop (drop_after_exec): its answer and fields can be read until then, also
+    across another question asked meanwhile (a deferred delete waits for the loop it was posted in)."""
+    try:
+        return dialog.exec(*args)
+    finally:
+        drop_after_exec(dialog)
+
+
 def nonblocking_dialogs(platform=sys.platform):
     """Every dialog run with exec() is a window of its own that blocks nothing: the main window, the log window and
     the other dialogs stay usable while it is open (Qt's exec() made it application modal: one dialog left open
@@ -942,20 +1089,112 @@ def input_statics():
 
 TITLE_BAR = 32  # what a window manager's frame adds above a window, about (unknown before the window is shown)
 SCREEN_MARGIN = 8
+# What a window manager's title bar takes beside the title: its buttons (close, maximise, minimise), the window's icon
+# and the margins, about. Qt's message box counts 50 px and the title font of its own MDI windows: under GNOME, KDE
+# or Xfce a short message's box was narrower than its title, which the title bar cut ("Rename auburn-kak…").
+TITLE_ROOM = 150
+
+
+def screen_area(widget):
+    """The free area of the screen WIDGET is shown on (the screen of the window it belongs to), less a margin and
+    the window manager's title bar; None without a screen."""
+    parent = widget.parentWidget()
+    screen = (parent.window().screen() if parent is not None else None) or widget.screen() or \
+        QApplication.primaryScreen()
+    if screen is None:
+        return None
+    return screen.availableGeometry().adjusted(SCREEN_MARGIN, SCREEN_MARGIN + TITLE_BAR, -SCREEN_MARGIN,
+                                                -SCREEN_MARGIN)
+
+
+def title_width(widget):
+    """The width a window needs for its title WIDGET.windowTitle() to be read whole in a window manager's title bar:
+    the title in a bold font a little larger than the window's own, and TITLE_ROOM beside it."""
+    title = widget.windowTitle()
+    if not title:
+        return 0
+    font = QFont(widget.font())
+    font.setBold(True)
+    if font.pointSizeF() > 0:
+        font.setPointSizeF(font.pointSizeF() * 1.1)
+    elif font.pixelSize() > 0:
+        font.setPixelSize(round(font.pixelSize() * 1.1))
+    return QFontMetrics(font).horizontalAdvance(title) + TITLE_ROOM
+
+
+def make_readable(dialog):
+    """DIALOG (about to be shown) as wide as its window title needs (title_width), within its screen and its own
+    maximum: a short message's box, an input dialog, were as narrow as their text, and the title bar cut the title.
+    An input dialog's question wraps where it would be wider than the screen (a phone's): it was cut off instead; a
+    row of buttons too wide stands one below the other. A message box is widened through a spacer across its grid (it
+    sizes itself from its layout when it is shown), its text never wider than the screen."""
+    area = screen_area(dialog)
+    room = area.width() if area is not None and area.width() >= 200 else None
+    want = title_width(dialog)
+    if room is not None:
+        want = min(want, room - 4)  # (a layout that wraps a label may add a pixel to the minimum it is given)
+    from PySide6.QtWidgets import QInputDialog
+    if room is not None:
+        if isinstance(dialog, QInputDialog):
+            for label in dialog.findChildren(QLabel):
+                if not label.wordWrap() and label.sizeHint().width() > room - 40:
+                    label.setWordWrap(True)
+                    label.setMaximumWidth(room - 40)  # (a wrapped label's own width would still be its longest)
+        # A row of buttons wider than the screen (three long German ones on a phone): one below the other.
+        for row in dialog.findChildren(QDialogButtonBox):
+            if row.orientation() == Qt.Orientation.Horizontal and row.sizeHint().width() > room - 40:
+                row.setOrientation(Qt.Orientation.Vertical)
+    if isinstance(dialog, QMessageBox):
+        label = dialog.findChild(QLabel, "qt_msgbox_label")
+        if label is None:
+            return
+        # The text never wider than the screen leaves it beside the icon and the margins (Qt sizes a box by the
+        # whole screen: on a phone it reached past the edge). The box at least as wide as its title needs: a spacer
+        # across its grid (a minimum on the text instead would replace what its lines need, and Qt then neither
+        # wraps nor shows them whole).
+        beside = max(0, dialog.sizeHint().width() - label.sizeHint().width())
+        if room is not None:
+            label.setMaximumWidth(max(80, room - beside))
+        layout = dialog.layout()
+        spacer = getattr(dialog, "_title_room", None)
+        if spacer is None and isinstance(layout, QGridLayout):
+            spacer = dialog._title_room = QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            layout.addItem(spacer, layout.rowCount(), 0, 1, max(1, layout.columnCount()))
+        if spacer is not None:
+            spacer.changeSize(max(0, want - layout.contentsMargins().left() - layout.contentsMargins().right()), 0,
+                              QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+            layout.invalidate()
+        return
+    want = min(want, dialog.maximumWidth())
+    if dialog.minimumWidth() < want:
+        dialog.setMinimumWidth(want)
+    if dialog.width() < want:
+        dialog.resize(want, dialog.height())
+
+
+def fit_height(dialog):
+    """DIALOG (shown) as high as its layout needs at its width, within its screen: a dialog sized before its
+    wrapping texts (a note, a warning) were laid out at its final width cut their last lines."""
+    try:
+        layout = dialog.layout()
+        if layout is None or not dialog.isVisible() or not layout.hasHeightForWidth():
+            return
+        need = layout.totalHeightForWidth(dialog.width())
+    except RuntimeError:  # (deleted meanwhile)
+        return
+    area = screen_area(dialog)
+    if area is not None:
+        need = min(need, area.height())
+    if need > dialog.height():
+        dialog.resize(dialog.width(), need)
 
 
 def fit_on_screen(widget):
     """WIDGET (a dialog about to be shown) no larger than the free area of its screen (the screen of the window it
     belongs to) and inside it: a dialog sized for its content reached past the screen's edge, its buttons out of
     reach. Its minimum size gives way where it must."""
-    parent = widget.parentWidget()
-    screen = (parent.window().screen() if parent is not None else None) or widget.screen() or \
-        QApplication.primaryScreen()
-    if screen is None:
-        return
-    area = screen.availableGeometry().adjusted(SCREEN_MARGIN, SCREEN_MARGIN + TITLE_BAR, -SCREEN_MARGIN,
-                                                -SCREEN_MARGIN)
-    if area.width() < 200 or area.height() < 150:
+    area = screen_area(widget)
+    if area is None or area.width() < 200 or area.height() < 150:
         return
     width, height = min(widget.width(), area.width()), min(widget.height(), area.height())
     if widget.minimumWidth() > width:
@@ -971,7 +1210,8 @@ def fit_on_screen(widget):
 
 
 def fitting_dialogs():
-    """Every dialog and message box fits on its screen when it is shown (fit_on_screen). Once per process."""
+    """Every dialog and message box can be read and fits on its screen when it is shown (make_readable,
+    fit_on_screen). Once per process."""
     from PySide6.QtWidgets import QMessageBox as Box
     for cls in (QDialog, Box):
         original = cls.showEvent
@@ -981,9 +1221,12 @@ def fitting_dialogs():
         def show_event(dialog, event, original=original):
             if not event.spontaneous():
                 try:
+                    make_readable(dialog)
                     fit_on_screen(dialog)
                 except RuntimeError:  # (deleted meanwhile)
                     pass
+                if not isinstance(dialog, Box):  # (a message box sizes itself)
+                    QTimer.singleShot(0, lambda d=dialog: fit_height(d))
             return original(dialog, event)
         show_event.fits = True
         cls.showEvent = show_event
@@ -1028,6 +1271,7 @@ def confirm(parent, title_text, text, accept, destructive=False, details=None, r
     """True if the human chose ACCEPT (a verb, e.g. "Delete"); the safe choice is the default."""
     if AUTO_ANSWER is not None:
         SHOWN.append((title_text, text, details))
+        log_answer(parent, title_text, text, accept if AUTO_ANSWER else reject or "Cancel")
         return bool(AUTO_ANSWER)
     box = _box(parent, QMessageBox.Icon.Warning if destructive else QMessageBox.Icon.Question, title_text, text,
                details)
@@ -1041,8 +1285,37 @@ def confirm(parent, title_text, text, accept, destructive=False, details=None, r
     # closed meanwhile) - not chosen then.
     chosen = []
     yes.clicked.connect(lambda *_: chosen.append(True))
-    box.exec()
+    exec_dropped(box)  # (made anew for each question)
+    log_answer(parent, title_text, text, accept if chosen else reject or tr("Cancel"))
     return bool(chosen)
+
+
+AUTO_CHOICE = None  # tests: the key choose() answers while AUTO_ANSWER is set (None: the first choice, or none)
+
+
+def choose(parent, title_text, text, choices, cancel=None, destructive=()):
+    """One of several answers: the key of CHOICES ([(key, text)], in their order) the human chose, or None for CANCEL
+    (default "Cancel", also Esc and the default button). Keys in DESTRUCTIVE are marked as such."""
+    if AUTO_ANSWER is not None:
+        SHOWN.append((title_text, text, None))
+        answer = None if not AUTO_ANSWER else AUTO_CHOICE if AUTO_CHOICE is not None else \
+            (choices[0][0] if choices else None)
+        log_answer(parent, title_text, text, "Cancel" if answer is None else answer)
+        return answer
+    box = _box(parent, QMessageBox.Icon.Question, title_text, text)
+    chosen, buttons = [], []
+    for key, label in choices:
+        button = box.addButton(label, QMessageBox.ButtonRole.AcceptRole)
+        if key in destructive:
+            button.setProperty("role", "danger")
+        button.clicked.connect(lambda *_, k=key: chosen.append(k))
+        buttons.append(button)
+    no = box.addButton(cancel or tr("Cancel"), QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(no)
+    box.setEscapeButton(no)
+    exec_dropped(box)  # (made anew for each question)
+    log_answer(parent, title_text, text, chosen[0] if chosen else cancel or tr("Cancel"))
+    return chosen[0] if chosen else None
 
 
 def ask_first(parent, action, title_text, text, accept, detail=None, details=None, reject=None):
@@ -1051,6 +1324,8 @@ def ask_first(parent, action, title_text, text, accept, detail=None, details=Non
     human chose ACCEPT in a destructive confirmation (Cancel the default)."""
     from . import backend  # here: backend never imports Qt, and the widgets need no backend otherwise
     if backend.needs_confirm(action, detail) is None:
+        applog.log("INFO", where_of(parent), f"{said(title_text, 200)}: goes ahead without a question (the setting "
+                                             f"of {action} needs none)")
         return True
     return confirm(parent, title_text, text, accept, destructive=True, details=details, reject=reject)
 
@@ -1177,6 +1452,8 @@ class Notice(QWidget):
         self.hide()
 
     def show_message(self, text, level="info", details=None):
+        if str(text) != self.label.text() or (details or "").strip() != self.details.toPlainText():
+            log_notice(self, text, level, details)
         self.label.setText(str(text))
         self.label.setProperty("role", {"warn": "notice-warn", "error": "notice-error", "ok": "notice-ok"}.get(level))
         self.label.style().unpolish(self.label)
@@ -1247,7 +1524,8 @@ class AsyncCommand(QObject):
         self.process, self.cancelled = process, False
         self.timer.start(int(self.timeout * 1000))
         self.started_at = time.monotonic()
-        applog.debug("command", argv=[str(a) for a in argv][-6:], timeout=self.timeout)
+        self.argv_shown = applog.argv_text(argv)
+        applog.log("DEBUG", "command", f"started: {self.argv_shown} (timeout {self.timeout:g} s)")
         process.start()
         if input is not None:
             process.write(input if isinstance(input, bytes) else str(input).encode())
@@ -1273,8 +1551,10 @@ class AsyncCommand(QObject):
         err = bytes(process.readAllStandardError()).decode("utf-8", "replace") + error
         if status == 127 and err.startswith(CANNOT_RUN):
             status = -1
-        applog.debug("command done", status=status, seconds=round(time.monotonic() - getattr(self, "started_at", 0), 2),
-                     error=err.strip()[-300:] if status else "")
+        took = applog.seconds(time.monotonic() - getattr(self, "started_at", time.monotonic()))
+        applog.log("INFO" if status else "DEBUG", "command",
+                   f"{'stopped' if self.cancelled else f'exit status {status}'} after {took}: "
+                   f"{getattr(self, 'argv_shown', '')}" + (f"\n{applog.tail(err)}" if status and err.strip() else ""))
         if process.state() == QProcess.ProcessState.NotRunning:
             process.deleteLater()
         else:  # stopped: deleted once it has ended (deleting a running QProcess waits for it)
@@ -1500,12 +1780,14 @@ class ThreadCall(QObject):
 
     def _call(self):
         _worker.call = self
+        applog.set_work(self.work)
         try:
             result, error = self.function(*self.args), None
         except BaseException as exc:  # noqa: BLE001 - reported to the page; SystemExit too (argparse, sys.exit)
             result, error = None, exc
         finally:
             _worker.call = None
+            applog.set_work(None)
             if _worker_processes:
                 _forget_reaped()
         with ThreadCall._lock:
@@ -1552,10 +1834,6 @@ class ThreadCall(QObject):
             self.deleteLater()
         except RuntimeError:
             pass
-
-    def abandon(self):
-        with ThreadCall._lock:
-            self.abandoned = True
 
     @classmethod
     def running(cls, work_only=False):
@@ -1702,9 +1980,10 @@ class _Call:
     """What one background() call keeps: never the ThreadCall itself, so nothing connected to the call refers
     back to it (see ThreadCall._dispose)."""
 
-    def __init__(self, done, sources, owner, counted, work, name, timeout):
+    def __init__(self, done, sources, owner, counted, work, name, timeout, what=None):
         self.done, self.sources, self.owner, self.counted, self.work = done, sources, owner, counted, work
         self.name, self.began, self.answered, self.timer, self.timeout = name, time.monotonic(), False, None, timeout
+        self.what = what or name  # what the call does, in words (background's WHAT, or describe()'s)
 
     def owner_alive(self):
         if self.owner is None:
@@ -1721,8 +2000,7 @@ class _Call:
         if self.timer is not None:  # (dropped here, not in expired(): never inside its own signal)
             self.timer.stop()
             self.timer = None
-        applog.debug("background done", call=self.name, seconds=round(time.monotonic() - self.began, 2),
-                     error=f"{type(error).__name__}: {error}"[:300] if error is not None else "")
+        ended_log(self.what, self.work, time.monotonic() - self.began, error, self.answered)
         for widget in self.sources:
             _release(widget)
         alive = self.owner_alive()
@@ -1738,6 +2016,8 @@ class _Call:
         """No result within TIMEOUT: DONE gets a TimeoutError now. The thread cannot be stopped: its buttons stay
         disabled and its owner busy until it really ends (a second start of the same action meanwhile would run
         it twice)."""
+        applog.log("WARNING", "background", f"no answer within {int(self.timeout)} s: {self.what} - still running "
+                   "(it cannot be stopped; its buttons stay disabled until it ends, its result is dropped)")
         if self.owner_alive():
             self.answer(None, TimeoutError(tr("No answer within {seconds} s.", seconds=int(self.timeout))))
 
@@ -1746,18 +2026,138 @@ class _Call:
             return
         self.answered = True
         done, self.done = self.done, None
-        done(result, error)
+        try:
+            done(result, error)
+        except Exception as exc:  # noqa: BLE001 - written as the exception hook writes it, the app goes on as before
+            # Raised by what handles the call's result: the entry names the call whose result it was - the hook named
+            # only the widget that had the focus then.
+            text = applog.entry(type(exc), exc, exc.__traceback__,
+                                delivered=f"the result of a background call: {self.what}")
+            applog.write(text)
+            applog.notify("ERROR", applog.component(exc.__traceback__)[0], text.split("\n", 1)[1])
 
 
-def background(function, *args, done, source=None, owner=None, timeout=None, work=False):
+_described = {}  # describe(): {code object: the words found for it}
+_DESCRIBE_SKIP = {"self", "sai", "page", "window", "host", "args", "kwargs", "get", "append", "items", "keys", "values",
+                  "isinstance", "len", "list", "dict", "set", "tuple", "str", "int", "bool", "sorted", "any", "all",
+                  "min", "max", "print", "range", "enumerate", "zip", "getattr", "hasattr", "json", "os", "path",
+                  "Path", "strip", "split", "join", "startswith", "endswith", "partition", "format", "update",
+                  "setdefault", "pop", "add", "extend", "lower", "replace", "exists", "time", "monotonic", "Exception",
+                  "OSError", "ValueError", "RuntimeError", "TypeError", "KeyError", "type", "iter", "next", "float",
+                  "frozenset", "repr", "open", "read", "write", "close", "dumps", "loads", "isfile", "isdir"}
+
+
+def _called_names(code, depth=0):
+    """The names CODE (and the functions and lambdas defined in it) looks up, in order: what it calls."""
+    names = list(code.co_names)
+    if depth < 3:
+        for const in code.co_consts:
+            if hasattr(const, "co_names"):
+                names += _called_names(const, depth + 1)
+    return list(dict.fromkeys(names))
+
+
+# SandboxAI's methods that run the command their arguments name: described as "sandbox-ai command" (its arguments
+# follow), not by their docstring ("(exit status, stdout, stderr) of a sandbox-ai command that does not need…").
+RUNNERS = ("call", "host_run", "host_json")
+
+
+def describe(function):
+    """What FUNCTION (handed to background()) does, in words, for the log: its name without the "<locals>" parts, the
+    first sentence of its docstring and, for a lambda or an inner function, the sandbox-ai calls it makes - not only
+    `Prerequisites.check_prerequisites.<locals>.read`. Worked out once per function's code."""
+    import functools
+    inner = function
+    while isinstance(inner, functools.partial):
+        inner = inner.func
+    code = getattr(inner, "__code__", None) or getattr(getattr(inner, "__func__", None), "__code__", None)
+    key = code if code is not None else getattr(inner, "__qualname__", None) or type(inner).__name__
+    found = _described.get(key)
+    if found is not None:
+        return found
+    qualname = str(getattr(inner, "__qualname__", None) or getattr(inner, "__name__", None) or type(inner).__name__)
+    if type(getattr(inner, "__self__", None)).__name__ == "SandboxAI":
+        if getattr(inner, "__name__", None) in RUNNERS:  # (its arguments are the command: arguments_text)
+            _described[key] = "sandbox-ai command" if inner.__name__ == "call" else "sandbox-ai command on a host"
+            return _described[key]
+        qualname = f"sandbox-ai {getattr(inner, '__name__', qualname)}"
+    short = qualname.replace(".<locals>", "")
+    doc = (getattr(inner, "__doc__", None) or "").strip() if code is not None else ""
+    sentence = " ".join(doc.split("\n\n")[0].split()).split(". ")[0].rstrip(".")
+    words = short + (f" ({sentence[:117] + '…' if len(sentence) > 118 else sentence})" if sentence else "")
+    if code is not None and ("<lambda>" in qualname or "<locals>" in qualname or not sentence):
+        names = _called_names(code)
+        try:
+            from . import backend
+            known = [n for n in names if n not in _DESCRIBE_SKIP and hasattr(backend.SandboxAI, n)]
+        except Exception:  # noqa: BLE001 - the names it looks up then
+            known = []
+        if not known:
+            known = [n for n in names if n not in _DESCRIBE_SKIP and not n.startswith("_")][:4]
+        if known:
+            words += " calling " + ", ".join(known[:5]) + (" …" if len(known) > 5 else "")
+    if len(_described) > 4000:
+        _described.clear()
+    _described[key] = words
+    return words
+
+
+# Parameters whose argument is never logged (set_secret's VALUE, save_token's TOKEN, add_login's SECRET...).
+SECRET_PARAMETER = re.compile(r"(?i)value|secret|token|passw|key|cred|auth|code|input|data|content|text")
+
+
+def arguments_text(function, args, limit=200):
+    """ARGS of a background call of FUNCTION for the log: the argument of a parameter whose name says it may be a
+    secret (value, secret, token, password, key, ...) masked, and so is one whose parameter is not known; short values
+    as they are (one that looks like a token masked: applog.argv_text), a list or a mapping by its size, anything else
+    by its type."""
+    import inspect
+    try:
+        bound = inspect.signature(function).bind_partial(*args).arguments
+    except (TypeError, ValueError):
+        return f"<{len(args)} arguments>"
+    shown = []
+    for name, value in bound.items():
+        for one in (value if isinstance(value, tuple) and name not in ("self",) and
+                    inspect.signature(function).parameters[name].kind == inspect.Parameter.VAR_POSITIONAL
+                    else (value,)):
+            if SECRET_PARAMETER.search(name):
+                shown.append("***")
+            elif isinstance(one, (str, int, float, bool)) or one is None:
+                shown.append(str(one))
+            elif isinstance(one, (list, tuple, set, frozenset, dict)):
+                shown.append(f"<{type(one).__name__} of {len(one)}>")
+            else:
+                shown.append(f"<{type(one).__name__}>")
+    return applog.argv_text(shown, limit)
+
+
+def ended_log(what, work, seconds, error, timed_out=False):
+    """The end of a background call in the log: work (a human's action) at INFO; a read at DEBUG, its failure at INFO
+    once per change of the error (a poll that fails every few seconds is said once, then at DEBUG). TIMED_OUT: its
+    caller was told of a timeout already (the late end is said, its result dropped)."""
+    took = applog.seconds(seconds)
+    late = " (late: its caller had a timeout already, the result is dropped)" if timed_out else ""
+    if error is None:
+        applog.log("INFO" if work or timed_out else "DEBUG", "background", f"done in {took}: {what}{late}")
+        return
+    said = f"failed after {took}: {what}: {applog.error_text(error)}{late}"
+    if work:
+        applog.log("WARNING", "background", said)
+    else:
+        applog.changed(("background", what), "INFO", "background", said, quiet="DEBUG")
+
+
+def background(function, *args, done, source=None, owner=None, timeout=None, work=False, what=None):
     """Run FUNCTION(*args) in a thread, never on the GUI thread (which must keep answering approvals);
     DONE(result, error) runs on the GUI thread, once. SOURCE (a widget or a list of them, e.g. the button
     that started it) is disabled until the thread ends; OWNER (a page) counts its running calls for busy(), and
     a late result never reaches it once it is deleted. WORK (True for what a human started that changes
     something: an install, a start, a write) also counts for working(): the window's busy bar and the question
     when it is closed. A read or a poll (the default) shows as neither, and quitting ends it without a question.
-    After TIMEOUT seconds without a result, DONE gets a TimeoutError (a late result is dropped). Returns the
-    ThreadCall."""
+    After TIMEOUT seconds without a result, DONE gets a TimeoutError (a late result is dropped). WHAT: what the call
+    does, in words, for the log (else describe()d from FUNCTION); its start and end are logged with it (work at
+    INFO, a read at DEBUG, a timeout at WARNING). Returns the ThreadCall."""
     sources = [w for w in (source if isinstance(source, (list, tuple)) else [source]) if w is not None]
     for widget in sources:
         _hold(widget)
@@ -1767,9 +2167,17 @@ def background(function, *args, done, source=None, owner=None, timeout=None, wor
         owner._work = getattr(owner, "_work", 0) + (1 if work else 0)
         activity().changed.emit()  # the window's busy indicator: which pages have work running
     name = getattr(function, "__qualname__", None) or repr(function)
-    state = _Call(done, sources, owner, counted, work, name, timeout)
+    words = str(what) if what else describe(function)
+    runner = not what and args and words.startswith("sandbox-ai command")
+    if runner:  # the command is what it does: named in its end line too (a failed read is said at INFO)
+        words = f"{words}: {arguments_text(function, args)}"
+    if work or applog.debugging() or applog._debug_wanted:
+        on = f" for {type(owner).__name__}" if owner is not None else ""
+        given = f" with {arguments_text(function, args)}" if args and not runner else ""
+        applog.log("INFO" if work else "DEBUG", "background",
+                   f"started: {words}{given}{on}" + (f" (timeout {timeout:g} s)" if timeout else ""))
+    state = _Call(done, sources, owner, counted, work, name, timeout, words)
     call = ThreadCall(function, *args, work=work)
-    applog.debug("background", call=name, timeout=timeout)
     # PySide holds a connected method of a plain Python object only weakly: the call keeps STATE (STATE never
     # refers to the call, so nothing is held in a circle; both go once the call has reported).
     call.state = state
@@ -1785,6 +2193,135 @@ def background(function, *args, done, source=None, owner=None, timeout=None, wor
 # -- several rows chosen at once (Ctrl+click, Shift+click): one question, then each in turn, the failures together --
 
 LISTED = 12  # names a question about several names in full (the rest: "and N more")
+
+
+# -- context menus: what the buttons beside a list offer, where the item is --
+
+def button_text(button):
+    """A button's text as a menu entry: its mnemonic marks (&) taken out, a doubled one kept as one &."""
+    return button.text().replace("&&", "\0").replace("&", "").replace("\0", "&").strip()
+
+
+def shown_button(button, near=None):
+    """Whether BUTTON is offered: not hidden itself or by what holds it below the nearest widget it shares with NEAR
+    (the list whose menu offers it; else its window) - an action of another host, of a mode not chosen; whether the
+    page itself is shown does not count."""
+    if button.isHidden():
+        return False
+    from shiboken6 import getCppPointer
+
+    def key(widget):
+        return getCppPointer(widget)[0]  # (a wrapper made again for the same widget is the same one)
+    ancestors, widget = set(), near
+    while widget is not None:
+        ancestors.add(key(widget))
+        widget = widget.parentWidget()
+    top = button.parentWidget()
+    while top is not None and key(top) not in ancestors and top.parentWidget() is not None:
+        top = top.parentWidget()
+    return top is None or button.isVisibleTo(top)
+
+
+def context_menu(parent, entries):
+    """The QMenu of ENTRIES, in their order: a button (a QPushButton or QToolButton: an entry with its text, enabled
+    state and tooltip - the reason it is disabled -, chosen: clicked; a button with a menu: that menu's entries; a
+    hidden button is left out), a QAction or a QMenu (as they are), (text, enabled, why, callback) (a TEXT entry,
+    WHY its tooltip while disabled), None (a separator; never two, never first or last)."""
+    menu = QMenu(parent)
+    menu.setToolTipsVisible(True)
+    pending = False
+    for entry in entries:
+        if entry is None:
+            pending = not menu.isEmpty()
+            continue
+        if isinstance(entry, QAbstractButton) and not shown_button(entry, parent):
+            continue
+        if pending:
+            menu.addSeparator()
+            pending = False
+        if isinstance(entry, QMenu):
+            menu.addMenu(entry)
+        elif isinstance(entry, QAction):
+            menu.addAction(entry)
+        elif isinstance(entry, tuple):
+            text, enabled, why, callback = (tuple(entry) + (None, None, None))[:4]
+            action = menu.addAction(str(text))
+            action.setEnabled(bool(enabled))
+            if why and not enabled:
+                action.setToolTip(safe_tooltip(why))
+            if callback is not None:
+                action.triggered.connect(lambda _=False, f=callback: f())
+        elif isinstance(entry, QAbstractButton) and entry.menu() is not None and not entry.menu().isEmpty():
+            sub = menu.addMenu(button_text(entry))
+            sub.setToolTipsVisible(True)
+            sub.setEnabled(entry.isEnabled())
+            for action in entry.menu().actions():
+                sub.addAction(action)
+        elif isinstance(entry, QAbstractButton):
+            action = menu.addAction(button_text(entry))
+            if not entry.icon().isNull():
+                action.setIcon(entry.icon())
+            action.setEnabled(entry.isEnabled())
+            tip = entry.toolTip()  # as the button has it: escaped when it was set (set_enabled, safe_tooltip)
+            action.setToolTip(tip)
+            action.triggered.connect(lambda _=False, b=entry: b.click())
+    return menu
+
+
+def menu_entries(menu):
+    """[(text, enabled)] of MENU's entries (separators left out; a submenu's own entries after it, indented): what
+    a test reads."""
+    found = []
+    for action in menu.actions():
+        if action.isSeparator():
+            continue
+        found.append((action.text(), action.isEnabled()))
+        if action.menu() is not None:
+            found += [("  " + text, enabled) for text, enabled in menu_entries(action.menu())]
+    return found
+
+
+def select_under(view, point):
+    """A right click on VIEW at POINT: the row there becomes the selection unless it is part of it already (the
+    selected rows stay, for an action on all of them: Ctrl and Shift select several). Its index (invalid: none)."""
+    index = view.indexAt(point)
+    model = view.selectionModel()
+    if not index.isValid() or model is None:
+        return index
+    if not model.isSelected(index):
+        flags = QItemSelectionModel.SelectionFlag.ClearAndSelect
+        if view.selectionBehavior() == QAbstractItemView.SelectionBehavior.SelectRows:
+            flags |= QItemSelectionModel.SelectionFlag.Rows
+        model.setCurrentIndex(index, flags)
+    return index
+
+
+def list_menu(view, entries, copy=True):
+    """A context menu on the list, table or tree VIEW: ENTRIES() (see context_menu: mostly the buttons beside the list,
+    which stay the one place of each action and its rules) for the row under the pointer (selected first, unless
+    it is one of several selected), then Copy and Copy cell (COPY). The menu key and Shift+F10 open it too. Kept
+    on the view (VIEW.menu_entries) for the tests."""
+    from . import copying
+    view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    view.menu_entries = entries
+
+    def show(point):
+        select_under(view, point)
+        menu = context_menu(view, entries())
+        if copy:
+            copying.copy_entries(menu, view, point)
+        if menu.isEmpty():
+            menu.deleteLater()
+            return
+        where = view.viewport() if hasattr(view, "viewport") else view
+        exec_dropped(menu, where.mapToGlobal(point))
+    view.customContextMenuRequested.connect(show)
+    return view
+
+
+def menu_of(view):
+    """The context menu list_menu gives VIEW now (not shown): for the tests."""
+    return context_menu(view, view.menu_entries())
 
 
 def listing(names, limit=LISTED):
@@ -1848,6 +2385,8 @@ def run_each(function, items, *, done, owner=None, source=None, timeout=None, wo
                 outcomes.append((item, None, exc))
         return outcomes
     return background(each, owner=owner, source=source, work=work, timeout=timeout,
+                      what=f"{describe(function)} for each of {len(items)}: " + applog.argv_text(
+                          [str(i) for i in items[:6]], 200) + (" …" if len(items) > 6 else ""),
                       done=lambda result, error: done(result if error is None else [(i, None, error) for i in items]))
 
 
@@ -1975,6 +2514,8 @@ class Task(QWidget):
         return self.command is not None or self.call is not None
 
     def _begin(self, text, source, cancellable):
+        self.began, self.job_text = time.monotonic(), str(text)
+        applog.log("INFO" if getattr(self, "work", True) else "DEBUG", "task", f"started: {applog.redact(text)}")
         self.label.setText(text)
         self.cancel_button.setVisible(cancellable)
         self.cancel_button.setEnabled(True)
@@ -2039,6 +2580,7 @@ class Task(QWidget):
 
     def _command_done(self, status, out, err):
         done, cancelled = self.done, self.command is not None and self.command.cancelled
+        self._ended("cancelled" if cancelled else f"exit status {status}", status != 0 and not cancelled, err)
         self._end()
         if done:
             done(-2 if cancelled else status, out, err)
@@ -2066,13 +2608,28 @@ class Task(QWidget):
                 return function()
         return self.thread(work, done, text, source, cancellable)
 
+    def _ended(self, outcome, failed, err=""):
+        """The job's end in the log: what it was, how long it took, how it ended (the tail of its error output)."""
+        took = applog.seconds(time.monotonic() - getattr(self, "began", time.monotonic()))
+        text = applog.redact(getattr(self, "job_text", ""))
+        level = "WARNING" if failed else "INFO" if getattr(self, "work", True) else "DEBUG"
+        applog.log(level, "task", f"ended after {took} ({outcome}): {text}" +
+                   (f"\n{applog.tail(err)}" if failed and str(err or "").strip() else ""))
+
     def _thread_done(self, result, error):
         done = self.done
+        status = result[0] if isinstance(result, tuple) and result and isinstance(result[0], int) else None
+        self._ended("cancelled" if self.cancelled else f"failed: {applog.error_text(error)}" if error is not None
+                    else f"exit status {status}" if status is not None else "done",
+                    error is not None or (status not in (None, 0) and not self.cancelled),
+                    result[2] if status not in (None, 0) and len(result) > 2 else "")
         self._end()
         if done:
             done(result, error)
 
     def cancel(self):
+        if self.running:
+            applog.log("INFO", "task", f"Cancel asked: {applog.redact(getattr(self, 'job_text', ''))}")
         if self.command is not None:
             self.cancelled = True
             self.command.stop()
@@ -2091,6 +2648,9 @@ class _Row:
 
     def __init__(self, values, color, tip, icon, sort, index):
         self.values, self.color, self.tip, self.icon, self.sort, self.index = values, color, tip, icon, sort, index
+
+
+LAYOUT_SIGNATURE = ("QList<QPersistentModelIndex>", "QAbstractItemModel::LayoutChangeHint")  # (a layout signal's hint)
 
 
 class RowModel(QAbstractTableModel):
@@ -2196,11 +2756,14 @@ class RowModel(QAbstractTableModel):
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
         """Sorted in Python (a header click, sortByColumn): the selection and the current row stay on their rows."""
         self.sorted_by = (column, order)
-        self.layoutAboutToBeChanged.emit()
+        # (VerticalSortHint: the selection is kept as one index a row, not one a cell - 20,000 rows selected took
+        # seconds to sort, and the selection came back cut into a range a row, every later look at it slow)
+        hint, signature = QAbstractItemModel.LayoutChangeHint.VerticalSortHint, LAYOUT_SIGNATURE
+        self.layoutAboutToBeChanged[signature].emit([], hint)
         before = self.rows
         self.rows = self.ordered(before, column, order)
         self._move_persistent(before)
-        self.layoutChanged.emit()
+        self.layoutChanged[signature].emit([], hint)
 
     def _move_persistent(self, before):
         where = {id(row): position for position, row in enumerate(self.rows)}
@@ -2444,10 +3007,6 @@ def fit_columns(widget, force=False):
     return tables.fit_columns(widget, force=force)
 
 
-def row_texts(widget, row):
-    return [widget.item(row, c).text() if widget.item(row, c) else "" for c in range(widget.columnCount())]
-
-
 def selected(widget, column=0):
     """The text of COLUMN in the selected row (read from the row itself, so sorting does not matter)."""
     rows = widget.selectionModel().selectedRows() if widget.selectionModel() else []
@@ -2459,7 +3018,22 @@ def selected(widget, column=0):
 
 def selected_rows(widget):
     """The visual rows selected, top to bottom: use row_key() to know what they stand for."""
-    return sorted(index.row() for index in widget.selectionModel().selectedRows()) if widget.selectionModel() else []
+    selection = widget.selectionModel()
+    if selection is None:
+        return []
+    if not isinstance(widget, ModelTable):
+        return sorted(index.row() for index in selection.selectedRows())
+    # A ModelTable (whole rows selected, a row's cells alike): by the ranges - Qt's selectedRows() asked the model for
+    # every cell's flags in Python, 140,000 calls for 20,000 rows (more than half a second at every Copy, F5, drag ...).
+    model = widget.model()
+    last, rows, partly = model.columnCount() - 1, set(), set()
+    for part in selection.selection():
+        if part.parent().isValid():
+            continue
+        (rows if part.left() <= 0 and part.right() >= last else partly).update(range(part.top(), part.bottom() + 1))
+    rows.update(row for row in partly - rows if selection.isRowSelected(row))
+    selectable = Qt.ItemFlag.ItemIsSelectable
+    return sorted(row for row in rows if model.flags(model.index(row, 0)) & selectable)
 
 
 def row_data(widget, row, column=0):
@@ -2675,18 +3249,28 @@ class FlowLayout(QLayout):
         return QSize(self.minimum)
 
     def _layout(self, rect, apply):
+        """The rows' height; APPLY: the items placed, each in the middle of its row's height (a label beside a
+        field beside a button share one middle line)."""
         x, y, line = rect.x(), rect.y(), 0
+        row = []  # (item, x, size) of the row being filled
         for item in self.items:
             if item.widget() is not None and item.widget().isHidden():
                 continue
             hint = item.sizeHint()
             if x + hint.width() > rect.right() + 1 and line > 0:
-                x, y, line = rect.x(), y + line + self.gap, 0
-            if apply:
-                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+                self._place(row, y, line, apply)
+                x, y, line, row = rect.x(), y + line + self.gap, 0, []
+            row.append((item, x, hint))
             x += hint.width() + self.gap
             line = max(line, hint.height())
+        self._place(row, y, line, apply)
         return y + line - rect.y()
+
+    @staticmethod
+    def _place(row, y, line, apply):
+        if apply:
+            for item, x, hint in row:
+                item.setGeometry(QRect(x, y + (line - hint.height()) // 2, hint.width(), hint.height()))
 
 
 def compact_combo(combo, chars=24):
@@ -2745,10 +3329,6 @@ def card():
     return frame
 
 
-def standard_icon(name):
-    return QApplication.style().standardIcon(getattr(QStyle.StandardPixmap, name))
-
-
 class Busy:
     """Wait cursor around a short call (no subprocess, no network: those run in the background)."""
 
@@ -2803,7 +3383,8 @@ class StartControls(QWidget):
         """A codename for the next session (as the launcher names starts), shown in the empty name field."""
         try:
             name = self.sai.module("codenames").codename() if self.sai is not None else ""
-        except Exception:  # noqa: BLE001 - an older sandbox-ai without codenames: a name must be typed
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai without codenames: a name must be typed
+            applog.swallowed("widgets", "StartControls.new_name: an older sandbox-ai without codenames: a name …", _exc)
             name = ""
         self.suggestion = name
         self.name.setPlaceholderText(name or tr("session name"))
@@ -2828,6 +3409,73 @@ class StartControls(QWidget):
 
 CLOSE_CORNER = 22  # pixels: the [x] button's side
 CLOSE_MARGIN = 6  # pixels from the window's top and right edge
+
+
+# -- a tab's close button, inside its tab --
+# Qt puts a tab's close button flush with the tab's right edge (a style sheet's padding and margins do not move it):
+# its [x] and its hover background reached onto the tab's border, beyond the tab as drawn. The button sits in a
+# holder whose right margin keeps it TAB_CLOSE_GAP pixels inside, in every theme and at every font size.
+TAB_CLOSE_GAP = 6
+TAB_CLOSE_SIZE = 18  # px of the button (its glyph 12 px): it fits the lowest tab of every theme
+
+
+def tab_close_button(bar, tooltip=None):
+    """A close button for a tab of BAR (a QTabBar): (holder to set with setTabButton, the button). A click asks BAR to
+    close the tab the holder is on (tabCloseRequested)."""
+    holder = QWidget()
+    holder.setObjectName("tabCloseHolder")
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, TAB_CLOSE_GAP, 0)
+    row.setSpacing(0)
+    close = QToolButton()
+    close.setObjectName("tabClose")
+    close.setAutoRaise(True)
+    close.setFixedSize(QSize(TAB_CLOSE_SIZE, TAB_CLOSE_SIZE))
+    close.setIconSize(QSize(12, 12))
+    close.setIcon(theme.glyph("quit", theme.colors()["text"], 12))
+    close.setToolTip(safe_tooltip(tooltip) if tooltip else tr("Close tab"))
+    close.setAccessibleName(tooltip or tr("Close tab"))
+    close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    row.addWidget(close)
+    holder.close_button = close
+
+    def clicked(_=False):
+        for index in range(bar.count()):
+            if bar.tabButton(index, bar.ButtonPosition.RightSide) is holder:
+                bar.tabCloseRequested.emit(index)
+                return
+    close.clicked.connect(clicked)
+    return holder, close
+
+
+class InsetCloseTabBar(QTabBar):
+    """A QTabBar whose closable tabs get tab_close_button (inside the tab) instead of Qt's own close button."""
+
+    def tabInserted(self, index):  # noqa: N802
+        super().tabInserted(index)
+        if self.tabsClosable():
+            holder, _close = tab_close_button(self)
+            self.setTabButton(index, QTabBar.ButtonPosition.RightSide, holder)
+
+    def changeEvent(self, event):  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == event.Type.PaletteChange:  # a new theme
+            self.restyle()
+
+    def restyle(self):
+        """The close buttons' glyph in the colors of the theme now."""
+        for index in range(self.count()):
+            holder = self.tabButton(index, QTabBar.ButtonPosition.RightSide)
+            close = getattr(holder, "close_button", None)
+            if close is not None:
+                close.setIcon(theme.glyph("quit", theme.colors()["text"], 12))
+
+
+def inset_close_tabs(tabs):
+    """TABS (a QTabWidget, before its first tab): closable tabs whose close button lies inside the tab."""
+    bar = InsetCloseTabBar()
+    tabs.setTabBar(bar)
+    return bar
 
 
 class CloseCorner(QToolButton):

@@ -14,12 +14,13 @@ anything that looks like a secret, or with options that copy a login in, is refu
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
 import re
 
+from . import applog
 from . import backend
 from . import board as B
 from .i18n import N_, language as i18n_language, tr
@@ -83,6 +84,9 @@ class Preset:
     # and its title and description in other languages ({"de": {"title", "description"}}).
     group: str = ""
     translations: dict = field(default_factory=dict)
+    # sandbox-ai's presets that start something not live-tested yet: {"names"} (its launcher's one list,
+    # EXPERIMENTAL_PARTS, as `presets list --json` says it: "experimental"); empty for the rest. A badge only.
+    experimental: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.name:
@@ -262,8 +266,8 @@ PRESETS = (
                   N_("TCP over IPv4 only: no UDP (no QUIC, ping or NTP), no IPv6, slower; the agent's provider may "
                      "refuse or challenge Tor exits."),
                   N_(".onion names resolve and connect through Tor (with --dns every one the agent looks up)."),
-                  N_("With --socks, 127.0.0.1:9050 is Tor's SocksPort (torsocks, curl --socks5-hostname); torsocks "
-                     "and Tor Browser in the image: sandbox-ai images recipe tor --from AGENT."))),
+                  N_("With --socks, 127.0.0.1:9050 is Tor's SocksPort (curl --socks5-hostname); nothing is needed in "
+                     "the agent's image: the Tor container beside it carries everything."))),
     Preset("vpn-mcp", N_("MCP servers behind different VPNs"),
            N_("Search through one VPN (e.g. Mullvad), page fetching through another (your own WireGuard); the "
               "agent reaches only its provider."), "privacy", "advanced",
@@ -434,7 +438,8 @@ def sai_categories(sai):
     sandbox-ai without them (or none at all)."""
     try:
         info = getattr(sai.module("presets"), "CATEGORY_INFO", None)
-    except Exception:  # noqa: BLE001 - an older sandbox-ai: no presets, no categories
+    except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: no presets, no categories
+        applog.swallowed("presets", "sai_categories: an older sandbox-ai: no presets, no categories", _exc)
         return []
     return [(key, value) for key, value in info.items() if isinstance(value, dict)] if isinstance(info, dict) else []
 
@@ -482,10 +487,13 @@ def local_documents(sai):
     a preset's ruleset beside it is read); none from a sandbox-ai without presets."""
     try:
         module = sai.module("presets")
-    except Exception:  # noqa: BLE001 - an older sandbox-ai: no presets of its own
+    except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: no presets of its own
+        applog.swallowed("presets", "local_documents: an older sandbox-ai: no presets of its own", _exc)
         return [], []
     problems = []
-    return [{**document} for document in module.catalog(problems).values()], problems
+    badge = getattr(module, "experimental", None)  # (an older sandbox-ai: no badges)
+    return [{**document, **({"experimental": badge(document)} if badge and badge(document) else {})}
+            for document in module.catalog(problems).values()], problems
 
 
 def host_documents(sai, host):
@@ -856,7 +864,7 @@ def from_sandbox_ai(sai, document, host="local"):
     if isinstance(document.get("rules"), str) and isinstance(document.get("_path"), str):
         try:
             rules = json.loads((Path(document["_path"]).parent / document["rules"]).read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             rules = None
     elif isinstance(document.get("rules"), str):
         rules_note = [tr("Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset "
@@ -887,7 +895,26 @@ def from_sandbox_ai(sai, document, host="local"):
                                agents=tuple(a for a in agents if a in tuple(getattr(sai, "agents", B.AGENTS))),
                                source="sandbox-ai", name=str(document.get("id", ""))[:60], host=host,
                                value_names=tuple((markers[name], name) for name in values),
-                               group=sai_group(document), translations=sai_translations(document))
+                               group=sai_group(document), translations=sai_translations(document),
+                               experimental=experimental_of(document))
+
+
+def experimental_of(document):
+    """The badge of sandbox-ai's preset DOCUMENT ({"names"}: its "experimental", which that host's launcher derives
+    from its one list of what has not passed its live test yet), its names checked and bounded; {} for the rest."""
+    given = document.get("experimental")
+    if not isinstance(given, dict) or not isinstance(given.get("names"), list):
+        return {}
+    word = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+    names = [name for name in given["names"] if isinstance(name, str) and word.fullmatch(name)][:10]
+    return {"names": names} if names else {}
+
+
+def experimental_text(badge):
+    """BADGE (Preset.experimental) in the app's words: what has not passed its live test yet. A badge only."""
+    if not badge:
+        return ""
+    return tr("Not live-tested yet: {names}.", names=", ".join(badge["names"]))
 
 
 # sandbox-ai's categories of earlier versions, and where they are listed now (its presets.LEGACY_CATEGORIES).
@@ -1006,6 +1033,32 @@ def export(sai, preset, path):
     return path
 
 
+# What a preset passed on (an imported file, someone else's) may not carry although one you save yourself may, as
+# sandbox-ai refuses it in a preset that is not yours (its presets.REFUSED and OWN_VALUES): a token read from a file of
+# yours (sent to the URL the preset names), the internal options of a start, and the values only you choose
+# (backend.PROJECT_REFUSED_VALUES: the cloud provider's conversations recorded). A gone value (--telemetry on:
+# telemetry is always off) is dropped from an imported preset (backend.without_retired), never refused.
+NOT_PASSED_ON = ("--git-token-file", "--helper-of", "--start-id", "--preset", "--preset-value")
+
+
+def not_passed_on(sai, options):
+    """["--git-token-file", "--llm-traffic all", ...]: what of OPTIONS a preset passed on may not carry."""
+    try:
+        tokens = list(backend.canonical_of(sai)(list(options)))
+    except (ValueError, SystemExit):
+        tokens = [str(option) for option in options]
+    found = []
+    for index, token in enumerate(tokens):
+        name, equals, value = str(token).partition("=")
+        if name in NOT_PASSED_ON:
+            found.append(name)
+        elif equals and backend.project_refused(name, value):
+            found.append(f"{name} {value}")
+        elif not equals and index + 1 < len(tokens) and backend.project_refused(name, tokens[index + 1]):
+            found.append(f"{name} {tokens[index + 1]}")
+    return list(dict.fromkeys(found))
+
+
 def import_file(sai, path):
     """The preset in the JSON file PATH (untrusted: size limited, every value checked), as one of the user's
     own (its id prefixed with my- when it would shadow a built-in one, numbered when one of yours has it: free_id)."""
@@ -1017,6 +1070,11 @@ def import_file(sai, path):
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise ValueError(tr("Not a JSON file.")) from None
     preset = from_document(sai, document)
+    preset = replace(preset, options=tuple(backend.without_retired(preset.options)))  # no --telemetry on: always off
+    passed_on = not_passed_on(sai, preset.options)
+    _check(not passed_on, N_("A preset from elsewhere may not carry {options}: it is not yours - only your command "
+                             "line, your defaults or a preset you save yourself chooses that."),
+           options=", ".join(passed_on))
     # (never in place of a built-in one, nor of one of yours: one of the same id - yours, sent on and changed by
     # someone, or another's - is kept beside it)
     wanted = free_id(("my-" + preset.id)[:64] if preset.id in BUILTIN else preset.id)

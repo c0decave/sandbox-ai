@@ -101,6 +101,65 @@ def test_a_model_request_body_is_redacted_in_a_fraction_of_the_time():
     assert best(rt.redact_text) < best(redacted_before)  # (about 0.2x here; a loaded CI runner gets room)
 
 
+# -- 0.1.95, performance round 1: a long text is searched where its matches can begin --
+
+# Where the starts are cut close: a scheme of 19 to 21 characters before "://", -u after a line break, re.I's letters.
+EDGES = ["a" * 19 + "://", "a" * 20 + "://", "a" * 21 + "://", "1a://", "x:pw@", "\n-u ", "\t--user a:b ", " -u x:y ",
+         "gho_" + "Z" * 20, "toKEN", "bEaReR", "BAS\u0130C", "\u0131", "\u0130", "\u017f", "\u212a", "\u00e9=",
+         "9token=", "_token=", "\u2028", "\u3000", "skx", "s", "k"]
+
+def test_a_text_searched_where_matches_can_begin_is_redacted_as_before():
+    chosen = random.Random(3)
+    for _ in range(20000):
+        text = "".join(chosen.choice(PIECES + EDGES) for _ in range(chosen.randint(1, 14)))
+        assert rt.redact_text(text, anchored=True) == redacted_before(text), text
+    for _ in range(300):  # long ones (the anchored form by their length), the pieces anywhere in them
+        text = "".join(chosen.choice(PIECES + ["word ", "a" * 30, "=" * 3, '{"k": "v"}, ']) for _ in range(600))
+        assert len(text) > rt.REDACT_ANCHORED and rt.redact_text(text) == redacted_before(text), text
+
+
+def test_the_starts_know_every_letter_ignorecase_takes():
+    """names_starts walks back over what [a-z_] takes under re.I; lowered_starts finds re.I's ASCII words in
+    str.lower(), except in a text with one of the letters it folds otherwise."""
+    letters = re.compile(r"[a-z_]", re.I)
+    taken = {chr(code) for code in range(0x110000) if letters.fullmatch(chr(code))}
+    assert taken == rt.NAME_CHARACTERS
+    for character in taken:
+        for letter in "abcdefghijklmnopqrstuvwxyz":
+            if character not in rt.LOWER_UNLIKE_IGNORECASE:
+                assert (re.fullmatch(letter, character, re.I) is not None) == (character.lower() == letter), character
+    assert [chr(code) for code in range(0x110000) if len(chr(code).lower()) != 1] == ["İ"]
+    text = "x " * 2000 + "baſic abcdefghijk TOKEN abcdefghijk"
+    assert rt.redact_text(text) == redacted_before(text) and text.endswith("abcdefghijk")
+    assert "baſic [redacted]" in rt.redact_text(text) and "TOKEN [redacted]" in rt.redact_text(text)
+
+
+def test_a_long_text_is_not_searched_whole_by_the_slow_patterns(monkeypatch):
+    """The patterns that tried each position of a long text in one call (holding the GIL: the LLM traffic log's thread
+    stopped the proxy's connections for 80 ms at a time) look only where a match can begin."""
+    called = []
+
+    class Counted:
+        def __init__(self, index, pattern):
+            self.index, self.pattern = index, pattern
+
+        def sub(self, *args):
+            called.append(("sub", self.index))
+            return self.pattern.sub(*args)
+
+        def match(self, text, start):
+            called.append(("match", self.index))
+            return self.pattern.match(text, start)
+    monkeypatch.setattr(rt, "SECRET_TEXT", [(Counted(index, pattern), replacement)
+                                            for index, (pattern, replacement) in enumerate(rt.SECRET_TEXT)])
+    text = json.dumps({"messages": [{"role": "user", "content": "some words - here: x=1 " * 4000}],
+                       "url": "https://user:pw@example.test/", "auth": "Bearer abcdefghijkl", "api_key": "k" * 12})
+    found = rt.redact_text(text)
+    assert {index for kind, index in called if kind == "sub"} <= {0, 4}
+    assert sum(1 for kind, index in called if kind == "match") < 4000 * 2 + 50
+    assert "Bearer [redacted]" in found and "user:[redacted]@" in found and '"api_key": "[redacted]"' in found
+
+
 # -- a log's lines --
 
 @pytest.mark.parametrize("line", [
@@ -224,3 +283,21 @@ def test_the_catalogs_are_downloaded_at_once_and_read_as_before():
         raise OSError("unreachable")
     found, problems = mcp.catalog_entries([("a", "https://a.example/catalog.json")], fetch=missing)
     assert found == [] and problems == ["https://a.example/catalog.json: unreachable"]
+
+
+def test_a_traffic_record_is_written_as_one_dumps_wrote_it():
+    """compact_json puts a record together from a dumps() per member (no single call over megabytes): the same text."""
+    class Odd:
+        def __str__(self):
+            return "odd é"
+    values = [{}, [], (), {"a": []}, {"a": {}}, [1, 2.5, float("nan"), float("inf"), None, True, " \"\\\n"],
+              {"x": {"y": {"z": {"w": {"v": [1, {"u": 2}]}}}}}, {1: "int key", "b": 2}, {"t": (1, 2)}, Odd(),
+              {"o": Odd(), "l": [Odd(), {"k": Odd()}]}, {None: 1, 2.5: 2, True: 3}, "plain", 7, [[[[[[]]]]]],
+              {"request": {"messages": [{"role": "user", "content": "\ud800 lone"}] * 3}}]
+    for value in values:
+        for depth in (0, 1, 2, 4, 9):
+            assert rt.compact_json(value, depth) == json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                                                               default=str), (value, depth)
+    record = {"version": 1, "request": {"messages": [{"role": "user", "content": "x" * 100}] * 50}, "response": {}}
+    assert rt.llm_traffic_line(record, 1 << 20)[0] == json.dumps(record, ensure_ascii=False, separators=(",", ":"),
+                                                                 default=str).encode()

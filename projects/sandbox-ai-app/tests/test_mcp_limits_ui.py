@@ -126,7 +126,9 @@ def test_the_inspector_of_an_mcp_node_edits_its_own_limits_and_resets_them(board
     assert not board_page.board.node(node.id).props.get("limits")
     assert "--mcp-limits" not in board_page.preview.toPlainText()
     buttons = [b.text() for b in board_page.inspector_holder.findChildren(QtWidgets.QPushButton)]
-    assert "Defaults for every start…" in buttons
+    # Two buttons that say what each does (they were "Reset to defaults" and "Defaults for every start…", as wide as
+    # the inspector): tests/test_mcp_variables_ui.py holds them to their size and words.
+    assert "Use the server's limits" in buttons and "Save as the server's defaults…" in buttons
 
 
 def test_the_context_menu_of_an_mcp_node_leads_to_the_servers_defaults(board_page, homes):
@@ -136,8 +138,8 @@ def test_the_context_menu_of_an_mcp_node_leads_to_the_servers_defaults(board_pag
     item = board_page.items[node.id]
     menu = board_page.canvas_menu(item.sceneBoundingRect().center())
     texts = [a.text() for a in menu.actions()]
-    assert "Properties" in texts and "Defaults for every start…" in texts
-    next(a for a in menu.actions() if a.text() == "Defaults for every start…").trigger()
+    assert "Properties" in texts and "The server's defaults (every start)…" in texts
+    next(a for a in menu.actions() if a.text() == "The server's defaults (every start)…").trigger()
     assert asked == [("demo", "local")]
 
 
@@ -334,7 +336,7 @@ def test_the_german_texts_are_there(qapp, sai):
     fields = MF.LimitsFields(MF.limit_checks(sai.module("mcp")), {"memory": "512m"})
     fields.fields["memory"].setText("1024")
     assert fields.reasons["memory"].text().startswith("Nicht gültig: eine ganze Zahl mit m oder g")
-    assert fields.reset_button.text() == "Auf Standard zurücksetzen"
+    assert fields.reset_button.text() == "Die eingebauten Grenzen nehmen"
     assert fields.fields["memory"].placeholderText() == "Standard: 512m"
 
 

@@ -1,0 +1,39 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "goose-local-llm",
+  "title": "Goose with a local model",
+  "description": "Goose with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one) and nothing else: only the server's address is opened, and the loop guard keeps a small model from going round in circles.",
+  "translations": {
+    "de": {
+      "title": "Goose mit einem lokalen Modell",
+      "description": "Goose mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler) und sonst nichts: nur die Adresse des Servers ist offen, und der Schleifenschutz hält ein kleines Modell davon ab, sich im Kreis zu drehen."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "goose"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "loop_guard=on"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent goose asks it for the API Goose uses.",
+    "Goose gets the server as variables that win over its own configuration: its provider openai with the server's /v1 URL (OPENAI_BASE_URL), the model (GOOSE_MODEL), the context window (GOOSE_CONTEXT_LIMIT), the key as a placeholder the connection proxy replaces; the loop guard's turn limit becomes GOOSE_MAX_TURNS and its instructions reach the model in every turn (GOOSE_MOIM_MESSAGE_FILE, read-only in /etc/goose). LM Studio, Ollama, vLLM and llama.cpp all work.",
+    "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
+    "Goose's own llama.cpp (goose local-models) stays off: it would download models from Hugging Face (--goose-enable local-inference opens that) and runs on the sandbox's processors only.",
+    "Goose is not live-tested yet (a start says so); its image first: sandbox-ai build goose."
+  ]
+}

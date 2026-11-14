@@ -120,7 +120,19 @@ class CredentialTab(QWidget):
         if not widget.accessibleName():  # (a group box's title named it before)
             widget.setAccessibleName(self.title_label.text())
         self.body.insertWidget(0, widget, 1)
+        # A right click on a row: the tab's buttons, as they are enabled for the row(s) selected.
+        from .widgets import list_menu
+        list_menu(widget, self.button_entries)
         return widget
+
+    def button_entries(self):
+        """The tab's buttons in their row's order (what its list's context menu offers)."""
+        found = []
+        for index in range(self.button_row.count()):
+            widget = self.button_row.itemAt(index).widget()
+            if widget is not None:
+                found.append(widget)
+        return found
 
     def add_below(self, item):
         """A widget or layout under the list (the list gives it the room)."""

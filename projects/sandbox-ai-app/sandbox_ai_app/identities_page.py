@@ -13,11 +13,12 @@ from PySide6.QtWidgets import (
 
 from .backend import SandboxAI
 from .credential_tab import CredentialTab
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .host_choice import on_host
 from .name_fields import NameField
-from . import tables
+from . import applog
+from . import tables, widgets
 from .widgets import (ask_first, background, delete_key, fill, held, multi_select, one_only, outcome, plain_label,
                       report_each, run_each, selected, selected_keys, several, show_text, table)
 
@@ -78,7 +79,8 @@ class IdentitiesBox(CredentialTab):
         def read():
             try:
                 names = [name for name, _ in (self.sai.secrets() if host == LOCAL else self.sai.host_secrets(host))[1]]
-            except Exception:  # noqa: BLE001 - only an offer while typing
+            except Exception as _exc:  # noqa: BLE001 - only an offer while typing
+                applog.swallowed("identities_page", "refresh.read: only an offer while typing", _exc)
                 names = []
             return (self.sai.identities() if host == LOCAL else self.sai.host_identities(host)), names
         background(read, owner=self, timeout=150,
@@ -88,7 +90,7 @@ class IdentitiesBox(CredentialTab):
         if (token is not None and token != self.token) or host != self.host:
             return
         if error is not None:
-            self.message.setText(printable(error))
+            self.message.setText(printable_text(error))
             return
         self.known, self.secret_names = result
         fill(self.list, [[name, *summary(identity)] for name, identity in sorted(self.known.items())])
@@ -102,7 +104,7 @@ class IdentitiesBox(CredentialTab):
         if name is not None and name not in known:
             return
         dialog = IdentityDialog(self, name, known.get(name), self.secret_names, set(known))
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         target, new = dialog.result_identity()
         old = known.get(target)
@@ -123,7 +125,7 @@ class IdentitiesBox(CredentialTab):
 
     def saved(self, name, result, error):
         status, said = (1, str(error)) if error is not None else result
-        self.message.setText(tr("{name} saved.", name=name) if status == 0 else printable(said)[-1500:])
+        self.message.setText(tr("{name} saved.", name=name) if status == 0 else printable_text(said)[-1500:])
         self.refresh()
 
     def remove_several(self, names, host=None):
@@ -252,6 +254,8 @@ class IdentityDialog(QDialog):
         row.addWidget(plus)
         row.addWidget(minus)
         row.addStretch()
+        from .widgets import list_menu
+        list_menu(widget, lambda: [minus, None, plus])
         return row
 
     def secret_edit(self, value):

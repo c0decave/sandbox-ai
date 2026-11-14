@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from sandbox_ai_app import backend, project_trust as PT, widgets
+from sandbox_ai_app import backend, project_trust as PT, short_notices, widgets
 
 needs_sai = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -186,7 +186,7 @@ def test_the_review_on_another_host_asks_like_this_machine_and_trusts_on_yes(qap
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     host_trust.review_and_trust(parent, sai, "ct1", path, done=lambda trusted, doc: outcomes.append((trusted, doc)))
     assert outcomes[-1] == (True, PLANTED) and sai.host_project_show("ct1", path)["trusted"]
-    assert widgets.SHOWN[-1][1] == f"Trusted on ct1: {path}"
+    assert short_notices.SHOWN[-1][1] == f"Trusted on ct1: {path}", "a short notice, no box"
     asked = len(widgets.SHOWN)
     host_trust.review_and_trust(parent, sai, "ct1", path, done=lambda trusted, doc: outcomes.append((trusted, doc)))
     assert outcomes[-1] == (True, PLANTED) and len(widgets.SHOWN) == asked, "trusted as it is: nothing to ask"
@@ -224,7 +224,7 @@ def test_the_start_page_opens_a_project_folder_on_another_host(qapp, host, isola
         assert form.load_project(folder) is None, "decided in the background"
         assert host.host_project_show("ct1", path)["trusted"]
         assert form.form.values().get("--workspace") == [folder], "the form starts in that folder there"
-        assert any(f"Trusted: {path}." in text for _, text, _ in widgets.SHOWN)
+        assert any(f"Trusted: {path}." in text for _, text in short_notices.SHOWN)
         widgets.SHOWN.clear()
         form.load_project("relative")
         assert "absolute path" in widgets.SHOWN[-1][1]

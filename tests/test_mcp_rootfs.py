@@ -235,14 +235,14 @@ def test_bwrap_gets_the_command_on_its_command_line_after_the_args_pipe(tmp_path
     class Done(Exception):
         pass
 
-    def execvp(program, argv):
+    def execvpe(program, argv, env):
         seen.append(argv)
         raise Done
 
     def popen(argv, **kw):
         seen.append(argv)
         raise Done
-    monkeypatch.setattr(r.os, "execvp", execvp)
+    monkeypatch.setattr(r.os, "execvpe", execvpe)
     monkeypatch.setattr(r.subprocess, "Popen", popen)
     try:
         r.run(d, {"API_KEY": "s3cr3t"})
@@ -252,3 +252,35 @@ def test_bwrap_gets_the_command_on_its_command_line_after_the_args_pipe(tmp_path
     assert argv[0] == "bwrap" and "--args" in argv
     assert argv[argv.index("--"):] == ["--", "/opt/venv/bin/python", "-I", "/opt/mcp/server.py"]
     assert "s3cr3t" not in " ".join(argv), "variables stay in the pipe"
+
+
+@pytest.mark.parametrize("network", ["none", "full"])
+def test_bwrap_itself_starts_with_an_empty_environment(tmp_path, monkeypatch, network):
+    """bwrap's own process becomes PID 1 in the server's PID namespace (--unshare-pid) and keeps the environment it was
+    started with: sandbox-ai's, API keys and all, readable by every process of the server at /proc/1/environ
+    (--clearenv only empties what the server's command gets). bwrap is started with PATH alone; what the server needs
+    goes through --setenv in the args pipe."""
+    d = definition(tmp_path, env=["API_KEY"], network=network)
+    monkeypatch.setenv("SANDBOX_AI_TEST_SECRET", "leaked-if-seen")
+    seen = []
+
+    class Done(Exception):
+        pass
+
+    def execvpe(program, argv, env):
+        seen.append(env)
+        raise Done
+
+    def popen(argv, **kw):
+        seen.append(kw.get("env"))
+        raise Done
+    monkeypatch.setattr(r.os, "execvpe", execvpe)
+    monkeypatch.setattr(r.os, "execvp", lambda *a: pytest.fail("bwrap started with the launcher's environment"))
+    monkeypatch.setattr(r.subprocess, "Popen", popen)
+    try:
+        r.run(d, {"API_KEY": "s3cr3t"})
+    except Done:
+        pass
+    env = seen[0]
+    assert env is not None and set(env) <= {"PATH", "LANG", "LC_ALL"}, env
+    assert "s3cr3t" not in str(env) and "leaked-if-seen" not in str(env)

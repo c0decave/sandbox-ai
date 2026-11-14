@@ -98,11 +98,16 @@ def test_reading_a_host_takes_only_what_looks_right(sai):
         "claude    login store  logged in, access token valid for 3.2 h  (/home/u/.local/share/sandbox-ai/auth)\n"
         "codex     host         expired, log in again  (/home/u/.codex/auth.json)\n"
         "opencode  host         no login  (/home/u/.local/share/opencode/auth.json)\n"
+        "hermes    host         logged in  (/home/u/.hermes/auth.json)\n"
+        "qwen      login store  no login  (/home/u/.local/share/sandbox-ai/auth/qwen)\n"
+        "gemini    host         logged in  (/home/u/.gemini/x)\n"
         "junk line\n"), "")
     assert sai.host_login_status(host) == [
         ("claude", "store", None, "/home/u/.local/share/sandbox-ai/auth"),
         ("codex", "host", "expired", "/home/u/.codex/auth.json"),
-        ("opencode", "host", "missing", "/home/u/.local/share/opencode/auth.json")]
+        ("opencode", "host", "missing", "/home/u/.local/share/opencode/auth.json"),
+        ("hermes", "host", None, "/home/u/.hermes/auth.json"),
+        ("qwen", "store", "missing", "/home/u/.local/share/sandbox-ai/auth/qwen")]
     sai.answers[on(host, "team", "list")] = (0, (
         "review               claude, codex            /srv/work\n"
         "trio                 codex, claude, opencode  /srv/other folder\n"

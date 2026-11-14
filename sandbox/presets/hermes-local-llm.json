@@ -1,0 +1,38 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "hermes-local-llm",
+  "title": "Hermes on a model of your own",
+  "description": "Hermes Agent with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one) and nothing else: only the server's address is opened, the loop guard is on, and Hermes' own loop guardrails and turn limit follow it.",
+  "translations": {
+    "de": {
+      "title": "Hermes mit einem eigenen Modell",
+      "description": "Hermes Agent mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler) und sonst nichts: nur die Adresse des Servers ist offen, der Schleifenschutz ist an, und Hermes' eigene Schleifenbremsen und Rundengrenze folgen ihm."
+    }
+  },
+  "category": "llm",
+  "agents": [
+    "hermes"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "loop_guard=on"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent hermes asks it for the Chat Completions API Hermes uses.",
+    "Hermes gets the server in its managed configuration (/etc/hermes/config.yaml): the URL, the model, its context window when the server reports one, and the key as a placeholder the connection proxy replaces. The loop guard's layers become Hermes' own switches: tool_loop_guardrails with a hard stop, agent.max_turns, compression, and the guard's instructions as a skill loaded in every session.",
+    "Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
+    "Hermes is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+  ]
+}

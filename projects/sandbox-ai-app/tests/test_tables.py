@@ -357,3 +357,20 @@ def test_the_themes_keep_titles_whole(qapp):
         assert findings(view, mode) == []
         view.close()
     theme.apply("system", qapp)
+
+
+def test_a_table_never_filled_keeps_its_titles_whole_when_shown(qapp):
+    """Design review 0.1.95: the Images page's table, its listing failed ("podman is not installed"), was never
+    filled: every column kept Qt's 100 px and "Agent version" read "gent versio". Shown, a table is fitted to its
+    titles even without rows."""
+    theme.apply("dark", qapp)
+    try:
+        view = widgets.table(["Image", "Agent", "Built", "Extension", "Agent version", "Created", "Size", "Name"],
+                             stretch=0, compact=(1, 2, 4, 5, 6))
+        view.resize(900, 200)
+        view.show()
+        qapp.processEvents()
+        assert findings(view, "dark") == []
+        view.close()
+    finally:
+        theme.apply("system", qapp)

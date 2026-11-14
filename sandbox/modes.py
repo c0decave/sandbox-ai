@@ -26,7 +26,6 @@ NAMES = ("lax", "low", "medium", "high", "paranoid")  # in rising strictness
 DEFAULT = "medium"
 STRICT = ("high", "paranoid")
 SCOPES = ("once", "run", "always")  # approval scopes, narrowest first
-PRIVACY = ("off", "public", "always")  # --privacy-check, laxest first
 
 # Options that choose the shape of the network. Given explicitly, they replace the mode's network default
 # (--mode lax --profile development: the development hosts, not everything); the other network options add
@@ -42,7 +41,8 @@ NETWORK_SHAPE = ("profile", "offline", "egress_all_allow", "no_provider_defaults
 # files (canary.py): "categories" planted at least, "on_read"/"on_send" weighed like a ruleset's "canary" section
 # (the strictest wins). Without the key, the launcher's own: credentials and home, a read reported, a token leaving
 # stops.
-# "telemetry": the least --telemetry level (agent_sandbox.telemetry_level; off when the key is missing).
+# "telemetry": the least --telemetry level (agent_sandbox.telemetry_level; off when the key is missing). Telemetry is
+# always off (there is no level on since 0.1.95); strict holds back the agents' other calls as well.
 MODES = {
     "lax": {
         "summary": "every outbound destination (--egress-all-allow), logged with --log-debug; no approval questions",
@@ -244,6 +244,9 @@ RULES = [
      "another agent in the sandbox reaches its own provider"),
     (STRICT, lambda a, l: _given(list(dict.fromkeys(getattr(a, "helper", None) or [])), "--helper"),
      "a helper reaches its own provider and works on the same workspace"),
+    # Before --allow-host: --allow-domain DOMAIN is --allow-host DOMAIN '*.DOMAIN' (expand_domains), named as given.
+    (STRICT, lambda a, l: _given(getattr(a, "allow_domain", None) or [], "--allow-domain"),
+     "it opens a domain and every name below it, beyond the agent's provider"),
     (STRICT, lambda a, l: _given(a.allow_host, "--allow-host"),
      "it opens hosts beyond the agent's provider (so does a Git token for another server)"),
     (STRICT, lambda a, l: _given(a.allow, "--allow"), "it opens addresses"),
@@ -263,8 +266,6 @@ RULES = [
      "pushes would not all be checked"),
     (STRICT, lambda a, l: "--no-canaries" if getattr(a, "canaries", None) == "none" else None,
      "without canary files a read of credentials or a leaking token goes unnoticed"),
-    (STRICT, lambda a, l: "--telemetry on" if getattr(a, "telemetry", None) == "on" else None,
-     "the agents would report usage, errors and feedback to their makers"),
     (("paranoid",), lambda a, l: "--telemetry off" if getattr(a, "telemetry", None) == "off" else None,
      "the agents would make calls beyond the model's (plugin downloads, model lists, language servers)"),
     (STRICT, lambda a, l: _given(a.device, "--device"), "the device's driver runs in your host's kernel"),
@@ -288,6 +289,14 @@ RULES = [
      "the agent would act without asking"),
     (("paranoid",), lambda a, l: ("--gui-vnc" if a.gui_vnc else "--gui") if a.gui else None,
      "a display serves programs the mode keeps out"),
+    # The sandbox's browser (--browser) is a display and a program beside the agent, as --gui is in paranoid; in
+    # high the agent driving it must not reach a folder of yours through its profile (downloads, files of pages).
+    (("paranoid",), lambda a, l: f"--browser {a.browser}" if getattr(a, "browser", None) else None,
+     "a browser with a display would run beside the agent, on its network"),
+    (STRICT, lambda a, l: f"--browser-profile {a.browser_profile}" if getattr(a, "browser", None) and
+     getattr(a, "browser_control", None) in ("agent", "both") and getattr(a, "browser_profile", None) not in
+     (None, "", "fresh", "session") else None,
+     "the agent drives the browser and could write a folder of yours through its profile"),
     (("paranoid",), lambda a, l: _given([n for n in dict.fromkeys(a.mcp) if mcp_has_network(
         l.load_mcp_module().definitions(getattr(a, "project_document", None)).get(n, {}), l)], "--mcp"),
      "the MCP server reaches the network past the agent's firewall and proxy"),
@@ -397,7 +406,8 @@ def ruleset(l, a, name):
 
 
 # What `sandbox-ai net allow` can open during a run, as the start option it stands for, with a sample value.
-RUNTIME_OPTIONS = (("--allow", "192.0.2.1"), ("--allow-host", "example.org"), ("--allow-tcp", "192.0.2.1:443"),
+RUNTIME_OPTIONS = (("--allow", "192.0.2.1"), ("--allow-host", "example.org"), ("--allow-domain", "example.org"),
+                   ("--allow-tcp", "192.0.2.1:443"),
                    ("--dns", None), ("--allow-host-port", "3000"))
 
 
@@ -441,14 +451,18 @@ def plan(a):
 # are found through the launcher's own canonical_options (weakening_options), never by a copy of the aliases.
 WEAKENING_OPTIONS = frozenset({
     # the network and the proxy
-    "--egress-all-allow", "--allow", "--allow-tcp", "--allow-host", "--allow-http", "--allow-host-port", "--allow-pypi",
+    "--egress-all-allow", "--allow", "--allow-tcp", "--allow-host", "--allow-domain", "--allow-http", "--allow-host-port",
+    "--allow-pypi",
     "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",
     "--profile", "--dns", "--nameserver", "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask",
     "--local-config", "--llm", "--preset", "--preset-value", "--vpn-check",  # --vpn-check: a failing VPN used anyway
     "--vpn-bypass-host-ports", "--vpn-bypass-tcp",  # the host's ports, an address of your network past Tor
     # files, devices, displays and sound
     "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
+    "--browser", "--browser-control", "--browser-profile",  # a browser beside the agent, which it may drive
     "--state-dir", "--kit", "--kit-dir", "--mcp", "--mcp-mount",  # --mcp-mount: a host folder an MCP server writes
+    "--mcp-limits",  # an MCP server's limits raised (or none), as --memory raises the agent's
+    "--mcp-env",  # --mcp-env: an MCP server's variable (ALLOW_PRIVATE_TARGETS=1 widens what it reaches) or secret
     # logins, secrets and identities
     "--dangerously-skip-permissions", "--env", "--secret-env", "--api-key", "--publish", "--git-token-env",
     "--git-token-file", "--git-token-secret", "--git-credentials", "--git-identity", "--git-logins", "--identity",
@@ -456,10 +470,14 @@ WEAKENING_OPTIONS = frozenset({
     # what is noticed, checked and kept
     "--privacy-check", "--privacy-rules", "--canaries", "--no-canaries", "--keep", "--log-debug", "--log-dir",
     "--telemetry", "--llm-param",  # --llm-param loop_guard=off: the loop guard off
+    "--llm-traffic", "--llm-traffic-limit",  # what the LLM traffic log keeps of the conversations
     # what runs the sandbox, and its limits
     "--runtime", "--binary", "--image", "--image-variant", "--podman-url", "--backend", "--memory", "--cpus", "--pids",
     "--tmp-size", "--nested-containers", "--service",  # --service: an image nobody reviewed, beside the agent
 })
+# Hermes', Qwen Code's and Goose's features (hermes.py, qwen.py, goose.py) open their own hosts (and give Hermes and
+# Goose secrets).
+WEAKENING_OPTIONS = WEAKENING_OPTIONS | {"--hermes-enable", "--qwen-enable", "--goose-enable"}
 
 
 def option_items(l, tokens):

@@ -404,14 +404,15 @@ def test_every_command_that_starts_a_server_is_built_from_its_plan():
     source = ast.get_source_segment((SANDBOX / "mcp.py").read_text(), functions["ensure_running_locked"])
     assert source.index("server_network(instance, definition, vpn)") < source.index("status(instance)")
     assert "verified_or_stopped(instance, plan, a)" in source and source.count("verified_or_stopped(") == 3
-    # An instance (NAME.HASH, a start's own limits or folders) has its own VPN container and pod: the plan is for it.
-    assert "instance, definition = instance_for(name, servers[name], limits, mounts)" in source
+    # An instance (NAME.HASH, a start's own limits, folders or variables, or one of its own where NAME runs with another
+    # definition) has its own VPN container and pod: the plan is for it.
+    assert "base, definition = instance_for(name, servers[name], limits, mounts, start_env(a).get(name))" in source
 
 
 # Every call that brings an MCP server up, anywhere in sandbox/, and the VPN it hands over: a new one fails here
 # until it is added - with the VPN it must hand over.
 ENSURE_RUNNING_CALLS = {
-    ("agent_sandbox.py", "launch", "vpn=behind.get(name)"),
+    ("agent_sandbox.py", "start_mcp_servers", "vpn=behind.get(name)"),  # (begin_running: started, then waited for)
     ("mcp.py", "attach", "server_vpn(a, name, vpn)"),
     ("mcp.py", "attach_live", "server_vpn(a, name)"),
     ("mcp.py", "cli", "a.vpn"),  # mcp start NAME [--vpn]: no start, only what was given
@@ -422,14 +423,14 @@ def test_every_call_that_brings_a_server_up_hands_it_its_vpn():
     found = set()
     for path in sorted(SANDBOX.glob("*.py")) + sorted((ROOT / "projects").glob("*/*/*.py")):
         text = path.read_text()
-        if "ensure_running(" not in text:
+        if "ensure_running(" not in text and "begin_running(" not in text:
             continue
         tree = ast.parse(text)
         owner = enclosing(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and (isinstance(node.func, ast.Attribute) and node.func.attr ==
-                                               "ensure_running" or isinstance(node.func, ast.Name) and
-                                               node.func.id == "ensure_running"):
+            if isinstance(node, ast.Call) and (isinstance(node.func, ast.Attribute) and node.func.attr in
+                                               ("ensure_running", "begin_running") or isinstance(node.func, ast.Name)
+                                               and node.func.id in ("ensure_running", "begin_running")):
                 vpn = [k for k in node.keywords if k.arg == "vpn"]
                 given = ast.get_source_segment(text, vpn[0].value) if vpn else \
                     ast.get_source_segment(text, node.args[2]) if len(node.args) > 2 else None
@@ -441,7 +442,11 @@ def test_every_call_that_brings_a_server_up_hands_it_its_vpn():
     # agent_sandbox: the VPN of each server comes from vpn_for_servers, and the start's servers are checked first.
     text = (SANDBOX / "agent_sandbox.py").read_text()
     assert "behind = mcp.vpn_for_servers(a, names)" in text
-    assert "load_mcp_module().vpn_for_servers(a, names)" in text  # check_mcp_names, before anything starts
+    # check_mcp_names, before anything starts: start_problems checks each server behind the start's VPN.
+    assert "found, instances, notes = mcp.start_problems(a, names, servers, present=present)" in text
+    assert "vpn_for_servers(a, [name])" in ast.get_source_segment(
+        (SANDBOX / "mcp.py").read_text(), next(node for node in ast.parse((SANDBOX / "mcp.py").read_text()).body
+                                               if isinstance(node, ast.FunctionDef) and node.name == "start_problems"))
 
 
 def test_a_definition_without_its_plan_or_a_plan_that_does_not_hold_builds_nothing():
@@ -1104,3 +1109,29 @@ def test_an_onion_name_resolves_into_the_announced_network_and_connects_through_
     assert not re.search(r"\b10\.", divert)
     assert ipaddress.ip_address("10.192.0.7") in ipaddress.ip_network(network)
     assert ipaddress.ip_address("10.0.0.7") not in ipaddress.ip_network(network)
+
+
+def nft_syntax_errors(rules):
+    """What nft's parser says about RULES (nft -c; the netlink errors of an unprivileged run come after parsing and
+    do not count), or None where nft is not installed."""
+    import shutil
+    import subprocess
+    nft = shutil.which("nft") or next((p for p in ("/usr/sbin/nft", "/sbin/nft") if os.path.exists(p)), None)
+    if not nft:
+        return None
+    done = subprocess.run([nft, "-c", "-f", "-"], input=rules, capture_output=True, text=True, timeout=30)
+    return [line for line in done.stderr.splitlines() if "syntax error" in line]
+
+
+def test_the_rules_an_mcp_vpn_container_loads_parse():
+    """The chains of mcp_dns_rules were called redirect and refuse - nft keywords: every VPN container of an MCP
+    server failed at nft -f ("syntax error, unexpected meta"), so no MCP server behind a VPN started (CI's killswitch
+    job). Each rule set the VPN container loads goes through nft's own parser here."""
+    for rules in (rt.mcp_dns_rules("10.66.0.1"),
+                  rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)]),
+                  rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)], mask=0xff00, any_marked=True,
+                                      tunnel_ipv6=False)):
+        errors = nft_syntax_errors(rules)
+        if errors is None:
+            pytest.skip("nft is not installed")
+        assert errors == [], rules

@@ -19,6 +19,13 @@ FAKE = {
     "codex": "import sys\nargs = sys.argv[1:]\nout = args[args.index('--output-last-message') + 1]\n"
              "open(out, 'w').write('codex did: ' + args[-1])\nprint('[progress lines]')\n",
     "opencode": "import sys\nprint('opencode did: ' + sys.argv[-1])\n",
+    # hermes -z prints the final answer alone.
+    "hermes": "import sys\nprint('hermes did: ' + sys.argv[-1].partition('--oneshot=')[2])\n",
+    # qwen --prompt=TASK prints the answer; dsh headless - reads the task on standard input.
+    "qwen": "import sys\nprint('qwen did: ' + sys.argv[-1].partition('--prompt=')[2])\n",
+    "dsh": "import os, sys\nprint('dsh did: ' + sys.stdin.read() + os.environ.get('DSH_PERMISSION_MODE', ''))\n",
+    # goose run --quiet --text=TASK prints the answer alone.
+    "goose": "import sys\nprint('goose did: ' + sys.argv[-1].partition('--text=')[2])\n",
 }
 
 
@@ -47,6 +54,18 @@ def test_ask_runs_the_agents_non_interactive_mode_in_work(agents, agent):
     helper = am.Helper(agent, cwd=str(agents / "work"), lock=agents / "lock")
     assert helper.ask("-rf the tests") == f"{agent} did: -rf the tests"
     cwd, *argv = called(agents)
+    if agent == "hermes":  # the prompt is the value of --oneshot=, never an option of its own
+        assert cwd == str(agents / "work") and argv == ["--oneshot=-rf the tests"]
+        return
+    if agent == "qwen":  # the value of --prompt=, never an option of its own
+        assert cwd == str(agents / "work") and argv == ["--prompt=-rf the tests"]
+        return
+    if agent == "dsh":  # on standard input: no argument holds it at all
+        assert cwd == str(agents / "work") and argv == ["headless", "--patch", am.DSH_PATCH, "-"]
+        return
+    if agent == "goose":  # the value of --text=, never an option of its own
+        assert cwd == str(agents / "work") and argv == ["run", "--quiet", "--text=-rf the tests"]
+        return
     assert cwd == str(agents / "work") and argv[-2:] == ["--", "-rf the tests"], "the prompt is never an option"
     expected = {"claude": ["-p", "--output-format", "json"], "codex": ["exec", "--skip-git-repo-check"],
                 "opencode": ["run"]}[agent]
@@ -65,6 +84,16 @@ def test_continue_and_skip_permissions_reach_the_agent(agents):
     assert argv[-4:] == ["resume", "--last", "--", "more"], "exec's options come before its subcommand"
     am.Helper("opencode", cwd=str(agents / "work"), lock=agents / "lock").ask("more", resume=True)
     assert called(agents)[1:] == ["run", "--continue", "--", "more"]
+    # Hermes: its last conversation goes on (--continue), its one-shot mode asks nothing (no switch of its own).
+    am.Helper("hermes", skip=True, cwd=str(agents / "work"), lock=agents / "lock").ask("more", resume=True)
+    assert called(agents)[1:] == ["--continue", "--oneshot=more"]
+    # Qwen Code: --continue and its --yolo; DSH: a new headless task (it resumes only a session it is named).
+    am.Helper("qwen", skip=True, cwd=str(agents / "work"), lock=agents / "lock").ask("more", resume=True)
+    assert called(agents)[1:] == ["--continue", "--yolo", "--prompt=more"]
+    assert am.Helper("dsh", skip=True, cwd=str(agents / "work"), lock=agents / "lock").ask("more", resume=True) \
+        == "dsh did: moredanger-full-access", "DSH's switch is a variable"
+    assert am.Helper("dsh", cwd=str(agents / "work"), lock=agents / "lock").ask("more") == "dsh did: more"
+    assert called(agents)[1:] == ["headless", "--patch", am.DSH_PATCH, "-"]
 
 
 def test_a_failed_or_endless_task_is_an_error(agents, tmp_path):

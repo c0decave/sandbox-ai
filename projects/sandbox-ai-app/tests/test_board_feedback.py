@@ -144,15 +144,23 @@ def test_a_session_without_a_name_gets_a_codename(page, monkeypatch):
     assert started[-1] == {"embedded": False, "session": None} and not page.session.isEnabled()
 
 
-def test_ctrl_s_applies_the_board(page, qapp, monkeypatch):
-    applied = []
-    monkeypatch.setattr(page, "apply", lambda *a, **k: applied.append(True))
+def test_ctrl_s_saves_the_board_where_it_belongs(page, qapp, monkeypatch):
+    """Ctrl+S is Save (save_board): with a project folder (and no preset of yours it came from) it applies the board
+    to its project file; without one it asks Save as preset…'s questions."""
+    applied, dialogs = [], []
+    monkeypatch.setattr(page, "apply", lambda *a, **k: applied.append(True) or True)
+    monkeypatch.setattr(page, "save_as_preset", lambda choices=None: dialogs.append(choices))
+    monkeypatch.setattr(page, "project_folder", lambda: "/some/project")
     page.show()
     page.view.setFocus()
     qapp.processEvents()
     QTest.keyClick(page.view, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
     qapp.processEvents()
-    assert applied == [True]
+    assert applied == [True] and dialogs == []
+    monkeypatch.setattr(page, "project_folder", lambda: None)
+    QTest.keyClick(page.view, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
+    qapp.processEvents()
+    assert applied == [True] and dialogs == [None]
 
 
 def test_every_mcp_server_is_offered(page, monkeypatch):

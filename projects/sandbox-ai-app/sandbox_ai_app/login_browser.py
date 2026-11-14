@@ -320,6 +320,7 @@ class LoginBrowser(QWidget):
         top.addWidget(self.external)
         layout.addLayout(top)
         self.bar = TerminalBar(self)
+        self.bar.logged = False  # (it shows the login's code: its own lines below say what happened, never the code)
         layout.addWidget(self.bar)
         self.view = QWebEngineView(self)
         self.page = LoginPage(self, self.view)
@@ -363,6 +364,8 @@ class LoginBrowser(QWidget):
         self.tls.setToolTip(tr("Chromium checked the server's certificate; a certificate error is always refused"))
 
     def certificate_refused(self, url, description):
+        from . import applog
+        applog.log("WARNING", "sign-in", f"the certificate of {T.host_of(url)} is refused: {description}")
         self.certificate_problem = (url, description)
         self.bar.say(tr("Not opened: the certificate of {host} is not valid ({why}).", host=T.host_of(url),
                         why=description), seconds=0, level="error")
@@ -484,6 +487,9 @@ class LoginBrowser(QWidget):
     def finished(self, result, url):
         """The sign-in reached its end (callback_result): what the terminal gets is shown, and pasted after a
         click; a problem is said."""
+        from . import applog
+        applog.log("INFO" if not result.problem else "WARNING", "sign-in", f"the sign-in at {T.host_of(url)} "
+                   + (f"did not finish: {result.problem}" if result.problem else "finished (its code is not logged)"))
         if result.problem:
             why = {"state": tr("it does not belong to the sign-in this window began"),
                    "code": tr("the code is not one a terminal can be given")}.get(result.problem, result.problem)
@@ -528,6 +534,8 @@ class LoginBrowser(QWidget):
 
     def login_ended(self, status):
         """The terminal's login ended: well (0) - the window has done its part and closes; else it says so."""
+        from . import applog
+        applog.log("INFO", "sign-in", f"the login in the terminal ended: exit status {status}")
         if status == 0:
             for window in [self, *self.popups]:
                 if _alive(window):

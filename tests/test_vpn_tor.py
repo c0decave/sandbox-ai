@@ -310,15 +310,214 @@ def test_bootstrap_waits_for_100_percent(tmp_path):
     assert rt.bootstrap_progress("nothing yet") == (0, None)
 
 
-def test_bootstrap_timeout_says_how_far_it_got_without_the_bridges(tmp_path):
+def test_bootstrap_timeout_says_how_far_it_got_without_the_bridges(tmp_path, monkeypatch):
     log = tmp_path / "tor.log"
     log.write_text("")
     clock = Clock(log, progress_lines(10) + ["[warn] Problem bootstrapping. Stuck at 10%: no route to 192.0.2.10:443"])
-    process = types.SimpleNamespace(poll=lambda: None, returncode=None)
-    with pytest.raises(RuntimeError, match=r"within 30 s \(it got to 10%: Step 10\).*--bridges") as error:
-        rt.wait_bootstrap(log, process, 30, types.SimpleNamespace(write=lambda t: None, flush=lambda: None),
-                          secrets=["192.0.2.10:443", "192.0.2.10"], clock=clock, sleep=clock.sleep)
+    process = types.SimpleNamespace(poll=lambda: None, returncode=None, terminate=lambda: None,
+                                    wait=lambda timeout=None: 0)
+    monkeypatch.setattr(rt, "fresh_guard", lambda uid: None)
+    with pytest.raises(RuntimeError, match=r"(?s)in 1 attempt .*stalled at 10% \(Step 10\) for 30 s.*Bootstrapped "
+                                           r"10%.*--bridges.*clock.*Problem bootstrapping") as error:
+        rt.bootstrap(lambda: process, log, KillSwitchRunner(), {"timeout": 60, "attempts": 1, "stall": 30},
+                     types.SimpleNamespace(write=lambda t: None, flush=lambda: None),
+                     secrets=["192.0.2.10:443", "192.0.2.10"], clock=clock, sleep=clock.sleep)
     assert "192.0.2.10" not in str(error.value) and "[secret]" in str(error.value)
+
+
+# --- the bootstrap, tried again (user, 2026-11-14: "Timeout zu kurz? U.U. wenn es am Bootstrap liegt längerer Timeout
+# oder noch 3x danach versuchen zu starten?") ---------------------------------------------------------------------
+
+class TorSim:
+    """tor in its container, as the bootstrap sees it: each start (start()) is an attempt whose lines come at the
+    times SCHEDULES[attempt] gives ([(seconds after its start, percent, summary)]); the clock moves only by sleep."""
+
+    def __init__(self, log, *schedules):
+        self.log, self.schedules, self.now, self.started, self.stopped = Path(log), list(schedules), 0.0, [], []
+        self.log.write_text("Nov 14 12:00:00.000 [notice] Tor 0.4.8 opening log file.\n")
+
+    def clock(self):
+        return self.now
+
+    def start(self):
+        number = len(self.started)
+        self.started.append(self.now)
+        process = types.SimpleNamespace(args=["tor"], returncode=None, poll=lambda: None,
+                                        terminate=lambda: self.stopped.append(number), wait=lambda timeout=None: 0)
+        return process
+
+    def sleep(self, seconds):
+        before, self.now = self.now, self.now + seconds
+        attempt = len(self.started) - 1
+        if attempt < 0 or attempt in self.stopped:
+            return
+        begun = self.started[attempt]
+        with open(self.log, "a") as stream:
+            for at, percent, summary in self.schedules[attempt]:
+                if before < begun + at <= self.now:
+                    stream.write(f"Nov 14 12:00:00.000 [notice] Bootstrapped {percent}% (step): {summary}\n")
+
+
+class KillSwitchRunner:
+    """The container's commands: the kill switch's table listed as loaded (LOADED False: gone)."""
+
+    def __init__(self, loaded=True):
+        self.commands, self.children, self.loaded = [], [], loaded
+
+    def run(self, command, data=None, check=True):
+        self.commands.append(command)
+        listing = (f"table inet {rt.TABLE} {{\n chain output {{ type filter hook output priority -5; policy drop;\n }}"
+                   "\n chain input { type filter hook input priority -5; policy drop;\n }\n chain forward { type "
+                   "filter hook forward priority -5; policy drop; }\n}\n") if self.loaded else ""
+        return types.SimpleNamespace(returncode=0 if self.loaded else 1, stdout=listing, stderr="")
+
+
+def messages_of(out):
+    return [json.loads(line)["message"] for line in out]
+
+
+def stream_into(out):
+    return types.SimpleNamespace(write=out.append, flush=lambda: None)
+
+
+STALLING = [(1, 5, "Connecting to a relay"), (20, 30, "Loading networkstatus consensus"),
+            (40, 69, "Loading relay descriptors")]
+
+
+def test_a_bootstrap_that_still_rises_gets_more_time(tmp_path):
+    """Past its timeout an attempt goes on while its percentage still rises: a slow network is no stall."""
+    sim = TorSim(tmp_path / "tor.log", [(1, 5, "Connecting"), *[(50 * i, 10 + 10 * i, f"Step {i}") for i in range(1, 9)],
+                                        (450, 100, "Done")])
+    out = []
+    process = rt.bootstrap(sim.start, sim.log, KillSwitchRunner(), {"timeout": 300, "attempts": 3, "stall": 90},
+                           stream_into(out), clock=sim.clock, sleep=sim.sleep)
+    assert process is not None and len(sim.started) == 1 and sim.now >= 450
+    said = messages_of(out)
+    assert "tor: bootstrapped 100% (Done), attempt 1 of 3" in said
+    assert not any("trying again" in line for line in said)
+
+
+def test_a_stalled_bootstrap_is_tried_again_behind_the_same_kill_switch(tmp_path, monkeypatch):
+    """User's start: tor stood at 69% (Loading relay descriptors). No new percentage for 90 s: that tor ends, the
+    kill switch is looked at (never loaded again, flushed or deleted), the guard is a new one, and tor starts again -
+    said with the attempt's number; the second attempt gets to 100%."""
+    guards = []
+    monkeypatch.setattr(rt, "fresh_guard", lambda uid: guards.append(uid))
+    sim = TorSim(tmp_path / "tor.log", STALLING, [(1, 10, "Connecting"), (30, 85, "Connecting to a relay to build "
+                                                                                  "circuits"), (50, 100, "Done")])
+    runner, out = KillSwitchRunner(), []
+    runner.children = ["tor of attempt 1"]
+    rt.bootstrap(sim.start, sim.log, runner, {"timeout": 300, "attempts": 3, "stall": 90}, stream_into(out),
+                 clock=sim.clock, sleep=sim.sleep)
+    said = messages_of(out)
+    assert "tor: bootstrapped 69% (Loading relay descriptors), attempt 1 of 3" in said
+    assert "Tor bootstrap stalled at 69% (Loading relay descriptors) for 90 s; trying again (2 of 3)" in said
+    assert "tor: bootstrapped 100% (Done), attempt 2 of 3" in said
+    assert sim.stopped == [0] and len(sim.started) == 2 and guards == [rt.TOR_UID]
+    # The kill switch: only looked at between the attempts - nothing loads, flushes or deletes a table.
+    assert runner.commands == [["nft", "list", "table", "inet", rt.TABLE]]
+    # While it stood still it said so (the launcher, and a session waiting for its start, see it goes on).
+    assert any(line.startswith("tor: still at 69% (Loading relay descriptors) for 30 s, attempt 1 of 3")
+               for line in said)
+
+
+def test_three_stalls_end_the_start_with_what_was_tried_and_what_helps(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "fresh_guard", lambda uid: None)
+    sim = TorSim(tmp_path / "tor.log", STALLING, STALLING, [(1, 5, "Connecting to a relay")])
+    out = []
+    with pytest.raises(RuntimeError) as error:
+        rt.bootstrap(sim.start, sim.log, KillSwitchRunner(), {"timeout": 300, "attempts": 3, "stall": 90},
+                     stream_into(out), clock=sim.clock, sleep=sim.sleep)
+    text = str(error.value)
+    assert text.startswith("Tor did not finish its bootstrap in 3 attempts (each 300 s, up to 600 s while it still rose")
+    assert "attempt 1 stalled at 69% (Loading relay descriptors) for 90 s" in text
+    assert "attempt 3 stalled at 5% (Connecting to a relay) for 90 s" in text
+    assert "Its last bootstrap line: Nov 14 12:00:00.000 [notice] Bootstrapped 5% (step): Connecting to a relay" in text
+    assert "--bridges" in text and "clock" in text and "--bootstrap-attempts" in text
+    said = messages_of(out)
+    assert [line for line in said if "trying again" in line] == [
+        "Tor bootstrap stalled at 69% (Loading relay descriptors) for 90 s; trying again (2 of 3)",
+        "Tor bootstrap stalled at 69% (Loading relay descriptors) for 90 s; trying again (3 of 3)"]
+    assert sim.stopped == [0, 1, 2]
+
+
+def test_an_attempt_that_still_rises_ends_at_twice_its_timeout(tmp_path, monkeypatch):
+    """Past its timeout an attempt goes on while it rises (never STALL seconds without a new percentage) - up to twice
+    its timeout; then tor starts again."""
+    monkeypatch.setattr(rt, "fresh_guard", lambda uid: None)
+    slow = [(1, 5, "a")] + [(80 * i, 5 + i, f"s{i}") for i in range(1, 20)]  # a new percentage every 80 s, for ever
+    sim = TorSim(tmp_path / "tor.log", slow, [(1, 100, "Done")])
+    out = []
+    rt.bootstrap(sim.start, sim.log, KillSwitchRunner(), {"timeout": 300, "attempts": 2, "stall": 90},
+                 stream_into(out), clock=sim.clock, sleep=sim.sleep)
+    retry = next(line for line in messages_of(out) if "trying again" in line)
+    assert retry.startswith("Tor bootstrap was not done within 600 s, twice its 300 s although it still rose (at 12% "
+                            "(s7))") and retry.endswith("(2 of 2)")
+    assert 600 <= sim.started[1] <= 601
+
+
+def test_no_new_attempt_once_the_kill_switch_is_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(rt, "fresh_guard", lambda uid: pytest.fail("no tor again without the kill switch"))
+    sim = TorSim(tmp_path / "tor.log", STALLING, [(1, 100, "Done")])
+    with pytest.raises(RuntimeError, match="kill switch .* is not loaded: tor is not started again"):
+        rt.bootstrap(sim.start, sim.log, KillSwitchRunner(loaded=False), {"timeout": 300, "attempts": 3, "stall": 90},
+                     stream_into([]), clock=sim.clock, sleep=sim.sleep)
+    assert len(sim.started) == 1
+
+
+def test_a_fresh_guard_drops_tors_state_and_gives_the_directory_back(tmp_path, monkeypatch):
+    data = tmp_path / "tor"
+    data.mkdir(mode=0o700)
+    (data / "state").write_text("Guard in=default rsa_id=...\n")
+    (data / "cached-microdesc-consensus").write_text("kept\n")
+    owned = []
+    monkeypatch.setattr(rt.os, "chown", lambda path, uid, gid, follow_symlinks=True: owned.append((uid, gid)))
+    rt.fresh_guard(rt.TOR_UID, data)
+    assert not (data / "state").exists() and (data / "cached-microdesc-consensus").exists()
+    assert owned == [(0, 0), (rt.TOR_UID, rt.TOR_UID)]  # root's for the moment, then debian-tor's again
+
+
+def test_bootstrap_settings_from_the_profile_with_their_limits():
+    assert rt.bootstrap_settings({}) == {"timeout": 300, "attempts": 3, "stall": 90}
+    assert rt.bootstrap_settings({"bootstrap_timeout": 600, "bootstrap_attempts": 5, "bootstrap_stall": 120}) == \
+        {"timeout": 600, "attempts": 5, "stall": 120}
+    for bad in ({"bootstrap_timeout": 10}, {"bootstrap_attempts": 0}, {"bootstrap_attempts": True},
+                {"bootstrap_stall": "90"}, {"bootstrap_timeout": 99999}):
+        with pytest.raises(ValueError, match="bootstrap_"):
+            rt.bootstrap_settings(bad)
+
+
+def test_the_launcher_waits_for_every_attempt(home):
+    """The launcher's wait for the container covers each attempt at its longest: the container says why it gave up,
+    never the launcher's "did not come up in time" first."""
+    default = rt.bootstrap_settings({})
+    assert v.ready_timeout(tor_profile()) == v.READY_TIMEOUT + 3 * (2 * 300 + rt.BOOTSTRAP_RESTART) \
+        == v.READY_TIMEOUT + rt.bootstrap_seconds(default)
+    assert v.ready_timeout(tor_profile(bootstrap_timeout=600, bootstrap_attempts=5)) == \
+        v.READY_TIMEOUT + 5 * (1200 + rt.BOOTSTRAP_RESTART)
+
+
+def test_tor_bootstrap_settings_by_profile_option_and_vpn_set(home, capsys):
+    assert v.main(["add", "anon", "--tor", "--bootstrap-timeout", "600", "--bootstrap-attempts", "5"]) == 0
+    tor = v.load_profile("anon")["tor"]
+    assert tor["bootstrap_timeout"] == 600 and tor["bootstrap_attempts"] == 5 and "bootstrap_stall" not in tor
+    assert v.main(["set", "anon", "--bootstrap-stall", "120", "--bootstrap-attempts", "default"]) == 0
+    tor = v.load_profile("anon")["tor"]
+    assert tor["bootstrap_stall"] == 120 and "bootstrap_attempts" not in tor and tor["bootstrap_timeout"] == 600
+    assert "600 s per attempt" in capsys.readouterr().out
+    assert "600 s per attempt" in v.describe(v.load_profile("anon"))["bootstrap"]
+    payload = v.payload(v.load_profile("anon"), "serve")
+    assert rt.bootstrap_settings(payload["profile"]["tor"]) == {"timeout": 600, "attempts": 3, "stall": 120}
+    with pytest.raises(ValueError, match="--bootstrap-timeout is 60-3600"):
+        v.main(["set", "anon", "--bootstrap-timeout", "5"])
+    with pytest.raises(ValueError, match="--bootstrap-attempts is 1-10"):
+        v.main(["add", "other", "--tor", "--bootstrap-attempts", "50"])
+    with pytest.raises(ValueError, match="nothing to set"):
+        v.main(["set", "anon"])
+    source = home / "x.conf"
+    source.write_text("[Interface]\n")
+    with pytest.raises(ValueError, match="are for --tor"):
+        v.main(["add", "corp", "--wireguard", str(source), "--bootstrap-timeout", "600"])
 
 
 def test_bootstrap_stops_when_tor_exits(tmp_path):
@@ -350,7 +549,7 @@ def test_tor_comes_up_behind_the_kill_switch(tmp_path, monkeypatch):
     given = []
     monkeypatch.setattr(rt, "own_data_directory", lambda uid: given.append(uid))
     waited = []
-    monkeypatch.setattr(rt, "wait_bootstrap", lambda log, process, timeout, out, secrets: waited.append(secrets) or 100)
+    monkeypatch.setattr(rt, "wait_bootstrap", lambda log, process, timeout, out, secrets, **kw: waited.append(secrets) or 100)
     runner = FakeRunner()
     stored = "\n".join(rt.bridge_line(b) for b in rt.parse_bridges(BRIDGES)) + "\n"
     payload = {"profile": tor_profile(socks=True, bridges=2, exit_country=["de"]), "secrets": {"tor_bridges": stored}}
@@ -490,7 +689,7 @@ def test_failed_checks_stop_unless_warn_only(home, monkeypatch):
     said = []
     FakeTunnel.inside = tor_inside()
     v.bring_up(profile, ["podman"], (), said.append)
-    assert FakeTunnel.timeout == v.READY_TIMEOUT + rt.BOOTSTRAP_TIMEOUT  # tor's bootstrap takes its time
+    assert FakeTunnel.timeout == v.ready_timeout(profile) > v.READY_TIMEOUT + 3 * rt.BOOTSTRAP_TIMEOUT  # every attempt
     assert f"anon: tor (tor, TransPort 127.0.0.1:{rt.TOR_TRANS_PORT}) is up; endpoints the Tor network; kill switch on" \
         in said
     FakeTunnel.inside = tor_inside(ipv4={"ip": "203.0.113.50", "vpn": False, "url": rt.TOR_CHECK})

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """sandbox-ai login: logins for sandboxes, kept apart from the host's own.
 
-  sandbox-ai login claude|codex|opencode [launcher options] [-- login command arguments]
+  sandbox-ai login claude|codex|opencode|hermes|qwen [launcher options] [-- login command arguments]
   sandbox-ai login --status
-  sandbox-ai login claude|codex|opencode --logout
+  sandbox-ai login claude|codex|opencode|hermes|qwen --logout
 
 The agent's own login command runs inside a sandbox with a fresh HOME. Its credential file is
 then checked and kept in ~/.local/share/sandbox-ai/auth/AGENT (mode 0600). From then on every
@@ -25,10 +25,17 @@ import threading
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "qwen")
+# Not DSH: its DeepSeek account sign-in is its web UI's (OAuth to a server on the sandbox's loopback, in the sandbox's
+# own browser); a key goes with --api-key api.deepseek.com=DEEPSEEK_API_KEY.
 # The agent's own login command. Codex's device code flow needs no callback to localhost, which
 # the browser on the host could not reach inside the sandbox.
-LOGIN_ARGS = {"claude": ["auth", "login"], "codex": ["login", "--device-auth"], "opencode": ["auth", "login"]}
+# Hermes: the Nous Portal's device login (no callback either; portal.nousresearch.com is Hermes' provider host).
+LOGIN_ARGS = {"claude": ["auth", "login"], "codex": ["login", "--device-auth"], "opencode": ["auth", "login"],
+              "hermes": ["auth", "add", "nous"],
+              # Qwen Code has no login command (qwen auth was removed): started without one, it opens its auth
+              # dialog; Qwen OAuth there is a device login (its URL through the login browser). /quit when done.
+              "qwen": []}
 # OpenCode logs in to other providers (Anthropic, OpenAI, ...); allow their hosts for the login.
 LOGIN_OPTIONS = {"opencode": ["--profile", "frontier"]}
 _launcher = None

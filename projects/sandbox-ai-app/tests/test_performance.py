@@ -938,7 +938,7 @@ def test_a_board_step_draws_again_only_what_changed(qapp, tmp_path, monkeypatch)
 
 def test_the_hex_view_finds_the_changed_bytes_as_a_look_at_each_would():
     """Performance round 2 (0.1.94): switching the editor to hex compared every byte in Python (4 MiB: 150 ms); a
-    block at a time now, each byte only in the blocks that differ - the same offsets."""
+    mask now, the two XORed as numbers (pass 18) - the same offsets."""
     import random
     from sandbox_ai_app import file_editor
     rng = random.Random(5)
@@ -949,7 +949,7 @@ def test_the_hex_view_finds_the_changed_bytes_as_a_look_at_each_would():
             data[rng.randrange(len(data))] = rng.randrange(256)
         data = bytes(data[:rng.randrange(len(data) - 100, len(data) + 1)]) + b"x" * rng.randrange(3)
         expected = {at for at in range(min(len(data), len(original))) if data[at] != original[at]}
-        assert file_editor.changed_bytes(data, original, block=rng.choice((1, 7, 4096))) == expected
+        assert file_editor.changed_bytes(data, original) == expected
     assert file_editor.changed_bytes(b"", original) == set()
     assert file_editor.changed_bytes(original, b"abc") == {at for at in range(3) if original[at] != b"abc"[at]}
 

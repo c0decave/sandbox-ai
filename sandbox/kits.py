@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kits, project memory and plugin declarations for agent sandboxes.
 
-A kit is a directory with one subdirectory per agent (claude/, codex/, opencode/). Each holds
+A kit is a directory with one subdirectory per agent (claude/, codex/, opencode/, hermes/). Each holds
 any of: skills/, agents/, commands/, prompts/ (whatever the agent knows), a memory template
 (CLAUDE.md or AGENTS.md), marketplaces.json and hooks/ (the agent's hooks, which run only once
 you approved them: see stage_hooks). Every sandbox gets the default kit
@@ -32,7 +32,7 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 TEMPLATES = HERE / "templates"
 # Shipped with sandbox-ai and part of every sandbox: the sandbox-ai skill. An entry of the same name in
 # a kit replaces it (unlike two kits, which may not share a name).
@@ -55,13 +55,32 @@ LAYOUT = {
     "codex": {"skills": ".agents/skills", "prompts": ".codex/prompts"},
     "opencode": {"skills": ".config/opencode/skills", "agents": ".config/opencode/agents",
                  "commands": ".config/opencode/commands"},
+    # Hermes writes its own skills into ~/.hermes/skills; the kits' are its external skills (hermes.py,
+    # skills.external_dirs), where the agent cannot change them.
+    "hermes": {"skills": ".agents/skills"},
+    # DSH scans ~/.dsh/skills (its own, the sandbox-ai skill's) and the shared agents root ~/.agents/skills (the
+    # kits', read-only).
+    "dsh": {"skills": ".agents/skills"},
+    # Qwen Code writes its own agents and commands; only the kits' skills are mounted (~/.qwen/skills, read-only).
+    "qwen": {"skills": ".qwen/skills"},
+    # Goose finds skills in ~/.agents/skills (and ~/.config/goose/skills, its own); the kits' are read-only there.
+    "goose": {"skills": ".agents/skills"},
 }
 # (name in a kit, sandbox HOME path) of the agent's own memory file.
 MEMORY_FILE = {"claude": ("CLAUDE.md", ".claude/CLAUDE.md"), "codex": ("AGENTS.md", ".codex/AGENTS.md"),
-               "opencode": ("AGENTS.md", ".config/opencode/AGENTS.md")}
+               "opencode": ("AGENTS.md", ".config/opencode/AGENTS.md"),
+               # Hermes' own memory (its memory tool's MEMORY.md), kept per project like the others' memory files.
+               "hermes": ("MEMORY.md", ".hermes/memories/MEMORY.md"),
+               # DSH's user-global instructions ($DSH_HOME/AGENTS.md); Qwen Code's global context file.
+               "dsh": ("AGENTS.md", ".dsh/AGENTS.md"), "qwen": ("QWEN.md", ".qwen/QWEN.md"),
+               # Goose's global hints: ~/.config/goose/AGENTS.md, read at every start beside .goosehints.
+               "goose": ("AGENTS.md", ".config/goose/AGENTS.md")}
 # Claude keeps its auto memory per working directory, named after the path with "/" as "-";
 # the first workspace is always /work.
-MEMORY_DIRS = {"claude": (".claude/projects/-work/memory",), "codex": (), "opencode": ()}
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "hermes": "Hermes",
+               "dsh": "DeepSeek Harness", "qwen": "Qwen Code", "goose": "Goose"}
+MEMORY_DIRS = {"claude": (".claude/projects/-work/memory",), "codex": (), "opencode": (), "hermes": (), "dsh": (),
+               "qwen": (), "goose": ()}
 PLUGINS_FILE = "marketplaces.json"
 
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
@@ -718,7 +737,7 @@ def memory_prepare(agent, project, home, template=None, check=None, persistent=F
         if pending.is_file() and not pending.is_symlink():
             try:
                 record = json.loads(read_regular(pending, 4 << 20) or b"null")
-            except ValueError:
+            except (ValueError, RecursionError):
                 record = None
             if persistent and isinstance(record, dict) and record.get("home") == str(home) \
                     and isinstance(record.get("manifest"), dict) and store.is_dir():
@@ -874,9 +893,10 @@ def declarations(agent, plugin_files, with_disabled=False, check=None):
         declared = document.get("marketplaces", {})
         if not isinstance(declared, dict):
             raise ValueError(f"{label}: {path}: \"marketplaces\" must be an object")
-        if agent == "codex":
+        if agent in ("codex", "hermes", "dsh", "qwen", "goose"):
             if listed or declared or off:
-                notes.append(f"{label}: plugins and marketplaces are not supported for Codex yet; ignored")
+                notes.append(f"{label}: plugins and marketplaces are not supported for "
+                             f"{AGENT_NAMES[agent]} yet; ignored")
             continue
         if agent == "opencode":
             if declared:
@@ -1138,6 +1158,10 @@ def read_hooks(agent, directory):
     result = {"path": str(directory), "files": tree["files"], "sha256": tree["sha256"], "groups": {},
               "plugins": [], "hooks": [], "notes": [], "errors": list(tree["errors"])}
     names = [f["path"] for f in tree["files"]]
+    if agent in ("hermes", "dsh", "qwen", "goose"):  # the launcher refuses rules for their own tools: never enforced
+        if names or tree["data"] is not None:
+            result["errors"].append(f"hooks are not supported for {AGENT_NAMES[agent]} yet")
+        return result
     if agent == "opencode":
         result["plugins"] = [name for name in names if "/" not in name and name.endswith(PLUGIN_SUFFIXES)]
         result["hooks"] = [{"plugin": name, "files": [name]} for name in result["plugins"]]
@@ -1310,7 +1334,7 @@ def trust_records(path=None):
     try:
         data = read_regular(path, 4 << 20)
         document = json.loads(data) if data else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     records = document.get("hooks") if isinstance(document, dict) else None
     return [r for r in records if isinstance(r, dict) and isinstance(r.get("agent"), str)

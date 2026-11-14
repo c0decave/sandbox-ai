@@ -16,6 +16,7 @@ VISIBLE = {"QPushButton", "QLabel", "QGroupBox", "QCheckBox", "QToolButton", "pl
            "getOpenFileNames", "show_text", "setTabText", "table"}
 # Literal strings that are the same in every language (names, examples, symbols).
 SAME = {"…", "+", "×", "English", "Deutsch", "sandbox-ai", "API_TOKEN", "GIT_TOKEN", "api.example.org pypi.org", "api.example.org *.example.net pypi.org",
+        "example.org example.net",
         "192.0.2.10:5432", "192.0.2.0/24", "512m", "podman", "bwrap", "both"}
 
 

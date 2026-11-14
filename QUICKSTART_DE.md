@@ -44,8 +44,15 @@ Linux (x86_64, aarch64) und `sandbox-ai.app` für macOS, fertig zum Starten
 
 Das baut `localhost/codex-sandbox`, `localhost/claude-sandbox` und
 `localhost/opencode-sandbox` mit den neuesten Agent-Versionen auf der aktuellen
-Node.js-LTS. Nur Benötigtes bauen: `./sandbox-ai build claude`.
-Derselbe Befehl aktualisiert später.
+Node.js-LTS, dazu `localhost/hermes-sandbox`, `localhost/dsh-sandbox`,
+`localhost/qwen-sandbox` und `localhost/goose-sandbox` in den von sandbox-ai
+geprüften Versionen, dann die Images Team, Cairn, Browser, VPN und Tor und Ihre
+Varianten, je ein Build (scheitert einer, laufen die anderen weiter; am Ende
+steht, was gebaut wurde und was scheiterte). Nur Benötigtes bauen:
+`./sandbox-ai build claude` - ein Start baut sein fehlendes Image auch selbst
+zuerst. Derselbe Befehl aktualisiert später. Als der Benutzer bauen, der die
+Sandboxen startet, nicht mit sudo: rootless Podman hat einen Image-Speicher je
+Benutzer.
 
 ## 2. Isolation prüfen
 
@@ -188,6 +195,7 @@ zeigt ihn mit seinem Arbeitsordner).
 ./sandbox-ai resume demo           # genau dort weitermachen
 ./sandbox-ai stop demo             # beenden; Dateien und HOME bleiben
 ./sandbox-ai resume demo           # später: eine neue Sandbox, Claude setzt das Gespräch fort
+./sandbox-ai stop --all            # jeden Start von Ihnen auf diesem Host, zuerst mit der Liste gefragt
 ```
 
 ## 6. Optional: ein lokales LLM mit OpenCode
@@ -256,14 +264,15 @@ Echte Server in `~/.config/sandbox-ai/mcp.json` definieren (siehe README).
 
 ## 9. Optional: die Logs ansehen
 
-Mit eingeschaltetem Logging (Wizard-Frage oder `--log-dir VERZ`):
+Jeder Start mit dem Verbindungs-Proxy (der Standard) führt sein Log im
+Log-Verzeichnis des Projekts (`--log-dir VERZ` wählt ein anderes; dann `sandbox-ai logs VERZ`):
 
 ```bash
 cd ~/src/sandbox-demo && sandbox-ai logs   # gesperrte Ziele mit der passenden Freigabe, Dateizugriffe
 ```
 
-Die rohen JSON-Zeilen liegen als `egress-denied.jsonl` und `files.jsonl` im
-Log-Verzeichnis unter `~/.local/state/sandbox-ai/logs/`.
+Die rohen JSON-Zeilen liegen als `egress-denied.jsonl` und, mit `--log-dir`,
+`files.jsonl` im Log-Verzeichnis (standardmäßig unter `~/.local/state/sandbox-ai/logs/`).
 
 ## 10. Optional: mit einem Preset starten
 
@@ -351,6 +360,13 @@ zusammen, dazu `sandbox-ai list`, `sandbox-ai mcp`, `sandbox-ai wizard` und
 `sandbox-ai build`.
 
 ## Weiter
+
+Ging etwas schief? `sandbox-ai doctor` prüft den Host;
+`~/.local/state/sandbox-ai/launcher.log` sagt, was jeder Start gefragt wurde,
+was er entschied und warum er endete (`SANDBOX_AI_DEBUG=1` fügt jeden
+Podman-Befehl hinzu); in der Desktop-App legt *Für einen Fehlerbericht
+kopieren* im Protokollfenster das Ende ihres `app.log` und von `launcher.log` in
+die Zwischenablage, Geheimnisse maskiert ([Fehlersuche](README_DE.md#fehlersuche)).
 
 Die [vollständige Dokumentation](README_DE.md) erklärt jede Option:
 Netzwerkmodi, mehrere Workspaces, Anmeldung und den Claude-Token-Abgleich,

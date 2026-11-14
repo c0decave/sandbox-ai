@@ -52,6 +52,11 @@ def pytest_configure(config):
         os.environ.setdefault("SANDBOX_AI_BUILD_NO_DNS_CHECK", "1")
         # Starts with --llm ask no server for its context window (test_llm.py turns it on for its fake servers).
         os.environ.setdefault("SANDBOX_AI_LLM_NO_CONTEXT_FETCH", "1")
+        # A start's check of its MCP servers asks Podman for no image (the tests' images are made up; the tests of
+        # that check give it their own answer).
+        os.environ.setdefault("SANDBOX_AI_MCP_NO_IMAGE_CHECK", "1")
+        # A start builds no missing image of its own (the tests that check it turn it on).
+        os.environ.setdefault("SANDBOX_AI_NO_AUTO_BUILD", "1")
     config.addinivalue_line("markers", "agent_live: launches real sandboxes")
     config.addinivalue_line("markers", "agent_provider: makes a real authenticated model request")
     config.addinivalue_line("markers", "agent_network: downloads from the internet inside the sandbox")

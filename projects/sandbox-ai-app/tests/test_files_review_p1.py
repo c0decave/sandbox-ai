@@ -494,7 +494,8 @@ def test_a_paste_into_a_remote_folder_of_the_same_path_is_no_paste_beside_the_or
     clip = files_page.Clip(page.right.root, [("a.txt", files_page.host_relative(str(host / "a.txt")), None)], False,
                            page.right.path_at(files_page.host_relative(str(host))), cut=True)
     started = []
-    page.transfer_items = lambda clip, target, target_dir, move=False: started.append((clip, move)) or True
+    page.transfer_items = lambda clip, target, target_dir, move=False, began=None: started.append((clip, move)) or \
+        True
     assert page.paste_clip(clip, pane, pane.relative)
     assert started and started[0][1] and started[0][0].items[0][2] is None, "moved under its own name"
     clip.cut = False

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from . import applog
 from . import board as B
 from . import guide, tours
 from .board_view import PathEdit
@@ -221,7 +222,8 @@ class TaskTourPanel(QFrame):
             return False
         try:
             return bool(self.check(step.check))
-        except Exception:  # noqa: BLE001 - a check never stops the tour
+        except Exception as _exc:  # noqa: BLE001 - a check never stops the tour
+            applog.swallowed("guide_view", "TaskTourPanel.is_done: a check never stops the tour", _exc)
             return False
 
     def look(self):
@@ -250,9 +252,11 @@ def guide_pages():
 
 class NodeGuide(QDialog):
     """Set up NODE (a new one, or one of the board) question by question; then what is still wrong with it.
-    answers() is what the dialog leaves: {question key: answer}, for guide.props_of."""
+    answers() is what the dialog leaves: {question key: answer}, for guide.props_of. Its first step introduces the
+    kind of part; SKIP_INTRO (the board shows it once per kind: intro_seen) starts at the first question instead,
+    and "Show the introduction" goes back to it."""
 
-    def __init__(self, node, problems=(), parent=None):
+    def __init__(self, node, problems=(), parent=None, skip_intro=False):
         super().__init__(parent)
         self.node, self.problems = node, list(problems)
         self.asked = list(guide.questions(node.kind))
@@ -288,12 +292,16 @@ class NodeGuide(QDialog):
         self.back.clicked.connect(lambda: self.show_page(self.pages.currentIndex() - 1))
         self.next.clicked.connect(self.forward)
         cancel.clicked.connect(self.reject)
+        self.intro = QPushButton(tr("Show the introduction"))
+        self.intro.setToolTip(tr("What this part is, again (the first step, shown once per kind of part)"))
+        self.intro.clicked.connect(lambda: self.show_page(0))
         row.addWidget(cancel)
+        row.addWidget(self.intro)
         row.addStretch(1)
         row.addWidget(self.back)
         row.addWidget(self.next)
         layout.addLayout(row)
-        self.show_page(0)
+        self.show_page(1 if skip_intro and self.asked else 0)
 
     def question_page(self, question):
         page = QWidget()
@@ -322,6 +330,10 @@ class NodeGuide(QDialog):
             widget.setEditable(question.form == "model")
             self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current,
                                     self.parent())
+        elif self.node.kind == "service" and question.key == "image" and hasattr(self.parent(), "image_combo"):
+            # Your images to choose from (sandbox-ai images list), "Other…" for a name typed in.
+            widget = self.parent().image_combo(current)
+            widget.setAccessibleName(tr(question.label))
         elif self.node.kind == "mcp" and question.key == "name" and hasattr(self.parent(), "mcp_combo"):
             # The servers there are to choose from (defined, the project's own, the catalogs'), any other typed.
             widget = self.parent().mcp_combo(current)
@@ -406,7 +418,8 @@ class NodeGuide(QDialog):
             elif isinstance(widget, QComboBox) and widget.isEditable():
                 index = widget.findText(widget.currentText())
                 data = widget.itemData(index) if index >= 0 else None
-                found[key] = data if data is not None else widget.currentText().strip()
+                found[key] = data if isinstance(data, str) and not data.startswith("\x00") else \
+                    widget.currentText().strip()
             elif isinstance(widget, QComboBox):
                 found[key] = widget.currentData() if widget.currentData() is not None else ""
             elif isinstance(widget, PathEdit):
@@ -437,13 +450,21 @@ class NodeGuide(QDialog):
                 self.summary.addItem(QListWidgetItem(f"{symbol} {printable(text)}"))
         self.where.setText(tr("Step {number} of {count}", number=index + 1, count=self.pages.count()))
         self.back.setEnabled(index > 0)
-        self.next.setText(tr("Done") if last else tr("Next"))
+        self.intro.setVisible(index > 0)
+        self.next.setText(tr("Done") if last or self.ends_here(index) else tr("Next"))
+
+    def ends_here(self, index):
+        """INDEX is the last question and the board finds nothing wrong with the part: the guide ends there - the
+        step "What the board still finds" is shown only when it has something to say."""
+        return index == self.pages.count() - 2 and index > 0 and \
+            not guide.checklist(self.problems, self.preview())
 
     def forward(self):
-        if self.pages.currentIndex() == self.pages.count() - 1:
+        index = self.pages.currentIndex()
+        if index == self.pages.count() - 1 or self.ends_here(index):
             self.accept()
         else:
-            self.show_page(self.pages.currentIndex() + 1)
+            self.show_page(index + 1)
 
 
 def server_models(page):

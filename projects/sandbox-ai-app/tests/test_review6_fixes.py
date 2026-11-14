@@ -354,3 +354,9 @@ def test_mcp_detach_on_an_older_host_says_update_it(isolated, monkeypatch):
     with pytest.raises(ValueError) as failed:
         sai.host_mcp_detach("local", "web", "files")
     assert str(failed.value) == "web is not kept\nsee sandbox-ai list", "lines, not \\x0a"
+    # What sandbox-ai mcp says itself (0.1.95 on, and its errors before): the same prefix taken off.
+    monkeypatch.setattr(sai, "host_run", lambda host, *args, timeout=120, input=None:
+                        (1, "", "sandbox-ai mcp: web is not kept\nsandbox-ai mcp: see sandbox-ai list"))
+    with pytest.raises(ValueError) as failed:
+        sai.host_mcp_detach("local", "web", "files")
+    assert str(failed.value) == "web is not kept\nsee sandbox-ai list"

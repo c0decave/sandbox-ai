@@ -16,8 +16,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import applog
 from . import backend
-from .files import printable
+from .files import printable, printable_text
 from .host_choice import HostChooser, follow_hosts
 from .i18n import tr
 from .name_fields import alive
@@ -112,6 +113,7 @@ class SessionTransferDialog(QDialog):
         follow_hosts(self, self.update_buttons)  # a host added or removed meanwhile: the buttons follow
         self.update_buttons()
         background(self.sai.session_transfer_plan, name, timeout=60,
+                   what=f"reading which folders session {name} names (sandbox-ai session plan)",
                    done=lambda result, error: alive(self) and self.plan_read(result, error))
 
     # -- the session's folders --
@@ -119,10 +121,13 @@ class SessionTransferDialog(QDialog):
     def plan_read(self, result, error):
         if error is not None:
             self.status.setText(tr("The session's folders could not be read: {error}",
-                                   error=printable(error)[:400]))
+                                   error=printable_text(error)[:400]))
             return
         paths, self.problems = result
         self.paths = [path for path in paths if isinstance(path, str)]
+        applog.log("INFO", "session transfer", f"session {printable(self.name)}: {len(self.paths)} folders and files "
+                   "named" + (f"; cannot go along: {applog.redact('; '.join(map(str, self.problems)))[:600]}"
+                              if self.problems else ""))
         for path in self.paths:
             edit = QLineEdit(path)
             edit.setAccessibleName(tr("{path} on the host", path=printable(path)))
@@ -132,7 +137,7 @@ class SessionTransferDialog(QDialog):
             self.edits[path] = edit
         lines = [tr("No folder or file of this machine is named.") if not self.paths else
                  tr("Folders and files: {count}", count=len(self.paths))]
-        lines += [tr("Cannot go along: {problem}", problem=printable(problem)[:400]) for problem in self.problems]
+        lines += [tr("Cannot go along: {problem}", problem=printable_text(problem)[:400]) for problem in self.problems]
         self.status.setText("\n".join(lines))
 
     def maps(self):
@@ -172,7 +177,9 @@ class SessionTransferDialog(QDialog):
         try:
             backend.session_transfer_args(command, self.name, host, new_name, maps, check, replace)
         except ValueError as exc:
-            self.show_output(tr("Not started: {error}", error=printable(exc)))
+            applog.log("INFO", "session transfer", f"{command} of session {printable(self.name)} to "
+                                                   f"{printable(host)} refused: {applog.error_text(exc)}")
+            self.show_output(tr("Not started: {error}", error=printable_text(exc)))
             return
         if self.moving and not check and not ask_first(
                 self, "session-move", tr("Move to host"),
@@ -186,6 +193,9 @@ class SessionTransferDialog(QDialog):
                    new=printable(new_name), host=printable(host)), tr("Replace"), detail={"replace": replace}):
             return
         function = self.sai.session_move if self.moving else self.sai.session_copy
+        applog.log("INFO", "session transfer", f"{'check of the ' if check else ''}{command} of session "
+                   f"{printable(self.name)} to {printable(host)} as {printable(new_name)}"
+                   + (f", folders mapped: {len(maps)}" if maps else "") + (", replacing it there" if replace else ""))
         self.running = True
         self.status.setText(tr("Checking on {host}…", host=printable(host)) if check else
                             tr("Checking and starting on {host}… (this can take minutes)", host=printable(host)))
@@ -193,11 +203,16 @@ class SessionTransferDialog(QDialog):
         # --replace only when chosen: a sandbox-ai without it is called as before
         args = (self.name, host, new_name, maps, check) + ((True,) if replace else ())
         background(function, *args, owner=self.owner, work=True,
+                   what=f"sandbox-ai session {command} {self.name} {host}" + (" (check only)" if check else ""),
                    source=[self.check_button, self.go_button], timeout=backend.TRANSFER_SECONDS + 60,
                    done=lambda result, error: self.ran(host, check, result, error))
 
     def ran(self, host, check, result, error):
         status, out, err = outcome(result, error)
+        applog.log("INFO" if status == 0 else "WARNING", "session transfer",
+                   f"{'check of the ' if check else ''}{'move' if self.moving else 'copy'} of session "
+                   f"{printable(self.name)} to {printable(host)}: exit status {status}"
+                   + (f"\n{applog.tail(err or out)}" if status != 0 or "warning:" in (out + err) else ""))
         if status == 0 and not check and self.succeeded is not None:
             self.succeeded(host)  # the lists follow, also when the dialog was closed meanwhile
         if not alive(self):
@@ -225,5 +240,6 @@ def _replace_supported(sai):
     """Whether this sandbox-ai's session copy|move takes --replace (an older one is called without it)."""
     try:
         return bool(sai.session_replace_supported())
-    except Exception:  # noqa: BLE001 - not known: not offered
+    except Exception as _exc:  # noqa: BLE001 - not known: not offered
+        applog.swallowed("session_transfer", "_replace_supported: not known: not offered", _exc)
         return False

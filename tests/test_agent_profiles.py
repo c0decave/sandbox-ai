@@ -164,18 +164,22 @@ def test_builder_pins_latest_release_and_refreshes_base(agent, fake_podman, fake
 
 
 def test_builder_all_builds_every_image(tmp_path, fake_npm, monkeypatch):
+    """build all: every agent's image first (in this order), then team, Cairn, browser, VPN and Tor, one build each:
+    one that fails (here the browser's, whose base digest the fake Podman cannot name) stops none of the others."""
     log = tmp_path / "builds.log"
     (tmp_path / "podman").write_text(f"#!/bin/sh\necho \"$*\" >> {log}\n")
     (tmp_path / "podman").chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + ":/usr/bin:/bin")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "all"], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    lines = log.read_text().splitlines()
-    assert [line.split()[2 + len(CGROUPS)] for line in lines] == [
-        f"localhost/{a}-sandbox:latest" for a in ("codex", "claude", "opencode")]
-    assert all(line.split()[:len(CGROUPS)] == CGROUPS for line in lines)
+    lines = [line for line in log.read_text().splitlines() if line.split()[len(CGROUPS):len(CGROUPS) + 1] == ["build"]]
+    assert [line.split()[2 + len(CGROUPS)] for line in lines][:7] == [
+        f"localhost/{a}-sandbox:latest" for a in ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose")]
+    assert all(line.split()[:len(CGROUPS)] == CGROUPS for line in lines[:7])
     assert "CLAUDE_VERSION=9.2.0" in lines[1]
+    for label in ("team", "cairn", "browser", "vpn", "tor"):
+        assert f": {label}\n" in result.stderr + "\n", result.stderr
+    assert "built" in result.stderr.splitlines()[-1]
 
 
 def test_builder_without_npm_queries_registry_with_python(tmp_path, monkeypatch):
@@ -210,12 +214,14 @@ def test_builder_rejects_unexpected_version_before_building(tmp_path, monkeypatc
     assert not fake_podman.exists()
 
 
-def test_builder_all_resolves_every_version_before_building(tmp_path, fake_podman):
+def test_builder_all_goes_on_when_one_version_lookup_fails(tmp_path, fake_podman):
+    """build all builds each image on its own: Claude Code's version lookup failing stops its build only (no image
+    of it is made), the others are built, and the end says which failed."""
     (tmp_path / "npm").write_text("#!/bin/sh\n[ \"$2\" = @anthropic-ai/claude-code ] && exit 1\necho 1.2.3\n")
     (tmp_path / "npm").chmod(0o700)
     result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "all"], capture_output=True, text=True)
     assert result.returncode != 0
-    assert not fake_podman.exists(), "no image may be rebuilt when any version lookup fails"
+    assert "failed: " in result.stderr and "claude" in result.stderr.splitlines()[-1]
 
 
 def test_builder_refuses_removed_update_option(fake_podman):

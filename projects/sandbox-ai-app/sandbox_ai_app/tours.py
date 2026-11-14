@@ -291,6 +291,28 @@ AREA_TOURS = {
               "Alles zum gewählten Ereignis; von dort zu seiner Verbindung oder Datei."),
              ("Select a tool call.", "Wählen Sie einen Werkzeugaufruf.")),
     ),
+    "traffic": (
+        step("source", ("Which run", "Welcher Lauf"),
+             ("Every run with an LLM traffic log: the requests to the --llm server, and with --llm-traffic all also "
+              "the cloud provider's.",
+              "Jeder Lauf mit einem LLM-Verkehrsprotokoll: die Anfragen an den --llm-Server, mit --llm-traffic all auch "
+              "die an den Cloud-Anbieter."),
+             ("Pick a run that used a local model.", "Wählen Sie einen Lauf, der ein lokales Modell nutzte.")),
+        step("table", ("Each request", "Jede Anfrage"),
+             ("Model, tokens, time taken, status, how many messages were new, and what the loop guard did.",
+              "Modell, Tokens, Dauer, Status, wie viele Nachrichten neu waren und was der Schleifenschutz tat."),
+             ("Select the last request.", "Wählen Sie die letzte Anfrage.")),
+        step("new_only", ("What is new", "Was neu ist"),
+             ("Only what this request added to the conversation: the tool results and the user's message since the "
+              "answer before.",
+              "Nur was diese Anfrage dem Gespräch hinzufügte: die Werkzeugergebnisse und die Nachricht des Nutzers "
+              "seit der Antwort davor."),
+             ("Switch it off to read the whole conversation.", "Schalten Sie es aus, um das ganze Gespräch zu lesen.")),
+        step("tabs", ("Parameters and raw", "Parameter und Rohdaten"),
+             ("The parameters as sent, the relay's changes marked; the raw record for everything else.",
+              "Die Parameter wie gesendet, die Änderungen des Relays markiert; der rohe Eintrag für alles Weitere."),
+             ("Open Parameters.", "Öffnen Sie Parameter.")),
+    ),
     "statistics": (
         step("directory", ("Tokens and calls", "Tokens und Aufrufe"),
              ("Tokens, requests and tool calls per run and per agent, from a project's logs.",

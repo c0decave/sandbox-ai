@@ -1,0 +1,52 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "showcase-full-stack",
+  "title": "Showcase: a full stack in one sandbox",
+  "description": "A PostgreSQL and an nginx web server as services beside the agent, Python, JavaScript and Django in the agent's image, PyPI, npm and GitHub open: the agent builds a small shop on the database, the web server passes it on, and a report says what worked; everything is gone with the run.",
+  "translations": {
+    "de": {
+      "title": "Schaufenster: ein ganzer Stack in einer Sandbox",
+      "description": "Ein PostgreSQL und ein nginx-Webserver als Dienste neben dem Agenten, Python, JavaScript und Django im Image des Agenten, PyPI, npm und GitHub offen: der Agent baut einen kleinen Shop auf der Datenbank, der Webserver reicht ihn weiter, und ein Bericht sagt, was funktioniert hat; mit dem Lauf ist alles wieder weg."
+    }
+  },
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github",
+    "--service",
+    "db:image={postgres},port=5432,user=999:999,env=POSTGRES_USER=dev,env=POSTGRES_PASSWORD=dev,env=POSTGRES_DB=shop,env=PGDATA=/var/lib/postgresql/data/pgdata,data=/var/lib/postgresql/data,data=/var/run/postgresql,memory=1g",
+    "--service",
+    "web:image={web},port=8080,user=101:101,memory=256m"
+  ],
+  "values": {
+    "postgres": {
+      "label": "Your PostgreSQL image (sandbox-ai images list)",
+      "kind": "text",
+      "default": "postgres",
+      "hint": "once: sandbox-ai images pull docker.io/library/postgres:17.6-bookworm --as postgres"
+    },
+    "web": {
+      "label": "Your web server image (sandbox-ai images list)",
+      "kind": "text",
+      "default": "web",
+      "hint": "once: sandbox-ai images build-image web --builtin showcase-web (nginx 1.28.0)"
+    }
+  },
+  "prompt": "This start shows a whole stack in one sandbox. Build it step by step and write a short report to /work/fullstack-report.md (what you ran, what came back, what did not work): (1) the tools: python3, node, npm and psql versions; Django from the image (/opt/django/venv/bin/python -m django --version) or, if that is missing, a venv of your own in /work/.venv with Django and psycopg[binary] from PyPI (say which); (2) the database, a service beside you: psql postgresql://dev:dev@localhost:5432/shop -c 'select version()'; (3) a Django project in /work/shop on that PostgreSQL (ENGINE django.db.backends.postgresql, ALLOWED_HOSTS localhost and 127.0.0.1) with one model Product (name, price), migrated, three products added, a JSON view at api/products/ and a page at / with a little JavaScript that fetches api/products/ (a relative URL) and lists them (if tsc is there, write it in TypeScript and compile it); run it with manage.py runserver 127.0.0.1:8000 in the background; (4) the web server, the second service: curl http://localhost:8080/ (its own page) and curl http://localhost:8080/app/api/products/ (nginx passes /app/ to your Django); (5) the network: npm view typescript version and pip download --no-deps sqlparse work, https://example.com/ is refused (quote the refusal). Stop the server at the end; keep everything in /work.",
+  "notes": [
+    "Podman only (each service is a container in the sandbox's pod); refused behind Tor and in the security mode paranoid.",
+    "Add the two images once (each marked UNCHECKED: nobody reviewed them): sandbox-ai images pull docker.io/library/postgres:17.6-bookworm --as postgres (PostgreSQL 17.6, pinned by the digest it gets), sandbox-ai images build-image web --builtin showcase-web (sandbox-ai's own Containerfile: nginx 1.28.0 from docker.io/library/nginx:1.28.0-alpine, pinned by digest when it is built, with a page of its own at / and /app/ passed to the agent's Django at localhost:8000).",
+    "The development image: sandbox-ai images recipe django --from AGENT, then sandbox-ai build django; start with --image-variant django. It adds Django 5.2.18 LTS and psycopg 3.3.6 in /opt/django/venv (every wheel pinned by its SHA-256, which pip checks), TypeScript 6.0.3 (pinned by its SHA-512, npm ci without install scripts) and psql with libpq from Debian; Python 3.11 and Node.js are the agent's own. Without the variant the agent installs Django from PyPI itself.",
+    "The services share the sandbox's network: whatever they send meets its firewall, connection proxy and approvals. They run without capabilities, with a read-only root and their data in memory (gone with the run; keep=yes in a --service value keeps it with the start). The agent connects with postgresql://dev:dev@localhost:5432/shop (a development password, never a secret of yours) and reaches nginx at localhost:8080; nginx reaches the agent's Django at 127.0.0.1:8000 in the same pod.",
+    "user=999:999 is the postgres user of the official Debian image, 101:101 nginx's: an image's own entry point cannot change its user without capabilities. Debian's psql (15) talks to PostgreSQL 17 with a warning about the newer server.",
+    "MCP servers: neither of sandbox-ai's catalogs (sandbox-ai-mcp, axross-mcp-hub) has a reviewed PostgreSQL or design MCP server yet, so this preset names none: the agent uses psql, Django's shell and curl. An MCP server runs in a sandbox of its own and would not reach the services at localhost anyway.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

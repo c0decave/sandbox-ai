@@ -28,6 +28,10 @@ always names the newest (the README's install commands use that).
 # 0. On a host with Podman and Bubblewrap (not in a sandbox): the live check, its report under
 #    ~/.local/state/sandbox-ai/live-check/ (scripts/live_check.py --help)
 scripts/live_check.py --build
+#    and the agents and parts not live-tested before (Hermes, Qwen Code, DSH, Goose, Cairn, the sandbox's own
+#    browser): their images built, each against a scripted model on this host, one MCP tool, its switches' hosts,
+#    no telemetry; send back the report.md it names (CI's job agents-live runs the same)
+scripts/live_check_agents.sh
 
 # 1. Bump the version, commit, tag
 v=$(python3 scripts/bump_version.py)

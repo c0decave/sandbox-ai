@@ -165,6 +165,23 @@ def test_the_service_part_is_set_up_in_the_inspector(page, wait):
     assert page.board.first("service").props["secrets"] == []
 
 
+def test_a_new_service_part_has_no_image_until_one_is_chosen(page):
+    """Review 0.1.95: a service part added before your images were read got its own name as its image ("service"),
+    and the guide's Image question showed that name as if it were one of your images."""
+    from sandbox_ai_app import guide
+    page.user_images = None  # not read yet
+    page.add_node("service")
+    node = page.board.first("service")
+    assert node.props["name"] == "service" and node.props["image"] == ""
+    question = next(q for q in guide.questions("service") if q.key == "image")
+    assert guide.answer_of(node, question) == "" and question.needed
+    assert "Image" in guide.missing(node)
+    page.refresh()
+    assert any("Choose the image of the service service" in p.text and p.level == "error" and p.node == node.id
+               for p in page.problems)
+    assert not any("service is none of your images" in p.text for p in page.problems)
+
+
 def test_an_unknown_image_is_a_problem_once_your_images_are_known(page, wait):
     page.add_node("service", **{**B.default_service("web"), "image": "nginx"})
     page.load_user_images()
@@ -186,6 +203,18 @@ def test_the_engine_says_when_its_variant_is_on_your_image(page, wait, monkeypat
 
 
 # -- the Images page: Your images --
+
+def test_the_images_page_says_a_failed_listing_as_an_error(qapp, sai, monkeypatch):
+    """Design review 0.1.95: "Cannot list the images: podman is not installed here" stood in the ordinary colour
+    under an empty table; a later listing that works shows the usual colour again."""
+    from sandbox_ai_app import images_page
+    page = images_page.ImagesPage(sai, lambda argv, title, **kw: None)
+    page.images_listed(1, "", "sandbox-ai images: podman is not installed here")
+    assert "Cannot list the images" in page.status.text() and page.status.property("role") == "notice-error"
+    page.images_listed(0, json.dumps({"images": []}), "")
+    assert page.status.property("role") in (None, "")
+    page.deleteLater()
+
 
 def test_your_images_on_the_images_page(qapp, sai, monkeypatch):
     from sandbox_ai_app import images_page

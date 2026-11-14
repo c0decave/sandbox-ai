@@ -13,8 +13,12 @@ sandbox runs): page switches; the Board of several projects (parts added, change
 and redone, Apply declined and now and then accepted, the projects switched, their tabs closed and opened again);
 questions of fake runs that appear, are answered (on the page and from their notification) or expire, runs and
 sessions that start and end; the log window at Debug with thousands of entries; themes; the Terminals page (tabs
-when QtWebEngine works here); the window hidden to the tray and shown again."""
+when QtWebEngine works here, SOAK_TABS of them at most, default 2); the window hidden to the tray and shown again;
+Settings…, the preset gallery, the wizard and the log window opened and closed; the window resized, minimised and
+shown again; notifications popping up; the app's browser and the video player (the series in SOAK_VIDEOS, default
+/work/videos-0.1.94, when it is there) opened and closed."""
 from collections import Counter
+import contextlib
 import faulthandler
 import gc
 import json
@@ -103,8 +107,149 @@ def children():
     return found
 
 
+_NATIVE = []
+CRASH_NOTES = []  # NOTE(rdi, rsi) -> text, said after a crash's registers
+
+
+def native_stack_on_crash():
+    """SOAK_NATIVE_STACK=1: on SIGSEGV, SIGBUS or SIGABRT the crashing thread's native frames go to standard error
+    first, then faulthandler's Python stacks as before - where in Qt the crash was, which faulthandler's Python stack
+    does not say, without a debugger (ptrace is often not allowed). On x86-64 Linux: the faulting address and
+    instruction, the first two arguments' registers and the words they point at (malloc's chunk size, vtables named:
+    which object a use after free used), what CRASH_NOTES say about them, then the code addresses found on the
+    crashing thread's stack (a scan: return addresses and stale
+    ones, each named by its library and nearest exported symbol, newest first), from a handler on a stack of its own
+    (16 MB: a crash by a full stack is told too). Elsewhere glibc's backtrace() - which itself crashed inside a Qt
+    crash of round 2's soaks (the reason for the scan)."""
+    import ctypes
+    import platform
+    import signal
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    if platform.machine() != "x86_64" or not sys.platform.startswith("linux"):
+        frames = (ctypes.c_void_p * 128)()
+        simple_type = ctypes.CFUNCTYPE(None, ctypes.c_int)
+
+        def simple(signum):
+            os.write(2, f"\n== native stack (signal {signum}) ==\n".encode())
+            count = libc.backtrace(frames, 128)
+            libc.backtrace_symbols_fd(frames, count, 2)
+            faulthandler.dump_traceback(file=sys.__stderr__, all_threads=True)
+            os._exit(128 + signum)
+        callback = simple_type(simple)
+        _NATIVE.append(callback)  # kept alive for the process
+        libc.backtrace(frames, 1)  # (loads libgcc_s now, not inside the handler)
+        for signum in (signal.SIGSEGV, signal.SIGBUS, signal.SIGABRT):
+            libc.signal(signum, callback)
+        return
+
+    class DlInfo(ctypes.Structure):
+        _fields_ = [("fname", ctypes.c_char_p), ("fbase", ctypes.c_void_p), ("sname", ctypes.c_char_p),
+                    ("saddr", ctypes.c_void_p)]
+
+    class StackT(ctypes.Structure):
+        _fields_ = [("sp", ctypes.c_void_p), ("flags", ctypes.c_int), ("size", ctypes.c_size_t)]
+
+    handler_type = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+    class SigAction(ctypes.Structure):  # glibc's struct sigaction on x86-64
+        _fields_ = [("handler", handler_type), ("mask", ctypes.c_uint64 * 16), ("flags", ctypes.c_int),
+                    ("restorer", ctypes.c_void_p)]
+    dladdr = libc.dladdr
+    dladdr.argtypes = (ctypes.c_void_p, ctypes.POINTER(DlInfo))
+
+    def mappings(executable):
+        found = []
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                parts = line.split()
+                if len(parts) >= 2 and ("x" in parts[1] if executable else parts[1].startswith("rw")):
+                    low, high = (int(x, 16) for x in parts[0].split("-"))
+                    found.append((low, high))
+        return found
+
+    def name(address):
+        info = DlInfo()
+        if not dladdr(address, ctypes.byref(info)) or not info.fname:
+            return f"0x{address:x}"
+        where = os.path.basename(info.fname.decode(errors="replace"))
+        if info.sname and info.saddr:
+            return f"{where}({info.sname.decode(errors='replace')}+0x{address - info.saddr:x})"
+        return f"{where}(+0x{address - (info.fbase or 0):x})"
+
+    def handler(signum, siginfo, context):
+        os.write(2, f"\n== native stack (signal {signum}) ==\n".encode())
+        try:
+            fault = ctypes.c_void_p.from_address(siginfo + 16).value or 0  # si_addr
+            rip = ctypes.c_uint64.from_address(context + 40 + 16 * 8).value  # uc_mcontext.gregs[REG_RIP]
+            rsp = ctypes.c_uint64.from_address(context + 40 + 15 * 8).value  # gregs[REG_RSP]
+            os.write(2, f"fault address 0x{fault:x} at {name(rip)}, thread {threading.get_native_id()}\n".encode())
+            rdi, rsi = (ctypes.c_uint64.from_address(context + 40 + n * 8).value for n in (8, 9))  # REG_RDI, REG_RSI
+            os.write(2, f"rdi 0x{rdi:x} rsi 0x{rsi:x} (the first two arguments of the crashing call)\n".encode())
+            heap = mappings(False)
+            for label, value in (("rdi", rdi), ("rsi", rsi)):
+                # What the first argument points at, word by word (an object freed: malloc's chunk size before it,
+                # vtables of the object or of what it holds named): which object a crash used after it was freed.
+                if not any(low <= value - 16 and value + 256 <= high for low, high in heap):
+                    continue
+                size = ctypes.c_uint64.from_address(value - 8).value
+                words = [ctypes.c_uint64.from_address(value + 8 * i).value for i in range(24)]
+                said = []
+                for index, word in enumerate(words):
+                    text = name(word) if word > 4096 else f"{word:#x}"
+                    target = ""
+                    if any(low <= word < high for low, high in heap) and word % 8 == 0:
+                        inner = ctypes.c_uint64.from_address(word).value
+                        if not any(low <= inner < high for low, high in heap) and inner > 4096:
+                            target = f" -> {name(inner)}"
+                    said.append(f"    +{index * 8:#04x} {text}{target}")
+                os.write(2, (f"{label} points at a chunk of size {size & ~7:#x}:\n" + "\n".join(said) + "\n").encode())
+            for note in CRASH_NOTES:  # what the harness knows about those addresses
+                with contextlib.suppress(Exception):
+                    os.write(2, f"{note(rdi, rsi)}\n".encode())
+            code = mappings(True)
+            top = next((high for low, high in mappings(False) if low <= rsp < high), rsp + 4096)
+            seen = 0
+            for index in range(min((top - rsp) // 8, 32768)):
+                value = ctypes.c_uint64.from_address(rsp + index * 8).value
+                if any(low <= value < high for low, high in code):
+                    os.write(2, f"  sp+{index * 8:#07x} {name(value)}\n".encode())
+                    seen += 1
+                    if seen >= 100:
+                        break
+        except Exception as exc:  # noqa: BLE001 - the Python stacks still follow
+            os.write(2, f"(scan failed: {exc!r})\n".encode())
+        faulthandler.dump_traceback(file=sys.__stderr__, all_threads=True)
+        os._exit(128 + signum)
+    callback = handler_type(handler)
+    alternate = ctypes.create_string_buffer(16 << 20)
+    action = SigAction(callback, (ctypes.c_uint64 * 16)(), 0x08000000 | 0x4 | 0x80000000, None)  # ONSTACK|SIGINFO|RESETHAND
+    _NATIVE.extend((callback, alternate, action))  # kept alive for the process
+    libc.sigaltstack(ctypes.byref(StackT(ctypes.cast(alternate, ctypes.c_void_p), 0, len(alternate))), None)
+    name(ctypes.cast(libc.dladdr, ctypes.c_void_p).value)  # (resolved once now, not first inside the handler)
+    for signum in (signal.SIGSEGV, signal.SIGBUS, signal.SIGABRT):
+        libc.sigaction(signum, ctypes.byref(action), None)
+
+
 def type_counts():
     return Counter(type(o).__qualname__ for o in gc.get_objects())
+
+
+def main_stack(text, main):
+    """The stack of thread MAIN (its "0x..." ident) in TEXT (faulthandler's dump), innermost first, as
+    "module:line:function <- ...": the app's and the soak's own frames (else any), at most 8."""
+    frames = []
+    for block in text.split("\n\n"):
+        lines = block.strip().splitlines()
+        if not lines or main not in lines[0]:
+            continue
+        for line in lines[1:]:
+            line = line.strip()
+            if line.startswith("File "):
+                path, _, rest = line[6:].partition('", line ')
+                number, _, function = rest.partition(" in ")
+                frames.append((path, f"{Path(path).stem}:{number}:{function}"))
+    mine = [f for path, f in frames if "sandbox_ai_app" in path or "soak_app" in path]
+    return " <- ".join((mine or [f for _, f in frames])[:8]) or None
 
 
 class Soak:
@@ -157,17 +302,21 @@ class Soak:
         self.stack_seen = None
 
     def watchdog(self):
-        """In a thread: the GUI thread's stack while the event loop has not turned for STALL seconds (once a stall)."""
-        main = threading.main_thread().ident
-        while not self.done:
-            time.sleep(0.05)
-            if time.monotonic() - self.beat_at > STALL * 0.75 and self.stack_seen is None:
-                frame = sys._current_frames().get(main)
-                if frame is not None:
-                    stack = traceback.extract_stack(frame)
-                    mine = [f for f in stack if "sandbox_ai_app" in f.filename or "soak_app" in f.filename]
-                    self.stack_seen = " <- ".join(f"{Path(f.filename).stem}:{f.lineno}:{f.name}"
-                                                  for f in reversed((mine or stack)[-8:]))
+        """In a thread: the GUI thread's stack while the event loop has not turned for STALL seconds (once a stall).
+        Read as faulthandler writes it, never as frame objects: a frame object of the GUI thread held here outlives
+        its function, and dropped here it frees what the function held in this thread - a Qt object then deleted
+        outside the GUI thread, its timers left behind; their next tick crashed the soak (round 2)."""
+        main = f"{threading.main_thread().ident:#018x}"
+        with open(self.env / "watchdog.txt", "w+") as scratch:  # noqa: PTH123
+            while not self.done:
+                time.sleep(0.05)
+                if time.monotonic() - self.beat_at > STALL * 0.75 and self.stack_seen is None:
+                    scratch.seek(0)
+                    scratch.truncate()
+                    faulthandler.dump_traceback(scratch, all_threads=True)
+                    scratch.flush()
+                    scratch.seek(0)
+                    self.stack_seen = main_stack(scratch.read(), main)
 
     def qobjects(self):
         top = [w for w in QtWidgets.QApplication.topLevelWidgets()]
@@ -383,13 +532,86 @@ class Soak:
             self.w.show()
             self.hidden_since = None
 
+    def close_soon(self, kind, after=300):
+        """Reject the shown dialog of class KIND a moment later (from inside the loop of its exec())."""
+        def close():
+            shown = [w for w in QtWidgets.QApplication.topLevelWidgets() if isinstance(w, kind) and w.isVisible()]
+            if not shown:
+                QtCore.QTimer.singleShot(50, close)
+                return
+            for dialog in shown:
+                self.trail.write(f"{time.monotonic() - self.started:9.3f}     closed {kind.__name__}\n")
+                dialog.reject()
+        QtCore.QTimer.singleShot(after, close)
+
+    def dialog(self):
+        """A dialog the human opens again and again: Settings…, the preset gallery, the wizard (closed again)."""
+        from sandbox_ai_app.preset_gallery import PresetGallery
+        from sandbox_ai_app.settings import SettingsDialog
+        from sandbox_ai_app.wizard import SandboxWizard
+        choice = self.random.random()
+        self.trail.write(f"    dialog {choice:.2f}: " + ("settings" if choice < 0.4 else "gallery" if choice < 0.7 else
+                                                        "wizard" if choice < 0.85 else "log window") + "\n")
+        if choice < 0.4:
+            self.close_soon(SettingsDialog)
+            self.w.open_settings()
+        elif choice < 0.7:
+            self.close_soon(PresetGallery)
+            self.w.board.open_gallery()
+        elif choice < 0.85:
+            self.close_soon(SandboxWizard)
+            self.w.board.open_wizard(ask=False)
+        else:
+            window = self.w.open_log_window()
+            QtCore.QTimer.singleShot(500, window.close)
+
+    def window(self):
+        """The window resized, minimised and shown again."""
+        w = self.w
+        if w.isMinimized():
+            w.showNormal()
+        elif self.random.random() < 0.3:
+            w.showMinimized()
+        else:
+            w.resize(*self.random.choice(((800, 600), (1024, 700), (1240, 840), (1600, 1000))))
+
+    def toast(self):
+        """Notifications on for a moment: a few popups that go by themselves."""
+        from sandbox_ai_app import backend as B
+        setting = B.setting
+        B.setting = lambda key: True if key == "notifications" else 3 if key == "notify_seconds" else setting(key)
+        try:
+            for index in range(self.random.randint(1, 4)):
+                self.w.notify(f"soak {self.serial}-{index}", "a notification", level=self.random.choice(
+                    ("info", "success", "warning", "error")))
+        finally:
+            B.setting = setting
+
+    def browser(self):
+        """The app's browser (a few tabs of local pages), the video player: opened and closed again."""
+        from sandbox_ai_app import chromium, terminal, video_player as P, videos as V, web_browser as W
+        if self.random.random() < 0.5 and not terminal.MISSING:
+            self.trail.write("    browser\n")
+            made = W.open_browser("data:text/html,<h1>soak</h1>", check=lambda: chromium.Probe(True, True, None, ""))
+            if made is not None:
+                for index in range(self.random.randint(0, 3)):
+                    made.open_url(f"data:text/html,<p>tab {index}</p>")
+                QtCore.QTimer.singleShot(self.random.randint(500, 3000), made.close)
+            return
+        folder = Path(os.environ.get("SOAK_VIDEOS", "/work/videos-0.1.94"))
+        found = V.catalog([folder], "de") if folder.is_dir() else []
+        if found and not P.MISSING and not P.backend_problem():
+            self.trail.write("    video\n")
+            player = P.open_video(self.random.choice(("launch", "board", "help")), found=found)
+            QtCore.QTimer.singleShot(self.random.randint(1000, 4000), player.close)
+
     def terminal(self):
         from sandbox_ai_app import terminal
         page = self.w.terminals
         if not terminal.available(page.web)[0]:
             return
-        if page.tabs.count() >= 2:
-            page.close_tab(0, ask=False)
+        if page.tabs.count() >= int(os.environ.get("SOAK_TABS", "2")):
+            page.close_tab(self.random.randrange(page.tabs.count()), ask=False)
         else:
             self.serial += 1
             page.open(["sh", "-c", f"while :; do echo soak {self.serial} $(date); sleep 0.5; done"],
@@ -402,14 +624,16 @@ class Soak:
         return tuple((action, float(weights.get(action.__name__, weight))) for action, weight in (
             (self.page, 10), (self.board, 12), (self.project, 3), (self.ask, 4), (self.answer, 5), (self.supervise, 4),
             (self.log, 8), (self.theme, 0.4), (self.tray, 0.15), (self.session, 1.5), (self.start_run, 0.3),
-            (self.end_run, 0.3), (self.terminal, 0.6)))
+            (self.end_run, 0.3), (self.terminal, 0.6), (self.dialog, 0.6), (self.window, 0.5), (self.toast, 0.4),
+            (self.browser, 0.3)))
 
     def act(self):
         skipped = set(filter(None, os.environ.get("SOAK_SKIP", "").split(",")))  # e.g. terminal,theme: left out
         actions, weights = zip(*((a, w) for a, w in self.schedule() if a.__name__ not in skipped))
         action = self.random.choices(actions, weights)[0]
         name = action.__name__
-        if self.hidden_since is not None and name in ("page", "board", "theme", "terminal", "project"):
+        if self.hidden_since is not None and name in ("page", "board", "theme", "terminal", "project", "dialog",
+                                                      "window", "browser"):
             name, action = "tray", self.tray  # (hidden: only what goes on in the background, and showing it again)
         self.last_action = name
         begin = time.monotonic()
@@ -606,6 +830,8 @@ def test_soak(qapp, env, monkeypatch, opened):
     hooks = (sys.excepthook, threading.excepthook, sys.unraisablehook)
     applog.install()
     faulthandler.enable(file=sys.__stderr__, all_threads=True)
+    if os.environ.get("SOAK_NATIVE_STACK"):
+        native_stack_on_crash()
     w = MainWindow(backend.SandboxAI(), check_updates=False, lazy=True)
     web = web_folder(env)
     w.page_makers["terminals"] = lambda: terminal.TerminalsPage(web, sai=w.sai, in_terminal=w.in_terminal)

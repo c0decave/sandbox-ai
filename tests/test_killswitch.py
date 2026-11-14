@@ -986,7 +986,7 @@ def test_the_supervisor_sets_waiting_cuts_before_the_agent_and_holds_the_socket_
     server = inspect.getsource(rt.control_server)
     assert server.index("listening.set()") < server.index("listener.accept()")
     assert server.index('request.get("op") == "cut"') < server.index("cuts_ready.wait(") < \
-        server.index("network.set_cut(mode")
+        server.index("network.set_cut(cut")
 
 
 def test_a_server_attached_while_its_run_is_cut_gets_the_cut(runs):

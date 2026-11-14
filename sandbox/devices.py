@@ -602,7 +602,7 @@ def load(record):
     """[grant] of the run (an older run's list of paths read as grants added by path)."""
     try:
         data = json.loads(registry(record).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     if isinstance(data, list):
         return [{"id": str(index), "value": path, "by": "path", "source": "added", "kind": "node", "path": path,
@@ -684,7 +684,7 @@ def run_rules(record):
     sources = []
     try:
         saved = json.loads((Path(record["directory"]) / "device-rules.json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         saved = []
     sources += [s for s in saved if isinstance(s, dict)] if isinstance(saved, list) else []
     policy = module("agent_sandbox").load_policy().get("rules")
@@ -723,7 +723,7 @@ def read_answer(record, ident):
     """{"decision", "scope"} of the answer to question IDENT, or None while there is none."""
     try:
         answer = json.loads((Path(record["directory"]) / "approvals" / f"{ident}.answer").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(answer, dict) or answer.get("decision") not in ("allow", "deny"):
         return {"decision": "deny", "scope": "once", "reason": "unreadable answer"}
@@ -1380,7 +1380,7 @@ def machine_current_limits(record, runner=None):
         result = (runner or subprocess.run)(command, capture_output=True, text=True, timeout=60)
         data = json.loads(result.stdout or "null") if result.returncode == 0 else None
         host = data[0]["HostConfig"]
-    except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError):
+    except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError, RecursionError):
         raise ValueError(f"the sandbox's container {container} was not found (has it ended?)") from None
     def positive(value):
         return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
@@ -1521,7 +1521,7 @@ if __name__ == "__main__":
         directory = Path(sys.argv[2])
         try:
             run = {**json.loads((directory / "run.json").read_text()), "directory": str(directory)}
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             sys.exit(1)
         import threading
         watch_devices(run, threading.Event())

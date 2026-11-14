@@ -51,7 +51,8 @@ PAGE_TITLES = {"launch": N_("Start"), "board": N_("Board"), "sandboxes": N_("San
                "approvals": N_("Approvals"), "terminals": N_("Terminals"), "files": N_("File manager"),
                "kits": N_("Kits & plugins"), "mcp": N_("MCP servers"), "llm": N_("LLM servers"),
                "images": N_("Images"), "credentials": N_("Credentials"), "team": N_("Teams"),
-               "connections": N_("Connections"), "activity": N_("Activity"), "statistics": N_("Statistics"),
+               "connections": N_("Connections"), "activity": N_("Activity"), "traffic": N_("LLM traffic"),
+               "statistics": N_("Statistics"),
                "system": N_("System"), "hosts": N_("Hosts"), "help": N_("Help")}
 LOOPBACK_OK = False  # http to 127.0.0.1 allowed (the tests' fake release server alone; nothing in the app sets it)
 

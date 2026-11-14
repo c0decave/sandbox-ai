@@ -607,14 +607,14 @@ def test_the_vendored_skill_kits_are_listed_and_switched_on_and_off(window, env,
     if "hallmark" not in builtin:
         pytest.skip("this sandbox-ai has no vendored skills (0.1.94)")
     for kit, skill in VENDORED.items():
-        assert set(builtin[kit]["agents"]) == {"claude", "codex", "opencode"}, kit
+        assert set(builtin[kit]["agents"]) == {"claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"}, kit
         assert all(skill in builtin[kit]["agents"][agent]["skills"] for agent in builtin[kit]["agents"]), kit
     assert set(builtin["hallmark-hook"]["agents"]) == {"claude"}
     page = window.kits
     page.refresh()
     assert wait(lambda: all(widgets.find_row(page.table, f"builtin:{kit}") >= 0 for kit in VENDORED), 60)
     row = widgets.find_row(page.table, "builtin:hyperframes")
-    assert page.table.item(row, 2).text() == "claude, codex, opencode"
+    assert page.table.item(row, 2).text() == "claude, codex, dsh, goose, hermes, opencode, qwen"
     assert "hyperframes-cli" in page.table.item(row, 3).text() and "media-use" in page.table.item(row, 3).text()
     # On: Use in the current project.
     folder = project(env, "p")

@@ -209,15 +209,41 @@ def test_each_action_calls_its_command(env, qapp, page, wait, monkeypatch):
     # A destination the network settings did not allow: as sandbox-ai net allow, --keep for always.
     lookup = lambda what: what == "lookup of pypi.org"  # noqa: E731
     act(qapp, page, wait, "allow-run", lookup)
-    assert called[-1] == ["net", "allow", "opencode-1", "--allow-host", "pypi.org"]
+    # (a name the agent looked up: only its public addresses, "always" remembered as an approval)
+    assert called[-1] == ["net", "allow", "opencode-1", "--allow-host", "pypi.org", "--public-only"]
     act(qapp, page, wait, "allow-always", lookup)
-    assert called[-1] == ["net", "allow", "opencode-1", "--allow-host", "pypi.org", "--keep"]
+    assert called[-1] == ["net", "allow", "opencode-1", "--allow-host", "pypi.org", "--public-only", "--keep"]
     act(qapp, page, wait, "allow-run", lambda what: what.startswith("connection to 198.51.100.3"))
     assert called[-1] == ["net", "allow", "opencode-1", "--allow-tcp", "198.51.100.3:443"]
     # A connection you denied: taken back through the supervisor (it opens the firewall itself).
     act(qapp, page, wait, "allow-run", lambda what: what.startswith("connect to 192.0.2.7"))
     assert called[-1] == ["approvals", "allow", "1762855200-7-2", "--scope", "run"]
     assert page.blocked.message.text() == "Done."
+
+
+def test_a_refused_lookup_is_allowed_as_an_answer_to_it_never_as_net_allow(env, qapp, page, wait, monkeypatch):
+    """Bug hunt: Allow on a lookup question nobody answered became `net allow --allow-host NAME` (--keep for
+    always), which opens every address the agent's name resolves to - this host's and the LAN's too - and keeps it
+    in the project for every later start; an answer to the question itself opens only its public addresses. Now it
+    goes through `approvals allow ID` (only public addresses, "always" remembered as an answer is)."""
+    directory, logs = fake_run(env, "opencode-1", "alpha")
+    (directory / "approvals" / "1762855200-7-3.json").write_text(json.dumps({
+        "id": "1762855200-7-3", "kind": "dns", "time": "2026-11-11T10:00:09Z", "name": "rebind.evil.example"}))
+    (directory / "approvals" / "1762855200-7-3.done").write_text(json.dumps({
+        "decision": "deny", "scope": "once", "reason": "no answer within 60 s", "question": "1762855200-7-3"}))
+    page.poll()
+    page.set_active_tab({"kind": "run", "id": "opencode-1"})
+    settle(qapp, page, wait)
+    called = []
+    monkeypatch.setattr(page.sai, "call", lambda *argv, **kwargs: called.append(list(argv)) or (0, "{}", ""))
+    lookup = lambda what: "rebind.evil.example" in what  # noqa: E731
+    act(qapp, page, wait, "allow-run", lookup)
+    assert called[-1] == ["approvals", "allow", "1762855200-7-3", "--scope", "run"]
+    widgets.SHOWN.clear()
+    act(qapp, page, wait, "allow-always", lookup)
+    assert called[-1] == ["approvals", "allow", "1762855200-7-3", "--scope", "always"]
+    assert not [argv for argv in called if argv[:2] == ["net", "allow"]]
+    assert "only the name's public addresses" in widgets.SHOWN[-1][1]
 
 
 def test_several_selected_act_together_and_a_failure_is_said(env, qapp, page, wait, monkeypatch):

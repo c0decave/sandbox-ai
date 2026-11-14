@@ -22,8 +22,9 @@ from PySide6.QtWidgets import (
     QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
+from . import widgets
 from .widgets import (
     ask_first, background, fill, flow, multi_select, outcome, plain_label, report_each, run_each, safe_tooltip,
     selected_keys, set_enabled, several, table, warn,
@@ -132,14 +133,14 @@ class StartDialog(QDialog):
         try:
             options = shlex.split(self.options.text())
         except ValueError as exc:
-            raise ValueError(tr("The options cannot be read: {error}", error=printable(exc))) from None
+            raise ValueError(tr("The options cannot be read: {error}", error=printable_text(exc))) from None
         return name, agents, workspace, options
 
     def check_and_accept(self):
         try:
             self.request()
         except ValueError as exc:
-            self.problem.setText(printable(exc))
+            self.problem.setText(printable_text(exc))
             return
         self.accept()
 
@@ -232,7 +233,10 @@ class TeamPage(QWidget):
         self.delete_button.clicked.connect(lambda _=False: self.delete())
         layout.addWidget(flow(self.start_button, self.attach_button, self.post_button, self.stop_button,
                               self.delete_button, self.refresh_button))  # wraps when the window is narrow
-        self.status = plain_label(role="secondary", selectable=True)
+        from .widgets import list_menu
+        list_menu(self.table, lambda: [self.attach_button, self.post_button, None, self.stop_button,
+                                       self.delete_button, None, self.start_button, self.refresh_button])
+        self.status = plain_label(role="secondary", selectable=True, log="team")
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.update_buttons()
@@ -291,7 +295,7 @@ class TeamPage(QWidget):
             fill(self.table, [], keys=[])
             self.clear_details()
             self.status.setText(tr("Could not list the teams on {host}: {error}", host=self.hosts.label(host),
-                                   error=printable(error)[:500]))
+                                   error=printable_text(error)[:500]))
             self.update_buttons()
             return
         self.teams, self.teams_host = [t for t in result if valid_team(t.get("name"))], host
@@ -353,7 +357,7 @@ class TeamPage(QWidget):
             return
         if error is not None:
             self.clear_details()
-            self.where.setText(tr("Could not read team {name}: {error}", name=name, error=printable(error)[:400]))
+            self.where.setText(tr("Could not read team {name}: {error}", name=name, error=printable_text(error)[:400]))
             return
         self.shown = result
         members = [m for m in result.get("members") or [] if m in AGENTS]
@@ -405,13 +409,13 @@ class TeamPage(QWidget):
         host = self.host()
         folder = self.project if host == LOCAL and self.project else ""
         dialog = StartDialog(self, self.hosts.label(host), host != LOCAL, folder)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         try:
             name, agents, workspace, options = dialog.request()
             argv = self.sai.team_start_argv(host, name, agents, workspace, options)
         except ValueError as exc:
-            warn(self, tr("Start a team"), printable(exc))
+            warn(self, tr("Start a team"), printable_text(exc))
             return
         title = f"sandbox-ai team start {name}" + ("" if host == LOCAL else f" ({host})")
         self.terminal(argv, title)
@@ -435,7 +439,7 @@ class TeamPage(QWidget):
         members = [m for m in (self.shown or {}).get("members") or [] if m in AGENTS] or \
             next((t["members"] for t in self.teams if t["name"] == name), list(AGENTS))
         dialog = PostDialog(self, name, members)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         agent, task = dialog.agent.currentData(), dialog.task.toPlainText().strip()
         if agent not in AGENTS or not task:

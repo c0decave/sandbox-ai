@@ -11,8 +11,13 @@ some servers and proxies do): a client that sends its next request on it sees "t
 unexpectedly" (OpenCode did). --close-after N closes each connection after N answers, also without saying so.
 Each request is a line in --log (JSONL): method, path, model, stream, the number of messages (with --log-bodies the
 request's whole JSON body too). --lmstudio answers LM Studio's own REST API as well (GET /api/v1/models with each
-model's loaded instances, POST /api/v1/models/load, which loads one and is logged), for the tests that no listing
-loads a model and that a start loads one explicitly.
+model's loaded instances, POST /api/v1/models/load, which loads one - a second load of a model is a second instance,
+MODEL:2, as LM Studio does - and refuses keys it does not know, POST /api/v1/models/unload {instance_id}); a chat
+request to a model not loaded loads it JIT (an instance with remaining_ttl_seconds, as LM Studio 0.4.26 reports
+one). For the tests that no listing loads a model, that a start loads one explicitly, and of llm loaded|load|unload.
+--ollama-ps answers Ollama's GET /api/ps (the loaded models with size, size_vram, context_length, expires_at), and
+/api/generate or /api/chat without a prompt (or messages) loads the model (done_reason "load"; keep_alive in seconds,
+negative: until unloaded; options.num_ctx its context), with keep_alive 0 unloads it ("unload").
 """
 import argparse
 import http.server
@@ -37,7 +42,15 @@ class Options:
     log_bodies = False
     lmstudio = False
     max_context = 131072
-    loaded = None       # {model: context_length} of the LM Studio-like listing (shared by the server's handlers)
+    # The LM Studio-like loaded instances, given as {model: context_length} or {model: {"context": N, "ttl": S}} (an
+    # instance with an idle TTL: JIT); made into instances [{"id", "model", "context", "ttl"}] (shared by the server's
+    # handlers) at the start.
+    loaded = None
+    instances = None
+    jit_ttl = 3600      # the remaining_ttl_seconds of an instance JIT-loaded by a chat request
+    ollama_ps = False
+    running = None      # the Ollama-like loaded models: {model: {"context", "expires_at"}}
+    size = 4 << 30      # what an Ollama-like loaded model takes in memory (all in VRAM)
 
 
 def text_for(options, messages):
@@ -117,6 +130,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
         self.wfile.write(b"0\r\n\r\n")
 
+    def add_instance(self, model, context, ttl):
+        """A loaded instance of MODEL (under LOCK): its id the model's key, MODEL:2 ... for a further one."""
+        taken = {i["id"] for i in self.options.instances}
+        number, name = 1, model
+        while name in taken:
+            number += 1
+            name = f"{model}:{number}"
+        self.options.instances.append({"id": name, "model": model, "context": context, "ttl": ttl})
+        return name
+
     def finish_answer(self):
         self.answers += 1
         if self.options.close_after and self.answers >= self.options.close_after:
@@ -133,11 +156,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                             for m in self.options.models]})
         elif path == "/api/v1/models" and self.options.lmstudio:
             with LOCK:
-                loaded = dict(self.options.loaded)
+                instances = [dict(i) for i in self.options.instances]
             self.send_json(200, {"models": [
-                {"key": m, "type": "llm", "max_context_length": self.options.max_context,
-                 "loaded_instances": [{"id": m, "config": {"context_length": loaded[m]}}] if m in loaded else []}
+                {"key": m, "type": "llm", "max_context_length": self.options.max_context, "size_bytes": 1 << 30,
+                 "loaded_instances": [{"id": i["id"], "config": {"context_length": i["context"]},
+                                       **({"remaining_ttl_seconds": i["ttl"]} if i.get("ttl") is not None else {})}
+                                      for i in instances if i["model"] == m]}
                 for m in self.options.models]})
+        elif path == "/api/ps" and self.options.ollama_ps:
+            with LOCK:
+                running = {m: dict(v) for m, v in self.options.running.items()}
+            self.send_json(200, {"models": [
+                {"name": m, "model": m, "size": self.options.size, "size_vram": self.options.size,
+                 "digest": "0" * 64, "details": {"family": "mock"}, "expires_at": v["expires_at"],
+                 "context_length": v["context"]} for m, v in running.items()]})
         elif path == "/api/version":
             self.send_json(200, {"version": "0.0.0-mock"})
         elif path in ("/", "/health"):
@@ -150,16 +182,57 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self.body()
         self.record(body)
         path = self.path.split("?", 1)[0]
+        if path == "/api/v1/models/unload" and self.options.lmstudio:
+            with LOCK:
+                found = [i for i in self.options.instances if i["id"] == body.get("instance_id")]
+                for instance in found:
+                    self.options.instances.remove(instance)
+            if found:
+                self.send_json(200, {"instance_id": body["instance_id"]})
+            else:
+                self.send_json(404, {"error": {"message": f"no instance {body.get('instance_id')}"}})
+            return self.finish_answer()
         model = body.get("model") or self.options.models[0]
         if model not in self.options.models:
             self.send_json(404, {"error": {"message": f"model {model} not found", "type": "invalid_request_error"}})
             return self.finish_answer()
         created = int(time.time())
         if path == "/api/v1/models/load" and self.options.lmstudio:
+            unknown = sorted(set(body) - {"model", "context_length", "eval_batch_size", "flash_attention",
+                                          "num_experts", "offload_kv_cache_to_gpu", "echo_load_config"})
+            if unknown:  # as LM Studio 0.4 answers a key it does not know ("ttl" too)
+                self.send_json(400, {"error": {"message": f"Unrecognized key(s) in object: {', '.join(unknown)}",
+                                               "type": "invalid_request", "code": "unrecognized_keys"}})
+                return self.finish_answer()
             with LOCK:
-                self.options.loaded[model] = body.get("context_length") or 4096
-            self.send_json(200, {"type": "llm", "instance_id": model, "load_time_seconds": 0.1, "status": "loaded"})
+                instance = self.add_instance(model, body.get("context_length") or 4096, None)
+            self.send_json(200, {"type": "llm", "instance_id": instance, "load_time_seconds": 0.1, "status": "loaded"})
             return self.finish_answer()
+        if self.options.lmstudio and path in ("/v1/chat/completions", "/v1/completions") and body.get("model") and \
+                (body.get("messages") or body.get("prompt")):  # (an empty probe loads nothing)
+            with LOCK:  # JIT loading: the first request to a model not loaded loads it, with an idle TTL
+                if not any(i["model"] == model for i in self.options.instances):
+                    self.add_instance(model, 4096, self.options.jit_ttl)
+        if self.options.ollama_ps and path in ("/api/generate", "/api/chat") and body.get("model"):
+            keep = body.get("keep_alive", 300)
+            empty = not body.get("prompt") if path == "/api/generate" else not body.get("messages")
+            with LOCK:
+                if keep == 0 and empty:
+                    self.options.running.pop(model, None)
+                    reason = "unload"
+                else:
+                    context = (body.get("options") or {}).get("num_ctx") or \
+                        (self.options.running.get(model) or {}).get("context") or 4096
+                    seconds = keep if isinstance(keep, (int, float)) else 300
+                    expires = "2318-01-01T00:00:00Z" if seconds < 0 else \
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
+                    self.options.running[model] = {"context": context, "expires_at": expires}
+                    reason = "load"
+            if empty:
+                self.send_json(200, {"model": model, "created_at": "2026-11-12T00:00:00Z", "done": True,
+                                     "done_reason": reason, **({"message": {"role": "assistant", "content": ""}}
+                                                               if path == "/api/chat" else {"response": ""})})
+                return self.finish_answer()
         if path in ("/v1/chat/completions", "/v1/completions"):
             chat = path.endswith("chat/completions")
             text = text_for(self.options, body.get("messages") if chat else
@@ -224,8 +297,12 @@ def start(bind="127.0.0.1", port=0, **settings):
     """The server in a thread: (server, port). SETTINGS: the Options above (models, reply, chunks, delay,
     idle_close, close_after, log)."""
     options = type("Settings", (Options,), {key: value for key, value in settings.items() if value is not None})
-    if options.loaded is None:
-        options.loaded = {}
+    options.instances = []
+    for model, value in (options.loaded or {}).items():
+        value = value if isinstance(value, dict) else {"context": value}
+        options.instances.append({"id": model, "model": model, "context": value.get("context") or 4096,
+                                  "ttl": value.get("ttl")})
+    options.running = dict(options.running or {})
     handler = type("MockHandler", (Handler,), {"options": options})
     server = (Server6 if ":" in bind else Server)((bind, port), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -244,11 +321,13 @@ def main(argv=None):
     p.add_argument("--close-after", type=int, metavar="N")
     p.add_argument("--log", metavar="FILE")
     p.add_argument("--log-bodies", action="store_true", help="each request's JSON body in --log too")
-    p.add_argument("--lmstudio", action="store_true", help="LM Studio's /api/v1/models and /api/v1/models/load too")
+    p.add_argument("--lmstudio", action="store_true",
+                   help="LM Studio's /api/v1/models, /api/v1/models/load and /unload too, and JIT loading")
+    p.add_argument("--ollama-ps", action="store_true", help="Ollama's /api/ps, and loading and unloading models")
     a = p.parse_args(argv)
     server, port = start(a.bind, a.port, models=tuple(a.model or Options.models), reply=a.reply, chunks=a.chunks,
                          delay=a.delay, idle_close=a.idle_close, close_after=a.close_after, log=a.log,
-                         log_bodies=a.log_bodies or None, lmstudio=a.lmstudio or None)
+                         log_bodies=a.log_bodies or None, lmstudio=a.lmstudio or None, ollama_ps=a.ollama_ps or None)
     print(json.dumps({"port": port, "models": list(a.model or Options.models)}), flush=True)
     try:
         while True:

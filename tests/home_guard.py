@@ -39,6 +39,7 @@ def ensure(environ=os.environ):
     for name in DROPPED:
         environ.pop(name, None)
     no_browser(root, environ)
+    no_ssh(root, environ)
     environ[MARKER] = str(root)
     return root
 
@@ -57,6 +58,29 @@ def no_browser(root, environ=os.environ):
         opener.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{root}/browser-opens"\nexit 0\n')
         opener.chmod(0o755)
     environ["BROWSER"] = str(directory / "xdg-open")
+    environ["PATH"] = f"{directory}{os.pathsep}{environ.get('PATH', '')}"
+    return directory
+
+
+SSH_COMMANDS = ("ssh", "scp", "sftp")
+
+
+def no_ssh(root, environ=os.environ):
+    """No test ever reaches a real host over SSH: the tests' hosts (192.0.2.x, documentation addresses) were tried
+    for real when a test did not fake ssh, and in a sandbox each attempt became a question to the human ("7 Fragen
+    zu 192.0.2.11:22 ... ohne Antwort abgelehnt"). The ssh, scp and sftp found first on PATH fail at once with
+    ssh's own exit status 255 and write what they were given to ROOT/ssh-calls; a test that fakes ssh puts its own
+    first on PATH."""
+    directory = root / "no-ssh-bin"
+    directory.mkdir(exist_ok=True)
+    for name in SSH_COMMANDS:
+        stub = directory / name
+        # `ssh -G` (print the configuration, connect nowhere) is the real ssh's: a test reads its settings.
+        passthrough = ('for a in "$@"; do [ "$a" = -G ] && { PATH=$(printf %s "$PATH" | sed "s#' + str(directory) +
+                       ':##"); exec ssh "$@"; }; done\n') if name == "ssh" else ""
+        stub.write_text(f'#!/bin/sh\n{passthrough}printf "%s %s\\n" "{name}" "$*" >> "{root}/ssh-calls"\n'
+                        f'echo "{name}: tests reach no real host" >&2\nexit 255\n')
+        stub.chmod(0o755)
     environ["PATH"] = f"{directory}{os.pathsep}{environ.get('PATH', '')}"
     return directory
 

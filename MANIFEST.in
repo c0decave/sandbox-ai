@@ -5,6 +5,8 @@ recursive-include sandbox Containerfile.* build_image.sh release-signers mcp-sig
 graft sandbox/web
 graft sandbox/launcher
 graft sandbox/presets
+graft sandbox/recipes
+graft sandbox/service-images
 graft sandbox/templates
 graft sandbox/builtin
 graft sandbox/marketplace

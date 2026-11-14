@@ -210,6 +210,10 @@ def test_own_presets_save_export_import(tmp_path, monkeypatch):
     ({"positions": {"agent#0": ["x", 1]}}, "Positions"),
     ({"surprise": 1}, "Unknown keys"),
     ({"format": "something else"}, "Not a preset"),
+    # Passed on (a file of someone else's): as sandbox-ai's presets that are not yours (its OWN_VALUES and REFUSED)
+    ({"options": ["--llm-traffic=all"]}, "--llm-traffic all"),
+    ({"options": ["--token-proxy", "--git-token-file", "https://git.example.org=/home/u/.config/tok"]},
+     "--git-token-file"),
 ])
 def test_imports_are_checked_and_secrets_refused(tmp_path, change, reason):
     sai = backend.SandboxAI()
@@ -284,3 +288,31 @@ def test_a_value_still_to_fill_in_is_named_by_the_presets_label(registered):
     assert "What to find out" in text and "Agent arguments" in text, text
     again = B.Board.from_state(board.state())
     assert again.labels == board.labels
+
+
+def test_values_only_you_choose_stay_in_a_preset_of_your_own_but_are_not_imported(tmp_path):
+    """--llm-traffic all and a token read from a file of yours: a board saved as your preset keeps them (yours, in your
+    configuration), a preset file imported from elsewhere may not bring them (sandbox-ai refuses them in a preset that
+    is not yours too). An old --telemetry on is kept nowhere (telemetry is always off)."""
+    sai = backend.SandboxAI()
+    board = B.from_argv(sai, "claude", ["--telemetry", "on", "--llm-traffic", "all", "--token-proxy",
+                                        "--git-token-file", "https://git.example.org=/home/u/.config/tok"])
+    preset = PR.from_board(sai, board, "Mine")
+    assert {"all", "--git-token-file"} <= set(preset.options) and "on" not in preset.options
+    path = tmp_path / "preset.json"
+    path.write_text(json.dumps(PR.to_document(preset)))
+    with pytest.raises(ValueError, match="not yours"):
+        PR.import_file(sai, path)
+
+
+@pytest.mark.parametrize("tokens", [["--telemetry", "on"], ["--telemetry=on"], ["-tm", "on"]])
+def test_an_imported_preset_with_an_old_telemetry_on_is_taken_without_it(tmp_path, tokens):
+    """Telemetry is always off (sandbox-ai 0.1.95): a preset file with an old --telemetry on is imported, the value
+    left out (never refused, never written)."""
+    sai = backend.SandboxAI()
+    document = {**PR.to_document(PR.find("strict-rules")), "id": "my-old-on"}
+    document["options"] = [*document.get("options", []), *tokens, "--telemetry", "strict"]
+    path = tmp_path / "preset.json"
+    path.write_text(json.dumps(document))
+    options = list(PR.import_file(sai, path).options)
+    assert "on" not in options and "--telemetry=on" not in options and "strict" in options

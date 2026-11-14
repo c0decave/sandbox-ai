@@ -108,6 +108,33 @@ def test_model_updates_trims_and_filters(qapp, monkeypatch):
     assert proxy.rowCount() == 1
 
 
+def test_a_full_timeline_keeps_its_rows_as_before_without_making_them_anew(qapp, monkeypatch):
+    """0.1.95, performance round 1: once the page holds KEEP events, each read dropped the oldest and made the places
+    of all the others anew (20,000 at every read: 8 s for a timeline of 100,000 events); now the places count from the
+    first event and only the dropped ones' ids go - the same rows, the same updates in place, as before."""
+    import random
+
+    class Before(ActivityModel):  # the index of ids as it was made: anew after each trim
+        def add(self, records):
+            super().add(records)
+            self.rows = {e.record["id"]: row for row, e in enumerate(self.entries) if isinstance(e.record.get("id"), str)}
+            self.dropped = 0
+    monkeypatch.setattr(activity_page, "KEEP", 7)
+    chosen = random.Random(4)
+    model, before = ActivityModel(), Before()
+    for _ in range(400):
+        batch = []
+        for _ in range(chosen.randint(1, 5)):
+            ident = chosen.choice([f"e{chosen.randint(0, 30)}", None, 7])
+            batch.append({**record("command", f"s{chosen.random():.6f}", ident),
+                          **({"update": True} if chosen.random() < 0.4 else {})})
+        model.add(batch)
+        before.add(batch)
+        assert [e.record for e in model.entries] == [e.record for e in before.entries]
+        assert {ident: row - model.dropped for ident, row in model.rows.items()} == before.rows
+    assert model.dropped > 300 and len(model.rows) <= 7
+
+
 def test_kind_colours_follow_the_theme(qapp):
     for mode in ("light", "dark"):
         theme.apply(mode)
@@ -247,3 +274,24 @@ def test_stopping_the_timeline_does_not_wait_on_the_gui_thread(window, monkeypat
     page.stop()
     assert waits == [] and page.process is None, "nothing waited for"
     assert wait(lambda: destroyed, 10), "deleted once it has ended"
+
+
+def test_a_page_closed_while_its_killed_command_ends_says_nothing_wrong(window, monkeypatch, wait):
+    """Design review 0.1.95: the app quitting right after stop() (the page goes, its killed command with it) ran the
+    finished handler on the deleted command: "RuntimeError: Internal C++ object (QProcess) already deleted"."""
+    import sys
+    from shiboken6 import Shiboken
+    from sandbox_ai_app.activity_page import ActivityPage
+    errors = []
+    monkeypatch.setattr(sys, "excepthook", lambda *info: errors.append(info[1]))
+    page = ActivityPage(window.sai, window)
+    process = activity_page.QProcess(page)
+    process.setProgram(sys.executable)
+    process.setArguments(["-c", "import time; time.sleep(60)"])
+    page.process = process
+    process.start()
+    assert wait(lambda: process.state() == activity_page.QProcess.ProcessState.Running, 10)
+    page.shutdown()
+    Shiboken.delete(page)  # as the window's end deletes it: the command with it, before it has ended
+    QtWidgets.QApplication.processEvents()
+    assert errors == []

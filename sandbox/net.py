@@ -3,11 +3,14 @@
 
   sandbox-ai net list                                  running sandboxes
   sandbox-ai net show [RUN]                            what was allowed during the run
-  sandbox-ai net allow [RUN] [--allow-host HOST] [--allow-tcp IP:PORT] [--allow IP_OR_CIDR] [--allow-PRESET]
+  sandbox-ai net allow [RUN] [--allow-host HOST] [--allow-domain DOMAIN] [--allow-tcp IP:PORT] [--allow IP_OR_CIDR]
+                       [--allow-PRESET]                  (--allow-domain D: --allow-host D --allow-host '*.D')
                        [--dns] [--nameserver IP]           real DNS lookups (as --dns at the start)
                        [--git-token-env|--git-token-file|--git-token-secret URL=REF]   a Git login
                        [--allow-host-port PORT]            the host's 127.0.0.1:PORT, through a relay
                        [--api-key HOST=NAME[=SECRET]]      an API key the proxy puts in (runs from 0.1.92)
+                       [--public-only]                     with --allow-host alone: only each name's public
+                                                           addresses (--keep: remembered as an approval)
   sandbox-ai net revoke [RUN] (the same options)       take back what `allow` gave
   sandbox-ai net untaint [RUN]                         take back the run's taint (untrusted content entered it)
   sandbox-ai net cut [RUN] MODE [--only] | --all-runs MODE
@@ -60,6 +63,21 @@ START_SLACK = 5
 _launcher = None
 _launcher_source = None  # starts.py's launcher() when starts.py loaded this module: one launcher for all of its modules
 _textout = None
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        made = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(made)
+        with LOADING:
+            loaded = sys.modules.setdefault("sandbox_ai_launchlog", made)
+    return loaded
+
+
+LOG = launch_log()
 
 
 def textout():
@@ -140,10 +158,15 @@ def alive(pid, start=None):
     a PID reused by another process after the run ended no longer passes for the run. Unknown either way (no
     /proc, a record of an older version) counts as alive: a live run's directory must never be removed."""
     try:
-        os.kill(int(pid), 0)
+        pid = int(pid)
+        if pid <= 0:
+            # No process's own number (a damaged record): 0 and -1 would ask about a whole process group or every
+            # process, and never about the run - unknown, as a value that is no number.
+            return True
+        os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except (PermissionError, ValueError, TypeError):
+    except (PermissionError, ValueError, TypeError, OverflowError):  # (a number beyond a PID: OverflowError)
         return True
     if isinstance(start, int) and not isinstance(start, bool):
         now = process_start(int(pid))
@@ -207,7 +230,7 @@ def running(orphans=None):
         for entry in entries:
             try:
                 record = json.loads((entry / "run.json").read_text())
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):  # (damaged: nested beyond what Python reads)
                 continue
             if not isinstance(record, dict):
                 continue
@@ -230,12 +253,32 @@ def running(orphans=None):
 def forget_ended(directory, record):
     """The run in DIRECTORY (RECORD: its run.json) ended without its launcher's cleanup (the launcher was killed):
     its end goes into its name's history and its start's exit.json (once), its pod goes if Podman still lists it
-    with nothing running, then its directory and its browser directory."""
-    with contextlib.suppress(Exception):  # the record is read from disk: whatever it holds, the cleanup goes on
-        launcher().load_starts_module().run_event(directory, "exit")
-    with contextlib.suppress(Exception):
-        liveness().remove_ended_pod(record)
-    liveness().discard(directory)
+    with nothing running, then its directory and its browser directory. One command at a time (a lock on the
+    directory): the app lists the runs often, several commands at once, and each that found the run recorded its end
+    before one of them removed the directory (two ends of one run in its history); one that finds the lock held, or
+    the directory gone once it holds it, leaves the cleanup to the other."""
+    try:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return  # gone meanwhile: cleaned up by another command
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # another command is at it
+        try:
+            now = json.loads(Path(directory, "run.json").read_text())
+        except (OSError, ValueError, RecursionError):
+            return  # it was done while this one waited
+        if not isinstance(now, dict) or any(now.get(key) != record.get(key) for key in ("run", "pid", "pid_start")):
+            return  # registered anew meanwhile (a start of that name): never this one's end
+        with contextlib.suppress(Exception):  # the record is read from disk: whatever it holds, the cleanup goes on
+            launcher().load_starts_module().run_event(directory, "exit")
+        with contextlib.suppress(Exception):
+            liveness().remove_ended_pod(record)
+        liveness().discard(directory)
+    finally:
+        os.close(fd)
 
 
 _sessions = None
@@ -498,7 +541,7 @@ def cut_record(directory):
     try:
         with open(Path(directory) / CUT_FILE, "rb") as stream:
             found = json.loads(stream.read(65536))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     if not isinstance(found, dict):
         return {}
@@ -604,7 +647,7 @@ def keep_request(directory, name, request):
     """REQUEST added to the list in DIRECTORY/NAME (at most CUT_PENDING_LIMIT, the newest kept); under cut_lock."""
     try:
         waiting = json.loads((Path(directory) / name).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         waiting = []
     waiting = (waiting if isinstance(waiting, list) else [])[-(CUT_PENDING_LIMIT - 1):] + [request]
     write_json(directory, name, waiting)
@@ -667,7 +710,7 @@ def apply_pending_locked(directory):
     try:
         waiting = json.loads(path.read_text())
         record = json.loads((Path(directory) / "run.json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     record = {**record, "directory": str(directory)} if isinstance(record, dict) else {"directory": str(directory)}
     done = []
@@ -803,6 +846,19 @@ def cut_runs(runs, record, mode, out=print, alone=False, every=False, as_json=Fa
     def holds(index):
         answer = answers[index] or {}
         return cut_label(answer.get("cut")), {by: m for by, m in (answer.get("cuts") or {}).items()}
+    # Each run's result in launcher.log (said on standard output only, or as JSON for the app).
+    for index, (run, entry, parent) in enumerate(targets):
+        shown = f"{names.get(run, run)} (run {run}" + (f", acting for {names.get(parent, parent)})" if parent else ")")
+        if index in failed:
+            LOG.warning("net", f"kill switch {mode} for {shown} NOT {'lifted' if mode == 'off' else 'set'}: "
+                               f"{results[index] or 'no answer in time'}")
+        elif pending[index] is not None:
+            LOG.info("net", f"kill switch {mode} for {shown}: waiting: {pending[index]}")
+        else:
+            LOG.info("net", f"kill switch {mode} for {shown}: confirmed by its supervisor; it holds now: "
+                            f"{holds(index)[0] or 'none'}")
+    if not targets:
+        LOG.info("net", f"kill switch {mode}: no sandbox is running")
     if as_json:
         out(json.dumps({"mode": mode, "runs": [
             {"run": run, "name": names.get(run), "for": parent, "ok": index not in failed,
@@ -890,9 +946,27 @@ def resolve_with(one):
     return resolve_all
 
 
+def public_resolver(resolve_all, notes):
+    """RESOLVE_ALL (hosts -> {host: addresses}) keeping only each name's public addresses, as an answered lookup
+    opens them (approvals.public_addresses: no loopback, private, link-local or NAT64 address); ValueError for a name
+    with none. NOTES gets what was left out."""
+    def resolve_public(hosts):
+        found = {}
+        for host, addresses in resolve_all(hosts).items():
+            public = approvals_module().public_addresses(host, addresses)
+            if len(public) < len(addresses):
+                notes.append(f"{host}: not opened (not public): "
+                             + ", ".join(address for address in addresses if address not in public))
+            found[host] = public
+        return found
+    return resolve_public
+
+
 def request_for(args, op, resolver=resolve):
     """(request for the supervisor, {host: addresses} for /etc/hosts) from the command line."""
     l = launcher()
+    for value in getattr(args, "allow_domain", None) or []:
+        l.domain_of(value)  # as the start refuses it, naming --allow-domain (expand_domains left it out)
     wildcards = sorted({h for h in args.allow_host if h.startswith("*.")})
     for wildcard in wildcards:
         try:
@@ -945,7 +1019,7 @@ def run_wildcards(record):
     found = [w for w in record.get("allow_wildcards") or [] if isinstance(w, str)]
     try:
         added = json.loads(wildcards_file(record).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         added = []
     found += [w for w in added if isinstance(w, str)] if isinstance(added, list) else []
     return sorted(set(found))
@@ -960,19 +1034,19 @@ def change_wildcards(record, op, wildcards, apply=True):
     if op == "allow":
         try:
             asks = json.loads((Path(record["session_dir"]) / "config.json").read_text()).get("ask")
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, RecursionError):
             asks = None
         if not asks:
-            raise ValueError("--allow-host *.DOMAIN needs a sandbox that asks (not one started with --ask off): each "
-                             "name below it is opened as its lookup is answered")
+            raise ValueError("--allow-host *.DOMAIN (and --allow-domain) needs a sandbox that asks (not one started "
+                             "with --ask off): each name below it is opened as its lookup is answered")
         try:
             resolv = (Path(record["session_dir"]) / "resolv.conf").read_text()
         except (OSError, KeyError):
             resolv = ""
         if "nameserver 127.0.0.1" not in resolv:
-            raise ValueError("--allow-host *.DOMAIN: this sandbox resolves names past its DNS stub (started with --dns "
-                             "or --nameserver), so the names below it would resolve but stay closed; name the hosts "
-                             "one by one")
+            raise ValueError("--allow-host *.DOMAIN (and --allow-domain): this sandbox resolves names past its DNS "
+                             "stub (started with --dns or --nameserver), so the names below it would resolve but "
+                             "stay closed; name the hosts one by one")
         policy = l.load_policy()
         ceiling = argparse.Namespace(policy={k: policy[k] for k in ("allow_within", "allow_hosts") if k in policy})
         outside = [w for w in wildcards if not l.within_ceiling(ceiling, host=w)]
@@ -1019,13 +1093,13 @@ def ask(directory, request, timeout=ASK_SECONDS, fds=()):
         try:
             record = json.loads((Path(directory) / "run.json").read_text())
             name = launcher().printable(str(label(record.get("run") or Path(directory).name, record)))
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             name = "NAME"
         raise ValueError(f"the sandbox is paused: resume it first (sandbox-ai resume {name}), then change it")
     if sys.platform == "darwin":  # podman machine: the control socket is in its VM
         try:
             record = json.loads((Path(directory) / "run.json").read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             record = {}
         if launcher().machine_record(record):
             return ask_machine(directory, record, request, timeout, fds)
@@ -1063,7 +1137,7 @@ def ask_machine(directory, record, request, timeout, fds=(), runner=None):
         raise ValueError(f"the sandbox did not answer through podman machine ({why}); see sandbox-ai net show")
     try:
         result = json.loads(lines[-1])
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ValueError("the sandbox's answer was not readable") from None
     if not isinstance(result, dict):
         raise ValueError("the sandbox's answer was not readable")
@@ -1110,7 +1184,7 @@ def git_logins(record):
     """[{"url", "user", "token"}] of the Git logins added during the run (the session directory's file)."""
     try:
         data = json.loads((Path(record["session_dir"]) / launcher().RUNTIME_GIT_TOKENS).read_text())
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return []
     logins = data.get("logins") if isinstance(data, dict) else None
     return [entry for entry in logins if isinstance(entry, dict) and isinstance(entry.get("url"), str)] \
@@ -1149,7 +1223,7 @@ def added_api_keys(record):
     path = api_keys_file(record)
     try:
         data = json.loads(path.read_text()) if path else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     entries = data.get("api_keys") if isinstance(data, dict) else None
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("name"), str)] \
@@ -1271,7 +1345,7 @@ def remembered(record):
     "lines" are the /etc/hosts entries this command added (not those the sandbox started with)."""
     try:
         data = json.loads((Path(record["directory"]) / "names.json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -1441,7 +1515,7 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
                 [[n, ", ".join(sorted(printable(h) for h in by_address.get(n, []))) or "-"] for n in nets], out)
     out("")
     out(t.style(f"  take back: sandbox-ai net revoke {printable(run) if run else '[RUN]'} --allow-host NAME | "
-                "--allow-tcp IP:PORT | --allow IP_OR_CIDR | --dns", "muted"))
+                "--allow-domain DOMAIN | --allow-tcp IP:PORT | --allow IP_OR_CIDR | --dns", "muted"))
 
 
 def process_state(pid):
@@ -1615,7 +1689,7 @@ def relay_running(directory, port):
     try:
         data = json.loads(info.read_text())
         pid, start = int(data["pid"]), int(data["start"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
     if ended(pid, start):
         return None
@@ -1759,6 +1833,9 @@ def parser(lean=False):
         command.add_argument("run", nargs="?")
         command.add_argument("-A", "--allow-host", action="append", default=[], metavar="HOST", type=str.lower,
                              help="pin HOST in the sandbox's /etc/hosts and allow TCP/443 to it")
+        command.add_argument("-ad", "--allow-domain", action="append", default=[], metavar="DOMAIN", type=str.lower,
+                             help="DOMAIN and every name below it: --allow-host DOMAIN --allow-host '*.DOMAIN' in one, "
+                                  "with the same checks (no public suffix or hosting service)")
         command.add_argument("-t", "--allow-tcp", action="append", default=[], metavar="IP:PORT")
         command.add_argument("-a", "--allow", action="append", default=[], metavar="IP_OR_CIDR",
                              help="every protocol and port")
@@ -1795,12 +1872,22 @@ def parser(lean=False):
                                  help="also keep it for the next starts: the options go into the project's "
                                       ".sandbox-ai.json (only while that file is exactly what you trusted; the new "
                                       "file is trusted at once). Logins are kept as references, never as tokens")
+            command.add_argument("--public-only", action="store_true",
+                                 help="--allow-host only: open just the public addresses of each name (one the agent "
+                                      "chose may point at this host, your network or a VPN), as an answered lookup "
+                                      "does; none is refused. With --keep it is remembered as an approval "
+                                      "(approved.json: public addresses at every start), not in the project file")
     return p
 
 
 def kept_options(args, ports):
-    """The options of an allow command, as tokens for a project file (logins as their references)."""
-    tokens = [token for host in args.allow_host for token in ("--allow-host", host)]
+    """The options of an allow command, as tokens for a project file (logins as their references). An
+    --allow-domain is kept as given, not as the two --allow-host it stands for."""
+    tokens = [token for host in args.allow_host if host not in getattr(args, "domain_hosts", ())
+              for token in ("--allow-host", host)]
+    tokens += [token for domain in dict.fromkeys(launcher().domain_of(value)
+                                                 for value in getattr(args, "allow_domain", None) or [])
+               for token in ("--allow-domain", domain)]
     tokens += [f"--allow-{preset}" for preset in dict.fromkeys(args.presets)]
     tokens += [token for value in args.allow_tcp for token in ("--allow-tcp", value)]
     tokens += [token for value in args.allow for token in ("--allow", value)]
@@ -2070,6 +2157,25 @@ def keep_in_project(record, tokens, write=True, workspaces=(), preview=None, cha
     return path, added
 
 
+def telemetry_refusal(record, args):
+    """ValueError for `net allow` ARGS that would open the telemetry of a run's agent whose telemetry is never
+    switchable (Hermes, Qwen Code, DSH, Goose) where the run has no connection proxy to refuse it: one of its telemetry
+    hosts (also through a wildcard) or a public network (as the start refuses them: the agent's check_telemetry,
+    the launcher's check_telemetry_unproxied). With the proxy its rules refuse those hosts whatever is opened."""
+    agent = record.get("agent")
+    names = launcher().UNSWITCHABLE_TELEMETRY
+    if agent not in names or record.get("proxy") is not False:
+        return
+    module = launcher().load_hermes_module() if agent == "hermes" else launcher().agent_module(agent)
+    opened = module.telemetry_hosts_in(getattr(args, "allow_host", None) or [])
+    if opened:
+        raise ValueError(f"{names[agent]}'s telemetry is always off: {', '.join(opened)} is never opened for "
+                         f"{names[agent]}, and this run has no connection proxy to refuse it")
+    launcher().check_telemetry_unproxied(argparse.Namespace(
+        agent=agent, no_proxy=True, offline=False, allow=list(getattr(args, "allow", None) or []),
+        allow_tcp=list(getattr(args, "allow_tcp", None) or [])))
+
+
 def inside_subnet(record, request):
     """Refuse destinations inside the sandbox's own --subnet/--subnet6 (run.json): they would reach its link,
     gateway or DNS forwarder, not what was meant (the launcher refuses them at the start too)."""
@@ -2126,6 +2232,8 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
     # The first word names the command (the parser has no option but --help before it): only allow and revoke need
     # their options.
     args = parser(lean=argv[:1] in (["list"], ["show"], ["untaint"], ["stop"], ["cut"])).parse_args(argv)
+    # --allow-domain D is --allow-host D '*.D' from here on, as at the start (the launcher's expand_domains).
+    args.domain_hosts = launcher().expand_domains(args) if getattr(args, "allow_domain", None) else []
     try:
         runs = running()
         if args.command == "list":
@@ -2149,7 +2257,9 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                 raise ValueError("give [RUN] MODE" if not args.all_runs else "--all-runs takes the MODE alone")
             mode = args.words[-1]
             if mode not in (*CUT_MODES, "off"):
-                raise ValueError(f"no kill switch mode {printable(mode)}: remote, local, api, all or off")
+                raise ValueError(f"no kill switch mode {printable(mode)}: remote, local, api, all or off" +
+                                 (f" (sandbox-ai net cut [RUN] MODE: the mode comes last, e.g. net cut "
+                                  f"{printable(mode)} api)" if len(args.words) == 1 and not args.all_runs else ""))
             if args.all_runs:
                 return cut_runs(runs, None, mode, out, every=True, as_json=args.json)
             record = choose(runs, args.words[0] if len(args.words) == 2 else None, command="net cut")
@@ -2218,13 +2328,21 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             args.allow_host = list(dict.fromkeys(args.allow_host + [host for host, _, _ in keys
                                                                     if host not in remembered(record)]))
         through = vpn_resolver(record) if resolver is resolve else None
-        request, names, hosts = request_for(args, args.command, resolve_with(through) if through else resolver)
+        public_only = getattr(args, "public_only", False)
+        if public_only and (args.allow_domain or args.allow_tcp or args.allow or args.presets or args.dns or
+                            args.nameserver or getattr(args, "allow_host_port", None) or logins or args.api_key or
+                            not args.allow_host or any(h.startswith("*.") for h in args.allow_host)):
+            raise ValueError("--public-only goes with --allow-host NAME alone (names, no wildcard and no other "
+                             "option)")
+        chosen = resolve_with(through) if through else resolver
+        request, names, hosts = request_for(args, args.command, public_resolver(chosen, notes) if public_only
+                                            else chosen)
         wildcards = request.pop("wildcards", [])
         ports = request.get("host_ports", [])
         network = request["nets"] or request["https"] or request["tcp"] or request.get("dns") or hosts or ports
         if not (network or logins or wildcards or keys):
-            raise ValueError(f"nothing to {args.command}: give --allow-host, --allow-tcp, --allow, --dns, "
-                             "--allow-host-port, a preset, a --git-token-* login or an --api-key")
+            raise ValueError(f"nothing to {args.command}: give --allow-host, --allow-domain, --allow-tcp, --allow, "
+                             "--dns, --allow-host-port, a preset, a --git-token-* login or an --api-key")
         if ports and args.command == "allow":
             if "--allow-host-port" in (launcher().load_policy().get("forbid") or []):
                 raise ValueError("--allow-host-port is forbidden by the administrator's policy")
@@ -2240,14 +2358,21 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                 raise ValueError(f"{launcher().printable(record.get('run', args.run))}: " + launcher().load_vpn_module()
                                  .host_ports_past_tor(sorted(ports), "--vpn", record["vpn_profile"]))
         if args.command == "allow":
+            telemetry_refusal(record, args)
             inside_subnet(record, request)
             # The run's security mode (run.json): what it refuses at the start stays closed during the run. The
             # supervisor checks it as well.
-            wanted = (["--allow"] if args.allow else []) + (["--allow-host"] if args.allow_host else []) + \
+            own_hosts = [h for h in args.allow_host if h not in args.domain_hosts]
+            wanted = (["--allow"] if args.allow else []) + (["--allow-host"] if own_hosts else []) + \
+                (["--allow-domain"] if args.allow_domain else []) + \
                 (["--allow-tcp"] if args.allow_tcp else []) + [f"--allow-{p}" for p in dict.fromkeys(args.presets)] + \
                 (["--dns"] if request.get("dns") else []) + (["--allow-host-port"] if ports else []) + \
                 (["--api-key"] if keys else [])
             refused = launcher().MODES.runtime_refusal(record.get("mode"), wanted, record.get("run", args.run))
+            if not refused and args.domain_hosts:
+                # A run whose mode record predates --allow-domain: what it stands for, --allow-host, decides.
+                refused = launcher().MODES.runtime_refusal(record.get("mode"), ["--allow-host"],
+                                                           record.get("run", args.run))
             if refused:
                 raise ValueError(refused)
         if wildcards:
@@ -2265,7 +2390,12 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                                       - {f"{a}/32" if ":" not in a else f"{a}/128" for a in kept})
         if getattr(args, "keep", False):
             keep_allowed()  # as net show --keep: before anything changes
-            keep_in_project(record, [], write=False)  # a --keep that cannot be done changes nothing
+            if public_only:
+                if not record.get("workspace"):
+                    raise ValueError("the run does not name its workspace (started by an older sandbox-ai): nothing "
+                                     "can be remembered for it")
+            else:
+                keep_in_project(record, [], write=False)  # a --keep that cannot be done changes nothing
         if logins and args.command == "allow":
             # Read every token before anything changes: a missing variable or secret refuses the whole command.
             tokens = {credential["url"]: launcher().git_token_value(credential, kind) for kind, credential in logins}
@@ -2311,6 +2441,17 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                     with contextlib.suppress(ValueError, OSError):
                         undo()
             raise
+        # What changed, in launcher.log: names and addresses, ports, presets, how many logins and keys (never theirs).
+        addresses = {h: " ".join(names.get(h, []) if isinstance(names, dict) else []) or "no address" for h in hosts}
+        LOG.info("net", f"{args.command} for {name} (run {record.get('run')}): done: " + "; ".join(part for part in (
+            "hosts " + ", ".join(f"{h} ({shown})" for h, shown in addresses.items()) if hosts else "",
+            f"wildcards {', '.join(wildcards)}" if wildcards else "",
+            f"TCP {', '.join(args.allow_tcp)}" if args.allow_tcp else "",
+            f"addresses {', '.join(args.allow)}" if args.allow else "",
+            f"presets {', '.join(dict.fromkeys(args.presets))}" if args.presets else "",
+            f"host ports {', '.join(map(str, ports))}" if ports else "", "DNS" if request.get("dns") else "",
+            f"{len(logins)} Git logins" if logins else "", f"API keys {', '.join(k for _, k, _ in keys)}"
+            if keys else "") if part) + (f"; notes: {'; '.join(notes)}" if notes else ""))
         if args.command == "allow":
             update_hosts(record, names)
         elif hosts:
@@ -2340,7 +2481,9 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
         for note in notes:
             out(f"note: {launcher().printable(note)}")
         if args.command == "allow":
-            options = (" ".join(f"--allow-host {h}" for h in args.allow_host)
+            options = (" ".join(f"--allow-host {h}" for h in args.allow_host if h not in args.domain_hosts)
+                       + "".join(f" --allow-domain {d}" for d in dict.fromkeys(launcher().domain_of(v)
+                                                                                for v in args.allow_domain))
                        + "".join(f" --allow-{p}" for p in args.presets)
                        + "".join(f" --allow-tcp {v}" for v in args.allow_tcp)
                        + "".join(f" --allow {v}" for v in args.allow)
@@ -2350,12 +2493,23 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                                  for value in getattr(args, f"git_token_{kind}", None) or [])
                        + "".join(f" --api-key {value}" for value in args.api_key)
                        ).strip()
-            if getattr(args, "keep", False):
+            if getattr(args, "keep", False) and public_only:
+                # As an answered lookup "always": its public addresses at every later start (remembered_pins).
+                for host in hosts:
+                    approvals_module().remember(record["workspace"], host=host,
+                                                details={"kind": "dns", "verified": "lookup",
+                                                         "asked": f"net allow --allow-host {host} --public-only"})
+                out(f"{name}: allowed always for this project, its public addresses at every start: "
+                    f"{', '.join(hosts)} (sandbox-ai approvals remembered; approvals forget)")
+            elif getattr(args, "keep", False):
                 path, added = keep_in_project(record, kept_options(args, ports))
                 if added:
                     out(f"{name}: kept in {launcher().printable(path)} (trusted): {' '.join(added)}")
                 else:
                     out(f"{name}: {launcher().printable(path)} already has it")
+            elif public_only:
+                out(f"{name}: allowed until the sandbox ends (its public addresses); add --keep to allow it always "
+                    "for this project, as an approval")
             else:
                 out(f"{name}: allowed until the sandbox ends; to keep it, start with: {options} "
                     f"(or add --keep: into the project's .sandbox-ai.json)")

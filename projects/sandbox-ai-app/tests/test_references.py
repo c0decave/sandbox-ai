@@ -84,10 +84,10 @@ def test_the_check_catches_a_missing_name(tmp_path):
 # SandboxAI methods that run a command, ask the keyring or read big logs (the window must keep polling the
 # approvals meanwhile, or questions are refused after a minute). Declared here; test_every_slow_backend_method_is_declared
 # finds every method of backend.py that runs a process, sleeps or calls one of these, and wants it here too.
-BLOCKING_SAI = {"call", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret", "delete_secret",
-                "secrets", "login_status", "remembered", "forget_remembered", "question_context", "run_log",
-                "devices_added", "device_check", "device_candidates", "add_device", "remove_device", "set_limits",
-                "workspaces", "add_workspace", "remove_workspace",
+BLOCKING_SAI = {"call", "_call", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret",
+                "delete_secret", "secrets", "login_status", "remembered", "forget_remembered", "question_context",
+                "run_log", "devices_added", "device_check", "device_candidates", "add_device", "remove_device",
+                "set_limits", "workspaces", "add_workspace", "remove_workspace",
                 "safeguards",  # sandbox-ai safeguards --json: a process, also over SSH
                 "report",  # sandbox-ai report: reads the logs bounded, writes the file (seconds)
                 "user_images", "variant_bases",  # sandbox-ai images list --json: a process, also over SSH
@@ -472,6 +472,7 @@ MUTATIONS = {
     "host-install": ["host_install"],
     "vpn-remove": ["vpn_remove"],
     "llm-remove": [("llm", "remove")],
+    "llm-unload": [("llm", "unload")],
     "secret-delete": ["delete_secret"],
     "secret-replace": ["set_secret", "vpn_add"],
     "canary-tokens": ["canary_run"],

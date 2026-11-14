@@ -11,17 +11,18 @@ from PySide6.QtCore import QEvent, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
+from . import applog
 from . import backend, theme, widgets
 from .approvals_sections import AllowedSection, BlockedSection, ContextHeader, run_for_tab
-from .files import printable
+from .files import printable, printable_text
 from .state import choose_folder
 from .i18n import language as i18n_language, tr
 from .widgets import (
-    MONO, SORT_ROLE, AsyncCommand, ask_first, background, bars, compact_combo, confirm, fill, find_row, fit_columns,
-    flow, outcome,
+    MONO, SORT_ROLE, AsyncCommand, ago, ask_first, background, bars, compact_combo, confirm, disclosure, fill, find_row,
+    fit_columns, flow, outcome,
     plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn, shown_as_text,
 )
 
@@ -80,13 +81,21 @@ def describe(question):
     rule = tr("rule {rule} of {ruleset}", rule=shown(question.get("rule", "?"), 80),
               ruleset=shown(question.get("ruleset", "?"), 120))
     if kind == "mcp":
-        return tr("call the MCP tool {tool} of {server} with {arguments} ({rule})",
-                  tool=shown(question.get("tool", "?"), 128), server=shown(question.get("server", "?"), 40),
-                  arguments=shown(question.get("arguments", "")), rule=rule)
-    if kind == "tool":
-        return tr("let {agent} use its tool {tool} with {arguments} ({rule})",
-                  agent=shown(question.get("agent", "?"), 20), tool=shown(question.get("tool", "?"), 128),
-                  arguments=shown(question.get("arguments", "")), rule=rule)
+        # Its arguments in full are below the list (ArgumentsBox): the line says it shortened them, before them (a
+        # table's cell is cut after 300 characters).
+        values = {"tool": shown(question.get("tool", "?"), 128), "server": shown(question.get("server", "?"), 40),
+                  "arguments": shown(question.get("arguments", "")), "rule": rule}
+        if backend.arguments_whole(question):
+            return tr("call the MCP tool {tool} of {server} with {arguments} ({rule})", **values)
+        return tr("call the MCP tool {tool} of {server} (arguments shortened here: in full below) with {arguments} "
+                  "({rule})", **values)
+    if kind == "tool":  # as an MCP call's: its arguments in full below the list where the line shortens them
+        values = {"agent": shown(question.get("agent", "?"), 20), "tool": shown(question.get("tool", "?"), 128),
+                  "arguments": shown(question.get("arguments", "")), "rule": rule}
+        if backend.arguments_whole(question):
+            return tr("let {agent} use its tool {tool} with {arguments} ({rule})", **values)
+        return tr("let {agent} use its tool {tool} (arguments shortened here: in full below) with {arguments} "
+                  "({rule})", **values)
     if kind == "http":
         return f"{shown(question.get('method', '?'), 20)} {shown(question.get('url', '?'), 500)} ({rule})"
     if kind == "device":
@@ -235,6 +244,54 @@ def context_text(context):
     return "\n".join(lines), log
 
 
+class ArgumentsBox(QWidget):
+    """A tool call's arguments in full, as the call will send them (backend.question_details): a button that opens and
+    closes them, the text read-only, monospace and scrollable. It opens by itself where the question's line shows them
+    shortened: what is allowed is seen whole before Allow."""
+
+    def __init__(self, height=220):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.toggle = widgets.disclosure(QToolButton())  # (an arrow and text: never a button stuck pressed)
+        self.toggle.setAccessibleName(tr("The call's arguments in full"))
+        self.toggle.toggled.connect(self.opened)
+        self.note = plain_label(role="secondary")
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setFont(MONO)
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.text.setMaximumHeight(height)
+        self.text.setAccessibleName(tr("The call's arguments in full"))
+        layout.addWidget(self.toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.note)
+        layout.addWidget(self.text)
+        self.shown_text = None
+        self.opened(False)
+        self.hide()
+
+    def show_for(self, question):
+        """The details of QUESTION (None: nothing chosen)."""
+        text, whole = backend.question_details(question) if question is not None else ("", True)
+        if not text:
+            self.shown_text = None
+            self.hide()
+            return
+        if text != self.shown_text:  # another question (the same one again keeps what you opened or closed)
+            self.shown_text = text
+            self.text.setPlainText(text)
+            self.toggle.setChecked(not whole)
+            self.opened(not whole)
+        self.note.setText(tr("As the call will send them (pretty-printed JSON; credentials redacted).")
+                          + ("" if whole else " " + tr("The question's line shows them shortened.")))
+        self.show()
+
+    def opened(self, on):
+        self.toggle.setText(tr("Hide the arguments") if on else tr("Show the arguments in full"))
+        self.note.setVisible(on)
+        self.text.setVisible(on)
+
+
 class QuestionsWindow(QDialog):
     """The open questions while another dialog is open. A modal dialog (the wizard, Settings, the gallery) blocks the
     main window, and with it the Approvals page, while a question is refused without an answer after a while. This
@@ -255,6 +312,8 @@ class QuestionsWindow(QDialog):
         keep(self.table, "dialog-questions")
         self.table.itemSelectionChanged.connect(self.update_buttons)
         layout.addWidget(self.table, 1)
+        self.arguments = ArgumentsBox(height=160)  # a tool call's arguments in full, seen here before Allow too
+        layout.addWidget(self.arguments)
         row = QHBoxLayout()
         self.table.setAccessibleName(tr("Open questions"))
         self.allow_button = QPushButton(tr("Allow once"))
@@ -281,6 +340,7 @@ class QuestionsWindow(QDialog):
         for first, second in ((self.table, self.allow_button), (self.allow_button, self.deny_button),
                               (self.deny_button, self.block_button), (self.block_button, close)):
             QWidget.setTabOrder(first, second)
+        widgets.list_menu(self.table, lambda: [self.allow_button, self.deny_button, None, self.block_button])
         self.resize(620, 280)
 
     def show_questions(self):
@@ -299,6 +359,7 @@ class QuestionsWindow(QDialog):
     def update_buttons(self):
         entry = self.current()
         rules = self.page.answer_rules(entry)
+        self.arguments.show_for(entry[1] if entry else None)
         self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else tr("Allow once"))
         set_enabled(self.allow_button, rules["allow"] is None, rules["allow"])
         set_enabled(self.deny_button, rules["deny"] is None, rules["deny"])
@@ -374,6 +435,9 @@ class ApprovalsPage(QWidget):
         self.why.setAccessibleName(tr("Why it is asked"))
         self.why.hide()
         open_layout.addWidget(self.why)
+        # A tool call's arguments in full, as the call will send them (its line in the table may be shortened).
+        self.arguments = ArgumentsBox()
+        open_layout.addWidget(self.arguments)
         # What the selected question means (resolved names, the run's earlier connections): in a thread.
         self.context = plain_label(role="secondary")
         self.context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -425,12 +489,14 @@ class ApprovalsPage(QWidget):
         # A row that wraps when the window is narrow (in German it made the window 1100 px wide).
         open_layout.addWidget(flow(scope_label, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
                                    self.block_button))
+        widgets.list_menu(self.open, lambda: [self.allow_button, self.deny_button, self.deny_once_button, None,
+                                              self.block_button])
         # Tab goes from whose questions to the questions, the scope and the answers, in the order they are read.
         order = (self.host_filter, self.open, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
                  self.block_button)
         for first, second in zip(order, order[1:]):
             QWidget.setTabOrder(first, second)
-        self.message = plain_label(selectable=True)
+        self.message = plain_label(selectable=True, log="approvals")
         open_layout.addWidget(self.message)
         self.remote_note = plain_label(role="secondary")  # hosts that did not answer
         self.remote_note.hide()
@@ -497,6 +563,7 @@ class ApprovalsPage(QWidget):
         self.forget_button.clicked.connect(lambda: self.forget())
         for widget in (self.always_host, refresh, self.forget_button):
             row.addWidget(widget)
+        widgets.list_menu(self.always, lambda: [self.forget_button, None, refresh])
         row.addStretch()
         always_layout.addLayout(row)
         self.always_message = plain_label(role="secondary", selectable=True)
@@ -548,6 +615,7 @@ class ApprovalsPage(QWidget):
         # The answers on their way, per question ({(host, run, id): ThreadCall}): a slow host's answer (over SSH, up
         # to REMOTE_ANSWER_WAIT) never holds up the others, whose time runs.
         self.answers = {}
+        self.answered_recently = set()  # questions answered from here, until they are no longer listed (the log)
         # Questions asked while a modal dialog blocks this page are offered in a window above it; the questions
         # open when it was closed are not offered again.
         self.questions_window, self.dismissed = None, set()
@@ -604,7 +672,9 @@ class ApprovalsPage(QWidget):
         snapshot = self.sai.approvals_snapshot(runs=runs, wait=wait)
         try:
             widest = self.sai.max_scope()
-        except Exception:  # noqa: BLE001 - a policy that cannot be read: the narrowest, sandbox-ai decides anyway
+        except Exception as _exc:  # noqa: BLE001
+            # (a policy that cannot be read: the narrowest, sandbox-ai decides anyway)
+            applog.swallowed("pages", "ApprovalsPage.scan: a policy that cannot be read: the narrowest, sandbox…", _exc)
             widest = "once"
         return snapshot, widest
 
@@ -629,8 +699,10 @@ class ApprovalsPage(QWidget):
 
     def apply(self, result, error, now=None):
         if error is not None:
+            applog.changed(("approvals host", LOCAL), "WARNING", "approvals", "this machine's questions cannot be "
+                           f"read: {applog.error_text(error)}", quiet="DEBUG")
             self.local_read = None
-            self.message.setText(tr("Cannot read the questions: {error}", error=printable(error)))
+            self.message.setText(tr("Cannot read the questions: {error}", error=printable_text(error)))
             return
         self.update_context()
         pending, answered = result
@@ -651,9 +723,33 @@ class ApprovalsPage(QWidget):
         keys = {(host, run, q.get("id")) for host, run, _, q in pending}
         new = [(self.label_of(host, run, record, q), q, (host, run, q.get("id"))) for host, run, record, q in pending
                if (host, run, q.get("id")) not in self.seen]
+        self.log_questions(new, keys)
         self.seen = keys
         self.offer_questions()
         self.pending_changed.emit(len(pending), new)
+
+    def log_questions(self, new, keys):
+        """The questions that came (NEW) and those no longer listed (SEEN before, not in KEYS) into the log at INFO,
+        once each: who asks, on which host, what (redacted) and how long it may wait; a question gone without an answer
+        from here was answered elsewhere, timed out (sandbox-ai refused it) or its start ended."""
+        for label, question, key in new:
+            try:
+                left = self.timing((key[1], question, key[0]))[1]
+            except Exception as exc:  # noqa: BLE001 - only the line's note
+                applog.swallowed("pages", "ApprovalsPage.log_questions: the time left of a question", exc)
+                left = None
+            where = "this machine" if key[0] == LOCAL else printable(key[0])
+            timed = isinstance(left, (int, float)) and left
+            wait = f" ({left:.0f} s to answer it, else it is refused)" if timed else ""
+            applog.log("INFO", "approvals", f"question {printable(key[2])[:60]} from {printable(label)} on {where}: "
+                       f"{applog.redact(describe(question))[:300]}{wait}")
+        for key in sorted(set(getattr(self, "seen", ()) or ()) - set(keys), key=str):
+            mine = key in self.answered_recently or key in self.answered_there
+            applog.log("INFO" if not mine else "DEBUG", "approvals", f"question {printable(key[2])[:60]} on "
+                       f"{'this machine' if key[0] == LOCAL else printable(key[0])} is no longer asked"
+                       + (" (answered here)" if mine else " (answered elsewhere, its time ran out - sandbox-ai refused "
+                                                         "it - or its start ended)"))
+            self.answered_recently.discard(key)
 
     def label_of(self, host, run, record, question):
         """Which sandbox asks, and on which host when it is not this machine."""
@@ -827,6 +923,9 @@ class ApprovalsPage(QWidget):
             return  # removed from the list meanwhile: its questions are not answered from here any more
         if error is None:
             self.remote[host] = list(result or [])
+            if self.remote_problems.get(host) is not None:
+                applog.changed(("approvals host", host), "INFO", "approvals", f"the questions of {printable(host)} "
+                               "are read again")
             self.remote_problems.pop(host, None)
             self.remote_next.pop(host, None)
             self.remote_failures.pop(host, None)
@@ -840,7 +939,9 @@ class ApprovalsPage(QWidget):
             # Its last questions stay while their time runs, at most REMOTE_GRACE seconds after its last answer (a
             # host that answers again soon must not announce them anew; one that stopped answering must not keep
             # them, a page to open with no deadline included, for ever).
-            self.remote_problems[host] = printable(error)[:200]
+            self.remote_problems[host] = printable_text(error)[:200]
+            applog.changed(("approvals host", host), "WARNING", "approvals", f"the questions of {printable(host)} "
+                           f"cannot be read (asked again later): {applog.error_text(error)}", quiet="DEBUG")
             self.expire_remote(host)
             failures = self.remote_failures[host] = self.remote_failures.get(host, 0) + 1
             self.remote_next[host] = time.monotonic() + min(REMOTE_BACKOFF, REMOTE_POLL / 1000 * 2 ** failures)
@@ -1016,11 +1117,12 @@ class ApprovalsPage(QWidget):
         # The cells themselves, collected first: setting them may move rows when the table is sorted by them.
         cells = [(self.questions.get(row_key(self.open, row)), self.open.item(row, 3), self.open.item(row, 4))
                  for row in range(self.open.rowCount())]
+        before = [(asked.text(), cell.text()) for _, asked, cell in cells if asked is not None and cell is not None]
         for entry, asked, cell in cells:
             if entry is None or asked is None or cell is None:
                 continue
             age, left = self.timing(entry, now)
-            asked.setText(tr("{seconds} s ago", seconds=age) if age is not None else "?")
+            asked.setText(ago(age) if age is not None else "?")
             asked.setData(SORT_ROLE, age if age is not None else -1)
             if self.key_of(entry) in self.answered_there:
                 cell.setText(tr("answered"))
@@ -1035,6 +1137,11 @@ class ApprovalsPage(QWidget):
                 cell.setData(SORT_ROLE, left)
                 color = "bad" if left <= 10 else "warn" if left <= 30 else None
                 cell.setForeground(QColor(theme.color(color)) if color else self.open.palette().text())
+        after = [(asked.text(), cell.text()) for _, asked, cell in cells if asked is not None and cell is not None]
+        if any(len(new) > len(old) for pair_before, pair_after in zip(before, after)
+               for old, new in zip(pair_before, pair_after)):
+            # The columns were fitted before these cells had their text ("39…go"): wider where it grew.
+            fit_columns(self.open)
         self.update_buttons()
 
     def timing(self, entry, now=None):
@@ -1232,6 +1339,7 @@ class ApprovalsPage(QWidget):
         why = why_asked(entry[1]) if entry else ""
         self.why.setText(why)
         self.why.setVisible(bool(why))
+        self.arguments.show_for(entry[1] if entry else None)
         url = backend.question_url(entry[1]) if entry else None
         destination = entry[1].get("url_host") if entry and entry[2] != LOCAL and entry[1].get("kind") == "browser" \
             else None
@@ -1271,7 +1379,7 @@ class ApprovalsPage(QWidget):
         if key not in self.questions:
             return
         self.contexts[key] = context_text(result) if error is None else \
-            (tr("No details: {error}", error=printable(error)), [])
+            (tr("No details: {error}", error=printable_text(error)), [])
         entry = self.current()
         if entry and (entry[2], entry[0], entry[1].get("id")) == key:
             self.set_context(*self.contexts[key])
@@ -1301,7 +1409,7 @@ class ApprovalsPage(QWidget):
         if token != self.history_token:
             return
         if error is not None:
-            self.history_text.setPlainText(tr("{host}: no answer", host=printable(host)) + f" ({printable(error)})")
+            self.history_text.setPlainText(tr("{host}: no answer", host=printable(host)) + f" ({printable_text(error)})")
             return
         self.history_text.setPlainText(text or tr("No answers on {host} yet.", host=printable(host)))
 
@@ -1342,7 +1450,7 @@ class ApprovalsPage(QWidget):
             self.always_message.setText(tr("This sandbox-ai version cannot list them yet: update it."))
             rows = []
         elif error is not None:
-            self.always_message.setText(tr("Cannot read them: {error}", error=printable(error)))
+            self.always_message.setText(tr("Cannot read them: {error}", error=printable_text(error)))
             rows = []
         else:
             self.always_message.setText(note or ("" if rows else tr("Nothing is allowed always.")))
@@ -1405,7 +1513,7 @@ class ApprovalsPage(QWidget):
 
     def forgotten(self, result, error):
         status, out, err = outcome(result, error)
-        self.load_always(note=printable((out + err).strip()) if status != 0 else tr("Forgotten."))
+        self.load_always(note=printable_text((out + err).strip()) if status != 0 else tr("Forgotten."))
 
     def answer(self, decision, scope=None, entry=None, parent=None, open_here=False, asked=False):
         """Send the answer in the background (`sandbox-ai approvals` may take up to a minute; on another host through
@@ -1467,6 +1575,9 @@ class ApprovalsPage(QWidget):
         self.scope.setCurrentIndex(self.scope.findData("once"))  # a wider scope is chosen for one answer only
         self.message.setText(tr("Sending the answer…"))
         ident = question.get("id", "")
+        applog.log("INFO", "approvals", f"answer {decision} (scope {scope}) to question {printable(ident)[:60]} "
+                                        f"({question.get('kind', '?')}) of {printable(run)} on {printable(host)}"
+                                        + (" - the page is opened here" if url is not None else ""))
         done = lambda result, error: self.answered(result, error, decision, scope, host, url, key)  # noqa: E731
         if host == LOCAL:
             # sandbox-ai answers within 60 s; a call that hangs past that (e.g. on a stuck pipe) frees the buttons.
@@ -1535,8 +1646,12 @@ class ApprovalsPage(QWidget):
 
     def answered(self, result, error, decision="deny", scope="once", host=LOCAL, url=None, key=None):
         self.answers.pop(key, None)
+        if key is not None and len(self.answered_recently) < 1000:
+            self.answered_recently.add(key)
         status, out, err = outcome(result, error)
-        text = printable((out + err).strip())
+        text = printable_text((out + err).strip())
+        applog.log("INFO" if status == 0 else "WARNING", "approvals", f"answer {decision} (scope {scope}) on "
+                   f"{printable(host)}: exit status {status}" + (f"\n{applog.tail(out + err)}" if status != 0 else ""))
         if status != 0:
             self.message.setText(tr("Not answered"))
             warn(self, tr("Not answered"), text or tr("sandbox-ai refused the answer."), modal=False)
@@ -1693,7 +1808,8 @@ class StatisticsPage(QWidget):
         """The logs of the project PATH (its default log folder, as the launcher names it)."""
         try:
             folder = self.sai.launcher.default_log_dir(Path(path))
-        except Exception:  # noqa: BLE001 - an older launcher: the choice stays
+        except Exception as _exc:  # noqa: BLE001 - an older launcher: the choice stays
+            applog.swallowed("pages", "StatisticsPage.set_project: an older launcher: the choice stays", _exc)
             return
         self.refresh_directories(select=str(folder))
 
@@ -1759,7 +1875,7 @@ class StatisticsPage(QWidget):
         if token != self.generation:
             return
         if error is not None:
-            self.summary.setText(tr("Cannot read the logs: {error}", error=printable(error)))
+            self.summary.setText(tr("Cannot read the logs: {error}", error=printable_text(error)))
             return
         self.show_data(data)
 

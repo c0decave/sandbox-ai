@@ -223,8 +223,15 @@ def test_secrets_round_trip_with_the_file_store(sai, tmp_path, monkeypatch):
 
 def test_login_status_rows(sai):
     rows = sai.login_status()
-    assert [r[0] for r in rows] == list(sai.agents)  # the launcher's order
+    # The agents `sandbox-ai login` takes (Hermes and Qwen Code too; DSH and Goose have none), in the launcher's order:
+    # a row offers Log in, which runs `sandbox-ai login AGENT`.
+    takes = sai.module("login").AGENTS
+    assert set(backend.LOGIN_AGENTS_ANYWHERE) == set(takes), "the app's list for another host is login.py's"
+    assert [r[0] for r in rows] == [agent for agent in sai.agents if agent in takes]
+    assert {"hermes", "qwen"} <= {r[0] for r in rows} and not {"dsh", "goose"} & {r[0] for r in rows}
     assert all(r[1] in ("store", "host", "?") for r in rows)
+    with pytest.raises(ValueError):
+        sai.login_argv("ct1", "goose")  # `sandbox-ai login goose` is no command there either
 
 
 def test_paths_of_runs_and_sessions(sai, tmp_path):
@@ -958,7 +965,9 @@ def test_what_needs_a_confirmation_depends_on_what_it_does():
         "old": old, "new": new, "canary_default": default})
     assert lower({"mode": "high"}, {"mode": "low"}) and not lower({"mode": "low"}, {"mode": "high"})
     assert lower({"telemetry": "strict"}, {}), "off (the default) is less private than strict"
-    assert not lower({"telemetry": "on"}, {"telemetry": "off"}) and lower({}, {"telemetry": "on"})
+    # there is no on (telemetry is always off): an old one is off, and none is ever written
+    assert not lower({"telemetry": "on"}, {"telemetry": "off"}) and not lower({"telemetry": "on"}, {})
+    assert backend.TELEMETRY_ORDER == ("off", "strict")
     assert lower({}, {"canaries": ["credentials", "home"]}, ["credentials", "home", "workspace"]), "the host's own default"
     assert not lower({}, {"canaries": ["credentials", "home"]}, ["credentials", "home"])
     assert lower({"canaries": "all"}, {"canaries": "credentials,home"}) and lower({}, {"canaries": False})
@@ -1102,3 +1111,19 @@ def test_the_recent_project_folders_are_merged_newest_first_each_once(tmp_path, 
     found = [path for path, _ in s.recent_folders()]
     assert found[:3] == [folders[4], folders[7], folders[6]] and folders[5] not in found, "no MCP server's folder"
     assert backend.home_short(str(Path.home() / "work")) == "~/work" and backend.home_short("/srv") == "/srv"
+
+
+def test_the_start_form_writes_no_value_a_project_file_may_not_hold(sai, tmp_path):
+    """--llm-traffic all is refused in a project file by the launcher and --telemetry on is gone (telemetry is always
+    off): the Start page's Write project file leaves both out."""
+    project = tmp_path / "project"
+    project.mkdir()
+    options = sai.options()
+    values = {"--workspace": [str(project)], "--allow-pypi": True, "--telemetry": "on", "--llm-traffic": "all"}
+    document, main = sai.project_document("codex", options, values)
+    assert main == str(project) and document["options"] == ["--allow-pypi"]
+    sai.write_project(project, document)
+    _, loaded = sai.launcher.load_project_config(sai.launcher.parse_args(["codex", "--workspace", str(project)]))
+    assert loaded["options"] == ["--allow-pypi"]
+    values.update({"--telemetry": "strict", "--llm-traffic": "off"})
+    assert set(sai.project_document("codex", options, values)[0]["options"]) >= {"--allow-pypi", "strict", "off"}

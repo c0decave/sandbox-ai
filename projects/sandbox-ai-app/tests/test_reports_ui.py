@@ -21,8 +21,8 @@ class Accepting:
 
     made = []
 
-    def __init__(self, parent, title, what, label, parts=True):
-        self.title, self.what, self.label, self.parts = title, what, label, parts
+    def __init__(self, parent, title, what, label, parts=True, traffic=False):
+        self.title, self.what, self.label, self.parts, self.traffic = title, what, label, parts, traffic
         Accepting.made.append(self)
 
     def exec(self):
@@ -50,6 +50,8 @@ def test_the_backend_runs_sandbox_ai_report(window, monkeypatch, tmp_path):
                          "work", "mcp-fetch")
     window.sai.report(path, "html", log_dir="/logs/web")
     assert calls[-1] == ("report", "--format", "html", "--output", path, "--log-dir", "/logs/web", "--")
+    window.sai.report(path, "md", ["work"], traffic=True)  # with the section on the LLM traffic log
+    assert calls[-1] == ("report", "--format", "md", "--output", path, "--llm-traffic", "--", "work")
     for bad in (dict(names=["-x"]), dict(names=["a b"]), dict(kind="docx", names=["a"]), dict(names=[]),
                 dict(names=["a"], since="--all"), dict(log_dir="relative")):
         kind = bad.pop("kind", "pdf")
@@ -95,7 +97,7 @@ def test_report_on_the_sandboxes_page(window, monkeypatch, wait, tmp_path):
     page.table.select_item(found["session:work"])
     page.report()
     assert wait(lambda: opened, 15) and opened == [target]
-    assert written[-1] == (target, "pdf", ["work"], None, True, None)
+    assert written[-1] == (target, "pdf", ["work"], None, True, None, False)
     assert notices and notices[-1][0] == "success" and target in notices[-1][2]
     assert "work" in Accepting.made[-1].what
     # Several rows: one report of those of this machine (the host's row is left out); an MCP server by its run.
@@ -110,9 +112,10 @@ def test_report_on_the_sandboxes_page(window, monkeypatch, wait, tmp_path):
     accept_with(monkeypatch, path=str(tmp_path / "two.html"), kind="html", since="2h", open=False, parts=False)
     page.report()
     assert wait(lambda: len(written) == 2, 15)
-    path, kind, names, log_dir, parts, since = written[-1]
+    path, kind, names, log_dir, parts, since, traffic = written[-1]
     assert kind == "html" and set(names) <= {"work", "mcp-fetch"} and "work" in names and since == "2h"
-    assert parts is False and log_dir is None and len(opened) == 1, "not opened when the human said so"
+    assert parts is False and traffic is False and log_dir is None
+    assert len(opened) == 1, "not opened when the human said so"
     # A file in a folder that does not exist: said, nothing written.
     accept_with(monkeypatch, path=str(tmp_path / "missing" / "r.pdf"))
     widgets.SHOWN.clear()
@@ -144,8 +147,25 @@ def test_report_on_the_statistics_page(window, env, monkeypatch, wait, tmp_path)
     accept_with(monkeypatch, path=str(tmp_path / "logs.md"), kind="md")
     page.report()
     assert wait(lambda: opened, 15)
-    assert written[-1] == (str(tmp_path / "logs.md"), "md", [], str(logs), True, None)
+    assert written[-1] == (str(tmp_path / "logs.md"), "md", [], str(logs), True, None, False)
     assert Accepting.made[-1].parts is False, "a log folder's report has no parts to choose"
+    assert Accepting.made[-1].traffic is True, "this sandbox-ai knows --llm-traffic: the choice is offered"
+    accept_with(monkeypatch, path=str(tmp_path / "traffic.md"), kind="md", traffic=True)
+    opened.clear()
+    page.report()
+    assert wait(lambda: opened, 15)
+    assert written[-1][-1] is True  # with the section on the LLM traffic log
+
+
+def test_the_dialog_offers_the_llm_traffic_section(qapp, env):
+    for offered in (True, False):
+        dialog = reports.ReportDialog(None, "Report of work", "A report of work", "work", traffic=offered)
+        try:
+            assert dialog.values()["traffic"] is False
+            dialog.traffic.setChecked(True)
+            assert dialog.values()["traffic"] is offered  # never asked for where it is not offered
+        finally:
+            dialog.deleteLater()
 
 
 def test_the_dialog_follows_the_format(qapp, env, tmp_path):

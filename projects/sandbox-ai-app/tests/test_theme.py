@@ -170,3 +170,85 @@ def test_a_line_between_the_column_titles_shows_where_to_grab_them(qapp, name, m
         assert rule not in sheet and "QHeaderView::section { border-top: 2px solid" in sheet
     else:
         assert rule in sheet and sheet.rindex(rule) > sheet.rindex("QHeaderView::section {")
+
+
+FOCUSABLE = ["button", "primary", "tool", "check", "radio", "tabs", "nav"]
+
+
+def focus_target(kind):
+    """(the widget to show, the one that takes the focus) of KIND."""
+    from PySide6.QtWidgets import QCheckBox, QListWidget, QPushButton, QRadioButton, QTabWidget, QToolButton, QWidget
+    if kind in ("button", "primary"):
+        widget = QPushButton("Start")
+        if kind == "primary":
+            widget.setProperty("role", "primary")
+        return widget, widget
+    if kind == "tool":
+        widget = QToolButton()
+        widget.setText("Arrange")
+        widget.setFocusPolicy(widget.focusPolicy().StrongFocus)
+        return widget, widget
+    if kind in ("check", "radio"):
+        widget = (QCheckBox if kind == "check" else QRadioButton)("follow")
+        return widget, widget
+    if kind == "tabs":
+        widget = QTabWidget()
+        widget.addTab(QWidget(), "Blocked")
+        widget.addTab(QWidget(), "History")
+        return widget, widget.tabBar()
+    widget = QListWidget()
+    widget.setObjectName("nav")
+    widget.addItems(["Start", "Board"])
+    widget.setCurrentRow(0)
+    return widget, widget
+
+
+# The looks without costume (light, dark, Mac and the editor themes); the costumed ones (hacker, amber, Fallout,
+# cyberpunk, unicorn, Windows 3.11) draw their own focus marks (docs/design-audit-0.1.95.md, open findings).
+PLAIN_LOOKS = [name for name in NAMES if theme.THEMES_DATA[name].get("extra") in (None, "mac")]
+
+
+@pytest.mark.parametrize("name", PLAIN_LOOKS)
+@pytest.mark.parametrize("kind", FOCUSABLE)
+def test_the_keyboard_focus_is_visible_on_every_control(qapp, name, kind):
+    """Design review 0.1.95 (hallmark's floor: every interactive element shows its focus): reached with Tab, a tool
+    button, a primary button, the navigation and a tab bar looked exactly as before; a check box showed a faint
+    dotted frame. Now each changes at least a ring's worth of pixels, each by a contrast of 3:1 or more (WCAG 2.2's
+    focus appearance)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLineEdit, QVBoxLayout, QWidget
+    theme.apply(name)
+    holder = QWidget()
+    try:
+        layout = QVBoxLayout(holder)
+        before_it = QLineEdit()
+        layout.addWidget(before_it)
+        shown, target = focus_target(kind)
+        layout.addWidget(shown)
+        holder.resize(260, 160)
+        holder.show()
+        holder.activateWindow()
+        before_it.setFocus()
+        qapp.processEvents()
+        resting = target.grab().toImage()
+        QTest.keyClick(before_it, Qt.Key.Key_Tab)
+        qapp.processEvents()
+        assert target.hasFocus()
+        focused = target.grab().toImage()
+        assert focused.size() == resting.size()
+        strong = sum(1 for x in range(focused.width()) for y in range(focused.height())
+                     if focused.pixel(x, y) != resting.pixel(x, y)
+                     and theme.contrast(focused.pixelColor(x, y).name(), resting.pixelColor(x, y).name()) >= 3)
+        ratio = focused.devicePixelRatio()
+        if kind in ("check", "radio"):  # around the box or the dot (14 px)
+            ring = (4 if kind == "check" else 3.14) * 12 * ratio  # the ring's inner edge
+        elif kind == "tabs":  # around the current tab, its lower edge open to the page
+            tab = target.tabRect(target.currentIndex())
+            ring = (tab.width() + 2 * tab.height()) * ratio
+        else:
+            ring = 2 * (target.width() + min(target.height(), 30)) * ratio
+        assert strong >= ring * 0.8, f"{kind} in {name}: {strong} px changed clearly, a ring is {ring:.0f}"
+    finally:
+        holder.close()
+        theme.apply("system")

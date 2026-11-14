@@ -75,6 +75,7 @@ def isolated(tmp_path, monkeypatch):
         raise AssertionError(f"a real podman was asked: {args}")
     monkeypatch.setattr(live, "RUNNER", real_podman)  # the podman fixture gives a fake one
     live._cache.clear()
+    live.LOG.forget_states()  # (launcher.log: each test sees its own changes)
 
 
 @pytest.fixture
@@ -411,3 +412,85 @@ def test_stop_pod_reports_what_podman_said(podman):
     assert stopped is True and "no such pod" in said  # nothing of it runs: stopped
     podman.add("agent-claude-1", live=1)
     assert live.stop_pod("agent-claude-1", None, 5) == (True, "")
+
+
+def test_list_says_which_runs_go_through_a_vpn_or_tor(podman):
+    """sandbox-ai list --json "vpn_profile" and "vpn_type" of a running start (run.json): the app opens no link of its
+    terminal on this host past the VPN or Tor; a damaged value is none."""
+    register("claude-0000aaaa", pid=os.getpid(), vpn_profile="anon", vpn_type="tor", browser=False)
+    register("claude-0000bbbb", pid=os.getpid(), vpn_profile="office", vpn_type="wireguard", browser=False)
+    register("claude-0000cccc", pid=os.getpid(), vpn_profile="bad name; x", vpn_type="tor", browser=False)
+    register("claude-0000dddd", pid=os.getpid(), vpn_profile=None, vpn_type=None, browser=False)
+    found = {entry["id"]: entry for entry in st.entries()}
+    assert (found["claude-0000aaaa"]["vpn_profile"], found["claude-0000aaaa"]["vpn_type"]) == ("anon", "tor")
+    assert (found["claude-0000bbbb"]["vpn_profile"], found["claude-0000bbbb"]["vpn_type"]) == ("office", "wireguard")
+    assert (found["claude-0000cccc"]["vpn_profile"], found["claude-0000cccc"]["vpn_type"]) == (None, None)
+    assert (found["claude-0000dddd"]["vpn_profile"], found["claude-0000dddd"]["vpn_type"]) == (None, None)
+
+
+def test_stop_by_name_never_ends_a_pod_that_is_not_sandbox_ais(podman):
+    """Review round 1 (core): `sandbox-ai stop web` stopped and force-removed any running pod named agent-web - one of
+    your own too. Only sandbox-ai's own pods (their names, or its labels) are ended as a pod no start knows."""
+    podman.add("agent-web", live=1)  # a pod of yours that happens to be named agent-...
+    with pytest.raises(ValueError, match="nothing named web"):
+        st.act("stop", "web", out=lambda line: None, wait=5)
+    with pytest.raises(ValueError, match="nothing named agent-web"):
+        st.act("stop", "agent-web", out=lambda line: None, wait=5)
+    assert "agent-web" in podman.pods
+    podman.add("agent-labelled", live=1, labels={live.RUN_LABEL: "labelled"})  # sandbox-ai's, by its label
+    assert st.act("stop", "labelled", out=lambda line: None, wait=5) == 0 and "agent-labelled" not in podman.pods
+
+
+# --- what is decided, in launcher.log (sandbox/launchlog.py) ------------------------------------------------------
+
+def launcher_log(tmp_path):
+    path = tmp_path / "state" / "sandbox-ai" / "launcher.log"
+    return path.read_text() if path.exists() else ""
+
+
+def test_a_session_status_is_logged_once_per_change_with_why(podman, tmp_path):
+    """The app polls the sessions: each status says why it is what it is, once, not at every poll."""
+    data = make_session("s-log")
+    podman.add("agent-claude-3123c2f0", live=1)
+    for _ in range(3):
+        assert sessions.status("s-log", data) == "orphaned"
+        live._cache.clear()
+    podman.pods["agent-claude-3123c2f0"].update(live=0, status="Exited")
+    assert sessions.status("s-log", data) == "stopped"
+    lines = [line for line in launcher_log(tmp_path).splitlines() if "session: s-log:" in line]
+    assert len(lines) == 2, lines
+    assert "s-log: orphaned: its supervisor is gone, its pod still runs" in lines[0]
+    assert "s-log: stopped: its supervisor is gone (no pod of its run runs)" in lines[1]
+
+
+def test_podman_not_answering_is_logged_once_until_it_answers(podman, tmp_path):
+    podman.answer = False
+    for _ in range(4):
+        assert live.pods(fresh=True) is None
+    podman.answer = True
+    assert live.pods(fresh=True) == {}
+    text = launcher_log(tmp_path)
+    assert text.count("does not answer podman pod ps") == 1
+    assert "exit status 125: Error: cannot connect to Podman" in text
+    assert "Podman answers podman pod ps again" in text
+
+
+def test_a_run_verdict_says_why(podman, tmp_path):
+    record = json.loads((register("claude-3123c2f0") / "run.json").read_text())
+    podman.add("agent-claude-3123c2f0", live=1)
+    assert live.verdict(record) == "orphaned"
+    assert "the run claude-3123c2f0 (its launcher is gone): orphaned: its pod agent-claude-3123c2f0 still runs a " \
+           "container" in launcher_log(tmp_path)
+
+
+def test_a_session_without_its_terminal_says_so_once(tmp_path):
+    data = make_session("s-term", started="2026-01-01T00:00:00Z")
+    log = sessions.session_dir("s-term") / "supervisor.log"
+    log.write_text("agent-sandbox: starting the MCP server fetch…\nagent-sandbox: Error: something broke\n")
+    os.utime(log, (0, 0))
+    for _ in range(3):
+        state, tail = sessions.terminal_state("s-term", data)
+        assert state == "missing"
+    text = launcher_log(tmp_path)
+    assert text.count("s-term: runs without a terminal to attach to") == 1
+    assert "Error: something broke" in text

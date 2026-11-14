@@ -1,0 +1,29 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "coding-hermes",
+  "title": "Coding with Hermes Agent",
+  "description": "Hermes Agent on your project with its maker's model (the Nous Portal), PyPI, npm and GitHub open for the project's packages and code, the agent's memory of this project kept between sessions; everything else stays closed.",
+  "translations": {
+    "de": {
+      "title": "Programmieren mit Hermes Agent",
+      "description": "Hermes Agent an Ihrem Projekt mit dem Modell seines Herstellers (das Nous Portal), PyPI, npm und GitHub offen für die Pakete und den Code des Projekts, das Gedächtnis des Agenten zu diesem Projekt bleibt zwischen den Sitzungen; alles andere bleibt zu."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "hermes"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github"
+  ],
+  "notes": [
+    "The model: the Nous Portal (your login: sandbox-ai login hermes). Its hosts are open by default; nothing else of the provider's.",
+    "PyPI, npm and GitHub are open for the project's dependencies; everything else is refused or asked (--ask). Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy.",
+    "Memory: ~/.hermes/memories/MEMORY.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
+    "Hermes Agent's telemetry is always off and cannot be turned on (pinned in its read-only configuration and refused by the proxy).",
+    "Hermes Agent is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+  ]
+}

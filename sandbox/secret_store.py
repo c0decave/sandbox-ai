@@ -25,12 +25,14 @@ the same step as the older form `sandbox-ai net allow RUN --api-key HOST=VARIABL
 Standard library only.
 """
 import argparse
+import contextlib
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 LIMIT = 8192
@@ -76,11 +78,17 @@ class FileStore:
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.directory.chmod(0o700)
         path = self.directory / check_name(name)
-        temporary = self.directory / f".{name}.tmp"
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as stream:
-            stream.write(value)
-        os.replace(temporary, path)
+        # A new temporary file of its own (O_EXCL, 0600): two writes of NAME at once never share one, and nothing
+        # left behind passes its permissions on.
+        fd, temporary = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=self.directory)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(value)
+            os.replace(temporary, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise
 
     def delete(self, name):
         try:
@@ -203,6 +211,9 @@ def get(name):
     for backend in ([store()] if isinstance(store(), FileStore) else [store(), FileStore()]):
         value = backend.get(name)
         if value is not None:
+            log = sys.modules.get("sandbox_ai_launchlog")  # (loaded by the launcher: a value read never reaches it)
+            if log is not None:
+                log.secret(value)
             return value
     return None
 

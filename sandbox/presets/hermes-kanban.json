@@ -1,0 +1,29 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "hermes-kanban",
+  "title": "Hermes Kanban: an orchestrator and its workers",
+  "description": "Hermes Agent's Kanban board in one sandbox: Hermes, as the orchestrator, breaks a goal into cards, the dispatcher in its gateway hands each card to a worker (another Hermes process in this sandbox), and the board is kept with the start; you watch it with hermes kanban watch in the shell window. No messaging platform unless you add one.",
+  "translations": {
+    "de": {
+      "title": "Hermes-Kanban: ein Orchestrator und seine Worker",
+      "description": "Das Kanban-Board von Hermes Agent in einer Sandbox: Hermes zerlegt als Orchestrator ein Ziel in Karten, der Dispatcher in seinem Gateway gibt jede Karte einem Worker (ein weiterer Hermes-Prozess in dieser Sandbox), und das Board bleibt mit dem Start erhalten; Sie verfolgen es mit hermes kanban watch im Shell-Fenster. Keine Messaging-Plattform, außer Sie fügen eine hinzu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "hermes"
+  ],
+  "options": [
+    "--hermes-enable",
+    "kanban"
+  ],
+  "prompt": "You are the orchestrator of a Kanban board (your kanban tools: kanban_create, kanban_link, kanban_list, kanban_show, kanban_comment ...); the dispatcher in your gateway hands each ready card to a worker, another Hermes process in this sandbox, which completes or blocks it. Work like this: when the human gives you a goal, break it into cards small enough for one worker each (a clear title, the files, what done means as the card's body), link the cards that depend on each other, and let the workers do them; follow the board (kanban_list), answer blocked cards, review what a worker completed before you build on it, and tell the human what is done. Do not do the cards' work yourself unless the human asks. Start by asking the human for the goal, and tell them to watch the board with: hermes kanban watch (in the shell window: Ctrl-b n).",
+  "notes": [
+    "--hermes-enable kanban turns on the dispatcher in Hermes' gateway, which Hermes' CLI starts itself in the background; it spawns the workers as local processes of this sandbox, with the same network, limits and rules. Nothing of it reaches a messaging platform; add one with --hermes-enable gateway:telegram (and so on) if you want to drive the board from there.",
+    "Watch the board: hermes kanban watch (or hermes kanban list, hermes kanban show ID, hermes kanban log ID) in the tmux window shell. Hermes' web dashboard is not offered: a sandbox takes no connections from outside, and its frontend is not part of the image.",
+    "The board (~/.hermes/kanban.db) lives in this start's HOME: it is kept when the start ends (sandbox-ai resume NAME brings it back), not with --no-keep.",
+    "Hermes needs a model: its Nous Portal login (sandbox-ai login hermes), --api-key HOST=NAME, or --llm NAME. Every worker uses it too: keep --memory and --cpus in mind for many cards at once (Hermes runs at most about one worker per 512 MiB of memory).",
+    "Hermes is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+  ]
+}

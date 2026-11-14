@@ -123,7 +123,6 @@ def test_a_ruleset_takes_tool_rules_and_agent_sources():
     assert rules.tool_active and not ruleset({"version": 1}).tool_active
     assert rules.untrusted_agent_tool("codex", "WebFetch")["what"] == "the tool WebFetch of codex"
     assert rules.untrusted_tool("claude", "WebSearch") is None  # an agent's source is no MCP server's
-    assert not rules.mcp_taint_active()
 
 
 @pytest.mark.parametrize("tool,arguments,decision,rule", [

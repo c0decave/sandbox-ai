@@ -119,7 +119,7 @@ def test_navigation_has_sections_shortcuts_and_a_glyph_per_page(window, qapp):
     from sandbox_ai_app.ui import PAGES, SECTIONS
     headers = [window.nav.item(r) for r in range(window.nav.count()) if window.nav.item(r).data(QtCore.Qt.ItemDataRole.UserRole)
                is None]
-    assert [h.text() for h in headers] == ["PROJECT", "RUNNING", "MANAGE", "INSIGHT", "SYSTEM"]
+    assert [h.text() for h in headers] == ["PROJECT", "RUNNING", "MANAGE", "MONITORING", "SYSTEM"]
     assert all(not (h.flags() & QtCore.Qt.ItemFlag.ItemIsSelectable) for h in headers), "headers cannot be chosen"
     assert [key for _, pages in SECTIONS for key, _ in pages] == [key for key, _ in PAGES] == window.keys
     for key in window.keys:
@@ -249,7 +249,9 @@ def test_the_project_name_is_the_switcher_and_shown_once(window, env, wait):
     assert "Project" not in texts and not any(t.startswith("one") for t in texts), "the name is not shown twice"
     assert bar.combo.objectName() == "projectName" and bar.combo.accessibleName() == "Project"
     assert bar.name() == "one" and str(one) not in bar.name(), "the name, not the path"
-    assert str(one) in bar.combo.toolTip() and bar.where.text() == str(one)
+    # (a long path - a deep TMPDIR - is shortened in its middle below the name; the tooltips name it whole)
+    from sandbox_ai_app.ui import middle
+    assert str(one) in bar.combo.toolTip() and bar.where.text() == middle(str(one)) and str(one) in bar.where.toolTip()
     assert bar.combo.currentText().startswith("one  —  /"), "the list names each project with its path"
     width = bar.combo.sizeHint().width()
     assert width < bar.combo.fontMetrics().horizontalAdvance(bar.combo.currentText()), "as wide as the name"
@@ -303,7 +305,7 @@ def test_approvals_of_the_current_project_stand_out(window, env):
 # -- every sandbox-ai instance --
 
 
-def test_every_instance_of_the_account_is_listed_with_its_kind(window, env, sleepers):
+def test_every_instance_of_the_account_is_listed_with_its_kind(window, env, sleepers, monkeypatch):
     sai = window.sai
     one, two = project(env, "one"), project(env, "two")
     fake_run(env, "claude-abc", one)  # a one-off run (this test process stands in for its launcher)
@@ -330,6 +332,11 @@ def test_every_instance_of_the_account_is_listed_with_its_kind(window, env, slee
     window.set_project(one)
     read_now(page)
     kinds = {widgets.row_key(page.table, r): page.table.item(r, 0).text() for r in range(page.table.rowCount())}
+    assert "session:work" not in kinds, "a stopped session is listed with \"Ended\" only"
+    monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [])  # (nothing else ended)
+    page.show_ended.setChecked(True)
+    read_now(page)
+    kinds = {widgets.row_key(page.table, r): page.table.item(r, 0).text() for r in range(page.table.rowCount())}
     assert kinds["run:claude-abc"] == "Run" and kinds["session:work"] == "Session"
     assert kinds["mcp:demo"] == "MCP server" and kinds[f"pid:{unregistered.pid}"] == "Not registered"
     assert bold(page.table, widgets.find_row(page.table, "run:claude-abc")), "the current project's rows stand out"
@@ -347,16 +354,20 @@ def test_a_session_that_runs_is_one_row_with_its_run(window, env):
     assert [(i.kind, i.key, i.run) for i in found] == [("session", "session:work", "session-work")]
 
 
-def test_buttons_follow_the_kind_and_say_why_not(window, env, sleepers):
+def test_buttons_follow_the_kind_and_say_why_not(window, env, sleepers, monkeypatch):
     page = window.sandboxes
     folder = project(env, "p")
     fake_run(env, "claude-abc", folder)
     fake_session(env, "work", folder)
     loose = sleepers("/x/agent_sandbox.py", "claude", "--workspace", folder)
+    monkeypatch.setattr(window.sai, "ended_starts", lambda name="local": [])
+    page.show_ended.setChecked(True)  # a stopped session is listed with "Ended" only
     read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "run:claude-abc"))
     live_mcp = [page.run_named[key] for key in ("add-mcp", "remove-mcp")]
-    assert all(b.isEnabled() for b in page.run_buttons if b not in live_mcp)
+    browser = page.run_named["browser"]  # a start without --browser: nothing to show
+    assert not browser.isEnabled() and "no browser of its own" in browser.toolTip()
+    assert all(b.isEnabled() for b in page.run_buttons if b not in live_mcp and b is not browser)
     assert not any(b.isEnabled() for b in live_mcp) and "Only for kept starts" in live_mcp[0].toolTip(), \
         "a run without a kept start takes no MCP server while it runs"
     assert not page.session_buttons["attach"].isEnabled() and "Only for sessions" in page.session_buttons["attach"].toolTip()

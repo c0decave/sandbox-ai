@@ -32,8 +32,9 @@ import json
 import re
 import unicodedata
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
+from . import applog
 
 # As sandbox-ai llm checks them (llm.py: NAME, SECRET, MODEL_NAME, VPN_PROFILE, URL).
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
@@ -41,7 +42,7 @@ SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 MODEL = re.compile(r"[\w.:/@+-]{1,200}", re.ASCII)
 VPN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 URL = re.compile(r"https?://(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?")
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 # (kind, label, the port it listens on by default): llm.py's KINDS, in the order the wizard offers them.
 KINDS = (("lmstudio", N_("LM Studio"), 1234), ("ollama", N_("Ollama"), 11434), ("llamacpp", N_("llama.cpp"), 8080),
          ("vllm", N_("vLLM"), 8000), ("openai-compatible", N_("OpenAI-compatible API"), None))
@@ -60,8 +61,8 @@ def default_port(kind, sai=None):
         port = sai.module("llm").KINDS[kind]["port"] if sai is not None else None
         if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536:
             return port
-    except Exception:  # noqa: BLE001 - an older or broken sandbox-ai: the table above
-        pass
+    except Exception as _exc:  # noqa: BLE001 - an older or broken sandbox-ai: the table above
+        applog.swallowed("wizard_llm", "default_port: an older or broken sandbox-ai: the table above", _exc)
     return next((port for key, _, port in KINDS if key == kind), None)
 
 
@@ -164,7 +165,7 @@ def parse_endpoints(out):
     text, notes = out or "", []
     try:
         data = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         lines = text.splitlines()
         start = next((i for i, line in enumerate(lines) if line.startswith("[")), None)
         if start is None:
@@ -220,8 +221,8 @@ def parse_detected(out):
     untrusted): a kind this wizard knows, a URL `llm add` takes, model names that may go back as arguments."""
     try:
         data = json.loads(out or "")
-    except ValueError:
-        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    except (ValueError, RecursionError):
+        raise ValueError(printable_text((out or "").strip()[-500:]) or tr("no answer")) from None
     if not isinstance(data, list):
         raise ValueError(tr("not a list of servers"))
     kinds = [key for key, _, _ in KINDS]
@@ -258,8 +259,8 @@ def models_and_status(out):
     parse_models, parse_status)."""
     try:
         data = json.loads(out or "")
-    except ValueError:
-        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    except (ValueError, RecursionError):
+        raise ValueError(printable_text((out or "").strip()[-500:]) or tr("no answer")) from None
     status = None
     if isinstance(data, dict) and isinstance(data.get("models"), list):
         status = parse_status(data.get("status")) if isinstance(data.get("status"), dict) else None
@@ -284,6 +285,11 @@ def models_and_status(out):
         context = entry.get("context")
         if isinstance(context, int) and not isinstance(context, bool) and 0 < context < 1 << 31:
             model["context"] = context
+        # What the server says it can do, and Ollama's families (llm.py's clean_models): model_tags reads them.
+        for key in ("capabilities", "families"):
+            words = entry.get(key)
+            if isinstance(words, list):
+                model[key] = [printable(w)[:20] for w in words[:8] if isinstance(w, str) and w.strip()]
         found.append(model)
     return found, status
 
@@ -340,6 +346,8 @@ def parse_status(entry):
                 model["context"] = item["context"]
             if isinstance(item.get("expires_at"), str) and item["expires_at"].strip():
                 model["expires_at"] = printable(item["expires_at"].strip())[:40]
+            if item.get("jit") is True:  # LM Studio loaded it JIT: Auto-Evict may unload it for another model
+                model["jit"] = True
             loaded.append(model)
     raw = entry.get("usage") if isinstance(entry.get("usage"), dict) else {}
     usage = {key: raw[key] for key in USAGE_COUNTS if whole(raw.get(key)) is not None}
@@ -359,8 +367,8 @@ def parse_statuses(out):
     all the same). ValueError: no list in the answer."""
     try:
         data = json.loads(out or "")
-    except ValueError:
-        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    except (ValueError, RecursionError):
+        raise ValueError(printable_text((out or "").strip()[-500:]) or tr("no answer")) from None
     if not isinstance(data, list):
         raise ValueError(tr("not a list of servers"))
     found = {}
@@ -413,6 +421,9 @@ def loaded_text(model):
         extra.append(size_text(model["size"]))
     if model.get("context"):
         extra.append(tr("context {tokens}", tokens=model["context"]))
+    if model.get("jit"):
+        extra.append(tr("JIT: LM Studio may unload it when another sandbox's model is loaded (Auto-Evict; Help > "
+                        "Keeping models loaded)"))
     return model["name"] + (f" ({'; '.join(extra)})" if extra else "")
 
 
@@ -483,9 +494,9 @@ def agent_hint(endpoint, agent, sai=None):
     try:
         problem = sai.module("llm").agent_problem(endpoint, agent) if sai is not None else None
         if problem:
-            return printable(problem)
-    except Exception:  # noqa: BLE001 - an entry the module cannot read: the short form
-        pass
+            return printable_text(problem)
+    except Exception as _exc:  # noqa: BLE001 - an entry the module cannot read: the short form
+        applog.swallowed("wizard_llm", "agent_hint: an entry the module cannot read: the short form", _exc)
     if agent == "claude":
         return tr("Claude Code needs a server with the Anthropic Messages API (Ollama, LM Studio, llama.cpp, vLLM, or "
                   "an OpenAI-compatible one added with --anthropic); Codex and OpenCode can use this one.")
@@ -652,17 +663,45 @@ def from_board(board):
 
 # -- the "Model" choice beside the agent (the launch page, the board's agent node) --
 
+def launcher_takes_name(endpoint):
+    """Whether the launcher starts with --llm NAME alone for ENDPOINT: it has a default model (llm add --model) or
+    exactly one model is known (listed at its last check, or asked now). With none known it asks for NAME:MODEL."""
+    models = [m for m in endpoint.get("models") or [] if valid_model(m)] if isinstance(endpoint.get("models"), list) \
+        else []
+    return bool(endpoint.get("model")) or len(models) == 1
+
+
+def no_models_hint(endpoint):
+    """Why a registered server is shown but not offered: no model of it is known (it has no default model, it listed
+    none at its last check, and it did not answer now), and how to change that."""
+    name = printable(str(endpoint.get("name") or ""))[:64]
+    if endpoint.get("answered") is False:
+        return tr("No models known: the server did not answer - start it, or: sandbox-ai llm check {name}",
+                  name=name)
+    return tr("No models known yet: start the server and read its models (sandbox-ai llm check {name}), or give it "
+              "a default model (sandbox-ai llm add {name} ... --model MODEL)", name=name)
+
+
 def model_choices(endpoints, agent, sai=None):
-    """[(label, value, hint)] for the Model choice beside AGENT: the agent's own provider first (value ""), then each
-    registered server as NAME (when that alone starts: its default or only model) and as NAME:MODEL for each model
-    it listed. HINT says why AGENT cannot use that server ("" when it can): the choice is shown, not offered."""
+    """[(label, value, hint)] for the Model choice beside AGENT: the agent's own provider first (value ""), then EVERY
+    registered server: as NAME where the launcher takes that alone (its default or only model: launcher_takes_name),
+    and as NAME:MODEL for each model known (listed at its last check, or asked now). A server with no model known is
+    still listed - by its name, with no_models_hint (it did not answer, or was never checked). HINT says why AGENT
+    cannot use that entry ("" when it can): such an entry is shown, not offered."""
     found = [(tr("the agent's provider (cloud)"), "", "")]
     for endpoint in endpoints or []:
-        values = placeholder_choices(endpoint)
-        if not values:
+        if not isinstance(endpoint, dict):
+            continue
+        name = valid_name(endpoint.get("name"))
+        if name is None:
             continue
         hint = agent_hint(endpoint, agent, sai)
         kind = kind_label(endpoint.get("kind"))
+        values = [value for value in placeholder_choices(endpoint) if value != name or launcher_takes_name(endpoint)]
+        if not values:
+            label = f"{name} ({kind})" if kind else name
+            found.append((tr("{server} - no models known", server=label), name, hint or no_models_hint(endpoint)))
+            continue
         for value in values:
             found.append((f"{value} ({kind})" if value == values[0] and kind else value, value, hint))
     return found
@@ -818,8 +857,8 @@ def parse_show(out):
     """The endpoint of `sandbox-ai llm show NAME --json` (a dict with a valid name); ValueError otherwise."""
     try:
         data = json.loads(out or "")
-    except ValueError:
-        raise ValueError(printable((out or "").strip()[-500:]) or tr("no answer")) from None
+    except (ValueError, RecursionError):
+        raise ValueError(printable_text((out or "").strip()[-500:]) or tr("no answer")) from None
     if not isinstance(data, dict) or valid_name(data.get("name")) is None:
         raise ValueError(tr("not an LLM server"))
     return data
@@ -872,6 +911,109 @@ def changes(old, new):
         if before != after:
             found.append(f"{tr(label)}: {shown(before)} → {shown(after)}")
     return found
+
+
+# -- what a model can do, how big it is: the tags, sorts and filters of the model choosers (model_picker.py) --
+
+TAGS = (("text", N_("text")), ("code", N_("code")), ("vision", N_("vision")), ("image", N_("image")),
+        ("embedding", N_("embedding")), ("reasoning", N_("reasoning")))
+# A model's name says what it is when its server does not (the fallback of model_tags).
+NAME_TAGS = (("vision", re.compile(r"(?i)(?:^|[-_./:])(?:vl|vlm|vision|llava|pixtral|moondream|minicpm-v|"
+                                   r"bakllava|qwen\d*(?:\.\d+)?-?vl|gemma3|llama3\.2-vision)(?:$|[-_./:\d])")),
+             ("code", re.compile(r"(?i)(?:coder|codestral|starcoder|codellama|codegemma|devstral|code(?:$|[-_.:]))")),
+             ("image", re.compile(r"(?i)(?:diffusion|sdxl|(?:^|[-_/])flux(?:$|[-_.:])|dall-?e|imagen|kandinsky)")),
+             ("embedding", re.compile(r"(?i)(?:embed|(?:^|[-_/])bge(?:$|[-_.:])|(?:^|[-_/])e5(?:$|[-_.:])|"
+                                      r"minilm|gte-)")),
+             ("reasoning", re.compile(r"(?i)(?:(?:^|[-_/:])r1(?:$|[-_.:])|reason|think|qwq|(?:^|[-_/])o[134]"
+                                      r"(?:$|[-_.:])|magistral)")))
+FAMILY_TAGS = {"clip": "vision", "mllama": "vision", "bert": "embedding", "nomic-bert": "embedding"}
+PARAMS = re.compile(r"(?i)^\s*(?:(\d+)\s*x\s*)?(\d+(?:\.\d+)?)\s*([kmbt])\b")
+PARAMS_IN_NAME = re.compile(r"(?i)(?:^|[-_:/])(?:(\d+)x)?(\d+(?:\.\d+)?)([mb])(?:$|[-_.:])")
+
+
+def model_tags(model):
+    """What MODEL (parse_models' entry, or only its name) is for, as TAGS' keys: what its server says (capabilities,
+    LM Studio's type vlm, Ollama's families clip/bert), else what its name says (-vl, coder, diffusion, embed, r1 ...);
+    text unless it is only an embedding or image model."""
+    model = model if isinstance(model, dict) else {"name": str(model or "")}
+    found = set(c for c in model.get("capabilities") or [] if c in dict(TAGS))
+    if str(model.get("type") or "").lower() == "vlm":
+        found.add("vision")
+    if str(model.get("type") or "").lower() in ("embedding", "embeddings"):
+        found.add("embedding")
+    found |= {FAMILY_TAGS[f.lower()] for f in model.get("families") or [] if f.lower() in FAMILY_TAGS}
+    name = str(model.get("name") or "")
+    found |= {tag for tag, pattern in NAME_TAGS if pattern.search(name)}
+    if not found & {"embedding", "image"} or found & {"code", "reasoning", "vision"}:
+        found.add("text")
+    return [key for key, _ in TAGS if key in found]
+
+
+def parameter_billions(model):
+    """MODEL's parameter count in billions (7.0 for "7B", 0.35 for "350M", 56.0 for "8x7B"), from its server's
+    "parameters", else from its name (qwen2.5-coder:7b, llama-3.1-70b); None when neither says it."""
+    model = model if isinstance(model, dict) else {"name": str(model or "")}
+    match = PARAMS.match(str(model.get("parameters") or ""))
+    if match is None:
+        found = PARAMS_IN_NAME.findall(str(model.get("name") or "").split("/")[-1])
+        match = found[-1] if found else None
+        if match is None:
+            return None
+        count, number, unit = match
+    else:
+        count, number, unit = match.groups()
+    value = float(number) * (int(count) if count else 1)
+    return round(value * {"k": 1e-6, "m": 1e-3, "b": 1.0, "t": 1e3}[unit.lower()], 6)
+
+
+def picker_rows(endpoints, agent, sai=None):
+    """The entries a model picker offers (model_choices) with what is known of each model: [{"label", "value",
+    "hint", "server", "model", "tags", "params" (billions or None), "size" (bytes or None)}]. A server's details come
+    from its models' answer (host_llm_servers: "model_info"); a value without a model (the server's name, the agent's
+    provider) has no tags."""
+    info = {}
+    for endpoint in endpoints or []:
+        if isinstance(endpoint, dict) and isinstance(endpoint.get("model_info"), dict):
+            info[endpoint.get("name")] = endpoint["model_info"]
+    rows = []
+    for label, value, hint in model_choices(endpoints, agent, sai):
+        server, model = parse_value(value) if value else (None, None)
+        details = (info.get(server) or {}).get(model) if model else None
+        details = details if isinstance(details, dict) else ({"name": model} if model else None)
+        size = details.get("size") if details else None
+        rows.append({"label": label, "value": value, "hint": hint, "server": server or "", "model": model or "",
+                     "tags": model_tags(details) if details else [],
+                     "params": parameter_billions(details) if details else None,
+                     "size": size if isinstance(size, int) and not isinstance(size, bool) else None})
+    return rows
+
+
+def sort_rows(rows, by):
+    """ROWS (picker_rows) by "name", "params" (largest first; unknown last) or "size" (largest first; unknown last);
+    the agent's own provider stays first."""
+    first = [r for r in rows if not r["value"]]
+    rest = [r for r in rows if r["value"]]
+    if by == "params":
+        rest.sort(key=lambda r: (r["params"] is None, -(r["params"] or 0), r["value"].lower()))
+    elif by == "size":
+        rest.sort(key=lambda r: (r["size"] is None, -(r["size"] or 0), r["value"].lower()))
+    else:
+        rest.sort(key=lambda r: r["value"].lower())
+    return first + rest
+
+
+def filter_rows(rows, text="", tag=""):
+    """ROWS whose label or value holds every word of TEXT (any case, any order: "qwen 30b") and, with TAG, that have
+    it."""
+    words = (text or "").lower().split()
+    return [r for r in rows if all(word in r["label"].lower() or word in r["value"].lower() for word in words)
+            and (not tag or tag in r["tags"])]
+
+
+def params_label(value):
+    if value is None:
+        return ""
+    return f"{value * 1000:.0f}M" if value < 1 else f"{value:.1f}B".replace(".0B", "B")
 
 
 # -- a server's models as a table --

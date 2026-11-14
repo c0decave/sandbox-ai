@@ -1,0 +1,55 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "showcase-local-llm",
+  "title": "Showcase: a model of your own, with the loop guard",
+  "description": "The agent works with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one) and reaches nothing else; the start sets its sampling and a strict loop guard, and the agent shows both: what it can reach, a small task, and the guard's note when it repeats itself; a report says what it saw.",
+  "translations": {
+    "de": {
+      "title": "Schaufenster: ein eigenes Modell, mit Schleifenschutz",
+      "description": "Der Agent arbeitet mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler) und erreicht sonst nichts; der Start setzt die Sampling-Parameter und einen strengen Schleifenschutz, und der Agent zeigt beides: was er erreicht, eine kleine Aufgabe und den Hinweis des Schutzes, wenn er sich wiederholt; ein Bericht sagt, was er gesehen hat."
+    }
+  },
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "temperature={temperature}",
+    "--llm-param",
+    "max_tokens=8192",
+    "--llm-param",
+    "loop_guard=on",
+    "--llm-param",
+    "loop_guard.warn=2",
+    "--llm-param",
+    "loop_guard.block=4"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    },
+    "temperature": {
+      "label": "Temperature of the model for this start (0 to 2)",
+      "kind": "number",
+      "default": "0.6",
+      "hint": "0.6 to 0.7 for most coding models; 0 is greedy and prone to loops"
+    }
+  },
+  "prompt": "You run on a model of the user's own server, and nothing else is reachable. Show what that means and write a short report to /work/llm-report.md: (1) what you are: the model you were given, if you can tell; (2) what you can reach: curl -sS -m 10 https://api.anthropic.com/ and https://example.com/ - both refused (quote the refusals); (3) a small task: /work/fizzbuzz.py with a function fizzbuzz(n) and a test /work/test_fizzbuzz.py (unittest), run it and quote the result; (4) the loop guard: run exactly the same command, cat /work/fizzbuzz.py, three times in a row and look at each result for a note of sandbox-ai's loop guard (it begins with [sandbox-ai loop guard]); quote it and stop repeating as soon as it appears; (5) the sampling this start set (temperature {temperature}, max_tokens 8192), as far as you can tell. Change nothing else.",
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL (--anthropic for a gateway with the Anthropic Messages API, which Claude Code needs); sandbox-ai llm check NAME --agent AGENT asks the server whether it has the API that agent needs, sandbox-ai llm params lists the parameters each kind takes.",
+    "On this host's loopback (http://127.0.0.1:PORT) only with Podman: sandbox-ai opens that one port for the sandbox. In your LAN or tailnet: a private address, or https.",
+    "--llm-param sets this start's sampling over the server's and the agent's own values (temperature, max_tokens) and the loop guard: on, a note in the tool result after the same tool call with the same result twice (warn=2), tool use paused for that answer after four (block=4). The connection proxy applies them to this server's requests only; each note of the guard names itself as the loop guard's.",
+    "The agent reaches nothing but the server (--no-provider-defaults): no cloud provider, its login is not copied in; the server's key stays with the connection proxy."
+  ]
+}

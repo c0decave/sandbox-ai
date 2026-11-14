@@ -341,3 +341,40 @@ def test_the_copy_of_a_ruleset_is_written_once_and_holds_the_bytes_it_is_named_b
     monkeypatch.setattr(backend, "write_private_text", lambda *a: written.append(a))
     monkeypatch.setattr(backend, "write_private_json", lambda *a: written.append(a))
     assert B.rules_copy(rules) == target and written == [], "written once"
+
+
+@pytest.mark.parametrize("tokens", [["--llm-traffic", "all"]])
+def test_values_a_project_file_may_not_hold_go_on_the_command_line(sai, tmp_path, tokens):
+    """The launcher refuses `--llm-traffic all` in a project file (only the command line or the defaults file may set
+    it): Apply leaves them out of the file it writes and trusts - a file the launcher refused
+    would stop every later start of the project - and a start from that file gives them on its command line."""
+    board = B.from_argv(sai, "claude", ["--allow-pypi", *tokens], [], [str(tmp_path)])
+    document, main = B.project_document(sai, board)
+    assert main == str(tmp_path) and document["options"] == ["--allow-pypi"]
+    path = sai.write_project(tmp_path, document)
+    a = sai.launcher.parse_args(["claude", "--workspace", str(tmp_path)])
+    _, loaded = sai.launcher.load_project_config(a)  # (refused with the value in it)
+    assert loaded["options"] == ["--allow-pypi"] and path.is_file()
+    argv = B.file_start_argv(sai, board)
+    assert normal(sai, argv)[0].get(tokens[0]) == tokens[1], argv
+    other = B.from_argv(sai, "claude", ["--allow-pypi", tokens[0], "off" if tokens[0] == "--telemetry" else "llm"],
+                        [], [str(tmp_path)])
+    assert tokens[0] in " ".join(B.project_document(sai, other)[0]["options"]), "other values stay in the file"
+
+
+@pytest.mark.parametrize("tokens", [["--telemetry", "on"], ["--telemetry=on"], ["-tm", "on"]])
+def test_an_old_telemetry_on_is_shown_as_off_and_never_passed(sai, tmp_path, tokens):
+    """Telemetry is always off (sandbox-ai 0.1.95): an old --telemetry on of a board (a field's value, its extra tokens)
+    goes nowhere - not into the project file, not onto a command line - and the field shows off (empty)."""
+    board = B.from_argv(sai, "claude", ["--allow-pypi"], [], [str(tmp_path)])
+    for node in board.included():
+        if "--telemetry" in B.KINDS[node.kind].options:
+            node.props["--telemetry"] = "on"
+    board.extra = list(tokens)
+    document, _ = B.project_document(sai, board)
+    assert document["options"] == ["--allow-pypi"]
+    for argv in (B.to_argv(sai, board), B.file_start_argv(sai, board)):
+        assert "on" not in argv and "--telemetry=on" not in argv, argv
+    assert "--telemetry" not in B.values(board, sai)[1]
+    board = B.from_argv(sai, "claude", ["--telemetry", "strict"], [], [str(tmp_path)])
+    assert "strict" in B.to_argv(sai, board), "strict stays"

@@ -106,7 +106,7 @@ def test_add_list_show_remove(tmp_path):
     assert KEY not in path.read_text()
     status, out = run("list", "--json")
     view = json.loads(out)[0]
-    assert view["name"] == "gpu" and view["agents"] == ["claude", "codex", "opencode"] and KEY not in out
+    assert view["name"] == "gpu" and view["agents"] == ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"] and KEY not in out
     status, out = run("show", "gpu")
     assert "key: secret GPU_KEY" in out and "header X-Team: secret TEAM" in out and "VPN profile: office" in out
     assert run("add", "gpu", "--kind", "vllm", "--url", "https://x.example")[0] == 1  # exists: needs --replace
@@ -549,6 +549,34 @@ def test_sandbox_ai_dispatches_llm():
     assert module.PYTHON_COMMANDS["llm"] == ("llm.py",) and "sandbox-ai llm add" in module.__doc__
 
 
+def test_the_models_carry_what_their_server_says_they_can_do():
+    """For the app's model picker (tags and filters): Ollama's families (clip: a vision model), LM Studio's vlm type,
+    OpenRouter's modalities, llama.cpp's parameter count - checked, only known words kept."""
+    ollama = {"/api/tags": {"models": [{"name": "llava:13b", "details": {"family": "llama", "families": ["llama", "clip"],
+                                                                         "parameter_size": "13B"}},
+                                       {"name": "qwen3:8b", "details": {"families": "not a list"}}]},
+              "/api/ps": {"models": []}}
+    found = llm.discover("ollama", lambda path: ollama[path])
+    assert found[0]["families"] == ["llama", "clip"] and found[0]["parameters"] == "13B"
+    assert "families" not in found[1]
+    lmstudio = {"/api/v1/models": {"models": []},
+                "/api/v0/models": {"data": [{"id": "qwen2.5-vl-7b", "type": "vlm", "state": "loaded"},
+                                            {"id": "qwen3-8b", "type": "llm", "state": "not-loaded"}]}}
+    found = {m["name"]: m for m in llm.discover("lmstudio", lambda path: lmstudio[path])}
+    assert found["qwen2.5-vl-7b"]["capabilities"] == ["vision"] and "capabilities" not in found["qwen3-8b"]
+    listing = {"/v1/models": {"data": [
+        {"id": "openai/gpt-4o", "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+         "context_length": 128000},
+        {"id": "flux/schnell", "architecture": {"modality": "text->image"}},
+        {"id": "odd", "architecture": {"input_modalities": ["telepathy"], "output_modalities": "x"}}]}}
+    found = {m["name"]: m for m in llm.discover("openai-compatible", lambda path: listing[path])}
+    assert found["openai/gpt-4o"]["capabilities"] == ["vision", "text"] and found["openai/gpt-4o"]["context"] == 128000
+    assert found["flux/schnell"]["capabilities"] == ["image"] and "capabilities" not in found["odd"]
+    llamacpp = {"/v1/models": {"data": [{"id": "model.gguf", "meta": {"n_params": 7241732096, "size": 4368439584}}]}}
+    assert llm.discover("llamacpp", lambda path: llamacpp[path])[0]["parameters"] == "7.2B"
+    assert llm.clean_models([{"name": "m", "capabilities": ["vision", "<script>", 7]}])[0]["capabilities"] == ["vision"]
+
+
 def test_the_models_carry_the_date_their_server_gives():
     """The version of a model as the server knows it: Ollama's modified_at, the OpenAI listing's created."""
     ollama = {"/api/tags": {"models": [{"name": "qwen3:8b", "modified_at": "2026-05-04T10:00:00.1+02:00",
@@ -893,3 +921,24 @@ def test_llm_detect_command_and_register(monkeypatch):
     monkeypatch.setattr(llm, "DETECT_PORTS", (("ollama", free_port()),))
     assert "no LLM server found (looked at 127.0.0.1" in run("detect")[1]
     assert run("detect", "--address", "not-an-ip")[0] == 1
+
+
+@pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
+def test_a_refused_replace_leaves_the_stored_ca_alone(tmp_path):
+    """Review round 2: llm add --replace changed the endpoint's CA copy (removed it with --no-ca, overwrote it with
+    --ca) before a refused --param stopped it, so the record that stayed pointed at a CA that was gone or another
+    one. Nothing is changed now until every value is checked."""
+    run_dir, other = tmp_path / "server-ca", tmp_path / "other-ca"
+    rt.create_ca(run_dir, tmp_path / "ca-out", bundles=())
+    rt.create_ca(other, tmp_path / "ca-out2", bundles=())
+    assert run("add", "gpu", "--kind", "openai-compatible", "--url", "https://gpu.example",
+               "--ca", str(run_dir / "ca.pem"))[0] == 0
+    kept = llm.ca_dir() / "gpu.pem"
+    before = kept.read_bytes()
+    assert run("add", "gpu", "--kind", "openai-compatible", "--url", "https://gpu.example", "--replace",
+               "--no-ca", "--param", "temperature=99")[0] != 0
+    assert kept.read_bytes() == before, "the CA of the endpoint that stays is still there"
+    assert run("add", "gpu", "--kind", "openai-compatible", "--url", "https://gpu.example", "--replace",
+               "--ca", str(other / "ca.pem"), "--param", "temperature=99")[0] != 0
+    assert kept.read_bytes() == before, "and still the one it was added with"
+    assert llm.load_store()["endpoints"]["gpu"]["ca"] == "gpu.pem"

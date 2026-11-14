@@ -24,14 +24,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWizard, QWizardPage,
 )
 
+from . import applog
 from . import board as B, labels
 from . import presets as PR
 from . import project_trust as PT
 from . import widgets
 from . import wizard_llm as WL
-from .board_view import LinesEdit, PathEdit, RulesEdit
+from .board_view import LinesEdit, PathEdit, RulesEdit, choose_agent, combo_agent, experimental_note, fill_agent_combo
 from .preset_gallery import PlaceholderForm
-from .files import printable
+from .files import printable, printable_text
 from .model_combo import searchable
 from .name_fields import NameField
 from .i18n import N_, tr
@@ -162,7 +163,7 @@ class FolderPage(Page):
         except FileNotFoundError:
             review = None
         except (OSError, ValueError) as exc:
-            self.note.setText(tr("The project file there cannot be read: {error}", error=printable(exc)))
+            self.note.setText(tr("The project file there cannot be read: {error}", error=printable_text(exc)))
             return False
         if review is not None and review.document is not None:
             self.wizard_.existing = review
@@ -193,7 +194,7 @@ class FolderPage(Page):
             os.makedirs(path, mode=0o755)
         except OSError as exc:
             self.note.setText(tr("{path} could not be created: {error}", path=printable(path),
-                                 error=printable(exc.strerror or exc)))
+                                 error=printable_text(exc.strerror or exc)))
             return False
         self.path.edit.setText(path)
         return True
@@ -205,8 +206,8 @@ def refusal(sai, path):
     launcher = None
     try:
         launcher = sai.launcher
-    except Exception:  # noqa: BLE001 - board.sensitive's own list still holds
-        pass
+    except Exception as _exc:  # noqa: BLE001 - board.sensitive's own list still holds
+        applog.swallowed("wizard", "refusal: board.sensitive's own list still holds", _exc)
     verdict = B.sensitive(path, launcher)
     if verdict and verdict[0] == "bad":
         return verdict[1]
@@ -224,17 +225,30 @@ class AgentPage(Page):
     def __init__(self, wizard):
         super().__init__(wizard, tr("Agent"), tr("Which coding agent runs in the sandbox."))
         self.agent = QComboBox()
-        self.agent.addItems(list(wizard.sai.agents))
-        self.agent.setCurrentText(wizard.settings().get("default_agent", "claude"))
+        self.agent.setAccessibleName(tr("Agent"))
+        # Agents not live-tested yet are listed, marked and said so below the choice: board_view.fill_agent_combo.
+        fill_agent_combo(self.agent, wizard.sai, wizard.settings().get("default_agent", "claude"))
+        self.experimental = plain_label("", role="secondary")
+        self.agent.currentIndexChanged.connect(self.agent_chosen)
         self.danger = QCheckBox(tr("without the agent's own approval prompts (-D; the sandbox stays in force)"))
         self.forbid(self.danger, "--dangerously-skip-permissions")
         self.form.addRow(tr("Agent"), self.agent)
+        self.form.addRow("", self.experimental)
         self.form.addRow("", self.danger)
+        self.agent_chosen()
+
+    def chosen(self):
+        """The agent chosen (its name, never the badge shown with it)."""
+        return combo_agent(self.agent)
+
+    def agent_chosen(self, _index=None):
+        self.experimental.setText(experimental_note(self.wizard_.sai, self.chosen()))
+        self.experimental.setVisible(bool(self.experimental.text()))
 
     def initializePage(self):  # noqa: N802
         existing = self.wizard_.existing
         if existing is not None and existing.agent:
-            self.agent.setCurrentText(existing.agent)
+            choose_agent(self.agent, existing.agent)
 
 
 class ModelPage(Page):
@@ -300,7 +314,7 @@ class ModelPage(Page):
         self.form.addRow("", self.only)
         self.hint = plain_label(role="secondary")
         self.form.addRow(self.hint)
-        self.status = plain_label(role="secondary", selectable=True)
+        self.status = plain_label(role="secondary", selectable=True, log="wizard")
         self.form.addRow(self.status)
         self.endpoints, self.notes, self.listed = {}, [], {}
         self.loaded, self.shown_agent, self.existing_choice, self.seen_existing = False, None, None, None
@@ -314,7 +328,7 @@ class ModelPage(Page):
     # -- the agent and the cloud --
 
     def agent(self):
-        return self.wizard_.agent_page.agent.currentText()
+        return self.wizard_.agent_page.chosen()
 
     def agent_changed(self, agent):
         from .guide import AGENT_EFFORTS
@@ -352,7 +366,8 @@ class ModelPage(Page):
                 try:
                     board = B.from_project(self.wizard_.sai, existing.document, self.wizard_.directory)
                     self.existing_choice = WL.from_board(board)
-                except Exception:  # noqa: BLE001 - a project the board cannot read: shown on the next pages
+                except Exception as _exc:  # noqa: BLE001 - a project the board cannot read: shown on the next pages
+                    applog.swallowed("wizard", "ModelPage.initializePage: a project the board cannot read: show…", _exc)
                     self.existing_choice = None
             if self.existing_choice:
                 self.own.setChecked(True)
@@ -406,7 +421,7 @@ class ModelPage(Page):
         self.loaded = True
         if error is not None:
             self.endpoints, self.notes = {}, []
-            self.status.setText(tr("The model servers could not be read: {error}", error=printable(error)))
+            self.status.setText(tr("The model servers could not be read: {error}", error=printable_text(error)))
         else:
             found, self.notes = result
             self.endpoints = {e["name"]: e for e in found}
@@ -507,7 +522,7 @@ class ModelPage(Page):
             return  # another server was chosen meanwhile
         if error is not None:
             self.status.setText(tr("{name} did not list its models: {error}. Type the model's name, or check that the "
-                                   "server runs.", name=name, error=printable(error)))
+                                   "server runs.", name=name, error=printable_text(error)))
             return
         self.listed[name] = result
         self.status.setText(tr("{name} offers {count} models.", name=name, count=len(result)) if result else
@@ -557,7 +572,7 @@ class ModelPage(Page):
         try:
             model = WL.chosen_model(endpoint, self.server_model_value(), self.listed.get(endpoint["name"], ()))
         except ValueError as exc:
-            self.status.setText(printable(exc))
+            self.status.setText(printable_text(exc))
             return False
         wizard.llm_choice = {"name": endpoint["name"], "model": model, "only": self.only.isChecked()}
         wizard.llm_endpoint = endpoint
@@ -655,7 +670,7 @@ class ServerDialog(QDialog):
             addresses = [a.strip() for a in self.addresses.text().split(",") if a.strip()]
             WL.detect_argv(addresses)  # checked before anything runs
         except ValueError as exc:
-            self.note.setText(printable(exc))
+            self.note.setText(printable_text(exc))
             self.note.show()
             return
         self.note.hide()
@@ -670,7 +685,7 @@ class ServerDialog(QDialog):
             return
         if error is not None or not result:
             self.form.setRowVisible(self.found, False)
-            self.note.setText(printable(error) if error is not None else
+            self.note.setText(printable_text(error) if error is not None else
                               tr("No LLM server answered there: give its kind and URL."))
             self.note.show()
             return
@@ -732,7 +747,7 @@ class ServerDialog(QDialog):
                 raise ValueError(tr("A server named {name} is registered already: choose another name.",
                                     name=fields["name"]))
         except ValueError as exc:
-            self.note.setText(printable(exc))
+            self.note.setText(printable_text(exc))
             self.note.show()
             return
         super().accept()
@@ -757,7 +772,7 @@ def add_server(parent, sai, agent=None, taken=(), done=None, source=None, fields
 
     def finished(result, error):
         if error is not None:
-            warn(parent, title, printable(error), modal=False)
+            warn(parent, title, printable_text(error), modal=False)
             finish(None, False)
             return
         name, (status, out, err) = result["name"], result["added"]
@@ -814,11 +829,14 @@ def fill_model_combo(combo, only, endpoints, agent, sai, value="", only_checked=
     only.blockSignals(True)
     try:
         combo.clear()
+        tags = {row["value"]: row["tags"] for row in WL.picker_rows(endpoints, agent, sai)}  # (text, code, vision ...)
         for label, item, hint in WL.model_choices(endpoints, agent, sai):
             combo.addItem(label, item)
             index = combo.count() - 1
             tip = (hint or f"--llm {item}") if item else tr("The agent's own provider and login "
                                                                              "(no --llm)")
+            if item and tags.get(item) and not hint:
+                tip += "\n" + " ".join(f"[{tr(dict(WL.TAGS)[t])}]" for t in tags[item])
             combo.setItemData(index, widgets.safe_tooltip(tip), Qt.ItemDataRole.ToolTipRole)
             if hint:
                 combo.model().item(index).setEnabled(False)
@@ -907,10 +925,12 @@ class StartPage(Page):
     def open_gallery(self):
         from .preset_gallery import PresetGallery
         wizard = self.wizard_
-        gallery = PresetGallery(wizard.sai, wizard.directory, wizard.agent_page.agent.currentText(), wizard.policy,
+        gallery = PresetGallery(wizard.sai, wizard.directory, wizard.agent_page.chosen(), wizard.policy,
                                 None, self, wizard.settings().get("default_backend"), host=self.host())
-        if gallery.exec() == gallery.DialogCode.Accepted and gallery.result_ is not None:
-            preset, values = gallery.result_
+        chosen = gallery.result_ if gallery.exec() == gallery.DialogCode.Accepted else None
+        widgets.drop_after_exec(gallery)  # (made anew each time)
+        if chosen is not None:
+            preset, values = chosen
             self.fill_presets()
             if not self.select_preset(preset.key):  # e.g. the host's presets read anew meanwhile: never another one
                 from .preset_gallery import fill_preset_combo
@@ -942,7 +962,7 @@ class StartPage(Page):
     def validatePage(self):  # noqa: N802
         wizard, choice = self.wizard_, self.choice()
         agent_page, model_page = wizard.agent_page, wizard.model_page
-        agent = agent_page.agent.currentText()
+        agent = agent_page.chosen()
         llm = wizard.llm_choice  # an own model server chosen on the Model page, or None: the agent's provider
         preset = self.chosen_preset() if choice not in ("existing", "custom") else None
         if choice == "existing" and wizard.existing is not None:
@@ -958,7 +978,7 @@ class StartPage(Page):
                     form = PlaceholderForm(wizard.sai, preset, self, agent=agent, host=self.host())
                     for marker, value in given.items():
                         form.set_value(marker, value)
-                    if widgets.AUTO_ANSWER is None and form.exec() != QDialog.DialogCode.Accepted:
+                    if widgets.AUTO_ANSWER is None and widgets.exec_dropped(form) != QDialog.DialogCode.Accepted:
                         return False
                     values = form.values()
             elif values is not None:
@@ -1030,6 +1050,14 @@ class NetworkPage(Page):
         self.form.addRow(tr("Presets"), row)
         self.hosts = LinesEdit([])
         self.form.addRow(tr("Further hosts (HTTPS)"), self.hosts)
+        # --allow-domain DOMAIN: DOMAIN and every name below it (sandbox-ai's --allow-host DOMAIN '*.DOMAIN').
+        self.domains = LinesEdit([])
+        self.domains.setToolTip(safe_tooltip(tr("Domains, one per line: each one and every name below it "
+                                                "(--allow-domain; not for shared hosting such as github.io, nor "
+                                                "public suffixes such as co.uk).")))
+        self.forbid(self.domains, "--allow-domain")
+        self.forbid(self.domains, "--allow-host")
+        self.form.addRow(tr("Whole domains (HTTPS)"), self.domains)
         self.ports = LinesEdit([])
         self.form.addRow(tr("Ports of services on this host"), self.ports)
         self.ask = QCheckBox(tr("ask before anything else (approvals)"))
@@ -1045,6 +1073,7 @@ class NetworkPage(Page):
         for option, box in self.presets.items():
             box.setChecked(bool(props.get(option)))
         self.hosts.setPlainText("\n".join(props.get("--allow-host", [])))
+        self.domains.setPlainText("\n".join(props.get("--allow-domain", [])))
         self.ports.setPlainText("\n".join(props.get("--allow-host-port", [])))
         approvals = self.board.first("approvals")
         self.ask.setChecked(not approvals or approvals.props.get("--ask", "on") != "off")
@@ -1064,6 +1093,8 @@ class NetworkPage(Page):
         for option, box in self.presets.items():
             set_or_drop(props, option, box.isChecked())
         set_or_drop(props, "--allow-host", self.hosts.values())
+        if self.domains.isEnabled():  # greyed out by the policy: what the board has stays as it is
+            set_or_drop(props, "--allow-domain", self.domains.values())
         set_or_drop(props, "--allow-host-port", self.ports.values())
         if self.ask.isChecked() == getattr(self, "shown_ask", None):
             pass  # as it was: --ask allow (every question allowed, chosen on the board) is not turned into on
@@ -1148,6 +1179,7 @@ class GitPage(Page):
         row.addWidget(add)
         row.addWidget(remove)
         row.addStretch()
+        widgets.list_menu(self.table, lambda: [remove, None, add])
         self.form.addRow(row)
         self.token_proxy = QCheckBox(labels.shown(tr("keep the tokens out of the sandbox: the connection proxy adds "
                                                      "them to Git's requests (--token-proxy)")))
@@ -1253,7 +1285,7 @@ class GitPage(Page):
                 try:
                     path = self.wizard_.sai.save_token(url, value)
                 except (OSError, ValueError) as exc:
-                    self.note.setText(tr("The token was not kept: {error}", error=printable(exc)))
+                    self.note.setText(tr("The token was not kept: {error}", error=printable_text(exc)))
                     return False
                 kind, value = "file", str(path)
                 kind_box.setCurrentIndex(kind_box.findData("file"))
@@ -1408,7 +1440,7 @@ class ReviewPage(Page):
         plan, message = result if error is None else (None, str(error))
         self.verdict_ok = plan is not None
         self.verdict.setText(tr("The launcher accepts these options.") if plan is not None else
-                             tr("The launcher refuses: {message}", message=printable((message or "").strip()[-400:])))
+                             tr("The launcher refuses: {message}", message=printable_text((message or "").strip()[-400:])))
 
     def validatePage(self):  # noqa: N802
         # QWizard.accept() validates the last page again: once the file is written the wizard may close, and
@@ -1442,7 +1474,8 @@ class SandboxWizard(QWizard):
         self.llm_choice, self.llm_endpoint = None, None  # the Model page's own server ({name, model, only}), if any
         try:
             self.policy, self.forbidden = sai.policy()[0], sai.forbidden()
-        except Exception:  # noqa: BLE001 - a broken policy is shown on the System page
+        except Exception as _exc:  # noqa: BLE001 - a broken policy is shown on the System page
+            applog.swallowed("wizard", "SandboxWizard.__init__: a broken policy is shown on the System page", _exc)
             self.policy, self.forbidden = {}, {}
         self.folder_page = FolderPage(self)
         self.agent_page = AgentPage(self)
@@ -1492,7 +1525,8 @@ class SandboxWizard(QWizard):
     def mcp_names(self):
         try:
             return sorted(self.sai.mcp_definitions())
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("wizard", "SandboxWizard.mcp_names failed (went on without it)", _exc)
             return []
 
     def document(self):
@@ -1531,7 +1565,7 @@ class SandboxWizard(QWizard):
     def wrote(self, main, error):
         if error is not None:
             self.set_write_state(None)  # Finish asks again
-            warn(self, tr("Not written"), printable(error))
+            warn(self, tr("Not written"), printable_text(error))
             return
         self.set_write_state("written")
         self.board.layout()

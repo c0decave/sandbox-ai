@@ -1,0 +1,24 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "default-hermes",
+  "title": "Hermes Agent (default)",
+  "description": "Hermes Agent on your project with sandbox-ai's defaults and nothing more: only its maker's model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "translations": {
+    "de": {
+      "title": "Hermes Agent (Standard)",
+      "description": "Hermes Agent an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur das Modell seines Herstellers ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "hermes"
+  ],
+  "options": [],
+  "notes": [
+    "The model: the Nous Portal (your login: sandbox-ai login hermes). Its hosts are open by default; nothing else of the provider's.",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-hermes (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "Its telemetry is always off and cannot be turned on.",
+    "Hermes Agent is not live-tested yet (a start says so); its image first: sandbox-ai build hermes (a start builds it when it is missing)."
+  ]
+}

@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QSplitter, QTableView, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
+from . import applog
 from . import backend, theme, widgets
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
 from .widgets import MONO, flow, plain_label, shown_as_text
 
@@ -126,7 +127,10 @@ class ActivityModel(QAbstractTableModel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.entries, self.rows = [], {}  # rows: id -> row
+        # rows: id -> its place counted from the first event ever added; DROPPED events have gone from the front since,
+        # so its row is that place minus DROPPED (a full page drops some at every read: the places of 20,000 events
+        # were all made anew each time, most of the time of a long timeline's read).
+        self.entries, self.rows, self.dropped = [], {}, 0
 
     def rowCount(self, parent=QModelIndex()):  # noqa: N802
         return 0 if parent.isValid() else len(self.entries)
@@ -169,14 +173,19 @@ class ActivityModel(QAbstractTableModel):
 
     def add(self, records):
         """Append RECORDS (updates replace their earlier event); keep at most KEEP events."""
-        fresh = []
+        fresh, pending = [], {}  # pending: id -> index in FRESH (an update read with its event takes its place)
         for record in records:
             ident = record.get("id")
             row = self.rows.get(ident) if isinstance(ident, str) else None
+            row = None if row is None else row - self.dropped
             if row is not None and record.get("update"):
                 self.entries[row] = Entry(record)
                 self.dataChanged.emit(self.index(row, 0), self.index(row, len(COLUMNS) - 1))
+            elif isinstance(ident, str) and ident in pending and record.get("update"):
+                fresh[pending[ident]] = Entry(record)
             else:
+                if isinstance(ident, str):
+                    pending[ident] = len(fresh)
                 fresh.append(Entry(record))
         if fresh:
             start = len(self.entries)
@@ -184,18 +193,22 @@ class ActivityModel(QAbstractTableModel):
             for offset, entry in enumerate(fresh):
                 self.entries.append(entry)
                 if isinstance(entry.record.get("id"), str):
-                    self.rows[entry.record["id"]] = start + offset
+                    self.rows[entry.record["id"]] = self.dropped + start + offset
             self.endInsertRows()
         if len(self.entries) > KEEP:
             drop = len(self.entries) - KEEP
             self.beginRemoveRows(QModelIndex(), 0, drop - 1)
+            for row, entry in enumerate(self.entries[:drop]):  # an id goes with the last of its events
+                ident = entry.record.get("id")
+                if isinstance(ident, str) and self.rows.get(ident) == self.dropped + row:
+                    del self.rows[ident]
             del self.entries[:drop]
-            self.rows = {e.record["id"]: row for row, e in enumerate(self.entries) if isinstance(e.record.get("id"), str)}
+            self.dropped += drop
             self.endRemoveRows()
 
     def clear(self):
         self.beginResetModel()
-        self.entries, self.rows = [], {}
+        self.entries, self.rows, self.dropped = [], {}, 0
         self.endResetModel()
 
     def recolor(self):
@@ -206,12 +219,16 @@ class ActivityModel(QAbstractTableModel):
             self.dataChanged.emit(self.index(0, 0), self.index(len(self.entries) - 1, len(COLUMNS) - 1))
 
 
+ALL_KINDS = frozenset(KINDS)
+
+
 class ActivityFilter(QSortFilterProxyModel):
     """The events of the kinds chosen that contain the text typed (in their summary, agent or details)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.kinds, self.text = set(KINDS), ""
+        self.timeline = None  # the ActivityModel filtered (setSourceModel)
 
     def set_filter(self, kinds=None, text=None):
         changing = hasattr(self, "beginFilterChange")  # Qt 6.9 on; invalidateFilter() before
@@ -225,6 +242,22 @@ class ActivityFilter(QSortFilterProxyModel):
             self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
         else:
             self.invalidateFilter()
+
+    def setSourceModel(self, model):  # noqa: N802
+        super().setSourceModel(model)
+        self.timeline = model
+
+    def display_text(self, row, column):
+        """What row ROW of the filter shows in COLUMN, without an index made for it (tables.fit_columns measures with
+        it after every read: through data(), each of its 800 cells made an index here and one in the timeline, a third
+        of the time a long timeline took to read). The filter never sorts: while it lets every event through, its rows
+        are the timeline's."""
+        if self.kinds >= ALL_KINDS and not self.text:
+            source = row
+        else:
+            source = self.mapToSource(self.index(row, 0)).row()
+        entries = (self.sourceModel() if self.timeline is None else self.timeline).entries
+        return entries[source].cells[column] if 0 <= source < len(entries) and 0 <= column < len(COLUMNS) else None
 
     def filterAcceptsRow(self, row, parent):  # noqa: N802
         entries = self.sourceModel().entries
@@ -345,10 +378,11 @@ class ActivityPage(QWidget):
         self.connections_button.clicked.connect(self.show_connections)
         self.files_button = QPushButton(tr("Show in Files"))
         self.files_button.clicked.connect(self.show_file)
-        self.status = plain_label(selectable=True)  # wraps: a long status never widens the window
+        self.status = plain_label(selectable=True, log="activity")  # wraps: a long status never widens the window
         self.status.setAccessibleName(tr("Status"))
         bottom.addWidget(self.connections_button)
         bottom.addWidget(self.files_button)
+        widgets.list_menu(self.table, lambda: [self.connections_button, self.files_button])
         bottom.addStretch(1)
         layout.addLayout(bottom)
         # the status on a row of its own: beside the buttons a wrapped status got no room for its second line (a
@@ -423,7 +457,8 @@ class ActivityPage(QWidget):
         found = []
         try:
             runs = self.sai.runs()
-        except Exception:  # noqa: BLE001 - the page shows what it can
+        except Exception as _exc:  # noqa: BLE001 - the page shows what it can
+            applog.swallowed("activity_page", "ActivityPage.read_sources: the page shows what it can", _exc)
             runs = {}
         for name, record in sorted(runs.items()):
             session = backend.session_of(record)
@@ -433,7 +468,8 @@ class ActivityPage(QWidget):
             found.append((tr("Running: {run} ({workspace})", run=printable(name), workspace=workspace), [name]))
         try:
             sessions = self.sai.sessions()
-        except Exception:  # noqa: BLE001
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("activity_page", "ActivityPage.read_sources failed (went on without it)", _exc)
             sessions = []
         for row in sessions:
             name, status = row[0], row[3] if len(row) > 3 else ""
@@ -466,7 +502,7 @@ class ActivityPage(QWidget):
             return  # read for this machine before another host was chosen: dropped
         self.local_sources = result if error is None else []
         if error is not None:
-            self.status.setText(printable(error)[:300])
+            self.status.setText(printable_text(error)[:300])
         self.fill_sources(select)
 
     def remote_listed(self, host, token, result, error):
@@ -482,7 +518,7 @@ class ActivityPage(QWidget):
                                  workspace=printable(instance.project)), [instance.name]))
         self.remote_sources = found
         if error is not None:
-            self.status.setText(tr("{host}: no answer", host=self.hosts.label(host)) + f" ({printable(error)[:300]})")
+            self.status.setText(tr("{host}: no answer", host=self.hosts.label(host)) + f" ({printable_text(error)[:300]})")
         self.fill_sources(None)
 
     def fill_sources(self, select=None):
@@ -620,7 +656,7 @@ class ActivityPage(QWidget):
         if self.remote_again:
             self.look_again()
         if error is not None:
-            self.status.setText(printable(str(error).removeprefix("sandbox-ai activity: "))[:500])
+            self.status.setText(printable_text(str(error).removeprefix("sandbox-ai activity: "))[:500])
             return
         new = []
         for record in result:
@@ -645,7 +681,9 @@ class ActivityPage(QWidget):
         if process.state() == QProcess.ProcessState.NotRunning:
             process.deleteLater()
             return
-        process.finished.connect(lambda *_: process.deleteLater())
+        # Qt's own slot, not a Python one: when the page (and the command with it) goes before the command has ended,
+        # the connection goes with it (a lambda ran on the deleted command: RuntimeError at the app's end).
+        process.finished.connect(process.deleteLater)
         process.kill()
 
     def shutdown(self):
@@ -700,7 +738,7 @@ class ActivityPage(QWidget):
             self.buffer = b""
         message = self.errors.strip().splitlines()[-1] if self.errors.strip() else ""
         if code != 0 and message:
-            self.status.setText(printable(message.removeprefix("sandbox-ai activity: ")))
+            self.status.setText(printable_text(message.removeprefix("sandbox-ai activity: ")))
         else:
             self.update_status()
 
@@ -778,7 +816,7 @@ class ActivityPage(QWidget):
                 stream.write("".join(line + "\n" for line in lines))
         except OSError as exc:
             widgets.warn(self, tr("Not exported"), tr("Cannot write {path}: {error}", path=printable(path),
-                                                      error=printable(exc)))
+                                                      error=printable_text(exc)))
             return None
         self.status.setText(tr("{count} events exported to {path}", count=widgets.number(len(records)),
                                path=printable(path)))

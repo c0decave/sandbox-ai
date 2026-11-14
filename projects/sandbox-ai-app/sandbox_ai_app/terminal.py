@@ -21,18 +21,20 @@ import sys
 import weakref
 
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSplitter, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import chromium, terminal_text, theme
+from . import applog
+from . import browser_tabs, chromium, terminal_text, theme, vnc_view
 from .backend import setting as backend_setting
-from .files import printable
+from .files import printable, printable_text
 from .i18n import N_, tr
 from .pty_bridge import PtyBridge
 from .widgets import (
-    ask_first, background, disclosure, fill, fit_columns, inform, on_screen, plain_label, row_key, safe_tooltip, table,
-    warn,
+    ask_first, background, choose, context_menu, disclosure, exec_dropped, fill, fit_columns, inform, inset_close_tabs,
+    on_screen, plain_label, row_key, safe_tooltip, shown_as_text, table, warn,
 )
 
 WEB = Path(__file__).resolve().with_name("web")
@@ -50,6 +52,54 @@ LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 TAB_TAG = "SANDBOX_AI_APP_TAB"
 SAVED_TABS = "terminal-tabs"  # the app's state: the terminal tabs of running starts, in their order
 SAVED_LIMIT = 40  # tabs remembered at most
+# A kept tab whose start runs but has no terminal yet (it still starts) is reopened once it has: its host's starts are
+# read again every REOPEN_RETRY seconds, for REOPEN_PATIENCE seconds at most.
+REOPEN_RETRY = 5
+REOPEN_PATIENCE = 180
+# The tab of a session (a start in tmux, an attach) whose command ended normally (exit status 0: detached, the session
+# ended) closes by itself after this moment - the human sees it end; one that failed stays, marked, until closed.
+AUTO_CLOSE_MS = 3000
+# Why a kept tab's start that runs was not reopened (reopen_listed): the line above the tabs says it.
+NOT_REOPENED = {
+    "paused": N_("Not reopened (paused: resume it first): {names}"),
+    "no-terminal": N_("Not reopened (it runs without a terminal: see its log in Sandboxes & sessions): {names}"),
+    "ended": N_("Not reopened (its agent ended, its sandbox runs on: see Sandboxes & sessions): {names}"),
+    "starting": N_("Not reopened (no terminal yet: attach it from Sandboxes & sessions once it has started): {names}"),
+    "other": N_("Not reopened (nothing to attach to): {names}"),
+}
+
+
+def attachable(entry):
+    """Whether the start ENTRY (of list --json) has a terminal to attach to now. An older sandbox-ai (0.1.94) gives no
+    "attachable": a running session is (as it always was attached)."""
+    if "attachable" in entry:
+        return bool(entry.get("attachable"))
+    return entry.get("state") == "running" and entry.get("kind", "session") == "session"
+
+
+def not_attachable_why(entry):
+    """Why the start ENTRY that runs cannot be attached now: a key of NOT_REOPENED."""
+    if entry.get("state") == "paused":
+        return "paused"
+    terminal = entry.get("terminal")
+    if terminal == "starting" or entry.get("state") == "starting":
+        return "starting"
+    if terminal == "missing" or entry.get("attach_why") == "no-terminal":
+        return "no-terminal"
+    if terminal == "ended" or entry.get("attach_why") == "ended":
+        return "ended"
+    return "other"
+
+
+def matches(saved, entry):
+    """Whether the kept tab SAVED ({"tag", "id", "name"}) is the start ENTRY: its tab's tag (list --json "app_tab"), its
+    id, or its name - which may be the start's id (a tab attached by id, a start renamed since)."""
+    names = {entry.get("name"), entry.get("id")} - {None, ""}
+    return bool((saved.get("tag") and entry.get("app_tab") == saved["tag"]) or
+                (saved.get("id") and saved["id"] in names) or (saved.get("name") and saved["name"] in names))
+
+
+START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"  # a start's name as sandbox-ai takes it (rename NEW; as ui.START_NAME)
 
 try:
     from PySide6.QtWebChannel import QWebChannel
@@ -193,6 +243,8 @@ class TerminalView(QWidget):
         # records (SANDBOX_AI_APP_TAB in ENV), and the host and start it attaches to.
         self.tab_tag = (env or {}).get(TAB_TAG)
         self.start_host = self.start_name = None
+        self.instance_key = None  # the Sandboxes & sessions start it was found to show (TerminalsPage.instance_of)
+        self.label = None  # a title given with Rename... (kept across restarts of the app)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         page_url = QUrl.fromLocalFile(str(Path(web) / "terminal.html"))
@@ -290,12 +342,49 @@ class TerminalView(QWidget):
         agent = self.login_agent or terminal_text.agent_of_url(url, launcher)
         return agent, terminal_text.login_hosts(agent, launcher) if agent else ()
 
+    def privacy(self):
+        """How the run of this tab reaches the internet, when not directly: ("tor", PROFILE), ("vpn", PROFILE), or
+        ("profile", PROFILE) when only its command line names a --vpn (the kind not known yet); None otherwise
+        (TerminalsPage.privacy_of looks it up)."""
+        page = self.parentWidget()
+        while page is not None and not hasattr(page, "privacy_of"):
+            page = page.parentWidget()
+        return page.privacy_of(self) if page is not None else argv_privacy(self.argv)
+
     def open_link(self, url, where=None):
         """Open URL (a link of the terminal): a provider's sign-in page in the login browser when Settings say so
-        (WHERE "app" or "system" decides instead), everything else in the system browser."""
-        from .terminal_tools import system_browser
+        (WHERE "app" or "system" decides instead), everything else in the system browser. Never for a run behind
+        Tor (a browser here would reach the link with this computer's own address, in clear text past Tor): Copy
+        link, for Tor Browser; behind a VPN only after a warning that it goes past the VPN."""
         if not terminal_text.plausible(url):
             return
+        privacy = self.privacy()
+        if privacy is not None:
+            self.refuse_link(url, where, *privacy)
+            return
+        self.open_now(url, where)
+
+    def refuse_link(self, url, where, kind, profile):
+        shown = terminal_text.shown_url(url, 120)
+        copy = (tr("Copy link"), lambda: self.helper.copy_text(url))
+        if kind == "vpn":
+            self.bar.ask(tr("This sandbox runs through the VPN {name}: a browser on this computer opens {url} with "
+                            "this computer's own address, past the VPN.", name=profile, url=shown),
+                         [copy, (tr("Open anyway, past the VPN"), lambda: self.open_now(url, where)),
+                          (tr("Cancel"), lambda: None)])
+            return
+        if kind == "tor":
+            text = tr("This sandbox runs through Tor: {url} is not opened on this computer, which would reach it "
+                      "with your own address, in clear text past Tor. Copy the link and open it in Tor Browser.",
+                      url=shown)
+        else:
+            text = tr("This sandbox starts behind the VPN or Tor profile {name}: {url} is not opened on this "
+                      "computer, which would reach it past the VPN or Tor. Copy the link and open it in a browser "
+                      "behind it (Tor Browser for Tor).", name=profile, url=shown)
+        self.bar.ask(text, [copy, (tr("Cancel"), lambda: None)])
+
+    def open_now(self, url, where=None):
+        from .terminal_tools import system_browser
         agent, hosts = self.hosts_for(url)
         in_scope = terminal_text.host_in(terminal_text.host_of(url), hosts)
         if where == "app" or (where is None and in_scope and backend_setting("login_links") == "app"):
@@ -397,7 +486,7 @@ class TerminalView(QWidget):
         from PySide6.QtWidgets import QMenu
         try:
             state = json.loads(state) if state else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             state = {}
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -423,6 +512,16 @@ class TerminalView(QWidget):
             bridge.setParent(None)
             bridge.exited.connect(lambda _status, b=bridge: ended(b))
         bridge.close()
+
+
+def command_failure(result, error):
+    """Why a sandbox-ai command run in the background ((status, out, err) or ERROR) failed, in plain text; None when it
+    did not."""
+    status = result[0] if isinstance(result, tuple) and result else 0 if error is None else 1
+    if error is None and status == 0:
+        return None
+    why = str(error) if error is not None else str(result[2] or result[1] or "") if len(result) > 2 else ""
+    return printable_text(why).strip()[-1500:] or tr("exit status {status}", status=status)
 
 
 def ended(bridge):
@@ -476,6 +575,10 @@ ATTACH_WHY = {
     "mcp": N_("An MCP server sandbox: it has no terminal of its own."),
     "stopped": N_("It does not run."),
     "damaged": N_("Damaged: see sandbox-ai list."),
+    "no-terminal": N_("Runs without its terminal: its start did not make one (its supervisor.log says why). Stop it "
+                      "and start it again."),
+    "ended": N_("No agent any more: its tmux session has ended (the agent and its shell window), its sandbox has not. "
+                "Stop it, then resume it."),
 }
 STATES = {"running": N_("running"), "paused": N_("paused")}
 
@@ -538,7 +641,7 @@ def attach_key(argv):
     return None
 
 
-AGENT_NAMES = ("claude", "codex", "opencode")
+AGENT_NAMES = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 
 
 def remote_words(command):
@@ -578,6 +681,32 @@ def attached_name(words):
     return None
 
 
+VPN_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+
+def record_privacy(kind, profile):
+    """("tor"|"vpn", PROFILE) of a run's vpn_type and vpn_profile (run.json, list --json), or None (none, or not
+    valid)."""
+    if not isinstance(profile, str) or not VPN_PROFILE.fullmatch(profile):
+        return None
+    return ("tor" if kind == "tor" else "vpn", profile)
+
+
+def argv_privacy(argv):
+    """("profile", PROFILE) when the start ARGV (here, or its words over SSH) names --vpn PROFILE among its options
+    (before --), else None: its run is not registered yet, and what kind of profile it is not known here."""
+    argv = [str(arg) for arg in argv]
+    if argv and os.path.basename(argv[0]) == "ssh":
+        argv = remote_words(argv[-1]) or []
+    options = argv[:argv.index("--")] if "--" in argv else argv
+    for index, token in enumerate(options):
+        value = options[index + 1] if token in ("--vpn", "-vp") and index + 1 < len(options) else \
+            token.partition("=")[2] if token.startswith(("--vpn=", "-vp=")) else None
+        if value and VPN_PROFILE.fullmatch(value):
+            return ("profile", value)
+    return None
+
+
 def detaches(argv, launcher=None):
     """Whether closing the terminal of ARGV only detaches it, the start running on: attaching to a start (tmux),
     a start with --session, or an interactive agent start, which the launcher runs as a detachable session in tmux
@@ -610,8 +739,8 @@ def detaches(argv, launcher=None):
     if launcher is not None and hasattr(launcher, "interactive_args"):
         try:
             return bool(launcher.interactive_args(argv[at], agent_args))
-        except Exception:  # noqa: BLE001 - an older launcher: options only means interactive
-            pass
+        except Exception as _exc:  # noqa: BLE001 - an older launcher: options only means interactive
+            applog.swallowed("terminal", "detaches: an older launcher: options only means interactive", _exc)
     return all(arg.startswith("-") for arg in agent_args)
 
 
@@ -644,6 +773,7 @@ class TerminalsPage(QWidget):
         self.waiting, self.checking = [], False  # tabs asked for while Chromium's sandbox is checked (open())
         self.show_state()
         self.tabs = QTabWidget()
+        inset_close_tabs(self.tabs)  # (the [x] inside its tab)
         self.tabs.setTabsClosable(True)
         self.tabs.setDocumentMode(True)
         # A terminal needs some rows: the page (and so the window) keeps that much height, Sessions folded or not.
@@ -661,6 +791,20 @@ class TerminalsPage(QWidget):
             key.activated.connect(lambda index=number: self.show_tab(index))
             self.tab_keys.append(key)
         self.tabs.tabBar().tabMoved.connect(lambda *_: self.save_tabs())
+        # Right click on a tab: its session's actions and the ways to close it (tab_actions).
+        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabs.tabBar().customContextMenuRequested.connect(self.tab_menu)
+        # Ctrl+W (macOS: Cmd+W) closes the current tab only when its session has ended: while it runs the key is the
+        # terminal's (the shortcut is disabled then, and the key goes to the program).
+        self.close_key = QShortcut(QKeySequence("Ctrl+W"), self)
+        self.close_key.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.close_key.activated.connect(self.close_ended_tab)
+        self.close_key.setEnabled(False)
+        self.tabs.currentChanged.connect(lambda _index: self.update_close_key())
+        # The sandboxes' own browsers (--browser): tabs beside their start's terminal (browser_tabs.py).
+        self.browsers = browser_tabs.BrowserTabs(self)
+        # The window's Sandboxes & sessions (set by the window): a tab's start, its Stop, Rename and Focus.
+        self.sessions_page, self.focus_start = None, None
         self.store, self.reopening = None, False  # the app's state (MainWindow), and while reopen() opens tabs
         self.entries, self.problem, self.reading, self.shown_rows, self.ticks = [], "", None, None, 0
         self.starts = self.make_starts() if sai is not None else None
@@ -725,6 +869,8 @@ class TerminalsPage(QWidget):
                           sortable=False)
         self.list.setAccessibleName(tr("Sessions"))
         self.list.cellDoubleClicked.connect(lambda row, _column: self.attach_row(row))
+        from .widgets import list_menu
+        list_menu(self.list, self.start_menu_entries)
         box_layout.addWidget(self.list, 1)
         self.top_row = top
         return box
@@ -764,7 +910,8 @@ class TerminalsPage(QWidget):
         try:
             others = [e for e in self.sai.host_entries() if e.get("kind") != LOCAL] \
                 if self.sai.hosts_supported() else []
-        except Exception:  # noqa: BLE001 - a damaged hosts file: this machine still counts
+        except Exception as _exc:  # noqa: BLE001 - a damaged hosts file: this machine still counts
+            applog.swallowed("terminal", "TerminalsPage.load_hosts: a damaged hosts file: this machine still co…", _exc)
             others = []
         self.host.blockSignals(True)
         self.host.clear()
@@ -819,7 +966,7 @@ class TerminalsPage(QWidget):
         if host != self.chosen_host():
             return
         if error is not None or not isinstance(result, list):
-            self.problem = printable(str(error) if error is not None else tr("not a list"))[:300]
+            self.problem = printable_text(str(error) if error is not None else tr("not a list"))[:300]
         else:
             self.entries = grouped(host, [e for e in result if isinstance(e, dict) and isinstance(e.get("name"), str)
                                           and e.get("state") in ("running", "paused")])
@@ -856,13 +1003,22 @@ class TerminalsPage(QWidget):
             owner = entry.get(OWNER)
             # What belongs to a start stands below it, indented; an MCP server of no start says so.
             name = printable(entry["name"])
+            terminal = entry.get("terminal") if entry.get("state") == "running" else None
+            step = printable(str(entry.get("terminal_step") or ""))[:60] if terminal == "starting" else ""
+            state = tr("starting") + (f": {step}" if step else "") if terminal == "starting" else \
+                tr("no terminal (see log)") if terminal == "missing" else \
+                tr("no agent: its tmux session ended (see log)") if terminal == "ended" else \
+                tr(STATES.get(entry.get("state"), "running"))
             rows.append([f"    ↳ {name}" if owner else name,
                          printable(entry.get("agent") or entry.get("kind") or ""),
-                         tr(STATES.get(entry.get("state"), "running")), printable(entry.get("workspace") or ""),
+                         state, printable(entry.get("workspace") or ""),
                          attach_why(entry) + (" · " + tr("belongs to no start") if owner == "" else "")])
-            colors.append({"running": "ok", "paused": "warn"}.get(entry.get("state")))
-            tips.append(tr("Belongs to {name}", name=printable(owner)) if owner else
-                        tr(ORPHAN_TIP) if owner == "" else None)
+            colors.append("bad" if terminal in ("missing", "ended") else "warn" if terminal == "starting" else
+                          {"running": "ok", "paused": "warn"}.get(entry.get("state")))
+            tip = tr("Belongs to {name}", name=printable(owner)) if owner else tr(ORPHAN_TIP) if owner == "" else None
+            if terminal in ("missing", "ended"):  # why: the end of its supervisor.log
+                tip = "\n".join(filter(None, [tip, printable_text(str(entry.get("terminal_log") or ""))[-2000:]]))
+            tips.append(tip)
             open_.append(view is not None)
         text = tr("{count} running on {host}", count=len(rows), host=host)
         if self.problem:
@@ -890,6 +1046,19 @@ class TerminalsPage(QWidget):
             self.list.setCellWidget(row, 4, cell)
         fit_columns(self.list)  # the buttons too
 
+    def start_menu_entries(self):
+        """A right click on a start of Sessions: Open terminal (or Show its tab), as its row's button - or why it has
+        no terminal; then Refresh."""
+        rows = sorted({index.row() for index in self.list.selectedIndexes()})
+        name = row_key(self.list, rows[0]) if len(rows) == 1 else None
+        entry = next((e for e in self.entries if e["name"] == name), None) if name is not None else None
+        why = None if entry is not None and entry.get("attachable") else \
+            attach_why(entry) if entry is not None else tr("Choose one start")
+        opened = entry is not None and entry.get("attachable") and \
+            self.open_view(self.start_key(self.chosen_host(), name)) is not None
+        return [(tr("Show its tab") if opened else tr("Open terminal"), why is None, why,
+                 lambda: self.attach_start(name)), None, self.refresh_button]
+
     def attach_row(self, row):
         name = row_key(self.list, row)
         entry = next((e for e in self.entries if e["name"] == name), None)
@@ -903,7 +1072,7 @@ class TerminalsPage(QWidget):
         try:
             argv = self.attach_argv(host, name)
         except (OSError, ValueError) as exc:
-            warn(self, tr("Attach"), printable(str(exc)))
+            warn(self, tr("Attach"), printable_text(str(exc)))
             return None
         view = self.open_view(attach_key(argv))
         if view is not None:
@@ -975,10 +1144,15 @@ class TerminalsPage(QWidget):
         first time, in a message; the caller opens a terminal window instead."""
         if result.ok:
             if self.sandbox_problem:
+                applog.changed(("terminal tabs", "chromium"), "INFO", "terminal", "tabs of the app again: Chromium's "
+                               "sandbox starts now")
                 self.sandbox_problem = ""
                 self.show_state()
             return True
         self.sandbox_problem = chromium.unavailable_text(result)
+        applog.changed(("terminal tabs", "chromium"), "WARNING", "terminal", "no tab of the app: Chromium's sandbox "
+                       f"cannot start now ({applog.redact(result.error or '?')}): a terminal window "
+                       f"instead\n{applog.tail(self.sandbox_problem, lines=4)}", quiet="DEBUG")
         self.show_state()
         window = self.window()
         if hasattr(window, "statusBar"):
@@ -1023,30 +1197,78 @@ class TerminalsPage(QWidget):
             if done is not None:
                 done(view)
 
-    def make_tab(self, argv, title, cwd=None):
+    def make_tab(self, argv, title, cwd=None, at=None):
         env = None
         start_host, start_name = self.start_of(argv)
-        if start_name is None and detaches(argv, self.launcher()):
-            # A start in this tab (not an attach): the start records the tag, by which the tab is found again
+        if start_name is None:
+            # A start in this tab (not an attach): the start records the tag, by which the tab is found again (a
+            # session's start; every run's run.json too: whether its links may open here, privacy_of)
             env = {**os.environ, TAB_TAG: secrets.token_hex(8)}
         view = TerminalView(argv, self.web, cwd, self, env=env)
         view.start_host, view.start_name = start_host, start_name
         view.tab_title = title
-        index = self.tabs.addTab(view, title)
+        index = self.tabs.addTab(view, title) if at is None else self.tabs.insertTab(at, view, title)
         self.tabs.setTabToolTip(index, shlex.join(argv))
         view.exited.connect(lambda status, v=view: self._ended(v, status))
         self.tabs.setCurrentIndex(index)
         view.view.setFocus()
         self.show_starts()
         self.save_tabs()
+        self.update_close_key()
         return view
 
     def _ended(self, view, status):
+        view.exit_status = status
         index = self.tabs.indexOf(view)
+        title = getattr(view, "tab_title", "?")
         if index >= 0:
-            self.tabs.setTabText(index, tr("{title} (ended)", title=self.tabs.tabText(index)))
+            title = self.ended_title(view, self.tabs.tabText(index))
+            self.tabs.setTabText(index, title)
         self.show_starts()
         self.save_tabs()
+        self.update_close_key()
+        # A session's tab that ended normally goes by itself (a tab of an ended session makes no sense); one that
+        # failed stays with its message; a build's or another command's stays (its output is read there).
+        closes = status == 0 and detaches(view.argv, self.launcher())
+        applog.log("INFO" if status == 0 else "WARNING", "terminal", f"tab {printable(title)}: its command ended, exit "
+                   f"status {status} - " + (f"the tab closes by itself in {AUTO_CLOSE_MS / 1000:g} s (its session's "
+                                           "terminal ended normally)" if closes else
+                                           "the tab stays open with its output"))
+        if closes:
+            QTimer.singleShot(AUTO_CLOSE_MS, lambda v=view: self.close_ended(v))
+
+    def ended_title(self, view, title):
+        """TITLE of the tab VIEW whose command ended: failed (an exit status other than 0), detached (its session
+        still runs), else ended."""
+        status = getattr(view, "exit_status", 0)
+        if isinstance(status, int) and status != 0:
+            return tr("{title} (failed)", title=title)
+        instance = self.instance_of(view)
+        if instance is not None and instance.state in ("running", "paused"):
+            return tr("{title} (detached)", title=title)
+        return tr("{title} (ended)", title=title)
+
+    def close_ended(self, view):
+        """Close the tab VIEW of a session that ended normally (AUTO_CLOSE_MS after it did), unless it was closed or
+        runs again meanwhile; the focus stays where the human has it."""
+        try:
+            index = self.tabs.indexOf(view)
+            if index < 0 or view.running:
+                applog.log("DEBUG", "terminal", f"tab {printable(getattr(view, 'tab_title', '?'))}: not closed by "
+                           "itself - " + ("closed already" if index < 0 else "it runs again"))
+                return
+        except RuntimeError:  # the page or the tab is gone
+            return
+        from PySide6.QtWidgets import QApplication
+        focus = QApplication.focusWidget()
+        applog.log("INFO", "terminal", f"tab {printable(self.tabs.tabText(index))}: closed by itself (its session's "
+                   "terminal ended normally)")
+        self.close_tab(index, ask=False)
+        try:
+            if focus is not None and focus.isVisible() and QApplication.focusWidget() is not focus:
+                focus.setFocus()
+        except RuntimeError:  # (it was in the tab that went)
+            pass
 
     # -- the tabs of running starts, kept for the next start of the app --
 
@@ -1067,12 +1289,14 @@ class TerminalsPage(QWidget):
         try:
             names = [e["name"] for e in self.sai.host_entries() if e.get("kind") != LOCAL] \
                 if self.sai is not None and self.sai.hosts_supported() else []
-        except Exception:  # noqa: BLE001 - no hosts file: no host
+        except Exception as _exc:  # noqa: BLE001 - no hosts file: no host
+            applog.swallowed("terminal", "TerminalsPage.host_of: no hosts file: no host", _exc)
             return None
         for name in names:
             try:
                 prefix = list(self.sai.host_terminal(name, "list"))[:-1]
-            except Exception:  # noqa: BLE001
+            except Exception as _exc:  # noqa: BLE001
+                applog.swallowed("terminal", "TerminalsPage.host_of failed (went on without it)", _exc)
                 continue
             if prefix and argv[:len(prefix)] == prefix:
                 return name
@@ -1091,9 +1315,13 @@ class TerminalsPage(QWidget):
             listed = next((e for e in self.entries if (tag and e.get("app_tab") == tag) or
                            (name and e.get("name") == name and (host or LOCAL) == self.chosen_host())), None) \
                 if self.starts is not None else None
-            entry = {"host": host or LOCAL, "name": name or (listed or {}).get("name"),
-                     "id": (listed or {}).get("id"), "tag": tag, "title": self.tabs.tabText(self.tabs.indexOf(view))}
+            known = self.instance_of(view) if not (listed or {}).get("id") else None  # (Sandboxes & sessions')
+            entry = {"host": host or LOCAL, "name": name or (listed or {}).get("name") or getattr(known, "name", None),
+                     "id": (listed or {}).get("id") or getattr(known, "ident", None), "tag": tag,
+                     "title": self.tabs.tabText(self.tabs.indexOf(view)), "label": view.label}
             found.append({k: v for k, v in entry.items() if isinstance(v, str) and v and len(v) <= 200})
+        # The kept tabs still waiting for their start's terminal (reopen_listed) stay kept.
+        found += [entry for entry in getattr(self, "reopen_waiting", []) if entry not in found]
         return found[:SAVED_LIMIT]
 
     def save_tabs(self):
@@ -1113,12 +1341,21 @@ class TerminalsPage(QWidget):
         everything = backend_setting("reopen_terminals") if everything is None else everything
         hosts = list(dict.fromkeys(([LOCAL] if everything else []) + [e["host"] for e in saved]))
         if not hosts:
+            applog.log("DEBUG", "terminal", "reopen: no tab was kept and the setting reopen_terminals is off")
             return False
         self.reopening = True
         listed = {}
+        applog.log("INFO", "terminal", f"reopen: {len(saved)} tab(s) kept from the last run of the app ("
+                   + (", ".join(printable(e.get("name") or e.get("title") or "?") for e in saved) or "-")
+                   + f"){', and every other start in tmux' if everything else ''}; the starts of "
+                   + ", ".join(map(printable, hosts)) + " are read")
 
         def one(result, error, host):
             listed[host] = result if error is None and isinstance(result, list) else None
+            if listed[host] is None:
+                applog.log("WARNING", "terminal", f"reopen: the starts of {printable(host)} could not be read "
+                           f"({applog.error_text(error) if error is not None else 'not a list'}): its kept tabs "
+                           "are not reopened")
             if len(listed) == len(hosts):
                 self.reopen_listed(saved, listed, everything, done)
         for host in hosts:
@@ -1126,54 +1363,129 @@ class TerminalsPage(QWidget):
                        done=lambda result, error, host=host: one(result, error, host))
         return True
 
-    def reopen_listed(self, saved, listed, everything, done=None):
-        """reopen(), once every host's starts were read (LISTED: {host: entries of list --json, None: not read})."""
-        wanted, skipped, seen = [], [], set()
-        runs = {host: [e for e in grouped(host, [e for e in entries if isinstance(e, dict)
-                                                 and isinstance(e.get("name"), str)])
-                       if e.get("state") == "running" and e.get("attachable")]
-                for host, entries in listed.items() if entries is not None}
+    def reopen_listed(self, saved, listed, everything, done=None, since=None):
+        """reopen(), once every host's starts were read (LISTED: {host: entries of list --json, None: not read}). Only
+        a start that is stopped or gone has ended meanwhile; one that runs without its terminal yet is waited for (read
+        again until it has one, REOPEN_PATIENCE at most), one that runs without anything to attach to is said with its
+        reason. SINCE: when the waiting began (a read again)."""
+        import time as clock
+        since = clock.monotonic() if since is None else since
+        wanted, skipped, seen, waiting, why = [], [], set(), [], {}
+        every = {host: grouped(host, [e for e in entries if isinstance(e, dict) and isinstance(e.get("name"), str)])
+                 for host, entries in listed.items() if entries is not None}
+        runs = {host: [e for e in entries if e.get("state") == "running" and attachable(e)]
+                for host, entries in every.items()}
         for entry in saved:
-            found = None
-            for start in runs.get(entry["host"], []):
-                if (entry.get("tag") and start.get("app_tab") == entry["tag"]) or \
-                        (entry.get("id") and start.get("id") == entry["id"]) or \
-                        (entry.get("name") and start["name"] == entry["name"]):
-                    found = start
-                    break
-            if found is None:
-                if entry["host"] in runs:  # (a host that did not answer: nothing is said of its starts)
-                    skipped.append(entry.get("name") or entry.get("title") or "?")
+            if entry["host"] not in every:  # (a host that did not answer: nothing is said of its starts)
+                continue
+            shown = entry.get("name") or entry.get("title") or "?"
+            found = next((start for start in every[entry["host"]] if matches(entry, start)), None)
+            if found is None or found.get("state") not in ("running", "paused", "starting", "orphaned"):
+                skipped.append(shown)  # stopped, or gone: ended meanwhile
+                continue
+            if not (found.get("state") in ("running", "orphaned") and attachable(found)):
+                reason = not_attachable_why(found)
+                if reason == "starting" and clock.monotonic() - since < REOPEN_PATIENCE:
+                    waiting.append(entry)
+                else:
+                    why.setdefault(reason, []).append(shown)
                 continue
             if (entry["host"], found["name"]) not in seen:
                 seen.add((entry["host"], found["name"]))
-                wanted.append((entry["host"], found["name"]))
+                wanted.append((entry["host"], found["name"], entry.get("label")))
         if everything:
             for host, starts in runs.items():
                 for start in starts:
                     # One tab per start: its MCP servers, helpers and a team's members are reached from it.
                     if OWNER not in start and (host, start["name"]) not in seen:
                         seen.add((host, start["name"]))
-                        wanted.append((host, start["name"]))
-        for host, name in wanted:
+                        wanted.append((host, start["name"], None))
+        for host, name, label in wanted:
             try:
                 argv = self.attach_argv(host, name)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                applog.swallowed("terminal", f"reopen: {printable(name)} on {printable(host)} is not attached",
+                                 exc, level="WARNING")
                 continue
-            self.open(argv, name if host == LOCAL else f"{host}: {name}")
+            label = label if isinstance(label, str) and label else None
+            self.open(argv, label or (name if host == LOCAL else f"{host}: {name}"),
+                      done=(lambda view, text=label: self.relabel(view, text)) if label else None)
         self.reopening = False
+        self.reopen_waiting = waiting
+        said = []
         if skipped:
-            from . import applog
-            text = tr("Not reopened (ended meanwhile): {names}", names=", ".join(printable(n) for n in skipped))
-            applog.log("INFO", "terminal", text)
-            self.say(text)
+            said.append(tr("Not reopened (ended meanwhile): {names}", names=", ".join(printable(n) for n in skipped)))
+        for reason, names in why.items():
+            said.append(tr(NOT_REOPENED[reason], names=", ".join(printable(n) for n in names)))
+        if waiting:
+            said.append(tr("Waiting for the terminal of {names} (it still starts): its tab opens once it is there.",
+                           names=", ".join(printable(e.get("name") or e.get("title") or "?") for e in waiting)))
+            QTimer.singleShot(int(REOPEN_RETRY * 1000), lambda: self.reopen_again(waiting, since))
+        if said:
+            for line in said:
+                applog.log("INFO", "terminal", line)
+            self.say("\n".join(said))
+        elif getattr(self, "waiting_said", False):  # the wait is over: its line goes
+            self.say("")
+        self.waiting_said = bool(waiting)
         if wanted:
             QTimer.singleShot(0, self.save_tabs)
+        applog.log("INFO", "terminal", "reopen: attached again " + (", ".join(
+            f"{printable(name)}" + (f" on {printable(host)}" if host != LOCAL else "") for host, name, _ in wanted)
+            or "none") + (f"; {len(waiting)} still starting" if waiting else ""))
         if done is not None:
-            done([name for _, name in wanted], skipped)
+            done([name for _, name, _label in wanted], skipped)
+
+    def reopen_again(self, waiting, since):
+        """The kept tabs WAITING for their start's terminal: their hosts' starts read again, reopen_listed once more."""
+        try:
+            if self.sai is None or not waiting or self.store is None:
+                return  # (the app ends: MainWindow.shutdown lets go of the store first)
+        except RuntimeError:  # the page is gone
+            return
+        hosts = list(dict.fromkeys(entry["host"] for entry in waiting))
+        listed = {}
+
+        def one(result, error, host):
+            listed[host] = result if error is None and isinstance(result, list) else None
+            if len(listed) == len(hosts):
+                self.reopen_listed(waiting, listed, False, since=since)
+        for host in hosts:
+            background(self.sai.host_json, host, "list", "--json", owner=self, timeout=90,
+                       done=lambda result, error, host=host: one(result, error, host))
 
     def views(self):
-        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+        """The terminal tabs (not the browser tabs: browser_tabs.py)."""
+        return [widget for widget in (self.tabs.widget(i) for i in range(self.tabs.count()))
+                if not isinstance(widget, vnc_view.BrowserPanel)]
+
+    def privacy_of(self, view):
+        """How the run in VIEW's tab reaches the internet (TerminalView.privacy): from this machine's registry (its
+        run.json: the tab's tag, app_tab, or the start it attaches to), else from the starts this page listed for
+        the tab's host (list --json: vpn_type, vpn_profile), else from the tab's command line (--vpn PROFILE).
+        Reads files only (never Podman, never SSH): it answers a click."""
+        host = view.start_host or LOCAL
+        tag, name = view.tab_tag, view.start_name
+
+        def mine(record, names):
+            return bool((tag and record.get("app_tab") == tag) or (name and name in names))
+        if host == LOCAL and self.sai is not None and hasattr(self.sai, "live_runs"):
+            try:
+                records = [r for r in self.sai.live_runs().values() if isinstance(r, dict)]
+            except Exception as _exc:  # noqa: BLE001 - the listing and the command line still say it
+                applog.swallowed("terminal", "TerminalsPage.privacy_of: the listing and the command line still …", _exc)
+                records = []
+            matched = [r for r in records if mine(r, (r.get("session"), r.get("name")))]
+            if matched:  # its run says it (a run of 0.1.95 or later records both; an older one: no VPN recorded)
+                return next(filter(None, (record_privacy(r.get("vpn_type"), r.get("vpn_profile"))
+                                          for r in matched)), None) or argv_privacy(view.argv)
+        if self.chosen_host() == host:
+            for entry in self.entries:
+                if isinstance(entry, dict) and mine(entry, (entry.get("name"),)):
+                    found = record_privacy(entry.get("vpn_type"), entry.get("vpn_profile"))
+                    if found:
+                        return found
+        return argv_privacy(view.argv)
 
     def running(self):
         return [view for view in self.views() if view.running]
@@ -1181,7 +1493,8 @@ class TerminalsPage(QWidget):
     def launcher(self):
         try:
             return self.sai.launcher if self.sai is not None else None
-        except Exception:  # noqa: BLE001 - without it the command line alone decides
+        except Exception as _exc:  # noqa: BLE001 - without it the command line alone decides
+            applog.swallowed("terminal", "TerminalsPage.launcher: without it the command line alone decides", _exc)
             return None
 
     def ending(self):
@@ -1197,19 +1510,285 @@ class TerminalsPage(QWidget):
         return [view for view in self.running() if detaches(view.argv, launcher)]
 
     def close_tab(self, index, ask=True):
+        """Close tab INDEX. ASK: a tab whose session runs on (a session, an attached start) asks Close tab (it runs
+        on), Stop session or Cancel; a command that ends with its tab (a build) asks before it ends; a tab whose
+        session or command has ended closes at once."""
         view = self.tabs.widget(index)
         if view is None:
             return
-        # Ending a command that runs loses what it did not save: asked, with Cancel as the default.
-        if ask and view.running and not ask_first(self, "terminal-end", tr("Close terminal"),
-                                                  tr("The command in this tab still runs. End it?"), tr("End it")):
+        if isinstance(view, vnc_view.BrowserPanel):  # a sandbox's browser: only its view closes, nothing to ask
+            self.browsers.close(view)
             return
+        if ask and not self.ended(view):
+            if detaches(view.argv, self.launcher()):
+                choice = self.ask_close(view)
+                if choice is None:
+                    return
+                if choice == "stop":
+                    self.stop_session(view, asked=True)
+            # Ending a command that runs loses what it did not save: asked, with Cancel as the default.
+            elif not ask_first(self, "terminal-end", tr("Close terminal"),
+                               tr("The command in this tab still runs. End it?"), tr("End it")):
+                return
+            index = self.index_of(view)  # (the question blocks no window: the tabs moved, or it went by itself)
+            if index < 0:
+                return
+        applog.log("INFO" if ask else "DEBUG", "terminal", f"tab {printable(self.tabs.tabText(index))} closed"
+                   + ("" if not getattr(view, "running", False) else " while its command runs" + (
+                       " (its session runs on)" if detaches(view.argv, self.launcher()) else " (the command ends)")))
         view.close_terminal()
         self.tabs.removeTab(index)
         view.deleteLater()
         self.show_starts()
         self.save_tabs()
+        self.update_close_key()
+
+    def ask_close(self, view):
+        """"close" (only the tab: its session runs on), "stop" (the session too) or None (Cancel) for the tab VIEW
+        of a session; the confirmation policy terminal-end off: "close" without asking."""
+        from . import backend
+        if backend.needs_confirm("terminal-end") is None:
+            return "close"
+        instance = self.instance_of(view)
+        name = printable(instance.name if instance is not None else view.start_name or self.tab_text(view))
+        choices = [("close", tr("Close tab"))]
+        if self.stoppable(view, instance) is None:
+            choices.append(("stop", tr("Stop session")))
+        return choose(self, tr("Close terminal"), tr(
+            "{name} keeps running when only its tab is closed (attach it again from Sandboxes & sessions or the "
+            "Sessions list). Stop the session too?", name=name), choices, cancel=tr("Cancel"), destructive=("stop",))
+
+    # -- a tab's session: its context menu, Ctrl+W --
+
+    def tab_text(self, view):
+        index = self.index_of(view)
+        return self.tabs.tabText(index) if index >= 0 else view.tab_title
+
+    def instance_of(self, view):
+        """The start of Sandboxes & sessions the tab VIEW shows (an Instance): the one it attaches to (its host and
+        name), or the one started in it (its tag: run.json "app_tab"), else the one it showed before (a session
+        that stopped since); None when it is not known (no Sandboxes page, not listed yet, a build)."""
+        page = self.sessions_page() if self.sessions_page is not None else None
+        instances = getattr(page, "instances", None) or {}
+        key, tag, name = (getattr(view, attr, None) for attr in ("instance_key", "tab_tag", "start_name"))
+        known = instances.get(key) if key else None
+        host = getattr(view, "start_host", None) or LOCAL
+        for instance in instances.values():
+            if getattr(instance, "host", LOCAL) != host or instance.kind not in ("session", "run"):
+                continue
+            record = instance.record if isinstance(instance.record, dict) else {}
+            if (tag and record.get("app_tab") == tag) or (name and name in (instance.name, instance.session)):
+                view.instance_key = instance.key
+                return instance
+        return known
+
+    def ended(self, view):
+        """Whether the tab VIEW's session is classified as ended: its command ended (the attach or the start
+        returned), or the start it shows is listed as stopped."""
+        if not getattr(view, "running", False):
+            return True
+        instance = self.instance_of(view)
+        return instance is not None and instance.state == "stopped"
+
+    def stoppable(self, view, instance=None):
+        """Why the session of the tab VIEW cannot be stopped from it, or None when it can."""
+        instance = instance if instance is not None else self.instance_of(view)
+        page = self.sessions_page() if self.sessions_page is not None else None
+        if instance is None or page is None:
+            return tr("Not a session the app knows (yet): see Sandboxes & sessions")
+        if instance.state not in ("running", "paused"):
+            return tr("The session does not run")
+        if instance.kind != "session" and not getattr(page, "stoppable", True):
+            return tr("Only sessions can be stopped here")
+        return None
+
+    def stop_session(self, view, asked=False):
+        """Stop the session of the tab VIEW (Sandboxes & sessions' Stop; ASKED: the human chose it already)."""
+        instance = self.instance_of(view)
+        page = self.sessions_page() if self.sessions_page is not None else None
+        if instance is None or page is None or self.stoppable(view, instance) is not None:
+            return False
+        page.stop(instance, asked=asked)
+        return True
+
+    def restartable(self, view, instance=None):
+        """Why the tab VIEW cannot be restarted, or None: a session (sandbox-ai resume NAME --restart) or a command
+        that ended (run again in its tab) can."""
+        instance = instance if instance is not None else self.instance_of(view)
+        if instance is not None and instance.kind == "session" and instance.state in ("running", "paused"):
+            return None if self.sai is not None else tr("Not available here")
+        if not view.running:
+            return None
+        return tr("Its command still runs: stop it first")
+
+    def restart(self, view):
+        """Restart: a running session with `sandbox-ai resume NAME --restart` (asked first; the agent continues its
+        conversation), then attached again in this tab; a command that ended runs again in its tab."""
+        instance = self.instance_of(view)
+        if self.restartable(view, instance) is not None:
+            return False
+        if instance is None or instance.kind != "session" or instance.state not in ("running", "paused"):
+            self.replace_view(view, view.argv)
+            return True
+        from . import backend
+        host = getattr(instance, "host", LOCAL)
+        name = instance.session if host == LOCAL and instance.session else instance.name
+        title = tr("Restart {name}", name=printable(name))
+        if not ask_first(self, "start-restart", title, tr(
+                "Restart {name} now? What runs in it ends; the agent continues its conversation.",
+                name=printable(name)), tr("Restart")):
+            return False
+        args = backend.resume_args(name, restart=True)
+        self.status_line(tr("Restarting {name}…", name=printable(name)))
+
+        def done(result, error):
+            failure = command_failure(result, error)
+            if failure is not None:
+                warn(self, title, failure)
+                return
+            if self.index_of(view) >= 0:  # (closed meanwhile: nothing to attach again)
+                try:
+                    self.replace_view(view, self.attach_argv(host, name))
+                except (OSError, ValueError) as exc:
+                    warn(self, title, printable_text(str(exc)))
+        background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, work=True, timeout=330,
+                   done=done)
+        return True
+
+    def replace_view(self, view, argv):
+        """ARGV in a new terminal in the place of tab VIEW (its title and name kept); the old one ends."""
+        index = self.index_of(view)
+        if index < 0:
+            return None
+        title = view.label or view.tab_title
+        new = self.make_tab(argv, title, at=index)
+        new.label = view.label
+        view.close_terminal()
+        self.tabs.removeTab(self.tabs.indexOf(view))
+        view.deleteLater()
+        self.tabs.setCurrentWidget(new)
+        self.save_tabs()
+        return new
+
+    def rename(self, view):
+        """Rename…: a session's start gets another name (sandbox-ai rename; its run id stays) and the tab with it;
+        any other tab only its title."""
+        from PySide6.QtWidgets import QInputDialog
+        instance = self.instance_of(view)
+        session = instance is not None and instance.kind == "session" and self.sai is not None
+        host = getattr(instance, "host", LOCAL) if instance is not None else LOCAL
+        old = (instance.session if host == LOCAL and instance.session else instance.name) if session else \
+            self.tab_text(view)
+        title = tr("Rename {name}", name=printable(old))
+        label = tr("New name (1-40 letters, digits, _ . -; its run id stays)") if session else tr("Title of the tab")
+        new, ok = QInputDialog.getText(self, title, shown_as_text(label), text=old)
+        new = (new or "").strip()
+        if not ok or not new or new == old:
+            return False
+        if not session:
+            self.relabel(view, printable(new)[:80])
+            return True
+        if not re.fullmatch(START_NAME, new):
+            warn(self, title, tr("A name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or digit."))
+            return False
+
+        def done(result, error):
+            failure = command_failure(result, error)
+            if failure is not None:
+                warn(self, title, failure)
+                return
+            if view.start_name == old:
+                view.start_name = new
+            self.relabel(view, new if host == LOCAL else f"{host}: {new}")
+            page = self.sessions_page() if self.sessions_page is not None else None
+            if page is not None and hasattr(page, "refresh_soon"):
+                page.refresh_soon(again=True)
+        background(lambda: self.sai.host_run(host, "rename", old, new, timeout=60), owner=self, work=True,
+                   timeout=90, done=done)
+        return True
+
+    def relabel(self, view, text):
+        """The tab VIEW titled TEXT, kept so (also after a restart of the app)."""
+        index = self.tabs.indexOf(view) if view is not None else -1
+        if index < 0 or not text:
+            return
+        view.label = view.tab_title = text
+        self.tabs.setTabText(index, text if view.running else self.ended_title(view, text))
+        self.save_tabs()
+
+    def focus(self, view):
+        """Focus in Sandboxes & sessions: the tab's start selected there."""
+        instance = self.instance_of(view)
+        if instance is not None and self.focus_start is not None:
+            self.focus_start(instance.key)
+
+    def status_line(self, text):
+        window = self.window()
+        if window is not self and hasattr(window, "statusBar"):
+            window.statusBar().showMessage(text, 8000)
+
+    def tab_actions(self, index):
+        """[(text, enabled, why, callback) or None] of the context menu of tab INDEX: its session's Rename…, Restart,
+        Stop session, Focus in Sandboxes & sessions; then Close tab, Stop session and close tab, Close other tabs."""
+        view = self.tabs.widget(index)
+        if view is None:
+            return []
+        if isinstance(view, vnc_view.BrowserPanel):
+            return self.browsers.actions(view)
+        instance = self.instance_of(view)
+        stop_why = self.stoppable(view, instance)
+        focus_why = None if instance is not None and self.focus_start is not None else \
+            tr("Not a session the app knows (yet): see Sandboxes & sessions")
+        restart_why = self.restartable(view, instance)
+        return [(tr("Rename…"), True, None, lambda: self.rename(view)),
+                (tr("Restart"), restart_why is None, restart_why, lambda: self.restart(view)),
+                (tr("Stop session"), stop_why is None, stop_why, lambda: self.stop_session(view)),
+                (tr("Focus in Sandboxes & sessions"), focus_why is None, focus_why, lambda: self.focus(view)),
+                None,
+                (tr("Close tab"), True, None, lambda: self.close_tab(self.index_of(view))),
+                (tr("Stop session and close tab"), stop_why is None, stop_why, lambda: self.stop_and_close(view)),
+                (tr("Close other tabs"), self.tabs.count() > 1, None, lambda: self.close_others(view))]
+
+    def tab_menu(self, position):
+        bar = self.tabs.tabBar()
+        index = bar.tabAt(position)
+        if index < 0:
+            return
+        menu = context_menu(self, self.tab_actions(index))
+        exec_dropped(menu, bar.mapToGlobal(position))
+
+    def index_of(self, view):
+        """The index of the tab VIEW, -1 when it is not (any more) a tab: one closed - and gone - by itself while a
+        question or a menu was open, or before a background answer came."""
+        try:
+            return self.tabs.indexOf(view)
+        except RuntimeError:
+            return -1
+
+    def stop_and_close(self, view):
+        if self.stop_session(view):
+            index = self.index_of(view)
+            if index >= 0:
+                self.close_tab(index, ask=False)
+
+    def close_others(self, view):
+        for other in [self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i) is not view]:
+            index = self.index_of(other)  # (a tab may have closed by itself under the question of the one before)
+            if index >= 0:
+                self.close_tab(index)
+
+    def update_close_key(self):
+        """Ctrl+W is the page's only while the current tab's session has ended (else the terminal's)."""
+        view = self.tabs.currentWidget()
+        self.close_key.setEnabled(view is not None and self.ended(view))
+
+    def close_ended_tab(self):
+        view = self.tabs.currentWidget()
+        if view is not None and self.ended(view):
+            self.close_tab(self.tabs.indexOf(view), ask=False)
 
     def close_all(self):
         for index in reversed(range(self.tabs.count())):
             self.close_tab(index, ask=False)
+        for frame in list(self.browsers.frames):  # the browsers opened in windows of their own
+            frame.close()

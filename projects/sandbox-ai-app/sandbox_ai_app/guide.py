@@ -79,6 +79,10 @@ TOUR = (
     Step("activity", N_("Activity"),
          N_("What happened in a run, in order: starts, tool calls, questions, connections, the taint."),
          N_("Pick a run to follow it from start to end.")),
+    Step("traffic", N_("LLM traffic"),
+         N_("What an agent and its model exchanged, request by request: the messages, tool calls and results, the "
+            "answer, and what the relay changed."),
+         N_("Pick a run with --llm and read its last request as a chat.")),
     Step("statistics", N_("Statistics"),
          N_("Tokens, requests and tool calls per run and per agent."),
          N_("Compare two runs of the same project.")),
@@ -119,9 +123,13 @@ class Question:
 FORMS = ("text", "path", "flag", "list", "choice", "switches", "model", "effort")
 # The model names each agent knows for sure and its effort levels, as the launcher (AGENT_MODELS, AGENT_EFFORTS)
 # has them; a test keeps both the same. An empty choice is the agent's own default.
-AGENT_MODELS = {"claude": ("fable", "opus", "sonnet", "haiku"), "codex": (), "opencode": ()}
+AGENT_MODELS = {"claude": ("fable", "opus", "sonnet", "haiku"), "codex": (), "opencode": (), "hermes": (),
+                "dsh": (), "qwen": (), "goose": ()}
 AGENT_EFFORTS = {"claude": ("low", "medium", "high", "xhigh", "max"),
-                 "codex": ("minimal", "low", "medium", "high", "xhigh"), "opencode": ()}
+                 "codex": ("minimal", "low", "medium", "high", "xhigh"), "opencode": (),
+                 "hermes": ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+                 "dsh": (), "qwen": ("none", "low", "medium", "high", "xhigh", "max"),
+                 "goose": ("off", "low", "medium", "high", "max")}
 
 NODE_QUESTIONS = {
     "workspace": (
@@ -155,7 +163,9 @@ NODE_QUESTIONS = {
     ),
     "agent": (
         Question("agent", N_("Agent"), N_("The coding agent that runs in the sandbox."), "choice",
-                 (("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode")), needed=True),
+                 (("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode"),
+                  ("hermes", "Hermes Agent"), ("dsh", "DeepSeek Harness"), ("qwen", "Qwen Code"),
+                  ("goose", "Goose")), needed=True),
         Question("model", N_("Model"), N_("The agent's model: pick one it knows or type another (Codex: its "
                                             "model name, OpenCode: provider/model); empty: its default."), "model"),
         Question("effort", N_("Effort"), N_("How hard the agent thinks (Claude Code: low to max, Codex: minimal to "
@@ -197,7 +207,7 @@ NODE_QUESTIONS = {
         Question("name", N_("Name"), N_("The service's name: the agent finds it in SANDBOX_AI_SERVICES, its logs are "
                                          "named after it."), "text", placeholder="db", needed=True),
         Question("image", N_("Image"), N_("One of your images (sandbox-ai images pull|build-image, the Images page): "
-                                           "pinned by digest, unchecked."), "text", placeholder="redis"),
+                                           "pinned by digest, unchecked."), "text", placeholder="redis", needed=True),
     ),
     "mcp": (
         Question("name", N_("Server"), N_("The MCP server by name (the MCP servers page lists them); it runs in a "
@@ -210,6 +220,9 @@ NODE_QUESTIONS = {
     "network": (
         Question("--allow-host", N_("Hosts"), N_("Further hosts the agent may reach over HTTPS, one per line."),
                  "list", placeholder="api.example.org"),
+        Question("--allow-domain", N_("Whole domains"), N_("Domains the agent may reach over HTTPS with every name "
+                                                           "below them, one per line (not github.io or co.uk)."),
+                 "list", placeholder="example.org"),
         Question("--allow-pypi", N_("PyPI"), N_("Python packages."), "flag"),
         Question("--allow-github", N_("GitHub"), N_("GitHub and its downloads."), "flag"),
         Question("--offline", N_("Offline"), N_("No network at all, not even the agent's provider."), "flag"),
@@ -236,6 +249,16 @@ NODE_QUESTIONS = {
                  "flag"),
         Question("--gui-vnc", N_("Watch it"), N_("A folder for the display's VNC socket, to watch what happens."),
                  "path"),
+    ),
+    "browser": (
+        Question("--browser", N_("Browser"), N_("Which browser runs beside the agent (its image: sandbox-ai build "
+                                                "browser)."), "choice",
+                 (("chromium", "Chromium"), ("firefox", "Firefox ESR")), needed=True),
+        Question("--browser-control", N_("Who drives it"), N_("You (in its tab in the app), the agent (Chrome's "
+                                                             "DevTools; Chromium only) or both."), "choice",
+                 (("", N_("you")), ("agent", N_("the agent")), ("both", N_("you and the agent")))),
+        Question("--browser-profile", N_("Profile"), N_("`fresh` (new at every start), `session` (kept with the session) "
+                                                        "or a folder of yours."), "text", placeholder="fresh"),
     ),
     "session": (
         Question("tmux", N_("tmux"), N_("Run the agent in tmux inside the sandbox (detach and attach again)."),

@@ -224,9 +224,9 @@ def read(path, keep=None, tail=0):
                     break
                 try:
                     entry = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):  # a damaged line: nested too deep for Python
                     continue
-                if isinstance(entry, dict) and entry.get("kind") in KINDS and (keep is None or keep(entry)):
+                if isinstance(entry, dict) and isinstance(entry.get("kind"), str) and entry["kind"] in KINDS and (keep is None or keep(entry)):
                     found.append(entry)
     finally:
         os.close(fd)
@@ -568,7 +568,7 @@ def muted(path=None):
     try:
         document = json.loads(Path(path or defaults_file()).read_text())
         return set(check_mute(document.get(MUTE_KEY, []))) if isinstance(document, dict) else set()
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return set()
 
 
@@ -703,7 +703,7 @@ class Questions:
             done_path = self.directory / f"{ident}.done"
             try:
                 question = json.loads((self.directory / name).read_text()[:1 << 16])
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 continue
             if not isinstance(question, dict):
                 continue
@@ -712,7 +712,7 @@ class Questions:
             elif done_path.exists():
                 try:
                     done = json.loads(done_path.read_text()[:1 << 16])
-                except (OSError, ValueError):
+                except (OSError, ValueError, RecursionError):
                     done = None
             elif final:
                 done = None
@@ -930,7 +930,7 @@ def safeguard_entry(line):
         entry = json.loads(line)
     except (ValueError, RecursionError):
         return None
-    return entry if isinstance(entry, dict) and entry.get("kind") in KINDS else None
+    return entry if isinstance(entry, dict) and isinstance(entry.get("kind"), str) and entry["kind"] in KINDS else None
 
 
 def collect(files, keep=None, tail=0):
@@ -1079,9 +1079,9 @@ class Tail:
             for line in complete.splitlines():
                 try:
                     entry = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
-                if isinstance(entry, dict) and entry.get("kind") in KINDS:
+                if isinstance(entry, dict) and isinstance(entry.get("kind"), str) and entry["kind"] in KINDS:
                     found.append(entry)
         self.primed = True
         return found

@@ -224,6 +224,34 @@ def test_openvpn_directives_that_are_refused(tmp_path, line, message):
         v.parse_openvpn(OPENVPN + line + "\n", tmp_path)
 
 
+INJECTED = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n{close}\nscript-security 2\n" \
+           "up /bin/sh\n<ca>\n-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n"
+
+
+@pytest.mark.parametrize("close", ["</ca>", "</ca>x", "  </ca> trailing"])
+def test_a_file_or_block_cannot_end_its_block_early_and_smuggle_directives(tmp_path, close):
+    """Bug hunt: a file the configuration names (ca ca.crt) went into the configuration verbatim as <ca>...</ca>, and
+    an inline block kept a line that only starts with its end tag; OpenVPN ends a block at the first line that starts
+    with </ca> (after leading spaces), so what followed it - script-security 2, up /bin/sh - became directives of
+    the VPN container's OpenVPN, past every refused one."""
+    (tmp_path / "ca.crt").write_text(INJECTED.format(close=close))
+    with pytest.raises(ValueError, match="could end it early"):
+        v.parse_openvpn("client\nremote 198.51.100.9\nca ca.crt\n", tmp_path)
+    if close != "</ca>":  # (an inline block's own end line ends it here too: then "up" is refused as a directive)
+        with pytest.raises(ValueError, match="could end it early"):
+            v.parse_openvpn("client\nremote 198.51.100.9\n<ca>\n" + INJECTED.format(close=close) + "</ca>\n")
+
+
+def test_a_stored_configuration_with_a_smuggled_directive_is_refused_at_its_start():
+    """A profile imported before parse_openvpn checked its blocks keeps what was smuggled in: refused when it is
+    used (blocks_closed_plainly), the configurations parse_openvpn writes now pass."""
+    config, _, _, _ = v.parse_openvpn(OPENVPN)
+    assert v.blocks_closed_plainly(config)
+    old = "client\n<ca>\n" + INJECTED.format(close="</ca>") + "</ca>\n"
+    assert not v.blocks_closed_plainly(old)
+    assert not v.blocks_closed_plainly("client\n<ca>\n" + INJECTED.format(close="</ca>x") + "</ca>\n")
+
+
 def test_openvpn_needs_a_remote_and_a_ca():
     with pytest.raises(ValueError, match="no remote"):
         v.parse_openvpn("client\n<ca>\nx\n</ca>\n")
@@ -457,6 +485,44 @@ def test_mullvad_errors_never_contain_the_account_number(api, certificate):
     assert "not reachable" in str(caught.value) and ACCOUNT not in str(caught.value)
     with pytest.raises(ValueError, match="16 digits"):
         v.read_account(prompt=lambda _: "12345")
+
+
+def test_mullvad_follows_no_redirect_with_its_access_token():
+    """Bug hunt: urllib carried the Bearer access token to wherever a redirect of Mullvad's API pointed (another
+    host, plain http). A redirect is an answer of its own now, never followed."""
+    seen = []
+
+    class Other(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"[]")
+
+        def log_message(self, *args):
+            pass
+
+    other = http.server.HTTPServer(("127.0.0.1", 0), Other)
+
+    class Api(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{other.server_port}/elsewhere")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    api = http.server.HTTPServer(("127.0.0.1", 0), Api)
+    for server in (other, api):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        status, _ = v.Mullvad(f"http://127.0.0.1:{api.server_port}", timeout=5).request("GET", "accounts/v1/devices",
+                                                                                      token="secret-access-token")
+        assert status == 302 and seen == []
+    finally:
+        api.shutdown()
+        other.shutdown()
 
 
 def test_mullvad_profile_end_to_end(home, api, capsys):

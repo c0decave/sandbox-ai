@@ -21,12 +21,6 @@ RESERVED = [1, 2, 950]  # the proxy's, PulseAudio's and tor's IDs
 SUBUIDS = [(0, 1000, 1), (1, 100000, 65536)]  # rootless Podman's own map: your user, then 65536 subordinate IDs
 
 
-@pytest.fixture(autouse=True)
-def experimental(monkeypatch):
-    """--nested-containers is experimental: these tests opt in (test_it_is_refused_unless_opted_into does not)."""
-    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested-containers")
-
-
 @pytest.fixture
 def devices(monkeypatch):
     """/dev/fuse and /dev/net/tun as this host had them (the test machine may lack them); returns the set to change."""
@@ -344,12 +338,15 @@ def test_the_guard_enters_the_namespace_and_checks_its_map(tmp_path):
     present = tmp_path / "sys"
     (present / "fs" / "cgroup").mkdir(parents=True)
     rt.enter_nested_userns(RESERVED, userns, libc, fake_proc(tmp_path / "good", good),
-                           run_dirs=(str(run / "libpod"), str(run / "containers" / "storage")), sys_root=present)
+                           run_dirs=(str(run / "libpod"), str(run / "containers" / "storage")), sys_root=present,
+                           mqueue=tmp_path / "no-mqueue")
     # Podman's run state exists before its first command (`podman import -` wrote into a missing /run/libpod).
     assert (run / "libpod").is_dir() and (run / "containers" / "storage").is_dir()
     assert rt.NESTED_RUN_DIRS == ("/run/libpod", "/run/containers/storage")
-    # Its own user namespace first, then a mount namespace of it (where the engines may mount).
-    assert libc.calls == [("setns", rt.CLONE_NEWUSER), ("unshare", rt.CLONE_NEWNS)]  # (a /sys there already)
+    # Its own user namespace first, then a mount namespace and an IPC namespace of it (where the engines may mount,
+    # mqueue included).
+    assert libc.calls == [("setns", rt.CLONE_NEWUSER), ("unshare", rt.CLONE_NEWNS),
+                          ("unshare", rt.CLONE_NEWIPC)]  # (a /sys there already, no /dev/mqueue to mount on)
     with pytest.raises(RuntimeError, match=r"maps the reserved IDs \[1, 2, 950\]"):
         rt.enter_nested_userns(RESERVED, userns, FakeLibc(), fake_proc(tmp_path / "all", "0 0 65537\n"))
     with pytest.raises(RuntimeError, match=r"gid_map maps the reserved IDs \[950\]"):
@@ -363,6 +360,78 @@ def test_the_guard_enters_the_namespace_and_checks_its_map(tmp_path):
     with pytest.raises(RuntimeError):
         rt.enter_nested_userns(RESERVED, userns, refused, fake_proc(tmp_path / "early", "0 0 3\n"))
     assert refused.calls == [("setns", rt.CLONE_NEWUSER)]
+
+
+def test_the_agent_gets_an_ipc_namespace_of_its_own_where_mqueue_can_be_mounted(tmp_path, capsys):
+    """crun mounts mqueue for a container ("mount `mqueue` to `dev/mqueue`: Operation not permitted" on GitHub's
+    runner): the kernel lets only a holder of CAP_SYS_ADMIN in the user namespace that owns the IPC namespace do that,
+    and the sandbox's IPC namespace is the pod's. The guard gives the agent one of its own user namespace (stricter,
+    too: no System V IPC shared with the supervisor) and a fresh mqueue at /dev/mqueue for it."""
+    userns = tmp_path / "userns"
+    userns.write_text("")
+    good = rt.id_map_text(rt.nested_id_map(SUBUIDS, RESERVED))
+    present = tmp_path / "sys"
+    (present / "fs" / "cgroup").mkdir(parents=True)
+    mqueue = tmp_path / "mqueue"
+    mqueue.mkdir()
+    libc = FakeLibc()
+    rt.enter_nested_userns(RESERVED, userns, libc, fake_proc(tmp_path / "p1", good), run_dirs=(), sys_root=present,
+                           mqueue=mqueue)
+    flags = rt.MS_NOSUID | rt.MS_NODEV | rt.MS_NOEXEC
+    assert libc.calls == [("setns", rt.CLONE_NEWUSER), ("unshare", rt.CLONE_NEWNS), ("unshare", rt.CLONE_NEWIPC),
+                          ("mount", "mqueue", str(mqueue), b"mqueue", flags, None)]
+    assert rt.CLONE_NEWIPC == 0x08000000
+
+    class NoIpc(FakeLibc):  # an IPC namespace that cannot be had: said, and the run goes on (containers may fail)
+        def unshare(self, kind):
+            self.calls.append(("unshare", kind))
+            return -1 if kind == rt.CLONE_NEWIPC else 0
+    refused = NoIpc()
+    rt.enter_nested_userns(RESERVED, userns, refused, fake_proc(tmp_path / "p2", good), run_dirs=(), sys_root=present,
+                           mqueue=mqueue)
+    assert [call[0] for call in refused.calls] == ["setns", "unshare", "unshare"], "no mqueue mount without it"
+    assert "no IPC namespace of its own" in capsys.readouterr().err
+
+    class NoMount(FakeLibc):  # mqueue that cannot be mounted: the old one stays, the run goes on
+        def mount(self, *args):
+            self.calls.append(("mount",))
+            return -1
+    rt.enter_nested_userns(RESERVED, userns, NoMount(), fake_proc(tmp_path / "p3", good), run_dirs=(),
+                           sys_root=present, mqueue=mqueue)
+    assert "no mqueue of its own" in capsys.readouterr().err
+
+
+def test_the_containers_conf_keeps_a_private_ipc_namespace_and_says_why(devices):
+    containers = s.nested_files(parsed("--nested-containers"))["containers/containers.conf"]
+    assert 'ipcns = "private"' in containers and "mqueue" in containers
+
+
+def test_x_without_mit_shm_for_an_agent_with_an_ipc_namespace_of_its_own(devices):
+    """Xvfb's shared memory is System V IPC of the sandbox's namespace, which the nested agent's X clients no longer
+    reach: the display offers no MIT-SHM then (clients draw through the socket), as for the browser's display."""
+    assert s.gui_config(parsed("--nested-containers", "--gui"))["no_shm"] is True
+    assert "no_shm" not in s.gui_config(parsed("--gui"))
+
+
+def test_the_live_test_names_the_runners_mqueue_refusal_as_a_known_limitation():
+    """tests/test_nested_containers_live.py: a container run that crun refuses with the mqueue EPERM - while the agent
+    has an IPC namespace of its own - is skipped with that reason (the CI job "nested" takes that one skip, and the
+    option stays not live-tested); any other failure stays a failure."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("nested_live_for_unit_test",
+                                                  Path(__file__).resolve().parent / "test_nested_containers_live.py")
+    live = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(live)
+    refused = "failed:Error: crun: mount `mqueue` to `dev/mqueue`: Operation not permitted: OCI permission denied"
+    reason = live.known_limitation({"run": refused, "ipc": "own"})
+    assert reason and reason.startswith(live.KNOWN_LIMITATION) and "mqueue" in reason
+    assert live.known_limitation({"run": refused, "ipc": "shared"}) is None, "only once sandbox-ai did its part"
+    assert live.known_limitation({"run": "hello", "ipc": "own"}) is None
+    assert live.known_limitation({"run": "failed:Error: no such file or directory", "ipc": "own"}) is None
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text()
+    nested = workflow[workflow.index("\n  nested:"):]
+    nested = nested[:nested.index("\n  services:")]
+    assert live.KNOWN_LIMITATION in nested and "::warning" in nested, "the job takes exactly that skip"
 
 
 def test_the_supervisor_makes_the_namespace_keeps_it_and_hides_a_fresh_proc(tmp_path, monkeypatch):
@@ -426,10 +495,17 @@ def test_the_guard_enters_it_only_for_a_nested_start(tmp_path, monkeypatch):
 def test_the_supervisor_calls_it_before_firejail_and_firejail_gets_the_filter():
     """inner_bootstrap's order, read from its source: the namespace first (a child is forked while no thread runs),
     Firejail's command with the nested filter."""
+    import ast
     import inspect
+    import textwrap
     source = inspect.getsource(rt.inner_bootstrap)
     assert source.index("nested_setup(") < source.index("namespace_state()") < source.index("start_loggers(")
-    assert "firejail_command(before, nested=bool(nested))" in source
+    # (by its arguments, not its text: other keywords may follow - shutdown=, since sessions end with their guard)
+    calls = [node for node in ast.walk(ast.parse(textwrap.dedent(source))) if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "firejail_command"]
+    assert len(calls) == 1, "Firejail's command is made once"
+    nested = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}.get("nested")
+    assert nested == "bool(nested)", "the nested filter goes to Firejail whenever the run is nested"
 
 
 def test_a_host_that_restricts_user_namespaces_is_named_with_the_way_out(tmp_path, monkeypatch, devices):
@@ -699,21 +775,19 @@ def test_a_sys_that_cannot_be_made_is_said_and_the_run_goes_on(tmp_path, capsys)
     assert "no /sys for the containers" in capsys.readouterr().err
 
 
-def test_it_is_refused_unless_opted_into(devices, monkeypatch):
-    """Experimental in this release: refused unless SANDBOX_AI_EXPERIMENTAL names it (the CI job nested does)."""
-    monkeypatch.delenv("SANDBOX_AI_EXPERIMENTAL")
-    with pytest.raises(ValueError, match="experimental in this release.*SANDBOX_AI_EXPERIMENTAL=nested-containers"):
-        s.check_nested(parsed("--nested-containers"))
-    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "something-else, nested-containers")
+def test_it_starts_with_a_note(devices, monkeypatch, capsys):
+    """Not live-tested yet: choosing the option starts it, with a one-line note - never an opt-in (no
+    SANDBOX_AI_EXPERIMENTAL any more, not in the environment, the help or the CI job)."""
+    monkeypatch.delenv("SANDBOX_AI_EXPERIMENTAL", raising=False)
     s.check_nested(parsed("--nested-containers"))
-    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested")
-    with pytest.raises(ValueError, match="experimental"):
-        s.check_nested(parsed("--nested-containers"))
-    s.check_nested(parsed())  # without the option nothing is asked
-    assert s.experimental("x", {"SANDBOX_AI_EXPERIMENTAL": "x"}) and not s.experimental("x", {})
-    assert "SANDBOX_AI_EXPERIMENTAL=nested-containers" in s.option_actions()["--nested-containers"].help
+    err = capsys.readouterr().err
+    assert "note: --nested-containers: not live-tested yet" in err and err.count("\n") == 1
+    s.check_nested(parsed())  # without the option nothing is said
+    assert capsys.readouterr().err == ""
+    assert not hasattr(s, "experimental") and not hasattr(s, "EXPERIMENTAL_ENV")
+    assert "not live-tested yet" in s.option_actions()["--nested-containers"].help.lower()
+    assert "SANDBOX_AI_EXPERIMENTAL" not in s.option_actions()["--nested-containers"].help
     assert s.nested_plan(parsed("--nested-containers"))["experimental"] is True
-    assert "experimental" in s.nested_notes(parsed("--nested-containers"))[0]
+    assert "not live-tested yet" in s.nested_notes(parsed("--nested-containers"))[0]
     ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text()
-    job = ci[ci.index("\n  nested:"):]
-    assert "SANDBOX_AI_EXPERIMENTAL: nested-containers" in job[:job.index("steps:")]
+    assert "SANDBOX_AI_EXPERIMENTAL" not in ci

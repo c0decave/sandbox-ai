@@ -4,7 +4,7 @@
 
 A course of about nineteen minutes in fourteen chapters, from "what is it and why" to agent teams, rendered from
 the storyboard in this folder: an English and a German video, each with WebVTT subtitles and a chapter track.
-Beside it, a **series of eighteen short videos, one per page of the desktop app** (about a minute or two each),
+Beside it, a **series of nineteen short videos, one per page of the desktop app** (about a minute or two each),
 with a spoken German narration (see [The app series, spoken](#the-app-series-spoken)). The rendered files are not
 kept in Git; render them as below, or take them from a release. The desktop app plays the series itself (Help >
 Videos about the pages) and downloads it once from its release, `sandbox-ai-videos.tar`, checked against the signed
@@ -111,7 +111,11 @@ python3 docs/video/capture_app.py --app projects/sandbox-ai-app --out ~/video-ou
     --voice /tmp/piper-voices/de_DE-thorsten-high.onnx
 ```
 
-This writes `sandbox-ai-app-01-launch-de.mp4` ... `sandbox-ai-app-18-help-de.mp4` (H.264 with AAC sound) and a
+Where `/tmp` is small or shared, set `TMPDIR` to a folder elsewhere (both scripts make their throwaway folders there)
+and give `--narration-cache` a folder outside the output; `capture_app.py --home /tmp/me` shows the demo project as
+`/tmp/me/src/shop` (a few kilobytes, removed afterwards) instead of a long temporary path.
+
+This writes `sandbox-ai-app-01-launch-de.mp4` ... `sandbox-ai-app-19-help-de.mp4` (H.264 with AAC sound) and a
 `.vtt` beside each, numbered in the order of the app's navigation. `--only files,board` renders some of them
 (capture again first when a page changed: `capture_app.py --only files,files-remote`; the file manager's remote
 pane is captured against the app's own test SFTP server, so no SSH connection is needed), `--jobs N` N at a time,
@@ -143,10 +147,11 @@ silent, timed for reading, in either language (`--lang en`).
 - **Writing for the voice.** The spoken narration holds no paths, options or symbols (the test checks it): what
   is typed belongs into the bullets on screen. Name a button or page as the German app shows it (`i18n.py`).
 
-Rendering all eighteen German videos at 1920x1080 took about ten minutes with `--jobs 4` on a busy machine
+Rendering all nineteen German videos at 1920x1080 took about ten minutes with `--jobs 4` on a busy machine
 limited to ten CPUs, after about five minutes of speaking the narration once (`--tts-threads 4`); one at a time
-(`--jobs 1`, where disk or memory is short) it takes about half an hour. Together they last about 28 minutes
-(0.1.94: one to two and a half minutes each) and take about 40 MB.
+(`--jobs 1`, where disk or memory is short) it takes about half an hour. Together they last about 30 minutes
+(0.1.95: one to two and a half minutes each; capturing the pictures takes about three minutes more) and take
+about 45 MB.
 
 ## Update it when sandbox-ai changes
 
@@ -172,7 +177,7 @@ storyboard.
 
 Ein Kurs von etwa neunzehn Minuten in vierzehn Kapiteln, von „was ist das und warum“ bis zu Agenten-Teams,
 erzeugt aus dem Storyboard in diesem Ordner: ein englisches und ein deutsches Video, jeweils mit
-WebVTT-Untertiteln und einer Kapitelspur. Dazu eine Serie von achtzehn kurzen Videos, eines je Seite der
+WebVTT-Untertiteln und einer Kapitelspur. Dazu eine Serie von neunzehn kurzen Videos, eines je Seite der
 Desktop-App, mit gesprochener deutscher Erzählung. Die fertigen Dateien liegen nicht in Git. Die Desktop-App spielt
 die Reihe selbst ab (Hilfe > Videos zu den Seiten) und lädt sie einmal aus ihrem Release, `sandbox-ai-videos.tar`,
 geprüft gegen die signierte `SHA256SUMS` (`scripts/make_dist.py --videos DIR` erzeugt die Datei; siehe RELEASING.md).
@@ -193,7 +198,7 @@ passt also zu jedem Video. `--lang de` erzeugt nur das deutsche Video, `--size 1
 schnelleres, `--captions off` brennt die Erzählung nicht ins Bild (für Plattformen, auf denen Zuschauer Untertitel
 wählen), `--plan` zeigt nur die Zeitleiste, `--stills` speichert zusätzlich Standbilder.
 
-**Die App-Serie, gesprochen.** Achtzehn kurze Videos, eines je Seite der Desktop-App (`SERIES` in
+**Die App-Serie, gesprochen.** Neunzehn kurze Videos, eines je Seite der Desktop-App (`SERIES` in
 `storyboard.py`), mit echten Screenshots der Seite und ihrer Dialoge und einer gesprochenen deutschen Erzählung:
 deutscher Text, aber jeder englische IT-Begriff (Sandbox, Proxy, Workspace, Session, Board, Plugin, Hook,
 MCP-Server, Token, Kill-Switch, Tor, VPN, Podman, ...) englisch ausgesprochen, nicht eingedeutscht. Zusätzlich

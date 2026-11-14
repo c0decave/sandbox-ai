@@ -47,10 +47,12 @@ from PySide6.QtWidgets import (
     QPushButton, QVBoxLayout, QWidget,
 )
 
-from .files import printable
+from .files import printable, printable_text
 from .host_choice import follow_hosts, on_host
+from . import applog
 from . import backend, theme, widgets
 from . import llm_params as LP
+from . import llm_loaded_view as LLV
 from . import llm_params_view as LPV
 from . import wizard_llm as WL
 from .i18n import N_, tr
@@ -75,7 +77,7 @@ LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 KINDS = (("lmstudio", N_("LM Studio")), ("ollama", N_("Ollama")), ("llamacpp", N_("llama.cpp server")),
          ("vllm", N_("vLLM")), ("openai-compatible", N_("OpenAI-compatible server (a gateway, LiteLLM, …)")))
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 NAME_EXAMPLE = WL.NAME_EXAMPLE
 URL_EXAMPLE = "http://192.168.1.20:1234"
 MODEL_EXAMPLE = "qwen2.5-coder:7b"
@@ -103,7 +105,7 @@ def endpoints_of(out):
     text, notes = out or "", []
     try:
         data = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         lines = text.splitlines()
         start = next((i for i, line in enumerate(lines) if line.startswith("[")), None)
         if start is None:
@@ -111,7 +113,7 @@ def endpoints_of(out):
         notes = [line for line in lines[:start] if line.strip()]
         try:
             data = json.loads("\n".join(lines[start:]))
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ValueError(text.strip()[-500:]) from None
     if not isinstance(data, list):
         raise ValueError("not a list of endpoints")
@@ -200,7 +202,7 @@ class LlmDialog(QDialog):
         self.test_button.setToolTip(tr("Ask the server for its models now, without saving it (sandbox-ai wizard "
                                        "models), and offer them as the default model"))
         self.test_button.clicked.connect(lambda _=False: self.test())
-        self.test_result = plain_label(role="secondary", selectable=True)
+        self.test_result = plain_label(role="secondary", selectable=True, log="llm")  # (what a test said: logged)
         self.test_result.setAccessibleName(tr("Result of the test"))
         self.test_row = QWidget()
         test = QHBoxLayout(self.test_row)
@@ -374,7 +376,7 @@ class LlmDialog(QDialog):
             except ValueError as exc:
                 self.check_after = True
                 self.test_result.setText(tr("{reason} It is checked with sandbox-ai llm check (its key, TLS and CA) "
-                                            "once it is saved.", reason=printable(exc)))
+                                            "once it is saved.", reason=printable_text(exc)))
                 colored(self.test_result, "warn")
                 return
         if self.run is None:
@@ -417,7 +419,7 @@ class LlmDialog(QDialog):
             return  # the kind or URL changed meanwhile: that answer is about another server
         result, sent, now = result if error is None else (None, False, None)
         if isinstance(error, backend.HostTooOld):
-            self.test_result.setText(printable(error))
+            self.test_result.setText(printable_text(error))
             colored(self.test_result, "warn")
             return
         status, out, err = outcome(result, error)
@@ -429,7 +431,7 @@ class LlmDialog(QDialog):
                 raise ValueError(failure(result, error))
             models, server = WL.models_and_status(out)
         except ValueError as exc:
-            text = tr("Not reachable: {error}", error=printable(exc))
+            text = tr("Not reachable: {error}", error=printable_text(exc))
             if WL.tls_untrusted(exc):
                 text += "\n" + (tr("Its certificate is not signed by the CA named in the field CA.") if fields.get("ca")
                                  else tr("Its certificate is signed by a CA this host does not know: name that CA "
@@ -503,7 +505,7 @@ class LlmDialog(QDialog):
             if value and not fields["secret"]:
                 raise ValueError(tr("A typed key needs the name of the secret to keep it as."))
         except ValueError as exc:
-            self.problem(printable(exc))
+            self.problem(printable_text(exc))
             return
         if self.on_save is None:
             self.finish()
@@ -593,6 +595,13 @@ class LlmPage(QWidget):
                                          "num_ctx …), the loop guard and the other models (sandbox-ai llm set): "
                                          "every model's, or the model selected below"))
         self.params_button.clicked.connect(lambda _=False: self.parameters())
+        self.loaded_button = QPushButton(tr("Models on the server…"))
+        self.loaded_button.setAccessibleName(tr("Models on the server"))
+        self.loaded_button.setToolTip(tr("What the server has loaded now (JIT or explicit, the running sandboxes "
+                                         "using each model): load, unload and keep models loaded (sandbox-ai llm "
+                                         "loaded, load, unload)"))
+        self.loaded_button.clicked.connect(lambda _=False: self.server_models())
+        self.loaded_dialog = None
         self.remove_button = QPushButton(tr("Remove…"))
         self.refresh_button = QPushButton(tr("Refresh"))
         for button, name, tip in (
@@ -615,10 +624,13 @@ class LlmPage(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         # A row that wraps when the window is narrow (it made the window 1300 px wide in German before).
         layout.addWidget(flow(self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
-                              self.sort, self.show_button, self.params_button, self.remove_button,
-                              self.refresh_button))
+                              self.sort, self.show_button, self.params_button, self.loaded_button,
+                              self.remove_button, self.refresh_button))
+        widgets.list_menu(self.servers, lambda: [
+            self.edit_button, self.check_button, self.models_button, self.show_button, self.params_button,
+            self.loaded_button, None, self.remove_button, None, self.add_button, self.refresh_button])
         layout.addWidget(self.build_models(), 3)
-        self.status = plain_label(role="secondary", selectable=True)
+        self.status = plain_label(role="secondary", selectable=True, log="llm")
         self.status.setAccessibleName(tr("Status"))
         layout.addWidget(self.status)
         self.load_hosts()
@@ -659,6 +671,7 @@ class LlmPage(QWidget):
         self.copy_button.clicked.connect(lambda _=False: self.copy_model())
         buttons.addWidget(self.default_button)
         buttons.addWidget(self.copy_button)
+        widgets.list_menu(self.model_table, lambda: [self.default_button, self.copy_button])
         buttons.addStretch(1)
         box.addLayout(buttons)
         self.models_box.hide()
@@ -675,7 +688,7 @@ class LlmPage(QWidget):
             try:
                 entries = [e for e in self.sai.host_entries() if isinstance(e, dict)]
             except (OSError, ValueError) as exc:
-                self.status.setText(printable(exc))
+                self.status.setText(printable_text(exc))
         self.host_box.blockSignals(True)
         self.host_box.clear()
         self.host_box.addItem(tr("{name} (this machine)", name=LOCAL), LOCAL)
@@ -785,8 +798,8 @@ class LlmPage(QWidget):
         except ValueError:
             if status == 2 and "invalid choice" in (err or ""):
                 self.status_old.add(host)  # an older sandbox-ai there: not asked again every few seconds
-            self.server_status.setText(tr("What the servers have loaded now could not be read: {error}",
-                                          error=WL.status_unknown(status, out, err)))
+            widgets.set_notice(self.server_status, tr("What the servers have loaded now could not be read: {error}",
+                                                      error=WL.status_unknown(status, out, err)), "warn")
             self.server_status.setToolTip("")
             return
         self.statuses, self.status_host = found, host
@@ -797,7 +810,9 @@ class LlmPage(QWidget):
         if self.status_host != self.host() or not self.statuses:
             return
         names = [e["name"] for e in self.entries if e.get("name") in self.statuses]
-        self.server_status.setText("\n".join(WL.status_text(self.statuses[n], n) for n in names))
+        down = any(self.statuses[n] and not self.statuses[n].get("reachable") for n in names)
+        widgets.set_notice(self.server_status, "\n".join(WL.status_text(self.statuses[n], n) for n in names),
+                           "warn" if down else None)
         self.server_status.setToolTip(safe_tooltip("\n\n".join(
             f"{n}\n{WL.status_detail(self.statuses[n])}" for n in names)))
 
@@ -816,11 +831,11 @@ class LlmPage(QWidget):
     def update_buttons(self):
         keys = selected_keys(self.servers)
         for button in (self.edit_button, self.check_button, self.models_button, self.show_button, self.remove_button,
-                       self.params_button):
+                       self.params_button, self.loaded_button):
             set_enabled(button, bool(keys), tr("Select a server first."))
         if len(keys) > 1:  # several: Remove… takes them all; what acts on one server waits
             for button in (self.edit_button, self.check_button, self.models_button, self.show_button,
-                           self.params_button):
+                           self.params_button, self.loaded_button):
                 set_enabled(button, False, tr("Acts on one row: {count} are selected.", count=len(keys)))
         if keys and self.params_missing(self.host()):
             set_enabled(self.params_button, False, tr("The sandbox-ai of {host} has no model parameters yet "
@@ -898,7 +913,7 @@ class LlmPage(QWidget):
         try:
             args = add_argv(fields)
         except ValueError as exc:
-            dialog.failed(printable(exc))
+            dialog.failed(printable_text(exc))
             return
         title = dialog.title_text
         changed = WL.changes(old, fields) if old is not None else []
@@ -984,7 +999,7 @@ class LlmPage(QWidget):
         open_ = dialog is not None and self.dialog is dialog
         if status == 0 and problem is not None:
             self.status.setText(tr("{name} added, but its key was not kept as the secret {secret}: {error}",
-                                   name=name, secret=secret, error=printable(problem)[:300]))
+                                   name=name, secret=secret, error=printable_text(problem)[:300]))
             if open_:
                 dialog.finish()  # the server is saved: only its key is not
             warn(self, tr("New LLM server"), self.status.text(), modal=False)
@@ -1014,7 +1029,8 @@ class LlmPage(QWidget):
         if host == LOCAL:
             try:
                 return not hasattr(self.sai.module("llm"), "params_catalogue")
-            except Exception:  # noqa: BLE001 - a sandbox-ai that does not load: the command says so when asked
+            except Exception as _exc:  # noqa: BLE001 - a sandbox-ai that does not load: the command says so when asked
+                applog.swallowed("llm_page", "LlmPage.params_missing: a sandbox-ai that does not load: the comm…", _exc)
                 return False
         return False
 
@@ -1105,6 +1121,24 @@ class LlmPage(QWidget):
         if open_:
             dialog.finish()
 
+    # -- what the server has loaded: Models on the server… --
+
+    def server_models(self):
+        """Models on the server…: what the selected server has loaded, with Load…, Unload…, Keep loaded and Refresh
+        (llm_loaded_view.LoadedDialog; its commands run on the chosen host, in the background)."""
+        host, name = valid_host(self.host()), self.chosen()
+        if host is None or name is None:
+            return
+        entry = next((e for e in self.entries if e.get("name") == name), {})
+        kind = entry.get("kind") if entry.get("kind") in {k for k, _ in KINDS} else None
+        dialog = LLV.LoadedDialog(self.runner(host), name, kind, self.host_label(host), host, self)
+        self.loaded_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self.loaded_dialog = None
+            dialog.deleteLater()
+
     # -- check, models, show, remove --
 
     def check(self):
@@ -1123,6 +1157,8 @@ class LlmPage(QWidget):
     def checked(self, host, name, result, error):
         status, out, err = outcome(result, error)
         verdict = tr("the server works for it") if status == 0 else tr("the check found problems")
+        applog.log("INFO" if status == 0 else "WARNING", "llm", f"llm check {printable(name)} on {printable(host)}: "
+                   f"exit status {status}" + (f"\n{applog.tail(out + err)}" if status != 0 else ""))
         self.status.setText(f"{name}: {verdict}")
         show_text(self, tr("Check of {name} on {host}", name=name, host=self.host_label(host)),
                   verdict + "\n\n" + lines_of((out + err).strip()), modal=False)
@@ -1233,7 +1269,7 @@ class LlmPage(QWidget):
         try:
             args = add_argv(new)
         except ValueError as exc:
-            self.status.setText(tr("Could not change {name}: {error}", name=name, error=printable(exc)))
+            self.status.setText(tr("Could not change {name}: {error}", name=name, error=printable_text(exc)))
             return
         if not ask_first(self, "llm-replace", tr("Use as default"), on_host(host, tr(
                 "Change the LLM server {name}? Every start that uses it gets the new settings:\n{changes}",
@@ -1388,7 +1424,7 @@ class ServerStatusLine(QLabel):
         except ValueError as exc:
             if status == 2 and "invalid choice" in (err or ""):
                 self.old.add(host)
-            text = WL.status_unknown(status, out, err) if status != 0 or not out.strip() else printable(exc)
+            text = WL.status_unknown(status, out, err) if status != 0 or not out.strip() else printable_text(exc)
             self.setText(tr("LLM server {value}: its status could not be read: {error}", value=value, error=text))
             return
         self.setText(tr("LLM server {value}: {status}", value=value, status=WL.status_text(found)))

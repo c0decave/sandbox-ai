@@ -57,8 +57,8 @@ def write_record(path, record):
         with os.fdopen(fd, "w") as stream:
             json.dump(record, stream)
         os.replace(temporary, path)
-    except OSError:
-        pass
+    except OSError as exc:
+        applog.swallowed("crash", f"the crash guard's record {path} could not be written", exc)
 
 
 def read_record(path):
@@ -66,7 +66,7 @@ def read_record(path):
         if path.is_symlink() or path.stat().st_size > 65536:
             return None
         record = json.loads(path.read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return record if isinstance(record, dict) and isinstance(record.get("pid"), int) else None
 
@@ -183,7 +183,8 @@ class Guard:
         try:
             oom = oom_lines(self.read_kernel(float(previous.get("seen") or previous.get("started") or 0)),
                             previous["pid"]) if self.read_kernel else []
-        except Exception:  # noqa: BLE001 - only a detail of the report
+        except Exception as _exc:  # noqa: BLE001 - only a detail of the report
+            applog.swallowed("crashguard", "Guard.kernel_said: only a detail of the report", _exc)
             oom = []
         if oom:
             self.last = describe(previous, oom, self.crash)
@@ -211,5 +212,5 @@ class Guard:
         try:
             if read_record(self.path) is not None and read_record(self.path).get("pid") == os.getpid():
                 self.path.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            applog.swallowed("crash", f"the crash guard's record {self.path} could not be removed", exc)

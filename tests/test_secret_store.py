@@ -131,3 +131,25 @@ def test_set_refuses_several_lines_and_an_unset_variable(tmp_path, monkeypatch, 
     assert ss.FileStore().get("ONE") == "value"
     assert ss.main(["set", "E", "--from-env", "NO_SUCH_VARIABLE"], out=out.append) == 1
     assert "NO_SUCH_VARIABLE is not set" in capsys.readouterr().err
+
+
+def test_a_file_secret_is_written_through_a_temporary_file_of_its_own(tmp_path, monkeypatch):
+    """Review round 2: FileStore.set wrote every value of NAME through the one name .NAME.tmp (opened with O_TRUNC,
+    not O_EXCL): two `secrets set NAME` at once wrote into the same file (a value of one with the other's tail), and
+    a .NAME.tmp left behind with other permissions passed them on - the secret then refused as "not private". Each
+    write now has a new temporary file of its own, 0600 from the start."""
+    store = ss.FileStore(tmp_path / "secrets")
+    store.directory.mkdir(mode=0o700)
+    stale = store.directory / ".TOKEN.tmp"
+    stale.write_text("an older, longer value that was cut short")
+    stale.chmod(0o644)
+    store.set("TOKEN", "new")
+    assert store.get("TOKEN") == "new"
+    assert stat.S_IMODE((store.directory / "TOKEN").stat().st_mode) == 0o600
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(ss.os, "open", lambda path, flags, *rest, **kw: opened.append((str(path), flags))
+                        or real_open(path, flags, *rest, **kw))
+    store.set("TOKEN", "newer")
+    assert store.get("TOKEN") == "newer"
+    assert all(flags & os.O_EXCL for path, flags in opened if ".TOKEN" in path), opened

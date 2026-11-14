@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import theme
+from . import applog
+from . import theme, widgets
 from .files import printable
 from .copying import copy_entries
 from .i18n import N_, tr
@@ -51,8 +52,8 @@ def group_of(check, groups=None):
     if groups is not None:
         try:
             return groups(check)
-        except Exception:  # noqa: BLE001 - the app's own table below
-            pass
+        except Exception as _exc:  # noqa: BLE001 - the app's own table below
+            applog.swallowed("doctor_view", "group_of: the app's own table below", _exc)
     for name, prefixes in PREFIXES.items():
         if any(check == p or check.startswith(p) for p in prefixes):
             return name
@@ -356,7 +357,7 @@ class DoctorView(QWidget):
             menu.addAction(tr("Copy the fix command"), lambda: self.copy_item(item))
         copy_entries(menu, self.tree, point)
         if menu.actions():
-            menu.exec(self.tree.viewport().mapToGlobal(point))
+            widgets.exec_dropped(menu, self.tree.viewport().mapToGlobal(point))
 
 
 def theme_brush(status):

@@ -33,6 +33,40 @@ REAL = {"instances", "runs", "sessions", "known_projects", "file_roots", "recent
 SKIP = {"Quit", "Quit sandbox-ai", "Hide to tray"}
 
 
+def held_back():
+    """Seconds this process was kept from running by other processes so far (Linux schedstat: time a thread was ready
+    and waited on a run queue for a CPU): the GUI thread's, and the longest of any other thread's (one holding the
+    GIL the GUI thread waits for). A loaded machine (another test suite, a build) delays the window without the app
+    doing anything slow; the times below are measured without that. 0 where the kernel does not say."""
+    main = threading.main_thread().native_id
+    own, others = 0, 0
+    try:
+        tasks = os.listdir("/proc/self/task")
+    except OSError:
+        return 0.0
+    for task in tasks:
+        try:
+            with open(f"/proc/self/task/{task}/schedstat") as stream:
+                waited = int(stream.read().split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if int(task) == main:
+            own = waited
+        else:
+            others = max(others, waited)
+    return (own + others) / 1e9
+
+
+class Stopwatch:
+    """Seconds since it was made, less the time other processes held this one back (held_back)."""
+
+    def __init__(self):
+        self.began, self.held = time.monotonic(), held_back()
+
+    def __call__(self):
+        return max(0.0, time.monotonic() - self.began - max(0.0, held_back() - self.held))
+
+
 def children():
     """The processes this one started that still run (zombies not counted)."""
     found = set()
@@ -93,9 +127,9 @@ def swept(env, monkeypatch, qapp, tmp_path):
     monkeypatch.setattr(widgets, "SHOWN", [])
     undo = widgets.track_worker_processes()  # as the app's start does: what the reads start ends with the app
     before = children()
-    began = time.monotonic()
+    watch = Stopwatch()
     window = make_window(monkeypatch)
-    built = time.monotonic() - began
+    built = watch()
     window.before_children = before
     window.on_gui = on_gui
     at_build = list(on_gui)
@@ -150,22 +184,27 @@ def select_first_rows(page):
 
 
 class Heartbeat:
-    """A timer that ticks every 10 ms: the longest time the event loop stood still."""
+    """A timer that ticks every 10 ms: the longest time the event loop stood still (less the time other processes
+    held this one back meanwhile: held_back)."""
 
     def __init__(self):
         self.stamps, self.timer = [], QtCore.QTimer()
         self.timer.setInterval(10)
-        self.timer.timeout.connect(lambda: self.stamps.append(time.monotonic()))
+        self.timer.timeout.connect(lambda: self.stamps.append(self.stamp()))
+
+    @staticmethod
+    def stamp():
+        return time.monotonic(), held_back()
 
     def __enter__(self):
-        self.began = time.monotonic()
+        self.began = self.stamp()
         self.timer.start()
         return self
 
     def __exit__(self, *exc):
         self.timer.stop()
-        points = [self.began, *self.stamps, time.monotonic()]
-        self.gap = max(b - a for a, b in zip(points, points[1:]))
+        points = [self.began, *self.stamps, self.stamp()]
+        self.gap = max((b[0] - a[0]) - max(0.0, b[1] - a[1]) for a, b in zip(points, points[1:]))
 
 
 def test_every_button_of_every_page_leaves_slow_work_to_the_background(qapp, swept):
@@ -174,7 +213,9 @@ def test_every_button_of_every_page_leaves_slow_work_to_the_background(qapp, swe
     assert not at_build, "slow backend calls on the GUI thread while the window was built: " + ", ".join(at_build)
     assert built < MAX_BUILD, f"building the window took {built:.1f} s (it waited for Podman?)"
     window.show()
-    assert wait_for(qapp, lambda: window.sandboxes.loaded and window.sandboxes.table.rowCount() > 1, 60), \
+    # (the stopped session is read too - asking podman, slowly - though listed only with Ended checked)
+    assert wait_for(qapp, lambda: window.sandboxes.loaded and len(window.sandboxes.instances) > 1
+                    and window.sandboxes.table.rowCount() > 0, 60), \
         "the Sandboxes page reads in the background and shows the fake run"
     slow_clicks, clicked, selected = [], 0, 0
     stray = set(QtWidgets.QApplication.topLevelWidgets())
@@ -193,9 +234,9 @@ def test_every_button_of_every_page_leaves_slow_work_to_the_background(qapp, swe
                 text = widget.text()
             except RuntimeError:  # deleted by a click before (a page rebuilt its rows)
                 continue
-            began = time.monotonic()
+            watch = Stopwatch()
             widget.click()
-            took = time.monotonic() - began
+            took = watch()
             clicked += 1
             if took > MAX_CLICK:
                 slow_clicks.append(f"{key}: {text!r} {took:.2f} s")

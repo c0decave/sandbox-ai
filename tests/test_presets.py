@@ -89,7 +89,7 @@ def test_the_categories_are_defined_once_and_older_ones_still_taken(own_config, 
                                        minimal(category="media"), minimal(category="llm"))] == \
         ["security", "other", "other", "fun", "llm"]
     assert p.problems(minimal(category="analysis")) == [] and p.problems(minimal(category="simple")) == []
-    assert any("category is one of development, research" in x for x in p.problems(minimal(category="cooking")))
+    assert any("category is one of development, agents, research" in x for x in p.problems(minimal(category="cooking")))
     assert any("category is one of" in x for x in p.problems(minimal(category=["llm"])))
     own_config.mkdir(parents=True)
     (own_config / "old.json").write_text(json.dumps(minimal(id="old", title="Old one", category="analysis")))

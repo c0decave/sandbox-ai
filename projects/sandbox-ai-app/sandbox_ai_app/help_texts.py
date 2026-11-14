@@ -47,14 +47,15 @@ def _tip(ident, title, what, does=None, cli="", section=""):
 
 PAGE_SECTIONS = {"launch": "page-launch", "board": "page-board", "sandboxes": "page-sandboxes",
                  "approvals": "page-approvals", "terminals": "page-terminals", "connections": "page-connections",
-                 "activity": "page-activity", "statistics": "page-statistics", "files": "page-files",
+                 "activity": "page-activity", "traffic": "page-traffic", "statistics": "page-statistics",
+                 "files": "page-files",
                  "kits": "page-kits", "mcp": "page-mcp", "llm": "page-llm", "images": "page-images",
                  "credentials": "page-credentials", "team": "page-team", "system": "page-system",
                  "hosts": "page-hosts", "help": "page-help"}
 PAGE_CLI = {"launch": "sandbox-ai AGENT [options]", "board": ".sandbox-ai.json",
             "sandboxes": "sandbox-ai list",
             "approvals": "--ask", "terminals": "tmux", "connections": "sandbox-ai logs, --log-dir",
-            "activity": "sandbox-ai activity",
+            "activity": "sandbox-ai activity", "traffic": "sandbox-ai llm traffic, --llm-traffic",
             "statistics": "sandbox-ai activity", "files": "", "kits": "sandbox-ai kits, --kit",
             "mcp": "sandbox-ai mcp, --mcp", "llm": "sandbox-ai llm, --llm NAME", "images": "sandbox-ai build",
             "credentials": "sandbox-ai secrets", "team": "sandbox-ai team",
@@ -75,7 +76,8 @@ def _page_tips():
 KIND_SECTIONS = {"workspace": "workspaces-mounts", "mount": "workspaces-mounts", "home": "secrets", "kits": "kits",
                  "agent": "sandbox", "approvals": "approvals", "proxy": "proxy", "git": "secrets", "mcp": "mcp",
                  "llm": "llm", "service": "services", "network": "network", "vpn": "vpn-tor", "devices": "devices", "limits": "limits",
-                 "display": "display", "session": "sessions", "logs": "logs", "engine": "sandbox"}
+                 "display": "display", "browser": "browser", "session": "sessions", "logs": "logs",
+                 "engine": "sandbox"}
 KIND_DOES = {
     "workspace": ("Connected to the agent, its folder is mounted: the first at /work (the project file is written "
                   "there), further ones at /workspaces/NAME. Not connected, it does not count.",
@@ -138,6 +140,12 @@ KIND_DOES = {
     "display": ("Starts a virtual display (or VNC, or your Wayland) so GUI programs and browsers can run.",
                 "Startet eine virtuelle Anzeige (oder VNC, oder Ihr Wayland), damit GUI-Programme und Browser "
                 "laufen können."),
+    "browser": ("A browser in its own container beside the agent, on the agent's network; Browser (Sandboxes & "
+                "sessions) shows it as a tab of Terminals beside the session's terminal. Its image is built once: "
+                "sandbox-ai build browser.",
+                "Ein Browser in einem eigenen Container neben dem Agenten, im Netz des Agenten; Browser (Sandboxen & "
+                "Sitzungen) zeigt ihn als Tab unter Terminals neben dem Terminal der Sitzung. Sein Image wird einmal "
+                "gebaut: sandbox-ai build browser."),
     "session": ("tmux inside the sandbox or not; a session itself is started with Start and as session.",
                 "tmux in der Sandbox oder nicht; eine Sitzung selbst starten Sie mit Start und als Sitzung."),
     "logs": ("Where the connection and file logs go (outside the sandbox) and how much they keep.",
@@ -164,12 +172,13 @@ def _kind_tips():
 AREA_TIPS = (
     # Start
     _tip("launch.agent", ("Agent", "Agent"),
-         ("The coding agent the sandbox runs: Claude Code, Codex or OpenCode, each in its own image.",
-          "Der Coding-Agent, den die Sandbox ausführt: Claude Code, Codex oder OpenCode, jeder in seinem eigenen "
-          "Image."),
+         ("The coding agent the sandbox runs: Claude Code, Codex, OpenCode, Hermes Agent, Qwen Code, DeepSeek "
+          "Harness or Goose, each in its own image.",
+          "Der Coding-Agent, den die Sandbox ausführt: Claude Code, Codex, OpenCode, Hermes Agent, Qwen Code, "
+          "DeepSeek Harness oder Goose, jeder in seinem eigenen Image."),
          ("The form below shows the options of this agent; the command line follows.",
           "Das Formular darunter zeigt die Optionen dieses Agenten; die Befehlszeile folgt."),
-         "sandbox-ai claude | codex | opencode", "page-launch"),
+         "sandbox-ai claude | codex | opencode | hermes | qwen | dsh | goose", "page-launch"),
     _tip("launch.host", ("Host", "Host"),
          ("Where it starts: this machine, or a host of sandbox-ai hosts (over SSH). The Model choice, the presets "
           "and the choosers of the form (VPN profiles, kits, identities, MCP servers, image variants) follow it.",
@@ -311,6 +320,16 @@ AREA_TIPS = (
          ("In the gallery, Save the board as a preset… keeps the board shown now as your own preset.",
           "In der Galerie speichert Board als Vorlage speichern… das gezeigte Board als Ihre eigene Vorlage."),
          "sandbox-ai presets list", "app-presets-gallery"),
+    _tip("board.folder", ("Change folder", "Ordner ändern"),
+         ("Change folder… puts this very board on another project folder: every part and setting stays; its main "
+          "workspace, its project file's place and its changes move there.",
+          "Ordner ändern… setzt genau dieses Board auf einen anderen Projektordner: Jedes Teil und jede Einstellung "
+          "bleibt; sein Hauptarbeitsordner, der Ort seiner Projektdatei und seine Änderungen ziehen dorthin um."),
+         ("Nothing is written there before Apply; Undo takes it back. A folder with a .sandbox-ai.json of its own: "
+          "you are asked whether to load that file instead.",
+          "Dort wird vor Übernehmen nichts geschrieben; Rückgängig nimmt es zurück. Hat der Ordner eine eigene "
+          ".sandbox-ai.json, werden Sie gefragt, ob stattdessen diese Datei geladen wird."),
+         "--workspace", "page-board"),
     _tip("board.tools", ("Undo, arrange, zoom", "Rückgängig, Anordnen, Zoom"),
          ("Undo and Redo go through every change of this project's board; Arrange lays the parts out in columns; "
           "+, − and Fit zoom.",
@@ -388,10 +407,12 @@ AREA_TIPS = (
          "sandbox-ai rename OLD NEW, sandbox-ai list --history NAME, sandbox-ai gc --dry-run", "page-sandboxes"),
     _tip("sandboxes.stop", ("Stop", "Stoppen"),
          ("Ends the selected sandbox after asking (several selected: each of them, after one question); its "
-          "launcher cleans up. A session can be paused instead.",
+          "launcher cleans up. A session can be paused instead. Stop all… ends every start that runs here and on "
+          "the hosts (or the host chosen above), after showing the list.",
           "Stoppt die gewählte Sandbox nach Rückfrage (mehrere gewählt: jede davon, nach einer Rückfrage); ihr "
-          "Launcher räumt auf. Eine Sitzung lässt sich stattdessen pausieren."),
-         None, "sandbox-ai stop NAME", "sessions"),
+          "Launcher räumt auf. Eine Sitzung lässt sich stattdessen pausieren. Alle beenden… beendet jeden Start, "
+          "der hier und auf den Hosts (oder dem oben gewählten Host) läuft, nachdem es die Liste gezeigt hat."),
+         None, "sandbox-ai stop NAME, sandbox-ai stop --all", "sessions"),
     _tip("sandboxes.live", ("While it runs", "Während sie läuft"),
          ("Changes for a running sandbox: allow or revoke a host, hand over a device, change the limits, show "
           "its log, add or remove a workspace (a folder, a single file, with a name of its own), add or remove "
@@ -503,6 +524,34 @@ AREA_TIPS = (
          ("Everything recorded about the selected event; from here to its connection or file.",
           "Alles, was zum gewählten Ereignis aufgezeichnet ist; von hier zu seiner Verbindung oder Datei."),
          None, "", "page-activity"),
+    # LLM traffic
+    _tip("traffic.source", ("Which run", "Welcher Lauf"),
+         ("The run or session whose model requests are shown: every run with an LLM traffic log, the running "
+          "first.",
+          "Der Lauf oder die Sitzung, deren Modellanfragen gezeigt werden: jeder Lauf mit einem LLM-Verkehrsprotokoll, "
+          "die laufenden zuerst."),
+         None, "sandbox-ai llm traffic --runs", "page-traffic"),
+    _tip("traffic.search", ("Search the run", "Den Lauf durchsuchen"),
+         ("Lists only the requests whose messages, tools or answer contain the text (the whole run is searched).",
+          "Zeigt nur die Anfragen, deren Nachrichten, Werkzeuge oder Antwort den Text enthalten (der ganze Lauf wird "
+          "durchsucht)."),
+         None, "sandbox-ai llm traffic --grep TEXT", "page-traffic"),
+    _tip("traffic.table", ("Requests", "Anfragen"),
+         ("Each request to the model: time, model, tokens, time taken, status, how many messages were new, what "
+          "the loop guard did.",
+          "Jede Anfrage an das Modell: Zeit, Modell, Tokens, Dauer, Status, wie viele Nachrichten neu waren, was der "
+          "Schleifenschutz tat."),
+         ("Select one to read it as a chat.", "Wählen Sie eine, um sie als Chat zu lesen."), "", "page-traffic"),
+    _tip("traffic.new", ("New in this request", "Neu in dieser Anfrage"),
+         ("Only the messages this request added to the conversation; off: everything that went to the model.",
+          "Nur die Nachrichten, die diese Anfrage dem Gespräch hinzufügte; aus: alles, was an das Modell ging."),
+         None, "sandbox-ai llm traffic --full", "page-traffic"),
+    _tip("traffic.detail", ("One request", "Eine Anfrage"),
+         ("The chat (tool calls and results fold open with a click), the parameters with the relay's changes "
+          "marked, and the raw record.",
+          "Der Chat (Werkzeugaufrufe und Ergebnisse klappen mit einem Klick auf), die Parameter mit den markierten "
+          "Änderungen des Relays und der rohe Eintrag."),
+         None, "sandbox-ai llm traffic --request N", "page-traffic"),
     # Statistics
     _tip("statistics.directory", ("Which project", "Welches Projekt"),
          ("The log folder whose runs are counted: tokens, requests and tool calls per run and per agent.",
@@ -868,6 +917,7 @@ PLACES = {
     "board": (("view", "board.canvas", "corner"), ("findings", "board.findings", "corner"),
               ("preview", "board.command", "corner"), ("dry_button", "board.dry", "after"),
               ("apply_button", "board.apply", "after"), ("gallery_button", "board.presets", "after"),
+              ("change_folder_button", "board.folder", "after"),
               ("arrange_button", "board.tools", "after")),
     "sandboxes": (("table", "sandboxes.table", "corner"), ("only_project", "sandboxes.only_project", "after"),
                   ("show_ended", "sandboxes.ended", "after"), ("host_filter", "sandboxes.hosts", "after"),
@@ -881,6 +931,9 @@ PLACES = {
                     ("table", "connections.table", "corner"), ("detail", "connections.detail", "corner")),
     "activity": (("source", "activity.source", "after"), ("kinds_button", "activity.kinds", "after"),
                  ("table", "activity.table", "corner"), ("detail", "activity.detail", "corner")),
+    "traffic": (("source", "traffic.source", "after"), ("search", "traffic.search", "after"),
+                ("table", "traffic.table", "corner"), ("new_only", "traffic.new", "after"),
+                ("tabs", "traffic.detail", "corner")),
     "statistics": (("directory", "statistics.directory", "after"),),
     "files": (("roots", "files.roots", "after"), ("table", "files.table", "corner"),
               ("replace", "files.replace", "after")),
@@ -1092,6 +1145,8 @@ SETTING_TIPS = _terms(
      "it is never allowed.",
      "Ob ein Programm in einem Terminal-Tab (der Copy-Modus von tmux) Text in die Zwischenablage legen darf. Lesen ist "
      "nie erlaubt."),
+    ("short_notices", "\"Done\" shows briefly in the window and goes by itself. Off: only the status bar and the log.",
+     "\"Erledigt\" erscheint kurz im Fenster und verschwindet von selbst. Aus: nur Statusleiste und Log."),
     ("notifications", "Popups at all: off by default - questions wait on the Approvals page and every notification "
      "goes to the log.", "Überhaupt Popups: aus als Standard - Fragen warten auf der Seite Freigaben, und jede "
      "Benachrichtigung landet im Log."),
@@ -1101,8 +1156,10 @@ SETTING_TIPS = _terms(
      "members get none (Open terminal reaches them).",
      "Jede startende Sitzung oder Sandbox bekommt einen Tab; ihre MCP-Server, Helfer und die anderen Mitglieder "
      "eines Teams keinen (Terminal öffnen erreicht sie)."),
-    ("reopen_terminals", "At start, every running session gets its terminal tab again (attached, never started).",
-     "Beim Start bekommt jede laufende Sitzung ihren Terminal-Tab wieder (angehängt, nie gestartet)."),
+    ("reopen_terminals", "Tabs open at the app's end come back while their session runs. On: every other running "
+     "session gets a tab too.",
+     "Beim Beenden offene Tabs kommen wieder, solange ihre Sitzung läuft. An: Auch jede andere laufende Sitzung "
+     "bekommt einen Tab."),
     ("notify_seconds", "How long a notification stays on the screen.", "Wie lange eine Benachrichtigung zu sehen ist."),
     ("notify_safeguards", "A notification when a safeguard refuses or ends something; the Safeguards tab lists all.",
      "Eine Benachrichtigung, wenn eine Schutzmaßnahme etwas ablehnt oder beendet; der Tab listet alle."),
@@ -1130,9 +1187,9 @@ SETTING_TIPS = _terms(
     ("desktop_notifications", "What the sandboxes show on the desktop themselves while this app does not run: "
      "everything, only a canary's alarm, or nothing.", "Was die Sandboxen selbst auf dem Desktop zeigen, solange diese "
      "App nicht läuft: alles, nur den Alarm eines Canary oder nichts."),
-    ("telemetry", "Whether the agents send usage statistics, error reports and update checks; off is "
-     "recommended.", "Ob die Agenten Nutzungsstatistiken, Fehlerberichte und Update-Abfragen senden; aus wird "
-     "empfohlen."),
+    ("telemetry", "The agents' telemetry is always off: no usage statistics, error reports or update checks; "
+     "strict also holds back their other calls.", "Die Telemetrie der Agenten ist immer aus: keine "
+     "Nutzungsstatistiken, Fehlerberichte oder Update-Abfragen; strict hält auch ihre anderen Aufrufe zurück."),
     ("loop_guard", "What sandbox-ai does against a local model that repeats itself (--llm starts only): each layer on "
      "or off, or a count; empty: sandbox-ai's own default.", "Was sandbox-ai gegen ein lokales Modell tut, das sich "
      "wiederholt (nur mit --llm): jede Schicht an, aus oder eine Anzahl; leer: Standard von sandbox-ai."),

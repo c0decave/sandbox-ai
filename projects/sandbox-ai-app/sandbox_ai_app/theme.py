@@ -574,14 +574,14 @@ QPushButton {{ background: {c['button']}; border: 1px solid #b9b9be; border-bott
               border-radius: 6px; padding: 4px 14px; min-height: 18px; }}
 QPushButton:hover {{ border-color: #a1a1a6; }}
 QPushButton:pressed {{ background: #e5e5ea; }}
-QPushButton:focus {{ border: 2px solid #7fb0ee; padding: 3px 13px; }}
+QPushButton:focus {{ border: 2px solid {c['accent']}; padding: 3px 13px; }}
 QPushButton[role="primary"] {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2f86f6, stop:1 {c['accent']});
                                color: {c['accent_text']}; border: 1px solid #0a55b6; font-weight: 600; }}
 QPushButton[role="primary"]:pressed {{ background: #0a55b6; }}
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
     border: 1px solid #b9b9be; border-radius: 6px; padding: 4px 7px; background: {c['base']}; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
-    border: 2px solid #7fb0ee; padding: 3px 6px; }}
+    border: 2px solid {c['accent']}; padding: 3px 6px; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox::down-arrow {{ {chevron} }}
 QTabWidget::pane {{ border: 1px solid #d1d1d6; border-radius: 8px; top: -12px; padding-top: 14px; background: #e6e6ea; }}
@@ -744,7 +744,7 @@ EXTRAS = {"win311": _win311, "mac": _mac, "hacker": _hacker, "fallout": _fallout
 # attribute makes these rules win over every theme's own QListWidget#nav::item.
 COMPACT_NAV = """
 QListWidget#nav[compact="true"] { padding: 4px 0px; }
-QListWidget#nav[compact="true"]::item { padding: 6px 0px 6px 8px; margin: 1px 4px; }
+QListWidget#nav[compact="true"]::item { padding: 4px 0px 4px 4px; margin: 1px 4px; }
 QListWidget#nav[compact="true"]::item:disabled { padding: 0px; }
 """
 
@@ -819,12 +819,13 @@ QTabBar::tab:selected {{ border-color: {c['border']}; background: {c['base']}; c
 QTabBar::tab:hover {{ color: {c['text']}; }}
 QListWidget#nav {{ border: none; background: {nav_background}; padding: 6px 6px; outline: none;
                    color: {c['nav_text']}; }}
-QListWidget#nav::item {{ padding: 8px 10px; margin: 1px 0; border-radius: {small}px; color: {c['nav_text']}; }}
+QListWidget#nav::item {{ padding: 6px 8px; margin: 1px 0; border-radius: {small}px; color: {c['nav_text']};
+                         border: 2px solid transparent; }}
 QListWidget#nav::item:hover {{ background: {c['alternate']}; }}
 QListWidget#nav::item:selected {{ background: {c['nav_selected']}; color: {c['nav_selected_text']};
                                   font-weight: 600; }}
 QListWidget#nav::item:disabled {{ background: transparent; color: {c['nav_text']}; padding: 12px 10px 2px 10px;
-                                  font-size: 8pt; font-weight: 700; }}
+                                  font-size: 8pt; font-weight: 700; border: none; }}
 QWidget#navPanel {{ background: {nav_background}; }}
 QWidget#projectBar {{ background: {c['window']}; }}
 QWidget#tabStrip {{ background: {c['window']}; border-bottom: 1px solid {c['border']}; }}
@@ -863,7 +864,28 @@ QSplitter::handle {{ background: {c['alternate']}; }}
 QMenu {{ background: {c['base']}; color: {c['text']}; border: 1px solid {c['border']}; padding: 4px; }}
 QMenu::item {{ padding: 5px 18px; border-radius: {small}px; }}
 QMenu::item:selected {{ background: {c['highlight']}; color: {c['highlight_text']}; }}
-""" + extra + header_edges(c, bevel) + COMPACT_NAV
+""" + extra + header_edges(c, bevel) + COMPACT_NAV + ("" if bevel else focus_rings(c))
+
+
+def focus_rings(c):
+    """Where the keyboard focus is, on every control that can take it (design review 0.1.95; hallmark's floor: every
+    interactive element shows its focus): a ring of 2 px in a colour of 3:1 or more against what it replaces, the
+    control's size unchanged (its padding gives up the pixel the ring takes; the navigation's rows and the tabs keep a
+    transparent edge for it). After the themes' own rules, so it is the same in every look but the bevelled one
+    (Windows 3.11 underlines a focused button's text and frames a focused box's text, as it did). Push buttons and fields
+    had theirs already (the stylesheet above); a (?) lights up (help_view.HelpButton). The style's own dotted frame
+    inside the control is not drawn beside the ring (two marks for one focus)."""
+    return f"""
+QPushButton, QToolButton, QCheckBox, QRadioButton, QTabBar {{ outline: none; }}
+QPushButton[role="primary"]:focus {{ border: 2px solid {c['accent_text']}; padding: 5px 13px; }}
+QToolButton:focus {{ border: 2px solid {c['accent']}; padding: 3px 7px; }}
+QCheckBox::indicator:focus {{ border: 2px solid {c['accent']}; width: 12px; height: 12px; }}
+QRadioButton::indicator:focus {{ border: 3px solid {c['accent']}; width: 10px; height: 10px; }}
+QCheckBox::indicator:checked:focus, QRadioButton::indicator:checked:focus {{ border-color: {c['accent_text']}; }}
+QTabBar::tab:focus {{ border: 2px solid {c['accent']}; border-bottom: none; padding: 6px 13px 7px 13px; }}
+QTabBar#projectTabs::tab:focus {{ padding: 5px 11px 6px 11px; }}
+QListWidget#nav::item:focus {{ border-color: {c['nav_selected_text']}; }}
+"""
 
 
 def header_edges(c, bevel=False):
@@ -1026,6 +1048,8 @@ GLYPHS = {
     "connections": [("dot", (5, 12)), ("dot", (19, 6)), ("dot", (19, 18)), ("line", (5, 12, 19, 6)),
                     ("line", (5, 12, 19, 18))],
     "activity": [("poly", [(3, 12), (7, 12), (10, 5), (14, 19), (17, 12), (21, 12)], False)],
+    "traffic": [("rect", (3, 4, 12, 8)), ("poly", [(6, 12), (6, 15), (9, 12)], False), ("rect", (9, 11, 12, 8)),
+                ("line", (6, 8, 12, 8)), ("line", (12, 15, 18, 15))],
     "statistics": [("line", (5, 20, 5, 12)), ("line", (10, 20, 10, 6)), ("line", (15, 20, 15, 14)),
                    ("line", (20, 20, 20, 9))],
     "files": [("poly", [(3, 6), (9, 6), (11, 8), (21, 8), (21, 19), (3, 19)], True)],

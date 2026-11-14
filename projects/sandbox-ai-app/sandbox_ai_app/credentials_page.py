@@ -19,14 +19,14 @@ from PySide6.QtWidgets import (
     QMessageBox, QPushButton, QRadioButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from . import applog
 from . import theme, widgets
 from .backend import SandboxAI
-from .files import printable
-from .copying import copy_entries
+from .files import printable, printable_text
 from .credential_tab import CredentialTab, even_out
 from .i18n import N_, tr
 from .host_choice import on_host
-from .name_fields import NameField, publish as publish_names
+from .name_fields import NameField, alive, publish as publish_names
 from .widgets import (ask_first, background, delete_key, fill, inform, multi_select, one_only, outcome, plain_label,
                       report_each, run_each, safe_tooltip, selected, selected_keys, several, show_text, table)
 
@@ -142,7 +142,7 @@ class LoginsBox(CredentialTab):
 
     def ran(self, what, result, error):
         status, out, err = outcome(result, error)
-        said = printable((out + err).strip())[-1500:]
+        said = printable_text((out + err).strip())[-1500:]
         if what == "kinds":
             show_text(self, tr("Publish login kinds"), "\n".join(printable(line) for line in out.strip().splitlines())
                       if status == 0 else said, modal=False)
@@ -186,7 +186,8 @@ class LoginsBox(CredentialTab):
             if existed is None:  # the host's names not read: asked now, so a refused login leaves no new secret
                 try:
                     existed = self.sai.secret_exists(secret, host)
-                except Exception:  # noqa: BLE001 - not answered: kept as it is whatever happens
+                except Exception as _exc:  # noqa: BLE001 - not answered: kept as it is whatever happens
+                    applog.swallowed("credentials_page", "add_with_token.work: not answered: kept as it is what…", _exc)
                     existed = None
             return self.sai.add_login(host, command, add_args, secret, value, existed=existed)
         background(work, owner=self, work=True, timeout=150, source=self.buttons(),
@@ -218,27 +219,10 @@ class GitLoginsBox(LoginsBox):
                 "A sandbox started before this login was added gets it now (sandbox-ai git-logins give RUN URL "
                 "--secret NAME); every sandbox started later has it anyway")))
             self.give_button.clicked.connect(lambda _=False: self.give())
-            self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            self.list.customContextMenuRequested.connect(self.menu)
         return [self.give_button]
 
     def single_buttons(self):
         return [self.give_button]
-
-    def menu(self, point):
-        """A login's menu: give it to a running sandbox, check, remove."""
-        row = self.list.rowAt(point.y())
-        if row < 0:
-            return
-        if row not in widgets.selected_rows(self.list):  # a right click in the selection keeps it (Remove… takes all)
-            self.list.selectRow(row)
-        menu = QMenu(self)
-        menu.addAction(tr("Give to a running sandbox…"), self.give).setEnabled(len(widgets.selected_rows(self.list)) == 1)
-        menu.addAction(tr("Check"), self.check)
-        menu.addSeparator()
-        menu.addAction(tr("Remove…"), self.remove)
-        copy_entries(menu, self.list, point)
-        menu.exec(self.list.viewport().mapToGlobal(point))
 
     def chosen(self):
         rows = sorted({index.row() for index in self.list.selectedIndexes()})
@@ -263,10 +247,10 @@ class GitLoginsBox(LoginsBox):
     def give_to(self, entry, found, error):
         runs = running_here(found, error)
         if not runs:
-            self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable(error))
+            self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable_text(error))
             return
         dialog = GiveDialog(self, runs)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         run, keep, called = dialog.run(), dialog.keep.isChecked(), dialog.run_label()
         target = git_login_url(entry)
@@ -291,7 +275,7 @@ class GitLoginsBox(LoginsBox):
         dialog = LoginDialog(self, tr("New Git login"), seen["secret_names"],
                              ((tr("Git server"), "url", "https://git.example.org"),
                               (tr("User"), "user", "x-access-token")), host=seen["host"])
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
         dialog.forget_value()
@@ -340,7 +324,7 @@ class PublishLoginsBox(LoginsBox):
         dialog = LoginDialog(self, tr("New publish login"), seen["secret_names"],
                              ((tr("Own server (optional)"), "url", "https://gitlab.example.org"),),
                              kinds=tuple(SandboxAI.PUBLISH_HOSTS), host=seen["host"])
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return None
         values = dialog.values()
         dialog.forget_value()
@@ -564,8 +548,6 @@ class CredentialsPage(QWidget):
             "HOST; its proxy puts the key in on the wire, the agent only sees a placeholder) or, for a Git server, as "
             "a Git login (sandbox-ai git-logins give RUN URL --secret NAME)")))
         give.clicked.connect(lambda _=False: self.give_secret())
-        self.secrets.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.secrets.customContextMenuRequested.connect(self.secret_menu)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Give… one
         delete_key(self.secrets, self.delete_secret)
         one_only(self.secrets, [give])
@@ -598,7 +580,8 @@ class CredentialsPage(QWidget):
         from . import web_browser
         try:
             launcher = self.sai.launcher  # (sandbox-ai's own PROVIDERS)
-        except Exception:  # noqa: BLE001 - not loadable: terminal_text's copy of the lists
+        except Exception as _exc:  # noqa: BLE001 - not loadable: terminal_text's copy of the lists
+            applog.swallowed("credentials_page", "CredentialsPage.fill_cloud_menu: not loadable: terminal_text'…", _exc)
             launcher = None
         web_browser.quick_menu(self.cloud_menu, self.open_browser, launcher)
         self.cloud_menu.addSeparator()
@@ -607,21 +590,6 @@ class CredentialsPage(QWidget):
     def open_browser(self, url):
         from . import web_browser
         return web_browser.open_browser(url, parent=self)
-
-    def secret_menu(self, point):
-        """A secret's menu: give it to a running sandbox as an API key, remove."""
-        row = self.secrets.rowAt(point.y())
-        if row < 0:
-            return
-        if row not in widgets.selected_rows(self.secrets):  # a right click in the selection keeps it
-            self.secrets.selectRow(row)
-        menu = QMenu(self)
-        menu.addAction(tr("Give to a running sandbox…"), self.give_secret).setEnabled(
-            len(widgets.selected_rows(self.secrets)) == 1)
-        menu.addSeparator()
-        menu.addAction(tr("Remove…"), self.delete_secret)
-        copy_entries(menu, self.secrets, point)
-        menu.exec(self.secrets.viewport().mapToGlobal(point))
 
     def give_secret(self):
         """The chosen secret as an API key of a sandbox that runs on this machine: its runs are read in the
@@ -639,10 +607,10 @@ class CredentialsPage(QWidget):
     def give_secret_to(self, secret, found, error):
         runs = running_here(found, error)
         if not runs:
-            self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable(error))
+            self.message.setText(tr("No sandbox runs on this machine now.") if error is None else printable_text(error))
             return
         dialog = GiveDialog(self, runs, secret=secret, git_hosts=self.git_hosts())
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         run, keep, called = dialog.run(), dialog.keep.isChecked(), dialog.run_label()
         host, variable = dialog.key_host(), dialog.variable.text().strip()
@@ -711,7 +679,9 @@ class CredentialsPage(QWidget):
 
     def even_out(self):
         """Every tab's header as high as the highest at this width (credential_tab.even_out): switching tabs moves
-        no list, no button and no text."""
+        no list, no button and no text. (Told a moment after a tab's header changed: the window may be gone by then.)"""
+        if not alive(self.tabs):
+            return
         current = self.tabs.currentWidget()
         even_out([current] + [self.tabs.widget(i) for i in range(self.tabs.count())
                               if self.tabs.widget(i) is not current])
@@ -772,7 +742,7 @@ class CredentialsPage(QWidget):
         stores = {"keyring": tr("your system keyring (Secret Service)"), "keychain": tr("the macOS Keychain"),
                   "file": tr("private files (mode 0600)")}
         if error is not None or not isinstance(result, str):
-            text = tr("Secrets backend: not known ({error})", error=printable(error)[:200])
+            text = tr("Secrets backend: not known ({error})", error=printable_text(error)[:200])
         else:
             text = tr("Secrets backend (sandbox-ai secrets backend): {store}",
                       store=stores.get(result, printable(result)[:40]))
@@ -791,13 +761,15 @@ class CredentialsPage(QWidget):
                 try:
                     found.append(function(host))
                 except Exception as exc:  # noqa: BLE001 - shown on the page; the other tabs still fill
+                    applog.swallowed("credentials_page", "refresh.read_remote: shown on the page; the other tabs…", exc)
                     found.append([])
-                    problems.append(printable(exc)[:300])
+                    problems.append(printable_text(exc)[:300])
             try:
                 listed = self.sai.host_secrets(host)
             except Exception as exc:  # noqa: BLE001
+                applog.swallowed("credentials_page", "refresh.read_remote failed (went on without it)", exc)
                 listed = None  # not known: a replace there is asked about
-                problems.append(printable(exc)[:300])
+                problems.append(printable_text(exc)[:300])
             rows, git, publish = found
             return rows, listed, "; ".join(problems) or None, git, publish, None
         if host != LOCAL:
@@ -812,11 +784,12 @@ class CredentialsPage(QWidget):
             git, publish = [], []
             try:
                 git, publish = self.sai.git_logins(), self.sai.publish_logins()
-            except Exception:  # noqa: BLE001 - an older sandbox-ai: those tabs stay empty
-                pass
+            except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: those tabs stay empty
+                applog.swallowed("credentials_page", "refresh.read: an older sandbox-ai: those tabs stay empty", _exc)
             try:
                 hosts = list(self.sai.remote_hosts())
-            except Exception:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: this machine's only
+            except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai, or no list of hosts: this machine's only
+                applog.swallowed("credentials_page", "refresh.read: an older sandbox-ai, or no list of hosts: t…", _exc)
                 hosts = []
             try:
                 return rows, self.sai.secrets(), None, git, publish, hosts
@@ -832,7 +805,7 @@ class CredentialsPage(QWidget):
             return
         if error is not None:
             self.remote_secrets.pop(host, None)
-            self.message.setText(printable(error))
+            self.message.setText(printable_text(error))
             return
         rows, listed, problem, git, publish, hosts = result
         store, names = listed if listed is not None else ("?", [])
@@ -850,7 +823,7 @@ class CredentialsPage(QWidget):
                            for agent, where, problem_, source in rows],
              ["ok" if problem_ is None else "warn" for _, _, problem_, _ in rows])
         if problem is not None:
-            self.message.setText(printable(problem))
+            self.message.setText(printable_text(problem))
         self.show_secrets(host, store, names)
         secret_names = [name for name, _ in names]
         self.git.show_entries(git, secret_names, known=listed is not None)
@@ -911,7 +884,7 @@ class CredentialsPage(QWidget):
             return
         if error is not None:
             self.remote_secrets.pop(host, None)
-            self.backend_label.setText(tr("{host}: no answer", host=printable(host)) + f" ({printable(error)[:300]})")
+            self.backend_label.setText(tr("{host}: no answer", host=printable(host)) + f" ({printable_text(error)[:300]})")
             return
         store, names = result
         self.remote_secrets[host] = list(names)
@@ -1060,8 +1033,8 @@ class CredentialsPage(QWidget):
 
     def secret_kept(self, result, error):
         status, out, err = outcome(result, error)
-        self.message.setText(printable((out + err).strip()) if status == 0 else
-                             tr("Not kept: {error}", error=printable(err.strip() or out.strip())))
+        self.message.setText(printable_text((out + err).strip()) if status == 0 else
+                             tr("Not kept: {error}", error=printable_text(err.strip() or out.strip())))
         self.secrets_changed()
 
     def secrets_changed(self):
@@ -1110,7 +1083,7 @@ class CredentialsPage(QWidget):
 
     def secret_deleted(self, result, error):
         status, out, err = outcome(result, error)
-        self.message.setText(printable((out + err).strip()))
+        self.message.setText(printable_text((out + err).strip()))
         self.secrets_changed()
 
 

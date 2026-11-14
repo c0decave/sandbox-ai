@@ -99,7 +99,7 @@ def serve(stdin=sys.stdin, stdout=sys.stdout):
             continue
         try:
             message = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
         else:
             reply = handle(message) if isinstance(message, dict) else {

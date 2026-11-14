@@ -29,7 +29,7 @@ import threading
 
 VERSION = "1.0.0"
 PROTOCOL = "2025-06-18"
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 LIMIT = 1800          # seconds a task may run
 LOCK = Path(os.environ.get("HOME") or "/root") / ".cache" / "sandbox-ai-helper.lock"
 ANSWER_LIMIT = 200 << 10  # characters of an answer; the rest is cut, and the answer says so
@@ -38,7 +38,16 @@ WORK = "/work"
 # The agents' own switch to work without asking: given only with --skip-permissions, which the launcher passes
 # when the lead was started with --dangerously-skip-permissions (the helper's sandbox holds either way).
 SKIP = {"claude": ["--dangerously-skip-permissions"], "codex": ["--dangerously-bypass-approvals-and-sandbox"],
-        "opencode": []}
+        "opencode": [], "hermes": [],  # Hermes' one-shot mode asks nothing
+        "dsh": [],  # a variable instead (SKIP_ENV): its headless run reads the mode from the environment
+        "qwen": ["--yolo"],
+        "goose": []}  # a variable instead (SKIP_ENV): Goose's mode auto
+# Without it Goose keeps the sandbox's smart_approve, which stops a headless run at its first question.
+SKIP_ENV = {"dsh": {"DSH_PERMISSION_MODE": "danger-full-access"}, "goose": {"GOOSE_MODE": "auto"}}
+# Agents that read the task on standard input: DSH's headless run takes it as "-" (an argument that starts with "-"
+# would be one of its options).
+STDIN_PROMPT = {"dsh"}
+DSH_PATCH = "/etc/dsh/sandbox-ai.patch.yml"  # dsh.py's PATCH (this module loads no sibling)
 
 
 def tools(agent):
@@ -68,6 +77,20 @@ def command(agent, prompt, resume=False, skip=False, last_message=None):
                 *(["resume", "--last"] if resume else []), "--", prompt]
     if agent == "opencode":
         return ["opencode", "run", *(["--continue"] if resume else []), *extra, "--", prompt]
+    if agent == "hermes":
+        # The prompt as the option's own value (--oneshot=...): one that starts with "-" stays the prompt.
+        return ["hermes", *(["--continue"] if resume else []), *extra, "--oneshot=" + prompt]
+    if agent == "qwen":
+        # The prompt as the option's own value (--prompt=...): one that starts with "-" stays the prompt.
+        return ["qwen", *(["--continue"] if resume else []), *extra, "--prompt=" + prompt]
+    if agent == "goose":
+        # One headless task: goose run, the text as the option's own value (--text=...); "continue" resumes the
+        # helper's last session.
+        return ["goose", "run", "--quiet", *(["--resume"] if resume else []), *extra, "--text=" + prompt]
+    if agent == "dsh":
+        # One headless task, read from standard input (STDIN_PROMPT); headless resumes only a session it is named,
+        # so "continue" starts a new task.
+        return ["dsh", "headless", "--patch", DSH_PATCH, *extra, "-"]
     raise ValueError(f"unknown agent {agent!r}")
 
 
@@ -76,7 +99,7 @@ def answer_of(agent, out, last_message=None):
     if agent == "claude":
         try:
             document = json.loads(out)
-        except ValueError:
+        except (ValueError, RecursionError):
             return out.strip()
         if isinstance(document, dict) and isinstance(document.get("result"), str):
             return document["result"]
@@ -120,11 +143,13 @@ class Helper:
             with tempfile.TemporaryDirectory(prefix="helper-") as scratch:
                 last = os.path.join(scratch, "last-message.txt") if self.agent == "codex" else None
                 argv = command(self.agent, prompt, resume, self.skip, last)
-                process = self.popen(argv, cwd=self.cwd if os.path.isdir(self.cwd) else None, text=True,
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     start_new_session=True)
+                given = self.agent in STDIN_PROMPT
+                env = {**os.environ, **SKIP_ENV[self.agent]} if self.skip and self.agent in SKIP_ENV else None
+                process = self.popen(argv, cwd=self.cwd if os.path.isdir(self.cwd) else None, text=True, env=env,
+                                     stdin=subprocess.PIPE if given else subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 try:
-                    out, err = process.communicate(timeout=self.limit)
+                    out, err = process.communicate(input=prompt if given else None, timeout=self.limit)
                 except subprocess.TimeoutExpired:
                     stop(process)
                     raise ValueError(f"{self.agent} did not finish within {self.limit} s; the task was stopped")
@@ -177,7 +202,7 @@ class Helper:
                 continue
             try:
                 message = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
             else:
                 reply = self.handle(message) if isinstance(message, dict) else {

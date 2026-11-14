@@ -164,7 +164,8 @@ def test_a_hosts_defaults_and_a_step_down_in_security_asks_first(qapp, env, monk
     assert ("ct1", ("defaults", "set", "mode", '"paranoid"')) in asked and not widgets.SHOWN
     assert hp.security_steps_down({"canaries": ["credentials", "home"]}, {"canaries": False})
     assert hp.security_steps_down({}, {"keep_days": 30}) and not hp.security_steps_down({}, {"mode": "high"})
-    assert hp.security_steps_down({}, {"telemetry": "on"}) and hp.security_steps_down({}, {"mode": "low"})
+    assert not hp.security_steps_down({}, {"telemetry": "on"}) and hp.security_steps_down({}, {"mode": "low"})
+    assert page.telemetry.findData("on") < 0, "telemetry is always off: on is never offered"
     page.close()
 
 

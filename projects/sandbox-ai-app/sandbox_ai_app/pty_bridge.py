@@ -9,6 +9,14 @@ text (the web page's QWebChannel carries strings), and a backlog until the page 
 acknowledges every chunk once it has shown it (ack); while more than ACK_LIMIT characters are not
 acknowledged, or the backlog is full, the terminal is not read: the command waits (its writes block), and
 nothing is lost or queued without bound.
+
+Output goes to the page in frames (Frames): what the command writes in one go reaches the terminal in pieces (a
+pseudo-terminal hands over 4 KiB per read; tmux passes an interface's redraw on in pieces of its own), and xterm.js
+paints whatever it has when the browser draws its next frame. A full-screen interface redraws by erasing its rows and
+writing them again (Ink: Qwen Code, Gemini CLI, Claude Code), so a paint between two pieces showed erased rows - the
+flicker. The bridge sends what it has once the output has been quiet for FRAME_QUIET (at most FRAME_HOLD after its first
+byte, FRAME_LIMIT bytes at most), and holds an unfinished synchronized update (DEC mode 2026, which xterm.js also
+honours) for up to SYNC_HOLD: each frame is one write, parsed whole and painted once.
 """
 from __future__ import annotations
 
@@ -22,6 +30,7 @@ import struct
 import subprocess
 import sys
 import termios
+import time
 
 # The child makes the new terminal its controlling terminal and then runs the command: a tiny Python
 # program instead of preexec_fn (which is unsafe in a process with threads, as every Qt application is).
@@ -36,6 +45,11 @@ INPUT_LIMIT = 1 << 20  # bytes per write from the page
 BACKLOG_LIMIT = 4 << 20  # output kept until the page is ready (base64 characters)
 ACK_LIMIT = 1 << 20  # output sent to the page and not yet acknowledged (base64 characters) before reading stops
 MAX_SIZE = 1000  # columns and rows
+FRAME_QUIET = 0.003  # s without output: the frame is complete (its pieces follow one another within 1-2 ms)
+FRAME_HOLD = 0.02  # s at most from a frame's first byte (steady output still reaches the page 50 times a second)
+SYNC_HOLD = 0.1  # s at most while a synchronized update is open (xterm.js itself waits up to 1 s for its end)
+FRAME_LIMIT = 64 << 10  # bytes: sent at once
+SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[?2026l"
 
 
 def set_size(fd, cols, rows):
@@ -47,6 +61,44 @@ def set_size(fd, cols, rows):
 def get_size(fd):
     rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
     return cols, rows
+
+
+class Frames:
+    """Output gathered into frames for the page: add() what was read, due() the seconds until it goes (None: nothing
+    waits; 0: now), take() it. No Qt: the bridge runs the timer."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock, self.chunks, self.size = clock, [], 0
+        self.first = self.last = 0.0
+        self.synced, self.tail = False, b""  # a synchronized update is open; the end of what came, for a split mark
+
+    def add(self, data):
+        now = self.clock()
+        if not self.chunks:
+            self.first = now
+        self.chunks.append(data)
+        self.size += len(data)
+        self.last = now
+        window = self.tail + data
+        begin, end = window.rfind(SYNC_BEGIN), window.rfind(SYNC_END)
+        if begin >= 0 or end >= 0:
+            self.synced = begin > end
+        self.tail = window[-(len(SYNC_BEGIN) - 1):]
+
+    def due(self):
+        if not self.chunks:
+            return None
+        if self.size >= FRAME_LIMIT:
+            return 0
+        deadline = self.first + SYNC_HOLD if self.synced else min(self.last + FRAME_QUIET, self.first + FRAME_HOLD)
+        return max(0, deadline - self.clock())
+
+    def take(self):
+        if self.synced and self.clock() - self.first >= SYNC_HOLD:
+            self.synced = False  # never ended: over, as xterm.js ends it after its own wait
+        data = b"".join(self.chunks)
+        self.chunks, self.size = [], 0
+        return data
 
 
 class Pty:
@@ -151,7 +203,7 @@ class Pty:
 
 
 try:
-    from PySide6.QtCore import Property, QObject, QSocketNotifier, QTimer, Signal, Slot
+    from PySide6.QtCore import Property, QObject, QSocketNotifier, Qt, QTimer, Signal, Slot
 except ImportError:  # pragma: no cover - the app needs Qt; Pty alone does not
     QObject = None
 
@@ -166,7 +218,16 @@ if QObject is not None:
         def __init__(self, argv, cols=80, rows=24, env=None, cwd=None, theme="dark", exit_text=None,
                      kill_after=3000, parent=None):
             super().__init__(parent)
-            self.pty = Pty(argv, cols, rows, env, cwd)
+            from . import applog
+            self.began, self.shown = time.monotonic(), applog.argv_text(argv, 1500)
+            try:
+                self.pty = Pty(argv, cols, rows, env, cwd)
+            except Exception as exc:
+                applog.log("WARNING", "terminal", f"the terminal's command could not start: "
+                                                  f"{applog.error_text(exc)}: {self.shown}")
+                raise
+            applog.log("INFO", "terminal", f"command started in a terminal tab (pid {self.pty.pid}"
+                                           + (f", in {cwd}" if cwd else "") + f"): {self.shown}")
             self._theme, self.exit_text, self.kill_after = theme, exit_text, kill_after
             self.status, self.ready_seen, self.backlog, self.backlog_size = None, False, [], 0
             self.unacked, self.paused, self.closed = 0, False, False  # characters sent the page has not shown yet
@@ -180,7 +241,19 @@ if QObject is not None:
             self.reaper.timeout.connect(self._reap)
             self.killer = QTimer(self)
             self.killer.setSingleShot(True)
-            self.killer.timeout.connect(self.pty.kill)
+            self.killer.timeout.connect(self._kill)
+            self.frames = Frames()
+            self.framer = QTimer(self)
+            self.framer.setSingleShot(True)
+            self.framer.setTimerType(Qt.TimerType.PreciseTimer)
+            self.framer.timeout.connect(self._flush)
+
+        def _kill(self):
+            from . import applog
+            if self.pty.poll() is None:
+                applog.log("INFO", "terminal", f"the terminal's command (pid {self.pty.pid}) is still there "
+                                               f"{self.kill_after} ms after the hang-up: killed")
+            self.pty.kill()
 
         def _get_theme(self):
             return self._theme
@@ -209,8 +282,10 @@ if QObject is not None:
             self._throttle()
 
         def _throttle(self):
-            """Read the terminal only while the page keeps up (and the backlog has room)."""
-            full = self.unacked > ACK_LIMIT if self.ready_seen else self.backlog_size >= BACKLOG_LIMIT
+            """Read the terminal only while the page keeps up (and the backlog has room); output still gathered
+            into a frame counts as sent."""
+            waiting = (self.frames.size + 2) // 3 * 4
+            full = self.unacked + waiting > ACK_LIMIT if self.ready_seen else self.backlog_size >= BACKLOG_LIMIT
             if full == self.paused or self.closed or self.status is not None or self.pty.eof:
                 return
             self.paused = full
@@ -248,14 +323,35 @@ if QObject is not None:
         def _readable(self, *_):
             for _ in range(16):  # bounded: the event loop stays responsive under heavy output
                 if self.paused:
-                    return
+                    break
                 data = self.pty.read()
                 if data is None:
+                    self._flush()
                     self._ended()
                     return
                 if not data:
-                    return
-                self._send(data)
+                    break
+                if self.ready_seen:
+                    self.frames.add(data)
+                else:
+                    self._send(data)
+                self._throttle()
+            self._frame()
+
+        def _frame(self):
+            """Send the frame when it is due (or the reading has stopped: the page is behind), else wake up then."""
+            due = self.frames.due()
+            if due is None:
+                self.framer.stop()
+            elif due <= 0 or self.paused:
+                self._flush()
+            else:
+                self.framer.start(max(1, round(due * 1000)))
+
+        def _flush(self):
+            self.framer.stop()
+            if self.frames.size:
+                self._send(self.frames.take())
                 self._throttle()
 
         def _writable(self, *_):
@@ -277,16 +373,25 @@ if QObject is not None:
             self.killer.stop()
             if self.status is None:
                 self.status = status
+                from . import applog
+                applog.log("INFO", "terminal", f"the terminal's command ended (pid {self.pty.pid}): "
+                           + (f"killed by signal {-status}" if status < 0 else f"exit status {status}")
+                           + f" after {applog.seconds(time.monotonic() - self.began)}"
+                           + (" (its tab was closed)" if self.closed else "") + f": {self.shown}")
                 if self.exit_text:
                     self._send(("\r\n" + self.exit_text.format(status=status) + "\r\n").encode())
                 self.exited.emit(status)
 
         def close(self):
             """End the command: hang up, and kill it if it is still there after KILL_AFTER ms."""
+            self._flush()
             self.closed = True
             self.reader.setEnabled(False)
             self.writer.setEnabled(False)
             if self.pty.poll() is None:
+                from . import applog
+                applog.log("INFO", "terminal", f"the terminal tab is closed while its command runs (pid "
+                                               f"{self.pty.pid}): hang-up sent")
                 self.pty.close()
                 self.killer.start(self.kill_after)
                 self.reaper.start()

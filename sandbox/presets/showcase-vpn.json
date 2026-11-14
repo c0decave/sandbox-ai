@@ -1,0 +1,49 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "showcase-vpn",
+  "title": "Showcase: through a VPN, with a kill switch",
+  "description": "Everything of the sandbox leaves through a VPN profile of yours (WireGuard, OpenVPN, a Tailscale exit node or Tor), checked before the agent starts and during the run. The agent shows the address the internet sees, what is refused around the tunnel, and what the kill switch cuts; a report says what it found.",
+  "translations": {
+    "de": {
+      "title": "Schaufenster: durch ein VPN, mit Notschalter",
+      "description": "Alles aus der Sandbox geht über ein VPN-Profil von Ihnen (WireGuard, OpenVPN, ein Tailscale-Exit-Node oder Tor), geprüft vor dem Start des Agenten und während des Laufs. Der Agent zeigt die Adresse, die das Internet sieht, was am Tunnel vorbei abgewiesen wird und was der Notschalter kappt; ein Bericht sagt, was er gefunden hat."
+    }
+  },
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--vpn",
+    "{vpn}",
+    "--vpn-check",
+    "stop",
+    "--dns",
+    "--allow-host",
+    "{echo}"
+  ],
+  "values": {
+    "vpn": {
+      "label": "VPN profile (sandbox-ai vpn list)",
+      "kind": "vpn",
+      "hint": "once: sandbox-ai vpn add NAME --wireguard wg.conf (or --openvpn FILE, --tailscale --exit-node HOST, --tor --socks after sandbox-ai build tor); sandbox-ai vpn check NAME tries it alone"
+    },
+    "echo": {
+      "label": "A web host that answers with the address it sees (HTTPS)",
+      "kind": "host",
+      "default": "api.ipify.org",
+      "hint": "plain text, no tracking needed: api.ipify.org, icanhazip.com or ifconfig.me"
+    }
+  },
+  "prompt": "This start goes through a VPN. Show what that means and write a short report to /work/vpn-report.md (each command, its answer, your conclusion): (1) the address the internet sees: curl -s https://{echo}/ - the VPN's exit, not this computer's; (2) names: cat /etc/resolv.conf and one lookup (getent hosts {echo}) - the tunnel's resolver; (3) the allow-list still holds: https://example.com/ is refused (quote the refusal); (4) around the tunnel: a DNS query straight to 1.1.1.1 (dig @1.1.1.1 example.com +time=3 +tries=1), a private address (nc -vz -w 3 192.168.1.1 80) and IPv6 (curl -6 -m 5 https://{echo}/) - say for each whether it was refused or got no answer; (5) the kill switch: tell the human to run, on this computer, sandbox-ai net cut $SANDBOX_AI_RUN api (only the model API stays), wait for their answer, run (1) again and quote what happens, then ask them to lift it with sandbox-ai net cut $SANDBOX_AI_RUN off and run (1) once more; if nobody answers within two minutes, skip (5) and say so. Change nothing in /work but the report.",
+  "notes": [
+    "Podman only (the tunnel runs in a container of the pod, and its kill switch in the pod's network namespace).",
+    "Make a profile once: sandbox-ai vpn add NAME --wireguard wg.conf (or --openvpn FILE, --tailscale --exit-node HOST, or --tor --socks after sandbox-ai build tor); sandbox-ai vpn check NAME tries it alone. --vpn-check stop (set here) ends the start when the check before it fails, and the run when a check during it does.",
+    "What the agent sees: only the tunnel leaves the pod; UDP and IPv6 go through it or nowhere (Tor: TCP over IPv4 only), the local network and the host's ports stay closed (a VPN of your network, Tailscale: its own ranges), and the allow-list, the connection proxy and the approvals apply inside the tunnel as always. --dns gives the sandbox the tunnel's resolver.",
+    "The kill switch is the host's, out of the agent's reach: sandbox-ai net cut RUN remote|local|api|all|off (the app: the Sandboxes page's Kill switch menu, or the emergency stop, Ctrl+Shift+X). A cut never opens anything and ends the open connections it forbids.",
+    "The host with your address: one HTTPS name that answers with the address it sees; nothing but the provider and it is open."
+  ]
+}

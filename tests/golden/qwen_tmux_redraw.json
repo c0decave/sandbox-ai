@@ -1,0 +1,53 @@
+{
+ "comment": "What a tmux 3.3a client wrote to its terminal while the pane redrew 8 Qwen-like (Ink, virtual viewport) frames of 50x200 rows and columns: each frame erases its rows and writes them again, and tmux passed it on in pieces of one pane read each. pieces: the length of each read; gaps: milliseconds before it; data: all bytes, zlib and base64. Frame n has TOPn in its first row and ENDn in its last.",
+ "tmux": "3.3a",
+ "rows": 50,
+ "columns": 200,
+ "frames": [
+  10,
+  17
+ ],
+ "pieces": [
+  1509,
+  4095,
+  4989,
+  4188,
+  4004,
+  2393,
+  2350,
+  4004,
+  4258,
+  5892,
+  4009,
+  709,
+  10599,
+  3908,
+  4009,
+  2714,
+  10597,
+  9145,
+  1446
+ ],
+ "gaps": [
+  0.0,
+  2.968,
+  0.199,
+  48.294,
+  1.212,
+  0.385,
+  48.94,
+  0.142,
+  1.694,
+  49.308,
+  0.402,
+  0.63,
+  49.759,
+  49.897,
+  0.128,
+  0.115,
+  49.891,
+  50.596,
+  0.183
+ ],
+ "data": "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"
+}

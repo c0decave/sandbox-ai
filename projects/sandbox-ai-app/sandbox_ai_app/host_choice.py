@@ -11,7 +11,7 @@ import re
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QWidget
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .widgets import plain_label, safe_tooltip
 
@@ -161,7 +161,7 @@ class HostChooser(QWidget):
             if self.sai.hosts_supported():
                 entries = [e for e in self.sai.host_entries() if isinstance(e, dict)]
         except Exception as exc:  # noqa: BLE001 - an older sandbox-ai or a broken file: this machine only
-            self.problem = printable(exc)
+            self.problem = printable_text(exc)
         self.box.blockSignals(True)
         self.box.clear()
         if self.local:

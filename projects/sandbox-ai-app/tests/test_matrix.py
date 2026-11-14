@@ -310,11 +310,12 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     assert wait(lambda: page.launcher_ok is True, 10)
     assert w.commands.argv(runs)[-1] == [runs, *B.launcher_argv(sai, board), "--workspaces-as-given", "--dry-run"]
     # Apply: written, trusted (exactly the bytes written), the layout next to it; read back it is the same board.
-    shown = len(widgets.SHOWN)
+    from sandbox_ai_app import short_notices
+    shown, notices = len(widgets.SHOWN), len(short_notices.SHOWN)
     assert page.apply()
     title = i18n.tr("Project configuration")
-    assert wait(lambda: title in shown_titles()[shown:], 10), widgets.SHOWN[shown:]
-    assert shown_titles()[shown] == i18n.tr("Write and trust") and not page.dirty()
+    assert wait(lambda: title in [t for t, _ in short_notices.SHOWN[notices:]], 10), widgets.SHOWN[shown:]
+    assert shown_titles()[shown:] == [i18n.tr("Write and trust")] and not page.dirty(), "written: a notice, no box"
     review = sai.review_project(project)
     assert review.trusted and review.problems == [] and (project / B.LAYOUT_NAME).is_file()
     document, main = B.project_document(sai, board)
@@ -581,7 +582,11 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         assert w.opened[-1][1] == i18n.tr("session {name}", name="work")
         page.session("attach")
         assert w.started[-1][0] == "term" and w.started[-1][4:] == ["session", "attach", "work"]
-        # Stop: asked first, then sandbox-ai session stop; the tab stays, stopped; Resume and Delete remain.
+        # Stop: asked first, then sandbox-ai session stop; the tab shows it stopped, Resume and Delete remain, until
+        # it closes by itself AUTO_CLOSE_MS later (here out of reach: a loaded machine takes longer than 3 s for the
+        # steps below; the close is called at the end).
+        from sandbox_ai_app import ui as ui_module
+        monkeypatch.setattr(ui_module, "AUTO_CLOSE_MS", 3_600_000)
         page.stop()
         assert i18n.tr("Stop {what}? It ends; its HOME is kept and Resume starts it again.",
                        what=i18n.tr("session {name}", name="work")) == widgets.SHOWN[-1][1]
@@ -594,7 +599,9 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         done("session", "delete")
         del registry["session"]
         read_now(page)
-        assert tab("session:work")[0]["state"] == "stopped", "a session that is gone stays as a stopped tab"
+        assert tab("session:work")[0]["state"] == "stopped", "a session that is gone shows a stopped tab"
+        w.close_ended_tab("session:work")  # (AUTO_CLOSE_MS after it ended)
+        assert tab("session:work")[0] is None, "the tab of a session that ended normally closes by itself"
         assert [args for args, _ in sai.run.log if args[0] == "session"] == [
             ["session", "pause", "work"], ["session", "resume", "work"], ["session", "stop", "work"],
             ["session", "delete", "work", "--yes"]]
@@ -816,7 +823,7 @@ def test_credentials_secrets_vpn_and_logins(window, env, monkeypatch, wait, agen
     secret = "sk-live-0123456789abcdef"
     page.refresh()
     assert wait(lambda: not widgets.busy(page), 10)
-    assert [page.logins.item(r, 0).text() for r in range(page.logins.rowCount())] == list(sai.agents)
+    assert [page.logins.item(r, 0).text() for r in range(page.logins.rowCount())] == list(sai.login_agents())
     # A secret: the value is cleared from the field at once and goes on standard input only.
     page.name.setText("DEMO_TOKEN")
     page.value.setText(secret)
@@ -889,13 +896,13 @@ def all_texts(widget):
 def changed_settings(env):
     """A value other than the default for every setting the app knows."""
     return {"theme": "dark", "ui_font": "Inter", "mono_font": "Hack", "language": "de", "terminal": "window", "tray": False, "notify": False,
-            "notify_safeguards": False, "notifications": True, "reopen_terminals": False,
+            "notify_safeguards": False, "notifications": True, "reopen_terminals": True,
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
             "default_template": "research", "board_grid": 40, "board_confirm_remove": False, "auto_tabs": False, "guide_nodes": False,
             "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True,
             "show_flags": True, "login_links": "system", "copy_on_select": True, "paste_warn": False,
-            "terminal_osc52": "off"}
+            "terminal_osc52": "off", "short_notices": False}
 
 
 def field_value(widget):

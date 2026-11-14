@@ -11,12 +11,14 @@
                                                          validate the extension, show the final Containerfile
   sandbox-ai images recipe NAME --from AGENT [--as V]  a variant with a ready extension (media: ffmpeg,
                                                          PulseAudio, espeak-ng, Piper ... for --audio virtual and
-                                                         videos; tor: torsocks, torbrowser-launcher; dev: Podman
+                                                         videos; dev: Podman
                                                          and tools for developing sandbox-ai, with
                                                          --nested-containers; hyperframes, playwright: the CLIs
                                                          of the built-in kits' skills, pinned by lockfiles)
   sandbox-ai images new NAME --from AGENT [--empty]      a variant: localhost/AGENT-sandbox-NAME, started with
-                                                         --image-variant NAME
+                                                         --image-variant NAME; each agent has its own (the recipe
+                                                         media for claude and for dsh); where a name is a variant
+                                                         of several agents, commands take it as NAME@AGENT
   sandbox-ai images remove AGENT|VARIANT [--keep-image]  drop an extension (and a variant's image)
   sandbox-ai images history [AGENT|VARIANT] [--json]     changes and builds of the extensions
   sandbox-ai images new NAME --from AGENT --base IMAGE   a variant built on one of your images (Debian 12) instead
@@ -30,6 +32,9 @@
                                                          its RUN steps without network unless --build-network (this
                                                          host's own, outside the firewall, VPN and Tor); refused
                                                          where a sandbox can write unless --trust-agent-written
+  sandbox-ai images build-image NAME --builtin TEMPLATE  the same of one of sandbox-ai's own Containerfiles
+                                                         (sandbox/service-images; showcase-web: nginx for the
+                                                         showcase presets), unchecked like yours
   sandbox-ai images list [--json]                        your images, each marked UNCHECKED (nobody reviewed them)
   sandbox-ai images remove IMAGE [--keep-image]          forget one of your images
 
@@ -63,14 +68,29 @@ import threading
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("claude", "codex", "opencode")
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 LABEL = "sandbox-ai.agent-version"
 HASH_LABEL = "sandbox-ai.extension-hash"
 BASE_LABEL = "sandbox-ai.base-id"
 EXTENSION_LABEL = "sandbox-ai.extension"
 AGENT_PACKAGES = {"claude": "@anthropic-ai/claude-code", "codex": "@openai/codex", "opencode": "opencode-ai"}
 NAME = r"[a-z0-9][a-z0-9_.-]{0,29}"
-RESERVED = {*AGENTS, "all", "base", "latest", "sandbox", "team", "vpn"}  # team, vpn: sandbox-ai build targets
+RESERVED = {*AGENTS, "all", "base", "latest", "sandbox", "team", "vpn", "variants"}  # team, vpn: build targets
+VARIANTS = "variants"  # config_root()/variants/AGENT/NAME: each agent's variants (a recipe's name for every agent)
 KINDS = ("apt", "npm", "pip")
 DOCUMENT = "image.json"
 FRAGMENT = "Containerfile.fragment"
@@ -200,8 +220,28 @@ def valid_name(name):
     return isinstance(name, str) and bool(re.fullmatch(NAME, name)) and name not in RESERVED
 
 
+# A part of an image name as Podman takes it (the OCI reference grammar): letters and digits, separated by one "." or
+# "_", by "__" or by dashes - never at the end, never two dots. A name Podman cannot tag is refused when it is made.
+TAG_SAFE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
+
+
+def taggable(name):
+    """NAME is valid_name and Podman can tag an image with it (localhost/AGENT-sandbox-NAME, sandbox-ai-image-NAME)."""
+    return valid_name(name) and bool(TAG_SAFE.fullmatch(name))
+
+
+NAME_RULE = ("lower-case letters and digits, joined by '.', '_' or '-' (not at the end, no '..' or '___': part of an "
+             "image name), up to 30 characters")
+
+
+def bare(target):
+    """The variant's own name of TARGET (NAME, or NAME@AGENT: the variant NAME of AGENT)."""
+    return str(target).partition("@")[0]
+
+
 def image_name(target, agent):
-    return f"localhost/{agent}-sandbox:latest" if target == agent else f"localhost/{agent}-sandbox-{target}:latest"
+    return f"localhost/{agent}-sandbox:latest" if target == agent else \
+        f"localhost/{agent}-sandbox-{bare(target)}:latest"
 
 
 def base_image(agent):
@@ -212,12 +252,13 @@ def base_of(target, document):
     """The image TARGET's extension layer is built on: the agent's base, or for a variant on a base image of yours
     (sandbox-ai images new NAME --base IMAGE) its own: the agent's layers built on that image."""
     agent = document["agent"]
-    return f"localhost/{agent}-sandbox-{target}:base" if document.get("base") and target != agent else base_image(agent)
+    return f"localhost/{agent}-sandbox-{bare(target)}:base" if document.get("base") and target != agent else \
+        base_image(agent)
 
 
 def prep_image(target, agent):
     """Your base image made ready for the agent's layers (prep_containerfile), tagged for sandbox-ai build."""
-    return f"localhost/{agent}-sandbox-{target}:prep"
+    return f"localhost/{agent}-sandbox-{bare(target)}:prep"
 
 
 def read_limited(path, limit):
@@ -242,75 +283,208 @@ def empty_document(agent):
     return {"version": 1, "agent": agent, "apt": [], "npm": [], "pip": [], "files": []}
 
 
-def variants():
-    """[(name, agent)] of the variants in the configuration directory, sorted by name."""
-    found = []
-    root = config_root()
+def document_agent(directory):
+    """The agent the extension in DIRECTORY is of (its image.json), else None."""
+    try:
+        document = json.loads(read_limited(directory / DOCUMENT, 1 << 20))
+    except (ValueError, OSError, RecursionError):
+        return None
+    return document.get("agent") if isinstance(document, dict) and document.get("agent") in AGENTS else None
+
+
+def migrate_variants(root):
+    """The variants of before 0.1.95's fixes (config_root()/NAME, one agent per name) moved to their agent's folder
+    (config_root()/variants/AGENT/NAME): a recipe's variant (tor, media) can then be made for every agent that needs
+    it. Once per variant; one that cannot be moved stays where it is and is read there."""
     try:
         entries = sorted(os.listdir(root))
     except OSError:
-        return []
+        return
     for name in entries:
-        if not valid_name(name):
+        if not valid_name(name) or (root / name).is_symlink():
+            continue
+        agent = document_agent(root / name)
+        if agent is None:
+            continue
+        target = root / VARIANTS / agent / name
+        if target.exists() or target.is_symlink():
             continue
         try:
-            document = json.loads(read_limited(root / name / DOCUMENT, 1 << 20))
-        except (ValueError, OSError):
+            check_location(root, "The image extensions in")
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.rename(root / name, target)
+        except (OSError, ValueError):
             continue
-        if isinstance(document, dict) and document.get("agent") in AGENTS:
-            found.append((name, document["agent"]))
-    return found
+
+
+def variants():
+    """[(name, agent)] of the variants in the configuration directory (each agent's own: the same name may be a
+    variant of several agents), sorted by name, then agent."""
+    root = config_root()
+    if not root.is_dir():
+        return []
+    migrate_variants(root)
+    found = set()
+    for agent in AGENTS:
+        folder = root / VARIANTS / agent
+        try:
+            names = os.listdir(folder) if not folder.is_symlink() else []
+        except OSError:
+            names = []
+        for name in names:
+            if valid_name(name) and document_agent(folder / name) == agent:
+                found.add((name, agent))
+    for name in os.listdir(root):  # (one that could not be moved: read where it is)
+        if valid_name(name) and not (root / name).is_symlink():
+            agent = document_agent(root / name)
+            if agent is not None:
+                found.add((name, agent))
+    return sorted(found)
 
 
 def targets():
-    """[(name, agent)]: the agents' own extensions first, then the variants."""
-    return [(agent, agent) for agent in AGENTS] + variants()
+    """[(target, agent)]: the agents' own extensions first, then the variants - each by its name, or NAME@AGENT where
+    the same name is a variant of several agents (shown_target)."""
+    found = variants()
+    return [(agent, agent) for agent in AGENTS] + [(shown_target(name, agent, found), agent) for name, agent in found]
 
 
-def agent_of(target):
-    """The agent of TARGET (an agent or an existing variant), else ValueError."""
+def shown_target(name, agent, found=None):
+    """The variant NAME of AGENT as its commands take it: NAME, or NAME@AGENT when NAME is a variant of another agent
+    too."""
+    found = variants() if found is None else found
+    return f"{name}@{agent}" if [owner for other, owner in found if other == name and owner != agent] else name
+
+
+def resolve(target):
+    """(name, agent) of TARGET: an agent (its own extension), a variant's NAME (of one agent only), or NAME@AGENT;
+    else ValueError."""
     if target in AGENTS:
-        return target
-    if not valid_name(target):
+        return target, target
+    name, at, agent = str(target).partition("@")
+    if not valid_name(name) or (at and agent not in AGENTS):
         raise ValueError(f"{target!r} is neither an agent ({', '.join(AGENTS)}) nor a variant name "
-                         "(lower-case letters, digits, '.', '_' and '-', up to 30 characters)")
-    for name, agent in variants():
-        if name == target:
-            return agent
+                         "(lower-case letters, digits, '.', '_' and '-', up to 30 characters; NAME@AGENT for the "
+                         "variant NAME of AGENT)")
+    owners = [owner for other, owner in variants() if other == name]
+    if at:
+        if agent in owners:
+            return name, agent
+        raise ValueError(f"no variant {name} of {agent}; create it with: sandbox-ai images new {name} --from {agent}")
+    if len(owners) == 1:
+        return name, owners[0]
+    if owners:
+        raise ValueError(f"{name} is a variant of {' and '.join(owners)}: name one of them, e.g. {name}@{owners[0]}")
     raise ValueError(f"no variant {target}; create it with: sandbox-ai images new {target} --from AGENT")
 
 
-BUILD_TARGETS = ("codex", "claude", "opencode", "all", "team", "vpn", "tor")  # what `sandbox-ai build NAME` means
+def agent_of(target):
+    """The agent of TARGET (an agent or an existing variant: NAME, NAME@AGENT), else ValueError."""
+    return resolve(target)[1]
+
+
+def target_dir(target):
+    """The folder of TARGET's extension: the agent's own (config_root()/AGENT), a variant's in its agent's folder (or
+    where one of before was left: migrate_variants)."""
+    name, agent = resolve(target)
+    return config_root() / agent if name == agent else variant_dir(name, agent)
+
+
+def variant_dir(name, agent):
+    """The folder of the variant NAME of AGENT: in its agent's folder, or where one of before was left."""
+    root = config_root()
+    own = root / VARIANTS / agent / name
+    if not own.exists() and not (root / name).is_symlink() and document_agent(root / name) == agent:
+        return root / name
+    return own
+
+
+BUILD_TARGETS = ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose", "all", "team", "cairn", "vpn", "tor",
+                 "browser")  # what `sandbox-ai build NAME` means
 
 
 def build_command(name):
-    """How the variant NAME is built: sandbox-ai build NAME, or with --variant when NAME is a build target too (the
-    recipe tor's variant: `build tor` builds the Tor VPN's image)."""
-    return f"sandbox-ai build --variant {name}" if name in BUILD_TARGETS else f"sandbox-ai build {name}"
+    """How the variant NAME (or NAME@AGENT) is built: sandbox-ai build NAME, or with --variant when NAME is a build
+    target too (a variant of yours called tor: `build tor` builds the Tor VPN's image)."""
+    return f"sandbox-ai build --variant {name}" if bare(name) in BUILD_TARGETS else f"sandbox-ai build {name}"
 
 
-def variant_image(agent, name):
-    """The image of variant NAME of AGENT (for the launcher's --image-variant), else ValueError."""
+def adopt_variant(name, agent, found=None):
+    """The variant NAME of another agent made for AGENT too (its image.json with AGENT, its fragment and files
+    copied): a preset or board made with one agent and switched to another names that agent's variant. The other
+    agent's that is copied: the first by name. None when there is none to copy, else the agent copied from."""
+    found = variants() if found is None else found
+    others = [owner for other, owner in found if other == name and owner != agent]
+    if not others:
+        return None
+    source, target = variant_dir(name, others[0]), config_root() / VARIANTS / agent / name
+    if target.exists() or target.is_symlink():
+        return None
+    check_location(config_root(), "The image extensions in")
+    document = json.loads(read_limited(source / DOCUMENT, 1 << 20))
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=target.parent))
+    try:
+        for entry in os.listdir(source):
+            path = source / entry
+            if entry == FILES and path.is_dir() and not path.is_symlink():
+                # The files its image.json installs (images extend --add-file): the copy names them too.
+                os.mkdir(staging / FILES, 0o700)
+                for name in os.listdir(path):
+                    item = path / name
+                    if item.is_symlink() or not item.is_file():
+                        continue
+                    (staging / FILES / name).write_bytes(read_limited(item, FILES_LIMIT))
+                    os.chmod(staging / FILES / name, item.stat().st_mode & 0o755)
+                continue
+            if entry == DOCUMENT or path.is_symlink() or not path.is_file():
+                continue
+            (staging / entry).write_bytes(read_limited(path, 64 << 20))
+            os.chmod(staging / entry, path.stat().st_mode & 0o755)
+        (staging / DOCUMENT).write_text(json.dumps({**document, "agent": agent}, indent=2) + "\n")
+        os.rename(staging, target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return others[0]
+
+
+def adopted_from(name, agent):
+    """The other agent whose variant NAME an adopted one of AGENT copied (said once at the start), or "another
+    agent" when it is not known any more."""
+    owners = [owner for other, owner in variants() if other == name and owner != agent]
+    return owners[0] if owners else "another agent"
+
+
+def variant_image(agent, name, adopt=False):
+    """The image of variant NAME of AGENT (for the launcher's --image-variant), else ValueError. ADOPT: a variant NAME
+    of another agent only is made for AGENT too (adopt_variant) instead of refused."""
     if not valid_name(name):
         raise ValueError(f"--image-variant {name!r}: not a variant name")
-    try:
-        owner = agent_of(name)
-    except ValueError:
-        if name in RECIPES:  # (images new would make an empty one: the recipe brings what the name promises)
-            raise ValueError(f"--image-variant {name}: no such variant; make it from its recipe and build it: "
-                             f"sandbox-ai images recipe {name} --from {agent} && {build_command(name)}") from None
-        raise ValueError(f"--image-variant {name}: no such variant; create it with: sandbox-ai images new {name} "
-                         f"--from {agent}") from None
-    if owner != agent:
-        raise ValueError(f"--image-variant {name} is a variant of {owner}, not of {agent}")
-    return image_name(name, agent)
+    found = variants()
+    if (name, agent) in found:
+        return image_name(name, agent)
+    if adopt and adopt_variant(name, agent, found):
+        return image_name(name, agent)
+    others = [owner for other, owner in found if other == name]
+    target = shown_target(name, agent, found + [(name, agent)])
+    if name in RECIPES:  # (images new would make an empty one: the recipe brings what the name promises)
+        raise ValueError(f"--image-variant {name}: no such variant of {agent}"
+                         + (f" (only of {', '.join(others)})" if others else "")
+                         + f"; make it from its recipe and build it: sandbox-ai images recipe {name} --from {agent} "
+                         f"&& {build_command(target)}")
+    if others:
+        raise ValueError(f"--image-variant {name} is a variant of {' and '.join(others)}, not of {agent}; make one "
+                         f"of {agent} too: sandbox-ai images new {name} --from {agent}")
+    raise ValueError(f"--image-variant {name}: no such variant; create it with: sandbox-ai images new {name} "
+                     f"--from {agent}")
 
 
 def load(target, strict=True):
     """(document, fragment text, {file name: bytes}) of TARGET's extension (empty for an agent without one).
     STRICT checks the location first (always before writing or building)."""
     agent = agent_of(target)
-    directory = config_root() / target
+    directory = target_dir(target)
     if strict:
         check_location(config_root(), "The image extensions in")
     document, fragment, files = empty_document(agent), "", {}
@@ -402,7 +576,7 @@ def json_or_words(arguments):
     if arguments.startswith("["):
         try:
             words = json.loads(arguments)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise ValueError("invalid JSON form") from None
         if not isinstance(words, list) or not all(isinstance(w, str) for w in words):
             raise ValueError("invalid JSON form")
@@ -703,8 +877,8 @@ def containerfile(target, document, fragment):
     files, your fragment, and the launcher's expectations restored at the end."""
     agent = document["agent"]
     q = shlex.quote
-    lines = [f"# Extension {target} of {agent}: generated by sandbox-ai images (change it with "
-             f"sandbox-ai images extend {target})",
+    lines = [f"# Extension {bare(target)} of {agent}: generated by sandbox-ai images (change it with "
+             f"sandbox-ai images extend {bare(target)})",
              f"FROM {base_of(target, document)}", "USER root"]
     if document.get("apt"):
         lines += ["RUN apt-get update && apt-get install -y --no-install-recommends \\",
@@ -739,8 +913,9 @@ def describe(target, strict=False):
     document, fragment, files = load(target, strict=strict)
     text = containerfile(target, document, fragment)
     findings = check(document, fragment, files)
-    return {"target": target, "agent": agent, "variant": target != agent, "image": image_name(target, agent),
-            "base": base_of(target, document), "base_image": document.get("base"), "path": str(config_root() / target),
+    shown = target if target in AGENTS else shown_target(bare(target), agent)
+    return {"target": shown, "agent": agent, "variant": target != agent, "image": image_name(target, agent),
+            "base": base_of(target, document), "base_image": document.get("base"), "path": str(target_dir(target)),
             **{kind: list(document.get(kind, [])) for kind in KINDS}, "files": list(document.get("files", [])),
             "available": sorted(files), "fragment": fragment, "extended": has_extension(document, fragment, files),
             "findings": findings, "containerfile": text, "hash": extension_hash(text, files)}
@@ -752,15 +927,20 @@ def write_private(path, data):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
-    os.replace(temporary, path)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)  # (a full disk: no .NAME.PID.tmp left beside the file)
+        raise
 
 
 def remember(action, target, **details):
     """One line in the history of the extensions (changes and builds)."""
     path = history_file()
-    entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "action": action, "target": target,
+    entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "action": action, "target": bare(target),
              **details}
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -783,9 +963,13 @@ def history(target=None):
     for line in lines:
         try:
             entry = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
-        if isinstance(entry, dict) and (target is None or entry.get("target") == target):
+        if not isinstance(entry, dict):
+            continue
+        name, at, agent = str(target).partition("@") if target is not None else ("", "", "")
+        if target is None or entry.get("target") == target or \
+                (at and entry.get("target") == name and entry.get("agent") in (agent, None)):
             entries.append(entry)
     return entries
 
@@ -804,7 +988,7 @@ def parse_file_option(value):
 
 
 def save(target, document, fragment, files):
-    directory = config_root() / target
+    directory = config_root() / target if target in AGENTS else variant_dir(bare(target), document["agent"])
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     write_private(directory / DOCUMENT, (json.dumps(document, indent=2) + "\n").encode())
     if fragment.strip():
@@ -947,11 +1131,12 @@ def build_prep(target, podman_url=None, run=subprocess.run, out=lambda text: pri
         (Path(context) / "Containerfile").write_text(text)
         network = ["--network=host"] if os.environ.get("SANDBOX_AI_BUILD_NETWORK") == "host" else []
         out(f"sandbox-ai images: preparing your image {name} for the agent's layers -> {prep_image(target, agent)}")
-        result = run(podman(podman_url) + ["build", *network, "--pull=never", "--tag", prep_image(target, agent),
-                                           "--label", f"sandbox-ai.base-image={name}",
-                                           "--label", f"sandbox-ai.base-image-id={entry['id']}",
-                                           "--file", str(Path(context) / "Containerfile"), context],
-                     stdin=subprocess.DEVNULL, stdout=sys.stderr)  # standard output: only the image's name
+        argv = podman(podman_url) + ["build", *network, "--pull=never", "--tag", prep_image(target, agent),
+                                     "--label", f"sandbox-ai.base-image={name}",
+                                     "--label", f"sandbox-ai.base-image-id={entry['id']}",
+                                     "--file", str(Path(context) / "Containerfile"), context]
+        result = LOG.run("image", f"preparing your image {name} for {target}", argv, runner=run,
+                         stdin=subprocess.DEVNULL, stdout=sys.stderr)  # standard output: only the image's name
     if result.returncode != 0:
         remember("prep-failed", target, agent=agent, base=name)
         raise ValueError(f"preparing your image {name} for {agent} failed (exit status {result.returncode}); its "
@@ -960,6 +1145,35 @@ def build_prep(target, podman_url=None, run=subprocess.run, out=lambda text: pri
     return prep_image(target, agent)
 
 
+_filelock = None
+
+
+def changing():
+    """The lock of a change to the image extensions (filelock.py, on images/extensions.lock): `images extend`, `new`,
+    `recipe` and `remove` run side by side (the app and a terminal) each read an extension and wrote it back whole,
+    so one of two packages added at the same moment was lost."""
+    global _filelock
+    if _filelock is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_filelock_for_images", HERE / "filelock.py")
+        with LOADING:
+            if _filelock is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _filelock = loaded
+    check_location(config_root(), "The image extensions in")  # (before the lock makes the folder)
+    return _filelock.locked(config_root() / "extensions")
+
+
+def under_lock(function):
+    """FUNCTION run holding changing()'s lock (reentrant: recipe() calls new_variant() and extend())."""
+    def locked(*args, **kwargs):
+        with changing():
+            return function(*args, **kwargs)
+    locked.__name__, locked.__doc__, locked.__wrapped__ = function.__name__, function.__doc__, function
+    return locked
+
+
+@under_lock
 def extend(target, add=None, remove=None, add_files=(), remove_files=(), fragment=None, base=None, own_files=()):
     """Change TARGET's extension (an agent's own or a variant's). ADD and REMOVE: {kind: [package]}. BASE: your
     image the variant is built on (a name), "" for the agent's own base again, None to leave it. OWN_FILES:
@@ -1072,6 +1286,22 @@ PLAYWRIGHT_FRAGMENT = (
     "    && ln -s /opt/playwright/node_modules/.bin/playwright /usr/local/bin/playwright\n"
     "ENV PW_EXECUTABLE_PATH=/usr/bin/chromium PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1\n")
 
+DJANGO_FRAGMENT = (
+    "# Django 5.2.18 LTS (BSD-3-Clause) and psycopg 3.3.6 (LGPL-3.0, pure Python on Debian's libpq5) with asgiref,\n"
+    "# sqlparse and typing-extensions, each pinned by version and the SHA-256 of its wheel in\n"
+    "# /opt/django/requirements.txt: pip installs exactly those wheels (no source build, no other package) into a\n"
+    "# venv of their own. TypeScript 6.0.3 (Apache-2.0, no dependencies) pinned by its SHA-512 in\n"
+    "# /opt/django/package-lock.json; npm ci runs no install scripts.\n"
+    "RUN python3 -m venv /opt/django/venv \\\n"
+    "    && /opt/django/venv/bin/pip install --no-cache-dir --require-hashes --no-deps --only-binary :all: -r "
+    "/opt/django/requirements.txt \\\n"
+    "    && /opt/django/venv/bin/python -c 'import django, psycopg; print(django.get_version(), psycopg.__version__)' \\\n"
+    "    && cd /opt/django \\\n"
+    "    && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \\\n"
+    "    && npm cache clean --force \\\n"
+    "    && ln -s /opt/django/venv/bin/django-admin /usr/local/bin/django-admin \\\n"
+    "    && ln -s /opt/django/node_modules/.bin/tsc /usr/local/bin/tsc\n")
+
 
 # Ready extensions for a purpose: `sandbox-ai images recipe NAME --from AGENT` makes the variant NAME with them.
 RECIPES = {
@@ -1092,19 +1322,6 @@ RECIPES = {
                     "iproute2", "tor", "git", "python3-venv", "busybox-static", "libegl1", "libgl1",
                     "libxkbcommon0", "libfontconfig1", "libdbus-1-3", "xvfb", "spectrwm", "xdotool", "x11-utils",
                     "x11-apps"]},
-    # tor itself runs in the VPN container (sandbox-ai vpn add NAME --tor); the agent needs only its clients.
-    # Tor Browser's libraries (GTK, X11, ALSA, dbus-glib) are in the base image's GUI layer (Playwright's Firefox).
-    "tor": {"description": "for a sandbox behind a Tor VPN profile: torsocks (socks5h://127.0.0.1:9050 with vpn add "
-                           "--socks) and torbrowser-launcher from Debian's contrib section, which downloads Tor Browser "
-                           "and checks its signature at its first start (run it with --gui and TOR_SKIP_LAUNCH=1)",
-            "apt": ["torsocks"],
-            "fragment": "# torbrowser-launcher is in Debian's contrib section: its archive, signed by Debian's own key.\n"
-                        "RUN . /etc/os-release \\\n"
-                        "    && printf 'Types: deb\\nURIs: http://deb.debian.org/debian\\nSuites: %s %s-updates\\n"
-                        "Components: contrib\\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\\n' \\\n"
-                        "       \"$VERSION_CODENAME\" \"$VERSION_CODENAME\" > /etc/apt/sources.list.d/contrib.sources \\\n"
-                        "    && apt-get update && apt-get install -y --no-install-recommends torbrowser-launcher \\\n"
-                        "    && rm -rf /var/lib/apt/lists/*\n"},
     # The CLIs of the built-in kits' skills (sandbox/builtin/kits, docs/skills-review.md), installed when the image
     # is built from sandbox-ai's own lockfiles (sandbox/recipes/NAME): every npm package pinned by its SHA-512, no
     # install scripts, the browsers Debian's - a sandbox then downloads nothing for them.
@@ -1122,16 +1339,29 @@ RECIPES = {
                    "files": [("playwright/package.json", "/opt/playwright/package.json", "0644"),
                              ("playwright/package-lock.json", "/opt/playwright/package-lock.json", "0644")],
                    "fragment": PLAYWRIGHT_FRAGMENT},
+    # The development image of the showcase preset showcase-full-stack: Python, JavaScript and Django on the agent's
+    # own Python 3.11 and Node.js, from sandbox-ai's lockfiles (sandbox/recipes/django), psql for the --service db.
+    "django": {"description": "for Python and JavaScript web development with Django: Django 5.2.18 LTS and psycopg "
+                              "3.3.6 in /opt/django/venv (every wheel pinned by its SHA-256, pip --require-hashes), "
+                              "TypeScript 6.0.3 pinned by its SHA-512 (npm ci, no install scripts), psql and libpq "
+                              "from Debian",
+               "apt": ["postgresql-client", "libpq5"],
+               "files": [("django/requirements.txt", "/opt/django/requirements.txt", "0644"),
+                         ("django/package.json", "/opt/django/package.json", "0644"),
+                         ("django/package-lock.json", "/opt/django/package-lock.json", "0644")],
+               "fragment": DJANGO_FRAGMENT},
 }
 RECIPE_FILES = HERE / "recipes"  # the files the recipes copy into the image (part of sandbox-ai, read-only)
 
 
+@under_lock
 def recipe(name, agent, variant=None):
     """The variant VARIANT (default NAME) of AGENT with the recipe NAME's packages; build it with sandbox-ai build."""
     if name not in RECIPES:
         raise ValueError(f"no recipe {name!r}; recipes: {', '.join(sorted(RECIPES))}")
     variant = variant or name
     new_variant(variant, agent)
+    variant = f"{variant}@{agent}"  # (the same name may be a variant of another agent too)
     wanted = RECIPES[name]
     fragment = None
     if wanted.get("fragment"):  # after the agent's own fragment, which the variant copied
@@ -1143,18 +1373,18 @@ def recipe(name, agent, variant=None):
                   fragment=fragment, own_files=own_files)
 
 
+@under_lock
 def new_variant(name, agent, empty=False, base=None):
     """The variant NAME of AGENT: its extension copied from the agent's (unless EMPTY); BASE: one of your images
     (sandbox-ai images pull|build-image) it is built on instead of the agent's own base."""
-    if not valid_name(name):
-        raise ValueError(f"{name!r}: a variant name is lower-case letters, digits, '.', '_' and '-' (up to 30 "
-                         f"characters), and not one of {', '.join(sorted(RESERVED))}")
+    if not taggable(name):
+        raise ValueError(f"{name!r}: a variant name is {NAME_RULE}, and not one of {', '.join(sorted(RESERVED))}")
     if agent not in AGENTS:
         raise ValueError(f"--from expects one of {', '.join(AGENTS)}")
     check_location(config_root(), "The image extensions in")
-    directory = config_root() / name
-    if directory.exists() or directory.is_symlink():
-        raise ValueError(f"{name} exists already ({directory})")
+    directory = config_root() / VARIANTS / agent / name
+    if directory.exists() or directory.is_symlink() or (name, agent) in variants():
+        raise ValueError(f"{name} of {agent} exists already ({directory})")
     if name in services_module().read_registry():
         raise ValueError(f"{name} is the name of one of your images (sandbox-ai images list); choose another one")
     if base:
@@ -1167,28 +1397,29 @@ def new_variant(name, agent, empty=False, base=None):
         raise ExtensionError(agent, findings)
     save(name, document, fragment, files)
     remember("new", name, agent=agent, copied=not empty, **({"base": base} if base else {}))
-    return describe(name)
+    return describe(f"{name}@{agent}")
 
 
 def remove(target, keep_image=False, podman_url=None, run=subprocess.run):
     """Drop TARGET's extension; for a variant also its image (unless KEEP_IMAGE). Returns notes."""
     agent = agent_of(target)
     check_location(config_root(), "The image extensions in")
-    directory = config_root() / target
+    directory = target_dir(target)
     notes = []
     try:
         based = target != agent and bool(load(target, strict=False)[0].get("base"))
     except ValueError:
         based = False
-    if directory.is_symlink():
-        os.unlink(directory)
-    elif directory.exists():
-        shutil.rmtree(directory)
+    with changing():  # (not around Podman's image rm below: a slow Podman would hold every other change up)
+        if directory.is_symlink():
+            os.unlink(directory)
+        elif directory.exists():
+            shutil.rmtree(directory)
     if target == agent:
         notes.append(f"the next sandbox-ai build {agent} leaves the extension out")
     elif not keep_image:
         # A variant on a base of yours has its own base layers (and their preparation) too.
-        for image in [image_name(target, agent)] + ([f"localhost/{agent}-sandbox-{target}:base",
+        for image in [image_name(target, agent)] + ([f"localhost/{agent}-sandbox-{bare(target)}:base",
                                                      prep_image(target, agent)] if based else []):
             result = run(podman(podman_url) + ["image", "rm", image], capture_output=True,
                          text=True, timeout=120, stdin=subprocess.DEVNULL)
@@ -1228,14 +1459,16 @@ _doctor = None
 
 def inspect(name, podman_url=None, run=subprocess.run):
     """The inspect document of image NAME, or None if it is not there."""
-    result = run(podman(podman_url) + ["image", "inspect", "--format", "json", name], capture_output=True, text=True,
-                 timeout=60, stdin=subprocess.DEVNULL)
+    result = LOG.run("image", f"inspect the image {name}", podman(podman_url) + ["image", "inspect", "--format", "json",
+                                                                                 name],
+                     runner=run, ok=(0, 1, 125), capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
+        LOG.debug("image", f"{name} is not there (podman image inspect: exit status {result.returncode})")
         return None
     try:
         data = json.loads(result.stdout)[0]
         return data if isinstance(data, dict) else None
-    except (ValueError, IndexError, KeyError, TypeError):
+    except (ValueError, IndexError, KeyError, TypeError, RecursionError):
         return None
 
 
@@ -1300,9 +1533,11 @@ PACKAGES_SCRIPT = ("dpkg-query -W -f '${Package}\\t${Version}\\n' 2>/dev/null | 
 def packages(agent, podman_url=None, run=subprocess.run):
     """[(kind, name, version)] installed in the image of AGENT or a variant (deb, npm, pip, tool), read by
     running it offline."""
-    if agent not in AGENTS and not (valid_name(agent) and any(name == agent for name, _ in variants())):
-        raise ValueError(f"agent must be one of {', '.join(AGENTS)} or a variant")
-    image = image_name(agent, agent_of(agent))
+    try:
+        owner = agent_of(agent)
+    except ValueError:
+        raise ValueError(f"agent must be one of {', '.join(AGENTS)} or a variant") from None
+    image = image_name(agent, owner)
     result = run(podman(podman_url) + ["run", "--rm", "--pull=never", "--network=none", "--read-only",
                                        "--cap-drop=ALL", "--security-opt=no-new-privileges", "--entrypoint=/bin/sh",
                                        image, "-c", PACKAGES_SCRIPT],
@@ -1360,15 +1595,19 @@ def build_layer(target, base_id, podman_url=None, run=subprocess.run):
         # sandbox-ai build found that only the host's network resolves names (build_image.sh): the same here.
         network = ["--network=host"] if os.environ.get("SANDBOX_AI_BUILD_NETWORK") == "host" else []
         argv = podman(podman_url) + ["build", *network, "--pull=never", "--tag", image_name(target, agent), "--file",
-                                     str(context / "Containerfile"), "--label", f"{EXTENSION_LABEL}={target}",
+                                     str(context / "Containerfile"), "--label", f"{EXTENSION_LABEL}={bare(target)}",
                                      "--label", f"{HASH_LABEL}={digest}", "--label", f"{BASE_LABEL}={base_id}",
                                      str(context)]
         if run is subprocess.run:  # its steps said as they go, bounded (progress.py; SANDBOX_AI_PODMAN_OUTPUT=full)
             argv = [sys.executable, "-I", str(HERE / "progress.py"), "podman", *argv]
-        result = run(argv, stdin=subprocess.DEVNULL)
+        LOG.info("image", f"building the extension {target} -> {image_name(target, agent)}")
+        result = LOG.run("image", f"podman build of the extension {target}", argv, runner=run, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
+        LOG.warning("image", f"the extension {target} was not built (exit status {result.returncode}; its output on "
+                             "standard error)")
         remember("build-failed", target, agent=agent, hash=digest)
         raise ValueError(f"podman build of the extension {target} failed (exit status {result.returncode})")
+    LOG.info("image", f"built the extension {target} as {image_name(target, agent)}")
     remember("build", target, agent=agent, hash=digest, base=base_id[:12], image=image_name(target, agent))
     return digest
 
@@ -1384,7 +1623,7 @@ def build_layers(target, with_variants=False, podman_url=None, run=subprocess.ru
     if base is None and not own_base:
         raise ValueError(f"no base image {base_image(agent)}: run sandbox-ai build {agent}")
     base_id = str(base.get("Id", "")) if base else ""
-    jobs = [target] if target != agent else [agent] + ([n for n, a in variants() if a == agent] if with_variants else [])
+    jobs = [target] if target != agent else [agent] + ([f"{n}@{a}" for n, a in variants() if a == agent] if with_variants else [])
     failed = 0
     for job in jobs:
         if job != target and job != agent:
@@ -1408,11 +1647,13 @@ def build_layers(target, with_variants=False, podman_url=None, run=subprocess.ru
             build_layer(job, base_id, podman_url, run)
         except ExtensionError as exc:
             failed += 1
+            LOG.warning("image", f"{job}: its extension has errors, not built", exc)
             print(f"sandbox-ai images: {exc}", file=sys.stderr)
             for item in errors(exc.findings):
                 print(f"  {format_finding(item)}", file=sys.stderr)
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             failed += 1
+            LOG.warning("image", f"{job}: not built", exc)
             print(f"sandbox-ai images: {job}: {exc}", file=sys.stderr)
     return 1 if failed else 0
 
@@ -1509,7 +1750,12 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
     owned = sub.add_parser("build-image", help="build your own Containerfile as one of your images, every FROM "
                                                "pulled once and pinned by digest (unchecked)")
     owned.add_argument("name")
-    owned.add_argument("-f", "--file", required=True, metavar="CONTAINERFILE")
+    source = owned.add_mutually_exclusive_group(required=True)
+    source.add_argument("-f", "--file", metavar="CONTAINERFILE")
+    source.add_argument("--builtin", metavar="TEMPLATE",
+                        help="one of sandbox-ai's own Containerfiles (sandbox/service-images) instead, for the "
+                             "showcase presets' services: showcase-web (nginx 1.28.0: a page of its own, /app/ to "
+                             "localhost:8000)")
     owned.add_argument("--context", metavar="DIR", help="the build context (default: the Containerfile's folder)")
     owned.add_argument("--replace", action="store_true", help="build an image of that name anew")
     owned.add_argument("--trust-agent-written", action="store_true",
@@ -1623,7 +1869,8 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
                                                *(["--replace"] if args.replace else []),
                                                *(["--json"] if as_json else [])], out=out, run=run)
             if args.command == "build-image":
-                return services_module().main(["build-image", args.name, "--file", args.file,
+                return services_module().main(["build-image", args.name,
+                                               *(["--builtin", args.builtin] if args.builtin else ["--file", args.file]),
                                                *(["--context", args.context] if args.context else []),
                                                *(["--replace"] if args.replace else []),
                                                *(["--trust-agent-written"] if args.trust_agent_written else []),

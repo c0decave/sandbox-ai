@@ -41,8 +41,14 @@ the commands below as `./sandbox-ai.pyz build all` and so on.
 
 This builds `localhost/codex-sandbox`, `localhost/claude-sandbox` and
 `localhost/opencode-sandbox` with the newest agent releases on the current
-Node.js LTS. Build only what you need with `./sandbox-ai build claude`.
-Run the same command later to update.
+Node.js LTS, and `localhost/hermes-sandbox`, `localhost/dsh-sandbox`,
+`localhost/qwen-sandbox` and `localhost/goose-sandbox` with the releases
+sandbox-ai reviewed, then the team, Cairn, browser, VPN and Tor images and your
+variants, one build each (one that fails stops none of the others; the end
+says what was built and what failed). Build only what you need with
+`./sandbox-ai build claude` - a start also builds its own missing image first.
+Run the same command later to update. Build as the user who starts the
+sandboxes, not with sudo: rootless Podman keeps one image store per user.
 
 ## 2. Verify the isolation
 
@@ -182,6 +188,7 @@ Every start works like this; without `--name` it gets a codename such as `brisk-
 ./sandbox-ai resume demo           # continue exactly where it was
 ./sandbox-ai stop demo             # end it; files and HOME are kept
 ./sandbox-ai resume demo           # later: a new sandbox, Claude continues the conversation
+./sandbox-ai stop --all            # every start of yours on this host, asked first with the list
 ```
 
 ## 6. Optional: a local LLM with OpenCode
@@ -247,14 +254,15 @@ servers in `~/.config/sandbox-ai/mcp.json` (see the README).
 
 ## 9. Optional: look at the logs
 
-With logging enabled (wizard question or `--log-dir DIR`):
+Every start with the connection proxy (the default) keeps its log in the
+project's log directory (`--log-dir DIR` chooses another; then `sandbox-ai logs DIR`):
 
 ```bash
 cd ~/src/sandbox-demo && sandbox-ai logs   # blocked targets with the option that allows each, file access
 ```
 
-The raw JSON lines are `egress-denied.jsonl` and `files.jsonl` in the log
-directory under `~/.local/state/sandbox-ai/logs/`.
+The raw JSON lines are `egress-denied.jsonl` and, with `--log-dir`, `files.jsonl`
+in the log directory (by default under `~/.local/state/sandbox-ai/logs/`).
 
 ## 10. Optional: start from a preset
 
@@ -338,6 +346,13 @@ export SANDBOX_GIT_TOKEN=...   # Gitea: Settings -> Applications
 `sandbox-ai list`, `sandbox-ai mcp`, `sandbox-ai wizard` and `sandbox-ai build`.
 
 ## Next
+
+Something went wrong? `sandbox-ai doctor` checks the host;
+`~/.local/state/sandbox-ai/launcher.log` says what each start was asked, what
+it decided and why it ended (`SANDBOX_AI_DEBUG=1` adds every Podman command);
+in the desktop app, *Copy for a bug report* in the log window puts the end of
+its `app.log` and of `launcher.log` on the clipboard, secrets masked
+([Troubleshooting](README.md#troubleshooting)).
 
 The [full documentation](README.md) explains every option: network modes,
 multiple workspaces, authentication and the Claude token sync, Bubblewrap,

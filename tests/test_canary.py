@@ -317,7 +317,7 @@ def test_rulesets_decide_the_strictest():
         with pytest.raises(rt.RuleError, match='"canary" takes'):
             rt.Ruleset.validated({"version": 1, "canary": bad}, "x")
     # A ruleset with only a canary section passes the launcher's checks, and the proxy is not bothered with it.
-    a = s.parse_args(["codex", "--no-config", "-w", "/nonexistent-ws", "--telemetry", "on"])  # no ruleset of its own
+    a = s.parse_args(["codex", "--no-config", "-w", "/nonexistent-ws", "--no-proxy"])  # no ruleset of its own
     a.policy_rules, a.project_document = {"version": 1, "canary": {"on_read": "ask"}}, None
     assert c.decisions(s.load_rulesets(a))["on_read"] == "ask"
     assert s.proxy_rules(a, {}) == {"rules": [], "pinned": {}}  # no HTTP rules (the addresses always go along)

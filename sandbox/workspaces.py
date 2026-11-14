@@ -861,7 +861,7 @@ def locked(record):
 def load(record):
     try:
         data = json.loads(registry(record).read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
     entries = data.get("workspaces") if isinstance(data, dict) else None
     return [e for e in entries if isinstance(e, dict) and e.get("state") in STATES and isinstance(e.get("host"), str)
@@ -924,7 +924,7 @@ def publish_push_rules(record, entries=None):
             json.dump({"workspaces": workspaces}, stream)
         os.replace(temporary, directory / privacy.ADDED_PUSH)
         return True, None
-    except (OSError, ValueError, AttributeError) as exc:
+    except (OSError, ValueError, AttributeError, RecursionError) as exc:
         with contextlib.suppress(OSError, UnboundLocalError):
             temporary.unlink()
         return False, exc

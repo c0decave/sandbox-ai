@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .llm_params import (
     EVICT, EVICT_NOTES, LAYER_HELP, MODEL, SCOPE_ALL, check_layer, check_value, layer_text, loop_changes, scope_of,
@@ -333,7 +333,7 @@ class ParamsDialog(QDialog):
         if note:
             other.addRow("", plain_label(tr(note), role="secondary"))
         layout.addLayout(other)
-        self.message = plain_label(role="notice-error", selectable=True)
+        self.message = plain_label(role="notice-error", selectable=True, log="llm")
         self.message.setVisible(False)
         layout.addWidget(self.message)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -418,7 +418,7 @@ class ParamsDialog(QDialog):
         try:
             argvs = self.requests()
         except ValueError as exc:
-            self.failed(printable(exc))
+            self.failed(printable_text(exc))
             return
         if not argvs:
             self.finish()

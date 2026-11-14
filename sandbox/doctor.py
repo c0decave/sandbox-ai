@@ -22,7 +22,9 @@ import threading
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("codex", "claude", "opencode")
+AGENTS = ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose")
+# Not live-tested yet (hermes, dsh, qwen, goose): no image or login of them is not a warning.
+OPTIONAL = {"hermes", "dsh", "qwen", "goose"}
 _launcher = None
 _modules = {}
 
@@ -48,13 +50,32 @@ def textout():
     return _modules["textout"]
 
 
-def run(cmd, timeout=30):
-    """(returncode, stdout) of CMD; 127 if it cannot run."""
+PODMAN_TIMEOUT = 30  # seconds one podman command of the checks may take
+NO_ANSWER = 124       # run()'s status for a command that did not end in time
+_unanswered = set()   # the podman command lines (before the subcommand) that did not answer: not asked again
+
+
+def run(cmd, timeout=None):
+    """(returncode, stdout) of CMD; 127 if it cannot run, NO_ANSWER if it did not end within TIMEOUT (default
+    PODMAN_TIMEOUT). A podman that did not answer once is not asked again in this process: a hanging Podman made
+    doctor wait 30 s for each of its checks (minutes)."""
+    base = tuple(cmd[:3]) if cmd[1:2] == ["--remote"] else tuple(cmd[:1])
+    if cmd[:1] == ["podman"] and base in _unanswered:
+        return NO_ANSWER, ""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or PODMAN_TIMEOUT,
+                                stdin=subprocess.DEVNULL)
         return result.returncode, result.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        if cmd[:1] == ["podman"]:
+            _unanswered.add(base)
+        return NO_ANSWER, ""
+    except OSError:
         return 127, ""
+
+
+def podman_answers(podman_url=None):
+    return tuple(podman_base(podman_url)[:3 if podman_url else 1]) not in _unanswered
 
 
 def check_user():
@@ -244,6 +265,10 @@ def check_podman(podman_url=None):
     if not shutil.which("podman"):
         return "fail", "Podman", "not found", "install podman (rootless) and pasta (package passt)"
     code, rootless = run([*podman_base(podman_url), "info", "--format", "{{.Host.Security.Rootless}}"])
+    if code == NO_ANSWER:
+        return ("fail", "Podman", f"podman info did not answer within {PODMAN_TIMEOUT} s",
+                "check `podman info` (a hung podman process, a remote engine that does not answer); the checks "
+                "that need Podman are skipped")
     if code != 0:
         return "fail", "Podman", "podman info failed", "check `podman info`; for a remote engine pass --podman-url"
     if rootless != "true":
@@ -279,10 +304,12 @@ def check_image(agent, podman_url=None):
     title = f"Image {agent}"
     if not shutil.which("podman"):
         return "skip", title, "no podman", ""
+    if not podman_answers(podman_url):
+        return "skip", title, "Podman does not answer", ""
     code, version = run([*podman_base(podman_url), "image", "inspect", image, "--format",
                          '{{index .Labels "sandbox-ai.agent-version"}}'])
     if code != 0:
-        return "warn", title, f"{image} missing", f"sandbox-ai build {agent}"
+        return "skip" if agent in OPTIONAL else "warn", title, f"{image} missing", f"sandbox-ai build {agent}"
     if not version or version == "<no value>":
         return "ok", title, f"{image} (built before version labels)", f"sandbox-ai build {agent} to update"
     return "ok", title, f"{image}, {agent} {version}", ""
@@ -300,6 +327,8 @@ def check_vpn(podman_url=None, modules=Path("/sys/module"), tun=Path("/dev/net/t
         return "skip", "VPN", "no profiles", ""
     if not shutil.which("podman"):
         return "fail", "VPN", "no podman", "--vpn needs the Podman backend"
+    if not podman_answers(podman_url):
+        return "skip", "VPN", "Podman does not answer", ""
     kinds = set()
     for profile in profiles:
         try:
@@ -372,7 +401,8 @@ def check_login(agent):
         return ("warn", title, "Claude Code keeps this Mac's login in the Keychain, which sandboxes cannot use",
                 f"sandbox-ai login {agent}")
     if problem == "missing":
-        return "warn", title, f"{source}: no login", f"sandbox-ai login {agent} (or log in on the host)"
+        return "skip" if agent in OPTIONAL else "warn", title, f"{source}: no login", \
+            f"sandbox-ai login {agent} (or log in on the host)"
     if problem == "expired":
         return "warn", title, f"{source}: login expired", f"sandbox-ai login {agent}"
     if agent != "claude":
@@ -563,6 +593,61 @@ def check_mode(cwd=None):
     return "ok", "Security mode", f"{name} ({origin}); modes: {names}", ""
 
 
+# The settings files a user (or the app) writes, in ~/.config/sandbox-ai: each read where it is used, and a damaged one
+# stops only that use - said here together, with the files that are fine left unnamed.
+SETTINGS_FILES = ("defaults.json", "llm.json", "mcp.json", "hosts.json", "identities.json", "git-logins.json",
+                  "publish-logins.json", "trusted.json", "app/settings.json", "app/presets.json")
+
+
+def check_settings_files(config=None):
+    """sandbox-ai's settings files that are there but not readable JSON objects (a crash while one was written, a
+    full disk, an editor): each named with why."""
+    config = Path(config or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai")
+    damaged = []
+    for name in SETTINGS_FILES:
+        path = config / name
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            damaged.append(f"{name}: {exc.strerror or exc}")
+            continue
+        try:
+            if not isinstance(json.loads(data.decode("utf-8")), dict):
+                damaged.append(f"{name}: not a JSON object")
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            damaged.append(f"{name}: not valid JSON" + (" (empty)" if not data.strip() else ""))
+    if damaged:
+        return ("warn", "Settings files", launcher().printable("; ".join(damaged)),
+                f"fix or remove the file named in {config} (what it held is gone with it)")
+    return "ok", "Settings files", f"readable ({config})", ""
+
+
+def check_sessions(state=None):
+    """Session folders without a readable session.json (damaged): every command refuses them by name."""
+    state = Path(state or Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai")
+    folder = state / "sessions"
+    try:
+        entries = sorted(path for path in folder.iterdir() if path.is_dir())
+    except OSError:
+        return "skip", "Sessions", "none", ""
+    damaged = []
+    for path in entries:
+        try:
+            if not isinstance(json.loads((path / "session.json").read_text()), dict):
+                damaged.append(path)
+        except (OSError, ValueError, RecursionError, UnicodeDecodeError):
+            damaged.append(path)
+    if damaged:
+        printable = launcher().printable
+        return ("warn", "Sessions", f"{len(damaged)} damaged (no readable session.json): "
+                + ", ".join(printable(path.name) for path in damaged),
+                "nothing of it can be resumed; remove its folder: rm -r "
+                + " ".join(shlex.quote(str(path)) for path in damaged))
+    return "ok", "Sessions", f"{len(entries)} kept, none damaged", ""
+
+
 def check_machine(runner=None, home=None, tmpdir=None):
     """macOS: podman machine, the Linux VM Podman runs the sandboxes in: running, rootless, sharing HOME and
     $TMPDIR (a workspace or a session's files outside the shares cannot be mounted), its CPUs and memory."""
@@ -573,7 +658,7 @@ def check_machine(runner=None, home=None, tmpdir=None):
     try:
         machines = json.loads(out)
         machine = machines[0] if isinstance(machines, list) and machines else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         machine = {}
     if not isinstance(machine, dict) or not machine:
         return "fail", "podman machine", "podman machine inspect gave nothing usable", "podman machine init"
@@ -607,7 +692,8 @@ def checks(backend="podman", podman_url=None, cwd=None):
         result += [check_image(agent, podman_url) for agent in AGENTS] + [check_vpn(podman_url)]
         result += [check_login(agent) for agent in AGENTS]
         result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
-        result += [check_git_identity(), check_project(cwd), check_mode(cwd)]
+        result += [check_git_identity(), check_project(cwd), check_mode(cwd), check_settings_files(),
+                   check_sessions()]
         return result
     result = [check_installation(), check_user(), check_python(), check_userns(),
               check_user_session(backend=backend, podman_url=podman_url), check_proxy_nat()]
@@ -622,7 +708,7 @@ def checks(backend="podman", podman_url=None, cwd=None):
             result += [check_subids(backend=backend), check_newuidmap()]
     result += [check_login(agent) for agent in AGENTS]
     result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
-    result += [check_git_identity(), check_project(cwd), check_mode(cwd)]
+    result += [check_git_identity(), check_project(cwd), check_mode(cwd), check_settings_files(), check_sessions()]
     return result
 
 

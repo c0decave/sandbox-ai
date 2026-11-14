@@ -19,7 +19,7 @@ ways in, safest first:
 
 | Tool | License | Version checked | Way in | State |
 |---|---|---|---|---|
-| [Playwright MCP](https://github.com/microsoft/playwright-mcp) | Apache-2.0 | 0.0.84 (`be26c080`), still the latest | container | prepared (`candidates/playwright`), Debian pins found, not built |
+| [Playwright MCP](https://github.com/microsoft/playwright-mcp) | Apache-2.0 | 0.0.84 (`be26c080`) | container, full network | **in the signed catalog** of sandbox-ai-mcp (Debian's Chromium): `sandbox-ai mcp add playwright --network full`; it takes the limits the catalog recommends (2g memory, 2 CPUs, 512 processes, a 768m /tmp) |
 | [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) | Apache-2.0 | 1.12.0 (`af283441`) | container, full network | prepared (`candidates/chrome-devtools`); the npm integrity hash is open; Google's usage statistics, CrUX lookups and update check switched off in the image |
 | [Context7](https://github.com/upstash/context7) | MIT | `@upstash/context7-mcp` 4.5.0 (`a138857c`) | container, `context7.com:443` only; or remote `https://mcp.context7.com/mcp` | prepared (`candidates/context7`), every pin set; `CONTEXT7_API_KEY` optional |
 | [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) | MIT | 0.12.1 (`a7158ac2`) | container, no network, the workspace read-only plus a writable index | prepared (`candidates/codebase-memory`), release archive checked by SHA-256 |

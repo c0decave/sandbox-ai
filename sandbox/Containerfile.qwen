@@ -1,0 +1,57 @@
+# Qwen Code (QwenLM/qwen-code, Apache-2.0) as sandbox-ai's agent qwen (sandbox-ai build qwen).
+# Only the reviewed release (docs/QWEN_CODE_REVIEW.md, sandbox/qwen.py): npm's package at the reviewed version and
+# every optional package exactly as Containerfile.qwen.lock has them, each checked against its sha512 integrity by
+# npm ci; no install script runs (--ignore-scripts), nothing is piped into a shell. Qwen Code cannot update itself:
+# its install is read-only in the sandbox (a new release is reviewed, then built here).
+# uv ships as a static binary in its official image; COPY --from takes only it (MCP servers and kits use uvx).
+ARG UV_VERSION=0.13.5
+# Floating tag: the current Active LTS line with its newest patch release (Qwen Code needs Node.js 22 or later).
+# Pin with --build-arg NODE_IMAGE=docker.io/library/node:<version>-bookworm-slim.
+ARG NODE_IMAGE=docker.io/library/node:lts-bookworm-slim
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM ${NODE_IMAGE}
+
+# The reviewed release; another one does not match the lock (npm ci refuses it).
+ARG QWEN_VERSION=0.26.4
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates bash git python3 python3-pip python3-venv firejail nftables ripgrep util-linux \
+    vim netcat-traditional bind9-dnsutils iputils-ping iproute2 traceroute curl wget tmux \
+    openssh-client jq openssl \
+    && rm -rf /var/lib/apt/lists/*
+# GitHub CLI from GitHub's own apt repository (Debian's gh is years behind), the key over HTTPS.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -nv -O /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+RUN gh --version
+# GUI base (--gui): virtual display, VNC over a Unix socket, fonts and the runtime libraries Playwright's Chromium
+# needs (fetched at run time, e.g. `uvx playwright install chromium`).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb x11vnc x11-utils fonts-liberation fonts-dejavu-core \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcairo-gobject2 libcups2 \
+    libdbus-1-3 libdbus-glib-1-2 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 \
+    libpango-1.0-0 libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 libxcomposite1 \
+    libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 libxtst6 \
+    libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxshmfence1 libxkbfile1 libfontconfig1 gdb \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /uvx /usr/local/bin/
+RUN python3 -m pip --version && uv --version
+# Qwen Code exactly as locked (scripts/agent_npm_lock.py qwen: every version older than 14 days at the review, each
+# with its integrity); Bun (only for the experimental OpenTUI renderer) and the voice capture are left out.
+COPY Containerfile.qwen.lock /opt/qwen/package-lock.json
+RUN printf '{"name":"sandbox-ai-qwen","private":true,"dependencies":{"@qwen-code/qwen-code":"%s"}}\n' \
+       "${QWEN_VERSION}" > /opt/qwen/package.json \
+    && cd /opt/qwen && npm ci --ignore-scripts --no-audit --no-fund \
+    && rm -rf /opt/qwen/node_modules/@oven /opt/qwen/node_modules/@qwen-code/audio-capture \
+    && npm cache clean --force \
+    && test "$(node -p 'require("/opt/qwen/node_modules/@qwen-code/qwen-code/package.json").version')" = "${QWEN_VERSION}" \
+    && ln -s /opt/qwen/node_modules/@qwen-code/qwen-code/cli-entry.js /usr/local/bin/qwen
+# Its system settings are mounted here by the launcher (read-only, sandbox/qwen.py).
+RUN mkdir -p -m 755 /etc/qwen-code && QWEN_HOME=/tmp/qwen-check qwen --version && rm -rf /tmp/qwen-check
+ENV HOME=/root
+WORKDIR /work

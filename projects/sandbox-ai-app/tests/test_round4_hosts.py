@@ -408,21 +408,25 @@ def test_files_keys_are_refused_during_a_copy_and_folders_are_listed_in_a_thread
         QtWidgets.QApplication.sendEvent(page.left.table, event)
     assert asked == [] and not (ws / "x").exists() and "Wait until" in page.message.text()
 
-    # A slow listing: list() returns at once (no local event loop), the pane says it lists after LIST_WAIT; when it
-    # comes back after another listing began, it is dropped.
+    # A slow listing: list() returns at once (no local event loop), the pane says it lists after LIST_WAIT; asked for
+    # again while it is on its way, it is not started again (review pass 14: on a file system that hangs each try left
+    # a thread waiting for good) - what it found (from before the change) is not what the pane keeps: once it has come,
+    # the folder is listed anew.
     pending = []
     monkeypatch.setattr(files_page, "background", lambda function, *a, done, **k: pending.append((function, done)))
     monkeypatch.setattr(files_page, "LIST_WAIT", 50)
     assert page.left.list() is True and page.left.listing is not None
     assert wait_until(qapp, lambda: "Listing" in page.message.text(), 5)
+    (first_work, first_done), = pending
+    before = first_work()  # (read before the change)
     (ws / "b.txt").write_text("b")
     assert page.left.list() is True
-    (late_work, late_done), (work, done) = pending
+    assert len(pending) == 1, "not started again while on its way"
+    first_done(before, None)
+    assert len(pending) == 2 and page.left.listing is not None, "listed anew for the Refresh of the meantime"
+    work, done = pending[1]
     done(work(), None)
     listed = lambda: sorted(page.left.table.item(r, 0).text() for r in range(page.left.table.rowCount()))  # noqa: E731
-    assert listed() == [".", "..", "a.txt", "b.txt"]
-    (ws / "c.txt").write_text("c")
-    late_done(late_work(), None)  # began first, came back last: dropped
     assert listed() == [".", "..", "a.txt", "b.txt"]
     assert os.path.isdir(ws)
 

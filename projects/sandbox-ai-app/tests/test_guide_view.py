@@ -189,13 +189,14 @@ def test_what_the_board_needs_is_made_before_the_start(window, monkeypatch):  # 
     their catalogs. Nothing is left to the launcher's refusal - for every preset, not only Tor."""
     import time
     board = window.board
-    monkeypatch.setattr(board, "board_needs", lambda: {"--identity": ["investigation"], "--image-variant": ["tor"],
+    monkeypatch.setattr(board, "board_needs", lambda: {"--identity": ["investigation"], "--image-variant": ["media"],
                                                          "--vpn": ["anon"], "--mcp": ["yara"]})
     state = {"made": False}
     monkeypatch.setattr(board.sai, "identities", lambda: {"investigation": {}} if state["made"] else {})
-    monkeypatch.setattr(board.sai, "host_json", lambda host, *a, **k: [{"target": "tor", "variant": True,
+    monkeypatch.setattr(board.sai, "host_json", lambda host, *a, **k: [{"target": "media", "variant": True,
                                                                        "present": True}] if state["made"] else [])
     monkeypatch.setattr(board.sai, "host_vpn_profiles", lambda host: [{"profile": "anon"}] if state["made"] else [])
+    monkeypatch.setattr(board.sai, "mcp_catalog", lambda: ([("hub", {"name": "yara"})], []))  # (no folder needed)
     monkeypatch.setattr(board.sai, "host_mcp_servers", lambda host: [["yara"]] if state["made"] else [])
     ran, started, warned = [], [], []
 
@@ -213,7 +214,7 @@ def test_what_the_board_needs_is_made_before_the_start(window, monkeypatch):  # 
         time.sleep(0.01)
     assert not warned, warned
     assert ("identities", "add", "--description=made for a start (no logins)", "--", "investigation") in ran
-    assert ("images", "recipe", "tor", "--from", "claude") in ran and ("build", "--variant", "tor") in ran
+    assert ("images", "recipe", "media", "--from", "claude") in ran and ("build", "--variant", "media") in ran
     assert ("vpn", "add", "anon", "--tor", "--socks") in ran and ("mcp", "add", "yara") in ran
     assert started == [True], "the start went on once everything was there"
 
@@ -320,3 +321,24 @@ def test_the_guide_offers_the_mcp_servers_to_choose_from(window, monkeypatch):  
     widget.setEditText("other-host-server")
     assert dialog.answers()["name"] == "other-host-server"
     dialog.reject()
+
+
+def test_the_last_step_is_shown_only_when_the_board_finds_something(window):  # noqa: F811
+    """User (2026-11-14): "wozu ist immer der letzte Schritt im Board, wenn man was hinzufügt: 'Was das Board noch
+    findet'? Da steht meist immer nur das gleiche, hat das irgendeinen Mehrwert?" - with nothing found for the part,
+    the last question ends the guide (Done); the step comes only when something is wrong with the part."""
+    node = window.board.board.add("mcp", name="demo")
+    dialog = guide_view.NodeGuide(node, [], window)
+    last_question = dialog.pages.count() - 2
+    dialog.show_page(last_question)
+    assert dialog.next.text() == "Done", "nothing found: no extra step"
+    accepted = []
+    dialog.accepted.connect(lambda: accepted.append(True))
+    dialog.next.click()
+    assert accepted and dialog.pages.currentIndex() == last_question
+    dialog.inputs["name"][1].setText("")  # now something is wrong: the step shows it
+    dialog.show_page(last_question)
+    assert dialog.next.text() == "Next"
+    dialog.next.click()
+    texts = [dialog.summary.item(i).text() for i in range(dialog.summary.count())]
+    assert texts == ["✘ Server is not set yet"]

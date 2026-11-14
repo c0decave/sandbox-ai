@@ -1,0 +1,37 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "showcase-second-opinion",
+  "title": "Showcase: a second opinion from another agent",
+  "description": "Another agent (Claude Code, Codex or OpenCode) as a helper in a sandbox of its own on the same project: the agent writes a small module, hands the review to its helper through MCP, fixes what it agrees with, and asks the helper what its own sandbox lets it do; a report says who found what.",
+  "translations": {
+    "de": {
+      "title": "Schaufenster: eine zweite Meinung von einem anderen Agenten",
+      "description": "Ein anderer Agent (Claude Code, Codex oder OpenCode) als Helfer in einer eigenen Sandbox auf demselben Projekt: der Agent schreibt ein kleines Modul, gibt die Prüfung über MCP an seinen Helfer, behebt, was er für richtig hält, und fragt den Helfer, was dessen eigene Sandbox ihm erlaubt; ein Bericht sagt, wer was gefunden hat."
+    }
+  },
+  "category": "fun",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--helper",
+    "{helper}"
+  ],
+  "values": {
+    "helper": {
+      "label": "The helper agent (claude, codex or opencode; another one than yours shows the most)",
+      "kind": "text",
+      "default": "codex",
+      "hint": "it needs its own login on this computer, as when you start it yourself"
+    }
+  },
+  "prompt": "You have a helper: another agent ({helper}) in a sandbox of its own on this same workspace, which you give tasks with its MCP tool ask. Show what that gives and write a short report to /work/second-opinion.md: (1) write /work/slugify.py with a function slugify(text) (lower case, ASCII, words joined by '-') and a test /work/test_slugify.py (unittest), and run the test; (2) ask your helper: 'Review /work/slugify.py and its test for bugs and missing edge cases (Unicode, empty input, punctuation, long input), run the test, and answer with a short list; change no file.' - quote its answer; (3) fix what you agree with, say what you did not take and why, and run the test again; (4) ask your helper which agent it is, whether it can reach https://example.com/ (curl -sS -m 10), and whether it sees /work/second-opinion.md once you have started it - quote its answers. Change nothing in /work but these files.",
+  "notes": [
+    "The helper runs as an MCP server in a sandbox of its own: its own login (copied in as at its own start), its provider's hosts, the kits, rules and hooks of this run, the same main workspace (/work) - and nothing of the lead agent's HOME or login. The lead reaches it only through its tool ask.",
+    "Refused with --llm and --offline (a helper reaches its own provider). With the lead's --dangerously-skip-permissions the helper runs without questions too; a read-only workspace and the security mode hold for both.",
+    "More agents at once, each with a sandbox of its own and a task board between them: sandbox-ai team start; two agents in one sandbox: --with AGENT (the preset sand-chess)."
+  ]
+}

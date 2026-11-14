@@ -9,6 +9,7 @@ import argparse
 import ast
 import base64
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -199,7 +200,7 @@ def test_validate(scenario, tmp_path, monkeypatch):
         assert not workspace.exists()
 
 
-def test_prepare_workspace(scenario, tmp_path):
+def test_prepare_workspace(scenario, tmp_path, capsys):
     path = tmp_path / "parent/work"
     if scenario == "sad":
         path.parent.mkdir()
@@ -207,14 +208,140 @@ def test_prepare_workspace(scenario, tmp_path):
         with pytest.raises(ValueError):
             s.prepare_workspace(path)
         assert path.read_text() == "preserve"
+        # A file in its path: the reason in words, never a bare errno.
+        with pytest.raises(ValueError, match="cannot be created: .* is a file, not a folder") as caught:
+            s.prepare_workspace(path / "below")
+        assert "Errno" not in str(caught.value)
     else:
         s.prepare_workspace(path)
+        # A missing workspace is made, with its parents, and the start says so.
+        assert f"created the workspace {path} (it was not there)" in capsys.readouterr().err
         mode = stat.S_IMODE(path.stat().st_mode)
         (path / "marker").write_text("preserve")
         if scenario == "edge":
             s.prepare_workspace(path)
         assert (path / "marker").read_text() == "preserve"
         assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+def test_check_new_workspace(scenario, tmp_path, monkeypatch):
+    """A folder named as a workspace that may not be there yet, checked as a start checks it: resolved, or refused with
+    the reason (the app's Create now, Start and Apply ask this before making it)."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    (tmp_path / "runtime").mkdir()
+    if scenario == "happy":
+        assert s.check_new_workspace(str(tmp_path / "new" / "project")) == tmp_path / "new" / "project"
+        assert not (tmp_path / "new").exists(), "only checked: nothing made"
+        assert s.check_new_workspace(tmp_path / "runtime" / ".." / "there") == tmp_path / "there"
+    elif scenario == "sad":
+        for bad, why in ((tmp_path / "runtime" / "x", "XDG_RUNTIME_DIR"), (Path("/proc/self/x"), "kernel"),
+                         (Path.home(), "HOME"), (Path(s.__file__).resolve().parent / "new", "sandbox-ai")):
+            with pytest.raises(ValueError) as caught:
+                s.check_new_workspace(bad)
+            assert "Errno" not in str(caught.value), bad
+        (tmp_path / "file").write_text("x")
+        with pytest.raises(ValueError, match="is a file, not a folder"):
+            s.check_new_workspace(tmp_path / "file" / "w")
+    else:  # a link in its path to a place that is gone: refused, nothing made through it
+        (tmp_path / "link").symlink_to(tmp_path / "gone")
+        with pytest.raises(ValueError, match="dangling symlink"):
+            s.check_new_workspace(tmp_path / "link" / "w")
+        assert not (tmp_path / "gone").exists()
+
+
+def test_create_workspace(scenario, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    if scenario == "happy":
+        made = s.create_workspace(str(tmp_path / "c0de" / "tor-network-another"))
+        assert made == tmp_path / "c0de" / "tor-network-another" and made.is_dir()
+        assert s.create_workspace(made) == made, "there already: used as it is"
+    elif scenario == "sad":
+        (tmp_path / "runtime").mkdir()
+        with pytest.raises(ValueError, match="XDG_RUNTIME_DIR"):
+            s.create_workspace(tmp_path / "runtime" / "w")
+        assert not (tmp_path / "runtime" / "w").exists()
+    else:
+        monkeypatch.setattr(s.os, "access", lambda path, mode: False)  # (root writes anything)
+        with pytest.raises(ValueError, match="is not writable for you"):
+            s.create_workspace(tmp_path / "x" / "y")
+        assert not (tmp_path / "x").exists()
+
+
+def test_start_image_problems(scenario, tmp_path, monkeypatch):
+    """The images a start needs, asked of Podman before anything is made (`podman image exists`): each one missing
+    is a problem with its build (a Qwen start started its MCP servers first, then failed at "image not known")."""
+    monkeypatch.delenv("SANDBOX_AI_MCP_NO_IMAGE_CHECK", raising=False)
+    asked = []
+
+    def exists(present):
+        def run(command, **kwargs):
+            asked.append(command)
+            return subprocess.CompletedProcess(command, 0 if command[-1] in present else 1)
+        return run
+    monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
+    if scenario == "happy":
+        monkeypatch.setattr(s.subprocess, "run", exists({"localhost/qwen-sandbox:latest"}))
+        a = s.parse_args(["qwen", "--workspace", str(tmp_path)])
+        assert s.start_image_problems(a) == [] and asked[0][:4] == ["podman", "image", "exists",
+                                                                     "localhost/qwen-sandbox:latest"]
+    elif scenario == "sad":
+        monkeypatch.setattr(s.subprocess, "run", exists(set()))
+        a = s.parse_args(["qwen", "--workspace", str(tmp_path), "--helper", "codex"])
+        problems = s.start_image_problems(a)
+        assert problems == [
+            "The image of qwen (localhost/qwen-sandbox:latest) is not built on this host (nothing is pulled at a "
+            "start): sandbox-ai build qwen",
+            "The image of codex (localhost/codex-sandbox:latest) is not built on this host (nothing is pulled at a "
+            "start): sandbox-ai build codex"]
+        a = s.parse_args(["claude", "--workspace", str(tmp_path), "--image-variant", "web"])
+        assert s.start_image_problems(a)[0].endswith("is not built on this host (nothing is pulled at a start): "
+                                                      "sandbox-ai build --variant web")
+        a = s.parse_args(["claude", "--workspace", str(tmp_path), "--image", "localhost/cairn-sandbox:latest"])
+        assert s.start_image_problems(a)[0].endswith(": sandbox-ai build cairn")
+        a = s.parse_args(["claude", "--workspace", str(tmp_path), "--image", "example.org/mine:1"])
+        assert s.start_image_problems(a)[0].endswith(": podman pull example.org/mine:1, or build it")
+        # Podman failing to answer (exit status 125) is not "not built": its own message is said.
+        monkeypatch.setattr(s.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 125, "", 'WARN[0000] noise\nError: database is locked'))
+        problems = s.start_image_problems(s.parse_args(["qwen", "--workspace", str(tmp_path)]))
+        assert problems == ["Podman could not say whether the image of qwen (localhost/qwen-sandbox:latest) is there "
+                            "(podman image exists: exit status 125: Error: database is locked); check the host "
+                            "with: sandbox-ai doctor"]
+        monkeypatch.setattr(s.subprocess, "run", exists(set()))
+        a = s.parse_args(["qwen", "--workspace", str(tmp_path), "--podman-url", "unix:///run/other.sock"])
+        assert "not built on this host (Podman at unix:///run/other.sock)" in s.start_image_problems(a)[0]
+        # Where it looked: Podman's image store and the user, so a build into another store shows.
+        monkeypatch.setattr(s.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0 if command[1] == "info" else 1, "/home/me/.local/share/containers/storage\n", ""))
+        assert "not built on this host (Podman's image store: /home/me/.local/share/containers/storage, user " in \
+            s.start_image_problems(s.parse_args(["qwen", "--workspace", str(tmp_path)]))[0]
+    else:
+        # Not asked: the tests' switch, Bubblewrap (no image), no Podman here (the start says it later).
+        monkeypatch.setattr(s.subprocess, "run", exists(set()))
+        monkeypatch.setenv("SANDBOX_AI_MCP_NO_IMAGE_CHECK", "1")
+        assert s.start_image_problems(s.parse_args(["qwen", "--workspace", str(tmp_path)])) == []
+        monkeypatch.delenv("SANDBOX_AI_MCP_NO_IMAGE_CHECK")
+        assert s.start_image_problems(s.parse_args(["claude", "--backend", "bwrap", "--workspace", str(tmp_path)])) \
+            == []
+        monkeypatch.setattr(s.shutil, "which", lambda name: None)
+        assert s.start_image_problems(s.parse_args(["qwen", "--workspace", str(tmp_path)])) == [] and asked == []
+
+
+def test_image_fix(scenario, tmp_path):
+    a = s.parse_args(["qwen", "--workspace", str(tmp_path)])
+    if scenario == "happy":
+        assert s.image_fix(a, "qwen", a.image) == "sandbox-ai build qwen"
+        assert s.image_fix(a, "the browser", s.BROWSER_IMAGE) == "sandbox-ai build browser"
+        # The launcher's names of sandbox-ai's own images are those of their modules.
+        assert s.BROWSER_IMAGE == s.load_browser_module().IMAGE
+        assert s.CAIRN_IMAGE == load_module("sandbox_cairn_contracts", "sandbox/cairn.py").IMAGE
+    elif scenario == "sad":
+        assert s.image_fix(a, "qwen", "example.org/x:1") == "podman pull example.org/x:1, or build it"
+    else:
+        a = s.parse_args(["claude", "--workspace", str(tmp_path), "--image-variant", "web"])
+        assert s.image_fix(a, "claude", a.image) == "sandbox-ai build --variant web"
+        assert s.image_fix(a, "claude", s.TEAM_IMAGE) == "sandbox-ai build team"
+        assert s.image_fix(a, "claude", s.CAIRN_IMAGE) == "sandbox-ai build cairn"
 
 
 def test_check_workspace_creatable(scenario, tmp_path, monkeypatch):
@@ -228,7 +355,7 @@ def test_check_workspace_creatable(scenario, tmp_path, monkeypatch):
         assert not (tmp_path / "a").exists()
     else:
         (tmp_path / "file").write_text("x")  # the nearest existing part is no folder: nothing can be made below
-        with pytest.raises(ValueError, match="cannot be created"):
+        with pytest.raises(ValueError, match=f"cannot be created: {tmp_path / 'file'} is a file, not a folder"):
             s.check_workspace_creatable(tmp_path / "file" / "w")
 
 
@@ -243,9 +370,19 @@ def test_check_mcp_names(scenario, tmp_path, monkeypatch):
         a.mcp = ["demo", "gone"]
         with pytest.raises(ValueError, match="Unknown MCP server: gone; defined: demo"):
             s.check_mcp_names(a)
+        # Every problem of its MCP servers at once, before anything is made: the unknown one and the variable of a
+        # command server (its variables are its options).
+        a.mcp_env = ["demo:FLAG=1"]
+        with pytest.raises(ValueError, match=r"^2 problems with the MCP servers of this start") as caught:
+            s.check_mcp_names(a)
+        assert "Unknown MCP server: gone" in str(caught.value) and "defined with a command" in str(caught.value)
     else:
         a.mcp, a.probe = ["gone"], True
         s.check_mcp_names(a)  # a probe starts no server: nothing to look up
+        a.mcp_env = ["demo:FLAG=1"]
+        with pytest.raises(ValueError, match="--mcp-env is for an agent's start with --mcp, not for a probe"):
+            s.check_mcp_names(a)
+        a.mcp_env = []
         a.probe, a.project_document = False, {"mcp_servers": {"gone": {"command": ["x"]}}}
         s.check_mcp_names(a)  # the trusted project file defines it
 
@@ -531,7 +668,7 @@ def test_inner_bootstrap(scenario, monkeypatch, tmp_path):
     monkeypatch.setattr(s.subprocess, "run", run)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
     monkeypatch.setattr(sr, "namespace_state", lambda: states()[0])
-    monkeypatch.setattr(sr, "firejail_command", lambda state, nested=False: ["firejail-fixture"])
+    monkeypatch.setattr(sr, "firejail_command", lambda state, nested=False, shutdown=False: ["firejail-fixture"])
     monkeypatch.setattr(sr, "wait_child", lambda child: 0)
     oom = []
     monkeypatch.setattr(s.RUNTIME, "oom_first", oom.append)  # never the real /proc of the machine running the tests
@@ -706,11 +843,12 @@ def test_agent_environment(scenario, monkeypatch):
 def test_agent_command(scenario):
     if scenario == "sad":
         args = s.parse_args(["codex", "--", "exec", "--sandbox=read-only", "task"])
-        assert s.agent_command(args, "codex") == ["codex", *args.agent_args]
+        assert s.agent_command(args, "codex") == ["codex", *s.codex_telemetry_args("off"), *args.agent_args]
     else:
         tail = ["exec", "--", "--sandbox=literal-task"] if scenario == "edge" else ["exec", "task"]
         args = s.parse_args(["codex", "--", *tail])
-        assert s.agent_command(args, "codex") == ["codex", "--sandbox", "danger-full-access", *tail]
+        assert s.agent_command(args, "codex") == ["codex", "--sandbox", "danger-full-access",
+                                                  *s.codex_telemetry_args("off"), *tail]
 
 
 def test_inner_guard(scenario, monkeypatch, capsys):
@@ -811,6 +949,22 @@ def test_run_pod(scenario, tmp_path, monkeypatch):
     assert cleanup[-1].startswith("agent-codex-")
     # A SIGTERM or Ctrl-C cannot cut the pod removal short; the commands before it stay interruptible.
     assert set(s.CLEANUP_SIGNALS) <= masks[-1] and not set(s.CLEANUP_SIGNALS) & masks[0]
+
+
+def test_sandbox_ended(scenario):
+    """The line of a sandbox's end in launcher.log: INFO when it ended well or by a signal, else WARNING ("at once"
+    within AT_ONCE_SECONDS: where its reason is)."""
+    if scenario == "happy":
+        assert s.sandbox_ended("agent-x", 0, 120) == ("INFO", "pod", "the sandbox of agent-x ended with exit status 0 "
+                                                                     "after 120 s")
+    elif scenario == "sad":
+        level, _, text = s.sandbox_ended("agent-x", 1, 0.4)
+        assert level == "WARNING" and "at once" in text and "supervisor.log" in text
+        assert "at once" not in s.sandbox_ended("agent-x", 1, 600)[2]
+    else:
+        for status in (-15, 143, 130):
+            level, _, text = s.sandbox_ended("agent-x", status, 3)
+            assert level == "INFO" and "ended by SIG" in text
 
 
 def test_bwrap_command(scenario, tmp_path, monkeypatch):
@@ -1312,6 +1466,38 @@ def test_change_wildcards(scenario, monkeypatch):
         assert rt.change_wildcards({"remove": ["*.example.com"]}, ["--allow-host"]) == []  # taking back is always allowed
 
 
+def test_domain_of(scenario):
+    if scenario == "happy":
+        assert s.domain_of("example.org") == "example.org" and s.domain_of("Example.CO.uk") == "example.co.uk"
+    elif scenario == "sad":  # what --allow-host '*.DOMAIN' refuses, named as --allow-domain
+        for value, reason in (("co.uk", "refused: it reaches co.uk"), ("github.io", "refused: it reaches github.io"),
+                              ("org", "a whole top-level domain"), ("bad host.org", "not a domain name"),
+                              ("bücher.de", "xn-- form")):
+            with pytest.raises(ValueError, match=f"^--allow-domain .*{reason}"):
+                s.domain_of(value)
+    else:  # one leading "*." or "." and one trailing "." name the same domain; no more than one
+        assert {s.domain_of(v) for v in ("*.example.org", ".example.org", "example.org.", "*.example.org.")} == \
+            {"example.org"}
+        for value in ("..example.org", "example.org..", "*.", ".", ""):
+            with pytest.raises(ValueError, match="not a domain name"):
+                s.domain_of(value)
+
+
+def test_expand_domains(scenario):
+    a = argparse.Namespace(allow_domain=[], allow_host=["x.example"])
+    if scenario == "happy":
+        a.allow_domain = ["Example.org"]
+        assert s.expand_domains(a) == ["example.org", "*.example.org"]
+        assert a.allow_host == ["x.example", "example.org", "*.example.org"]
+    elif scenario == "sad":  # a refused domain adds nothing; validate() names it
+        a.allow_domain = ["github.io", "com"]
+        assert s.expand_domains(a) == [] and a.allow_host == ["x.example"]
+        assert s.expand_domains(argparse.Namespace(allow_host=[])) == []  # a namespace without the option
+    else:  # what --allow-host names already, and the domain given twice, each once
+        a.allow_host, a.allow_domain = ["example.org"], ["example.org", "*.example.org"]
+        assert s.expand_domains(a) == ["*.example.org"] and a.allow_host == ["example.org", "*.example.org"]
+
+
 def test_host_wildcards(scenario, tmp_path):
     (tmp_path / "w").mkdir()
     extra = {"happy": ["--allow-host", "*.Example.com", "--allow-host", "api.example.org"], "sad": ["--offline"],
@@ -1805,18 +1991,31 @@ def test_tmux_command(scenario):
     import shlex
     command = {"happy": ["claude"], "sad": ["codex", "exec", "a b; rm -rf / $(x) && echo x"], "edge": ["opencode", "run", "it's"]}[scenario]
     cmd = s.tmux_command(command)
+    options = list(s.RUNTIME.TMUX_OPTIONS)  # the server's options first (tests/test_terminal_frames.py)
+    assert cmd[:2] == ["tmux", "-u"] and cmd[2:2 + len(options)] == options
+    cmd = cmd[:2] + cmd[2 + len(options):]
     assert cmd[:8] == ["tmux", "-u", "new-session", "-s", "sandbox", "-n", "agent", "-c"]
     assert shlex.split(cmd[9]) == command
     assert cmd[10:] == [";", "new-window", "-d", "-n", "shell", "-c", "/work", "bash"]
-    # Detached sessions: the guard keeps running while the tmux session exists.
+    # Detached sessions: the guard keeps running while the tmux session exists, and no longer (its relay ends too:
+    # tests/test_live_regressions.py runs it with a real tmux).
     detached = s.tmux_command(command, detached=True)
     assert detached[:2] == ["sh", "-c"]
-    tmux_part, _, loop = detached[2].rpartition(" && ")
-    assert shlex.split(tmux_part)[:4] == ["tmux", "-u", "new-session", "-d"]
-    assert shlex.split(shlex.split(tmux_part)[10]) == command
-    assert loop == "while tmux has-session -t sandbox 2>/dev/null; do sleep 1; done"
+    lines = detached[2].splitlines()
+    tmux_part = lines[0].removesuffix(" || exit $?")
+    words = shlex.split(tmux_part)
+    assert words[2:2 + len(options)] == options
+    words = words[:2] + words[2 + len(options):]
+    assert words[:4] == ["tmux", "-u", "new-session", "-d"]
+    # The agent's window records its exit status for the account of the end.
+    agent, _, record = words[10].rpartition("; printf ")
+    assert shlex.split(agent) == command and record.endswith("> /sandbox/tmux/agent-exit")
+    assert "while tmux has-session -t sandbox 2>/dev/null; do sleep 1; done" in lines
+    assert 'kill "$relay" 2>/dev/null' in lines
     # The relay that terminals attach through starts inside the same confinement.
-    assert "--internal-attach-relay /sandbox/tmux/attach.sock" in tmux_part
+    assert any("--internal-attach-relay /sandbox/tmux/attach.sock &" == line[-len("--internal-attach-relay "
+                                                                                   "/sandbox/tmux/attach.sock &"):]
+               for line in lines)
 
 
 def test_claude_token_status(scenario, tmp_path):
@@ -1837,6 +2036,7 @@ def test_load_sessions_module(scenario, monkeypatch, tmp_path):
     else:
         module = s.load_sessions_module()
         assert callable(module.start) and callable(module.cli)
+        assert module.launcher().parse_args is s.parse_args  # this launcher, not a second copy of it
         if scenario == "edge":
             assert s.load_sessions_module() is not module
 
@@ -3039,6 +3239,7 @@ def test_load_mcp_module(scenario, monkeypatch, tmp_path):
     else:
         module = s.load_mcp_module()
         assert callable(module.ensure_running) and "demo" in module.BUILTIN
+        assert module.launcher().parse_args is s.parse_args  # this launcher, not a second copy of it
         if scenario == "edge":
             assert s.load_mcp_module() is not module
 
@@ -3151,9 +3352,30 @@ def test_mcp_agent_args(scenario):
     elif scenario == "happy":
         args = s.mcp_agent_args(s.parse_args(["claude", "--mcp", "demo"]))
         assert args[0] == "--mcp-config" and "demo" in json.loads(args[1])["mcpServers"]
-    else:
+    else:  # each server once, with its command, arguments, wait for a call and for its start
         args = s.mcp_agent_args(s.parse_args(["codex", "--mcp", "a", "--mcp", "a", "--mcp", "b"]))
-        assert args.count("-c") == 4 and 'mcp_servers.b.command="python3"' in args
+        assert args.count("-c") == 8 and 'mcp_servers.b.command="python3"' in args
+        assert f"mcp_servers.a.tool_timeout_sec={s.DEFAULT_MCP_TOOL_TIMEOUT}" in args
+
+
+def test_mcp_tool_timeouts(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    config = tmp_path / "cfg" / "sandbox-ai" / "mcp.json"
+    config.parent.mkdir(parents=True)
+    if scenario == "happy":  # the definition's own, a helper's long one, the default for the rest
+        config.write_text(json.dumps({"exec": {"command": ["srv"], "tool_timeout": 630}}))
+        a = s.parse_args(["codex", "--mcp", "exec", "--mcp", "helper-claude-x", "--mcp", "demo"])
+        assert s.mcp_tool_timeouts(a) == {"exec": 630, "helper-claude-x": s.LONG_TOOL_TIMEOUT,
+                                          "demo": s.DEFAULT_MCP_TOOL_TIMEOUT}
+    elif scenario == "sad":  # definitions that cannot be read: the default
+        config.write_text("{")
+        assert s.mcp_tool_timeouts(s.parse_args(["codex", "--mcp", "exec"])) == {"exec": s.DEFAULT_MCP_TOOL_TIMEOUT}
+        assert s.mcp_tool_timeouts(s.parse_args(["codex"])) == {}
+    else:  # only helpers and boards: no definition is read at all
+        config.write_text("{")
+        a = s.parse_args(["codex", "--mcp", "team-app", "--mcp", "team-app"])
+        assert s.mcp_tool_timeouts(a) == {"team-app": s.LONG_TOOL_TIMEOUT}
 
 
 def test_mcp_serve(scenario, tmp_path):
@@ -3186,9 +3408,12 @@ def test_mcp_serve(scenario, tmp_path):
         except ConnectionResetError:
             pass  # a failed server closes with unread input
         return received
-    assert exchange() == (ping if scenario == "happy" else b"")
+    # cat sends the request back (no answer to it): once it ends, the relay answers the request still open.
+    unanswered = b'{"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "sandbox-ai: the MCP server ended ' \
+                 b'before it answered"}}\n'
+    assert exchange() == (ping + unanswered if scenario == "happy" else b"")
     # One failing or finished instance never takes the listener down.
-    assert exchange() == (ping if scenario == "happy" else b"")
+    assert exchange() == (ping + unanswered if scenario == "happy" else b"")
     if scenario == "happy":
         # What is not one JSON message never reaches the server: the relay answers it.
         answer = json.loads(exchange(b"echo\n"))
@@ -3462,6 +3687,28 @@ def test_review6_trust_and_forget_hold_the_trust_store_lock(tmp_path, monkeypatc
     assert list(s.trusted_configs()) == [str(second)]
 
 
+def test_bind_long(scenario, tmp_path, monkeypatch):
+    deep = tmp_path / ("x" * 70) / ("y" * 70)
+    deep.mkdir(parents=True)
+    server = socket.socket(socket.AF_UNIX)
+    try:
+        if scenario == "sad":
+            with pytest.raises(OSError):
+                s.RUNTIME.bind_long(server, tmp_path / "missing" / "b.sock")
+            return
+        if scenario == "edge":  # no /proc (macOS): a short link in the temporary folder, gone afterwards
+            links = tmp_path / "t"
+            links.mkdir()
+            monkeypatch.setattr(s.RUNTIME, "PROC_FD", str(tmp_path / "no-proc"))
+            monkeypatch.setattr(s.RUNTIME.tempfile, "gettempdir", lambda: str(links))
+        s.RUNTIME.bind_long(server, deep / "b.sock")
+        assert (deep / "b.sock").is_socket()
+        if scenario == "edge":
+            assert list(links.iterdir()) == []
+    finally:
+        server.close()
+
+
 def test_listen_unix(scenario, tmp_path):
     path = tmp_path / "l.sock"
     if scenario == "sad":
@@ -3478,6 +3725,33 @@ def test_listen_unix(scenario, tmp_path):
         client.close()
     finally:
         server.close()
+
+
+def test_accept_transient(scenario):
+    paused = []
+    if scenario == "happy":  # out of descriptors: wait a moment, go on
+        assert s.RUNTIME.accept_transient(OSError(errno.EMFILE, "Too many open files"), sleep=paused.append)
+        assert s.RUNTIME.accept_transient(OSError(errno.ECONNABORTED, "aborted"), pause=0.5, sleep=paused.append)
+        assert paused == [0.1, 0.5]
+    elif scenario == "sad":  # the listener closed: the loop ends, at once
+        assert not s.RUNTIME.accept_transient(OSError(errno.EBADF, "Bad file descriptor"), sleep=paused.append)
+        assert not s.RUNTIME.accept_transient(OSError(errno.EINVAL, "Invalid argument"), sleep=paused.append)
+        assert paused == []
+    else:  # a timeout is not this one's to judge (the loops take it first), nor anything but an OSError
+        assert not s.RUNTIME.accept_transient(socket.timeout("timed out"), sleep=paused.append)
+        assert not s.RUNTIME.accept_transient(ValueError("x"), sleep=paused.append)
+        assert not s.RUNTIME.accept_transient(OSError("no errno"), sleep=paused.append) and paused == []
+
+
+def test_sequence_end(scenario):
+    """(The terminal relay's bursts end only after a complete sequence: tests/test_terminal_frames.py.)"""
+    data = {"happy": b"x\x1b[12;34H", "sad": b"x\x1b[12;3", "edge": b"x\x1b]0;t\x07"}[scenario]
+    assert s.RUNTIME.sequence_end(bytearray(data), 1) is (scenario != "sad")
+
+
+def test_safe_cut(scenario):
+    data = {"happy": b"row\x1b[K", "sad": b"row\x1b]52;c;YWJj", "edge": "row€".encode()[:-1]}[scenario]
+    assert s.RUNTIME.safe_cut(bytearray(data)) == (len(data) if scenario == "happy" else 3)
 
 
 def test_relay_terminal(scenario, tmp_path):
@@ -3509,6 +3783,55 @@ def test_terminate(scenario):
     with pytest.raises(SystemExit) as raised:
         s.terminate(signum, None)
     assert raised.value.code == 128 + signum
+
+
+class DeadStream(io.StringIO):
+    """A terminal after its hangup (EIO) or a log on a full disk (ENOSPC): every write and flush fails."""
+
+    def __init__(self, error=errno.EIO):
+        super().__init__()
+        self.error = error
+
+    def write(self, text):
+        raise OSError(self.error, os.strerror(self.error))
+
+    def flush(self):
+        raise OSError(self.error, os.strerror(self.error))
+
+
+def test_steady_output(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        # A run whose terminal was closed: the clean-up's first line (the memory watch's note) raised EIO, its
+        # except block's line raised again, and every later step of the clean-up was skipped - the run's exit was
+        # never noted, and main ended with OSError instead of the agent's status.
+        monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr(s, "run_pod", Mock(return_value=3))
+        monkeypatch.setattr(s, "start_memory_watch", lambda *a, **k: SimpleNamespace(stop=lambda: ["memory note"]))
+        events = []
+        monkeypatch.setattr(s, "history_event", lambda a, event, status=None: events.append((event, status)))
+        monkeypatch.setattr(sys, "stderr", DeadStream())
+        options = ["codex", "--workspace", str(tmp_path / "work"), "--offline", "--no-auth", "--no-keep"]
+        assert s.main(options) == 3
+        assert ("exit", 3) in events
+        assert isinstance(sys.stderr, DeadStream)  # restored
+    elif scenario == "sad":
+        dead = DeadStream(errno.ENOSPC)
+        monkeypatch.setattr(sys, "stdout", dead)
+        with s.steady_output():
+            print("lost", flush=True)
+            print("lost too", file=sys.stderr)
+            assert sys.stdout.write("x") == 1
+        assert sys.stdout is dead
+    else:
+        written = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", None)  # (pythonw, a closed stream)
+        monkeypatch.setattr(sys, "stderr", written)
+        with s.steady_output():
+            with s.steady_output():  # never wrapped twice
+                assert sys.stdout is None and type(sys.stderr._stream) is io.StringIO
+                print("kept", file=sys.stderr)
+        assert written.getvalue() == "kept\n" and sys.stderr is written
 
 
 def blocked():
@@ -3933,10 +4256,14 @@ def test_check_image_variant(scenario, tmp_path, monkeypatch):
         assert a.image == "localhost/claude-sandbox-web:latest"
         s.check_image_variant(s.parse_args(["claude"]))  # nothing to check
     elif scenario == "sad":
-        with pytest.raises(ValueError, match="variant of claude"):
-            s.check_image_variant(s.parse_args(["codex", "--image-variant", "web"]))
         with pytest.raises(ValueError, match="no such variant"):
             s.check_image_variant(s.parse_args(["claude", "--image-variant", "gone"]))
+        adopted = s.parse_args(["codex", "--image-variant", "web"])  # claude's: made for codex too
+        s.check_image_variant(adopted)
+        assert adopted.image == "localhost/codex-sandbox-web:latest"
+        tor = s.parse_args(["codex", "--image-variant", "tor"])  # the gone recipe's: not needed, Tor is the VPN
+        s.check_image_variant(tor)
+        assert tor.image == "localhost/codex-sandbox:latest" and tor.image_variant is None
     else:
         with pytest.raises(ValueError, match="exclude each other"):
             s.check_image_variant(s.parse_args(["claude", "--image-variant", "web", "--image", "localhost/x"]))
@@ -4936,6 +5263,7 @@ def test_load_kits_module(scenario, monkeypatch, tmp_path):
 
 def test_load_privacy_module(scenario, monkeypatch, tmp_path):
     if scenario == "sad":
+        monkeypatch.setattr(s, "_privacy_module", None)
         monkeypatch.setattr(s, "HERE", tmp_path)
         with pytest.raises(FileNotFoundError):
             s.load_privacy_module()
@@ -4943,7 +5271,7 @@ def test_load_privacy_module(scenario, monkeypatch, tmp_path):
         module = s.load_privacy_module()
         assert callable(module.scan_repository) and module.builtin_rules().patterns
         if scenario == "edge":
-            assert s.load_privacy_module() is not module
+            assert s.load_privacy_module() is module  # loaded once: a start asked for it ten times
 
 
 def test_privacy_hooks_apply(scenario, tmp_path):
@@ -5885,6 +6213,152 @@ def test_redact_text(scenario):
         assert rt.redact_text('{"password": "a\\"b"}') == '{"password": "[redacted]"}'
 
 
+def test_full_arguments(scenario):
+    """A tool call's arguments as a question's details show them: the exact value, pretty-printed, redacted, bounded
+    with a marker (tests/test_mcp_full_arguments.py has the rest)."""
+    if scenario == "happy":
+        args = {"text": "zwei\nZeilen ä", "n": [1, 2.5, None]}
+        assert json.loads(rt.full_arguments(args)) == args and "\n  " in rt.full_arguments(args)
+    elif scenario == "sad":
+        text = rt.full_arguments({"api_key": "k-123456789", "text": "x" * 300}, limit=100)
+        assert "k-123456789" not in text and len(text.encode()) < 200
+        assert re.search(r"\n\.\.\. truncated: [0-9]+ more bytes", text)
+    else:
+        assert rt.full_arguments({}) == "{}" and json.loads(rt.full_arguments({"s": "\ud800"})) == {"s": "\ud800"}
+
+
+def test_arguments_window(scenario):
+    """The hook's window of a call (its first 64 KiB and the margin, the whole size) and what a question shows of it
+    (window_shown: redacted, the run's secret values too, bounded with a marker); tests/test_tool_full_arguments.py
+    has the rest."""
+    if scenario == "happy":
+        window, size = rt.arguments_window({"command": "ls"})
+        assert window == '{\n  "command": "ls"\n}' and size == len(window)
+        assert rt.window_shown(window, size) == window
+        assert rt.window_shown('{"t": "sk-secret-123"}', 22, values=["sk-secret-123"]) == '{"t": "[redacted]"}'
+    elif scenario == "sad":
+        window, size = rt.arguments_window({"t": "x" * (200 << 10)})
+        assert len(window.encode()) == rt.FULL_ARGUMENTS_LIMIT + rt.FULL_ARGUMENTS_MARGIN and size > (200 << 10)
+        text = rt.window_shown(window, size)
+        assert re.search(r"\n\.\.\. truncated: [0-9]+ more bytes", text)
+        assert int(text.rpartition("truncated: ")[2].split()[0]) == size - rt.FULL_ARGUMENTS_LIMIT
+    else:
+        assert rt.arguments_window({}) == ("{}", 2) and rt.window_shown("{}", 1) == "{}"  # a size below: no marker
+        assert json.loads(rt.arguments_window({"s": "\ud800"})[0]) == {"s": "\ud800"}
+
+
+def test_window_shown(scenario):
+    """What a question shows of a call's window (arguments_window): redacted, the run's secret values too, bounded with
+    a marker that counts what the window did not hold."""
+    if scenario == "happy":
+        assert rt.window_shown('{\n  "a": 1\n}', 12) == '{\n  "a": 1\n}'
+        assert rt.window_shown('{"t": "sk-secret-123"}', 22, values=["sk-secret-123"]) == '{"t": "[redacted]"}'
+    elif scenario == "sad":  # the window is the first part of more: the marker counts the rest
+        text = rt.window_shown("x" * 100, 1000, limit=40)
+        assert text.startswith("x" * 40) and "\n... truncated: 960 more bytes" in text
+    else:  # a secret across the cut is redacted before it, never shown up to the cut
+        text = rt.window_shown("p" * 30 + '"password": "hunter2-long"', 60, limit=40)
+        assert "hunter2" not in text and "truncated" in text
+
+
+def test_window_cut(scenario):
+    """(text, more) of a call's window: MORE, the bytes a question cannot show, makes a call too large to ask."""
+    if scenario == "happy":
+        assert rt.window_cut('{\n  "a": 1\n}', 12) == ('{\n  "a": 1\n}', 0)
+        assert rt.window_cut('{"t": "sk-secret-123"}', 22, values=["sk-secret-123"]) == ('{"t": "[redacted]"}', 0)
+    elif scenario == "sad":  # the window is the first part of more
+        assert rt.window_cut("x" * 100, 1000, limit=40) == ("x" * 40, 960)
+    else:  # at the limit exactly: all of it; a character is never cut in half
+        assert rt.window_cut("x" * 40, 40, limit=40) == ("x" * 40, 0)
+        text, more = rt.window_cut("ä" * 21, 42, limit=41)
+        assert text == "ä" * 20 and more == 2
+
+
+def test_marked(scenario):
+    if scenario == "happy":
+        assert rt.marked("abc", 0) == "abc"
+    elif scenario == "sad":
+        assert rt.marked("abc", 7) == "abc\n... truncated: 7 more bytes (the call carries them all; shown are the " \
+                                      "first 3)"
+    else:
+        assert rt.marked("", 1).startswith("\n... truncated: 1 more bytes")
+
+
+def test_too_large_refusal(scenario):
+    """Why a call too large for its question is refused, never asked: for the agent and the record."""
+    if scenario == "happy":
+        assert rt.too_large_refusal(5).startswith("its arguments are 5 bytes more than the 64 KiB a question shows")
+    elif scenario == "sad":
+        assert "refused without asking" in rt.too_large_refusal(1 << 30)
+    else:
+        assert "1 KiB" in rt.too_large_refusal(1, limit=1024) and "\n" not in rt.too_large_refusal(1)
+
+
+def test_hook_server_call(scenario):
+    """HookServer.call: a hook message's arguments in full for its question, the keyed digest that binds an answer
+    to exactly that call, and how many bytes of it a question cannot show (such a call is refused, never asked)."""
+    server = rt.HookServer(rt.Ruleset([]), secret_values=["sk-secret-123"])
+    window, size = rt.arguments_window({"command": "ls sk-secret-123"})
+    full, digest, more = server.call({"input_window": window, "input_size": size, "input_digest": "d"},
+                                     {"command": "ls sk-secret-123"})
+    if scenario == "happy":
+        assert json.loads(full) == {"command": "ls [redacted]"} and len(digest) == 32 and more == 0
+        assert server.call({"input_window": window, "input_size": size, "input_digest": "d"},
+                           {"command": "ls sk-secret-123"})[1] == digest  # the same call: the same question
+        assert rt.HookServer(rt.Ruleset([])).call({}, {"command": "ls"})[1] != digest  # another run's key
+    elif scenario == "sad":  # a window that is no text, or too long: the rules' arguments are shown instead
+        assert json.loads(server.call({"input_window": 1, "input_size": 1}, {"a": 1})[0]) == {"a": 1}
+        assert json.loads(server.call({"input_window": "x" * (1 << 20), "input_size": True}, {"a": 1})[0]) == {"a": 1}
+        # ... and a value the rules know only by its length is not in them: too large to show
+        assert server.call({}, {"a": {"sandbox-ai": "too large", "length": 300000}})[2] == 300000
+        big = rt.arguments_window({"command": "y" * (rt.FULL_ARGUMENTS_LIMIT + 5)})
+        assert server.call({"input_window": big[0], "input_size": big[1]}, {"command": "?"})[2] > 0
+    else:  # one more byte anywhere: another call
+        assert server.call({"input_window": window, "input_size": size, "input_digest": "e"},
+                           {"command": "ls sk-secret-123"})[1] != digest
+        assert server.call({"input_window": window, "input_size": size + 1, "input_digest": "d"},
+                           {"command": "ls sk-secret-123"})[1] != digest
+
+
+def test_image_base(scenario):
+    if scenario == "happy":
+        assert s.image_base("localhost/cairn-sandbox:latest") == "localhost/cairn-sandbox"
+    elif scenario == "sad":
+        assert s.image_base("localhost/cairn-sandbox@sha256:abc") == "localhost/cairn-sandbox"
+    else:  # a registry's port is no tag
+        assert s.image_base("registry:5000/x/cairn-sandbox:1") == "registry:5000/x/cairn-sandbox"
+        assert s.image_base("cairn") == "cairn"
+
+
+def test_experimental_needs(scenario):
+    """The one list of what has not passed its live test yet (EXPERIMENTAL_PARTS), read for a preset or a start: its
+    agents (all of them in the list), --helper/--with, --image, --nested-containers, long or short."""
+    if scenario == "happy":
+        assert s.experimental_needs(["hermes"]) == ["hermes"]
+        assert s.experimental_needs(["claude"], ["--helper", "hermes"]) == ["hermes"]
+        assert s.experimental_needs(["claude"], ["--image", "localhost/cairn-sandbox:latest", "--with", "codex"]) == \
+            ["cairn"]
+        assert s.experimental_needs(["goose", "dsh"], ["-ct"]) == ["dsh", "goose", "nested-containers"]
+    elif scenario == "sad":  # an agent among others is not the preset's badge; neither is another image
+        assert s.experimental_needs(["claude", "hermes"]) == []
+        assert s.experimental_needs(["claude"], ["--image", "localhost/claude-sandbox:latest", "--helper"]) == []
+        assert s.experimental_needs(["claude"], ["--mount", "--helper"]) == []
+    else:
+        assert s.experimental_needs() == [] and s.experimental_needs([], ["--helper=qwen", "-hl", "dsh"]) == ["dsh",
+                                                                                                          "qwen"]
+        assert s.experimental_needs(["claude"], ["-i", "localhost/cairn-sandbox@sha256:" + "a" * 64]) == ["cairn"]
+
+
+def test_experimental_badge(scenario):
+    """A badge only ({"names"}): no variable, nothing to enable."""
+    if scenario == "happy":
+        assert s.experimental_badge(["qwen"]) == {"names": ["qwen"]}
+    elif scenario == "sad":
+        assert s.experimental_badge(["claude"]) is None
+    else:
+        assert s.experimental_badge(["hermes"], ["--nested-containers"]) == {"names": ["hermes", "nested-containers"]}
+
+
 def test_body_record(scenario):
     if scenario == "happy":
         assert rt.body_record(b'{"a": 1}', 8, [], 100) == {"size": 8, "truncated": False, "text": '{"a": 1}'}
@@ -6544,6 +7018,23 @@ def test_runs_dir(scenario, tmp_path, monkeypatch):
         assert s.runs_dir() == Path.home() / ".local/state/sandbox-ai/runs"
 
 
+def test_app_tab(scenario, monkeypatch):
+    """The app's terminal tab a run is in (SANDBOX_AI_APP_TAB), as run.json records it: the app finds the run of a tab
+    by it (and whether a link of it may open on this host, past a VPN or Tor)."""
+    if scenario == "happy":
+        monkeypatch.setenv("SANDBOX_AI_APP_TAB", "0123456789abcdef")
+        assert s.app_tab() == "0123456789abcdef"
+    elif scenario == "sad":
+        for value in ("short", "a b c d e f g h", "../../etc/passwd", "x" * 65, "0123456789abcdef\n"):
+            monkeypatch.setenv("SANDBOX_AI_APP_TAB", value)
+            assert s.app_tab() is None, value
+    else:
+        monkeypatch.delenv("SANDBOX_AI_APP_TAB", raising=False)
+        assert s.app_tab() is None
+        monkeypatch.setenv("SANDBOX_AI_APP_TAB", "")
+        assert s.app_tab() is None
+
+
 def test_register_run(scenario, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))  # beside the workspace: never around it
     a = s.parse_args(["claude", "--workspace", str(tmp_path / "app")])
@@ -7082,18 +7573,16 @@ def test_credential_headers(scenario):
         assert rt.credential_headers([["Cookie", "a"], ["cookie", "b"]]) == ["cookie"]
 
 
-def test_tool_call_record(scenario):
+def test_mcp_call_arguments_as_logged(scenario):
+    """The arguments of a tool call as the log and the questions show them (McpGateway.arguments)."""
     if scenario == "happy":
-        record = rt.tool_call_record(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
-            "name": "web_search", "arguments": {"query": "x", "api_key": "secret-value"}}}).encode())
-        assert record["tool"] == "web_search" and '"api_key": "[redacted]"' in record["arguments"]
+        shown = rt.McpGateway.arguments({"query": "x", "api_key": "secret-value"})
+        assert '"query": "x"' in shown and '"api_key": "[redacted]"' in shown and "secret-value" not in shown
     elif scenario == "sad":
-        assert rt.tool_call_record(b"not json") is None
-        assert rt.tool_call_record(b'{"method": "tools/list"}') is None
+        assert rt.McpGateway.arguments({}) == "{}" and rt.McpGateway.arguments(None) == "null"
     else:
-        record = rt.tool_call_record(json.dumps({"method": "tools/call", "params": {
-            "name": "x", "arguments": {f"text{i}": "y" * 5000 for i in range(10)}}}).encode())
-        assert len(record["arguments"]) == 2003 and record["arguments"].endswith("...")
+        shown = rt.McpGateway.arguments({f"text{i}": "y" * 5000 for i in range(10)})
+        assert len(shown) == 2003 and shown.endswith("...")
 
 
 def test_process_logger(scenario, tmp_path, monkeypatch):
@@ -7992,9 +8481,8 @@ def test_seed_exposed(scenario, tmp_path, monkeypatch):
 
 def test_shortened(scenario):
     if scenario == "happy":  # long secrets keep their closing quote, so the redaction still matches
-        record = rt.tool_call_record(json.dumps({"method": "tools/call", "params": {
-            "name": "x", "arguments": {"client_secret": "ya29." + "A" * 9000}}}).encode())
-        assert "AAAAAAAAAA" not in record["arguments"]
+        shown = rt.McpGateway.arguments({"client_secret": "ya29." + "A" * 9000})
+        assert "AAAAAAAAAA" not in shown
     elif scenario == "sad":
         assert rt.shortened({"k": ["v"] * 500})["k"][-1] == "..."
     else:
@@ -8310,9 +8798,9 @@ def test_load_rulesets(scenario, tmp_path, monkeypatch):
         with pytest.raises(ValueError, match="decision"):
             s.load_rulesets(s.parse_args(["codex", "--rules", str(mine)]))
     else:
-        # Nothing configured: only the proxy's part of --telemetry off; with it on, nothing decided by rules.
+        # Nothing configured: only the proxy's part of the telemetry (always off: an old on changes nothing).
         assert [r["name"] for r in s.load_rulesets(s.parse_args(["codex"]))] == ["telemetry"]
-        assert s.load_rulesets(s.parse_args(["codex", "--telemetry", "on"])) == []
+        assert [r["name"] for r in s.load_rulesets(s.parse_args(["codex", "--telemetry", "on"]))] == ["telemetry"]
 
 
 def test_check_rulesets(scenario, tmp_path, monkeypatch):
@@ -8376,10 +8864,11 @@ def test_proxy_rules(scenario, tmp_path, monkeypatch):
         assert config["pinned"] == hosts
     elif scenario == "sad":
         # No rules, but the addresses: rules reloaded during the run hold for a bare address too.
-        assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on"]), hosts) == {"rules": [], "pinned": hosts}
+        rules = s.proxy_rules(s.parse_args(["codex"]), hosts)
+        assert [r["name"] for r in rules["rules"]] == ["telemetry"] and rules["pinned"] == hosts
     else:  # --allow-http travels as http_rules, not twice
-        assert s.proxy_rules(s.parse_args(["codex", "--telemetry", "on", "--allow-http", "api.github.com GET /**"]),
-                             hosts) == {"rules": [], "pinned": hosts}
+        rules = s.proxy_rules(s.parse_args(["codex", "--allow-http", "api.github.com GET /**"]), hosts)
+        assert [r["name"] for r in rules["rules"]] == ["telemetry"] and rules["pinned"] == hosts
         assert s.proxy_config(s.parse_args(["codex", "--rules", str(mine)]), hosts, "l")["rules"][0]["http"]
 
 
@@ -9762,8 +10251,9 @@ def test_hook_mount(scenario, tmp_path, monkeypatch):
                                                                                           "/etc/codex")
     elif scenario == "sad":
         assert s.hook_mount(s.parse_args(["claude"]), tmp_path) is None
-    else:  # OpenCode's plugin lies in the session directory, mounted anyway
+    else:  # OpenCode's plugin lies in the session directory, mounted anyway; Hermes' managed scope always
         assert s.hook_mount(s.parse_args(["opencode", "--rules", str(mine)]), tmp_path) is None
+        assert s.hook_mount(s.parse_args(["hermes"]), tmp_path) == (tmp_path / "hermes", "/etc/hermes")
 
 
 def test_hook_problem(scenario):
@@ -10416,11 +10906,14 @@ def test_telemetry_level(scenario):
         assert s.telemetry_level(a) == "off"
         a.telemetry_default = "strict"
         assert s.telemetry_level(a) == "strict"
-        a.telemetry = "on"
-        assert s.telemetry_level(a) == "on", "the option wins over the defaults file"
+        a.telemetry = "off"
+        assert s.telemetry_level(a) == "off", "the option wins over the defaults file"
+        a.telemetry = "on"  # gone since 0.1.95 (the parser never gives it): off, never on
+        assert s.telemetry_level(a) == "off"
     elif scenario == "sad":  # below the security mode's floor: raised to it
         a.mode, a.telemetry_default = "paranoid", "on"
         assert s.telemetry_level(a) == "strict"
+        assert s.parse_args(["claude", "--telemetry", "on"]).telemetry is None, "an old on: as if not given"
     else:
         a.mode = "high"
         assert s.telemetry_level(a) == "off" and s.MODES.MODES["high"].get("telemetry") is None
@@ -10431,7 +10924,7 @@ def test_telemetry_environment(scenario):
         env = s.telemetry_environment(s.parse_args(["claude", "--with", "opencode"]))
         assert env == {**s.TELEMETRY_ENV["claude"]["off"], **s.TELEMETRY_ENV["opencode"]["off"]}
     elif scenario == "sad":
-        assert s.telemetry_environment(s.parse_args(["claude", "--telemetry", "on"])) == {}
+        assert s.telemetry_environment(s.parse_args(["claude", "--telemetry", "on"])) == s.TELEMETRY_ENV["claude"]["off"]
         assert s.telemetry_environment(s.parse_args(["claude", "--binary", "/bin/sh"])) == {}, "no agent runs"
     else:
         env = s.telemetry_environment(s.parse_args(["opencode", "--telemetry", "strict"]))
@@ -10447,9 +10940,9 @@ def test_telemetry_plan(scenario):
         a.mode = "paranoid"
         assert s.telemetry_plan(a)["origin"] == "--mode paranoid"
     else:
-        plan = s.telemetry_plan(s.parse_args(["claude", "--telemetry", "on"]))
-        assert plan == {"level": "on", "origin": "--telemetry", "environment": [], "opencode_config": None,
-                        "codex_config": []}
+        plan = s.telemetry_plan(s.parse_args(["claude", "--telemetry", "on"]))  # an old on: ignored
+        assert plan == {"level": "off", "origin": "default", "environment": sorted(s.TELEMETRY_ENV["claude"]["off"]),
+                        "opencode_config": None, "codex_config": []}
 
 
 def test_telemetry_rules(scenario):
@@ -10458,7 +10951,7 @@ def test_telemetry_rules(scenario):
         assert [r["host"] for r in rules["http"]] == ["api.anthropic.com", "chatgpt.com"]
     elif scenario == "sad":
         assert s.telemetry_rules(s.parse_args(["claude", "--no-proxy"])) is None
-        assert s.telemetry_rules(s.parse_args(["claude", "--telemetry", "on"])) is None
+        assert s.telemetry_rules(s.parse_args(["claude", "--telemetry", "on"]))["http"], "an old on: refused all the same"
     else:  # a host passed unopened gets no rule; OpenCode has none at all
         assert s.telemetry_rules(s.parse_args(["claude", "--no-inspect", "api.anthropic.com"])) is None
         assert s.telemetry_rules(s.parse_args(["opencode"])) is None
@@ -10467,9 +10960,9 @@ def test_telemetry_rules(scenario):
 def test_codex_telemetry_keys(scenario):
     if scenario == "happy":
         assert [k for _, k, _, _ in s.codex_telemetry_keys("off")] == [
-            "check_for_update_on_startup", "enabled", "enabled", "metrics_exporter"]
+            "check_for_update_on_startup", "enabled", "enabled", "metrics_exporter", "exporter", "trace_exporter"]
     elif scenario == "sad":
-        assert s.codex_telemetry_keys("on") == []
+        assert s.codex_telemetry_keys("on") == s.codex_telemetry_keys("off"), "telemetry is always off"
     else:
         assert s.codex_telemetry_keys("strict")[-1] == ("features", "plugins", False, "false")
 
@@ -10489,8 +10982,8 @@ def test_codex_config_with(scenario):
         with pytest.raises(ValueError):
             s.codex_config_with("not = [toml\n", keys, tomllib)
     else:
-        text, kept = s.codex_config_with("[feedback]\nenabled = true\n", keys, tomllib)
-        assert ("feedback.enabled", True) in kept and tomllib.loads(text)["feedback"] == {"enabled": True}
+        text, replaced = s.codex_config_with("[feedback]\nenabled = true\n", keys, tomllib)
+        assert ("feedback.enabled", True) in replaced and tomllib.loads(text)["feedback"] == {"enabled": False}
 
 
 def test_codex_telemetry_defaults(scenario, tmp_path, capsys):
@@ -10503,12 +10996,13 @@ def test_codex_telemetry_defaults(scenario, tmp_path, capsys):
     config = home / ".codex/config.toml"
     if scenario == "happy":
         s.codex_telemetry_defaults(home, "off")
-        assert tomllib.loads(config.read_text())["otel"] == {"metrics_exporter": "none"}
+        assert tomllib.loads(config.read_text())["otel"] == {"metrics_exporter": "none", "exporter": "none",
+                                                             "trace_exporter": "none"}
         assert oct(config.stat().st_mode & 0o777) == "0o600"
     elif scenario == "sad":
         config.write_text("analytics = { a = 1 }\n")
         s.codex_telemetry_defaults(home, "off")
-        assert config.read_text() == "analytics = { a = 1 }\n" and "left as its" in capsys.readouterr().err
+        assert config.read_text() == "analytics = { a = 1 }\n" and "left as it is" in capsys.readouterr().err
     else:
         s.codex_telemetry_defaults(home, "strict")
         first = config.read_text()
@@ -11883,6 +12377,41 @@ def test_no_delay(scenario):
         rt.no_delay(None)  # not a socket at all
 
 
+def test_peer_done(scenario):
+    import select as select_module
+    import socket as socket_module
+    left, right = socket_module.socketpair()
+    with left, right:
+        if scenario == "happy":
+            right.sendall(b"\x16\x03")
+            right.close()  # gone, its bytes still unread
+            assert rt.peer_done(left) is bool(getattr(select_module, "POLLRDHUP", 0))
+        elif scenario == "sad":
+            right.sendall(b"\x16\x03")  # still there: it may send the rest
+            assert rt.peer_done(left) is False
+        else:
+            left.close()
+            assert rt.peer_done(left) is bool(getattr(select_module, "POLLRDHUP", 0))  # (no descriptor: done)
+
+
+def test_wait_ready(scenario):
+    import socket as socket_module
+    left, right = socket_module.socketpair()
+    with left, right:
+        if scenario == "happy":
+            right.sendall(b"x")
+            assert rt.wait_ready([left, right], [right], 1) == ([left], [right])
+        elif scenario == "sad":
+            assert rt.wait_ready([left], (), 0.05) == ([], [])  # nothing within the time
+            closed = socket_module.socket()
+            closed.close()
+            with pytest.raises(ValueError):
+                rt.wait_ready([closed], (), 0)  # as select(): a closed socket is refused
+        else:
+            right.close()
+            assert rt.wait_ready([left.fileno()], (), 1) == ([left.fileno()], [])  # the peer's end reads as readable
+
+
 def test_option_actions(scenario):
     actions = s.option_actions()
     if scenario == "happy":
@@ -12005,7 +12534,6 @@ def test_nested_storage(scenario, nested_devices_present):
 
 
 def test_check_nested(scenario, nested_devices_present, monkeypatch):
-    monkeypatch.setenv("SANDBOX_AI_EXPERIMENTAL", "nested-containers")
     if scenario == "happy":
         s.check_nested(s.parse_args(["claude", "--nested-containers"]))
         s.check_nested(s.parse_args(["claude", "--backend", "bwrap"]))  # not asked for: nothing checked
@@ -12200,6 +12728,31 @@ def test_nested_setup(scenario, tmp_path, monkeypatch):
         assert mounts == [] and not (tmp_path / "nested").exists()
 
 
+def test_nested_ipc(scenario, tmp_path, capsys):
+    rt = s.RUNTIME
+    calls = []
+    mqueue = tmp_path / "mqueue"
+    if scenario != "edge":
+        mqueue.mkdir()
+
+    class Libc:
+        def unshare(self, kind):
+            calls.append(("unshare", kind))
+            return -1 if scenario == "sad" else 0
+
+        def mount(self, source, target, fstype, flags, data):
+            calls.append(("mount", fstype))
+            return 0
+    if scenario == "happy":  # its own IPC namespace and a fresh mqueue there
+        assert rt.nested_ipc(Libc(), mqueue) is True
+        assert calls == [("unshare", rt.CLONE_NEWIPC), ("mount", b"mqueue")]
+    elif scenario == "sad":  # none to be had: said, nothing mounted, the run goes on
+        assert rt.nested_ipc(Libc(), mqueue) is False and calls == [("unshare", rt.CLONE_NEWIPC)]
+        assert "no IPC namespace of its own" in capsys.readouterr().err
+    else:  # no /dev/mqueue to mount on: the namespace alone
+        assert rt.nested_ipc(Libc(), mqueue) is True and calls == [("unshare", rt.CLONE_NEWIPC)]
+
+
 def test_enter_nested_userns(scenario, tmp_path):
     userns = tmp_path / "userns"
     userns.write_text("")
@@ -12215,12 +12768,12 @@ def test_enter_nested_userns(scenario, tmp_path):
             return -1 if scenario == "sad" else 0
 
         def unshare(self, kind):
-            assert kind == rt.CLONE_NEWNS
+            assert kind in (rt.CLONE_NEWNS, rt.CLONE_NEWIPC)
             return 0
     if scenario == "happy":
         (tmp_path / "sys" / "fs" / "cgroup").mkdir(parents=True)
         rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc, run_dirs=(str(tmp_path / "run" / "libpod"),),
-                               sys_root=tmp_path / "sys")
+                               sys_root=tmp_path / "sys", mqueue=tmp_path / "none")
     elif scenario == "sad":
         with pytest.raises(OSError, match="cannot enter"):
             rt.enter_nested_userns([1, 2, 950], userns, Libc(), proc)
@@ -12502,15 +13055,6 @@ def test_nested_sys(scenario, tmp_path):
         assert rt.nested_sys(Libc(), root) == "present" and calls == []
 
 
-def test_experimental(scenario):
-    if scenario == "happy":
-        assert s.experimental("nested-containers", {"SANDBOX_AI_EXPERIMENTAL": "a, nested-containers"})
-    elif scenario == "sad":
-        assert not s.experimental("nested-containers", {"SANDBOX_AI_EXPERIMENTAL": "nested"})
-    else:
-        assert not s.experimental("nested-containers", {})
-
-
 def test_added_writable(scenario, tmp_path):
     """--nested-containers: the writable workspaces added during the run, from the run's registry, each only while
     it is a mount point of its own (another device than /workspaces) and writable."""
@@ -12641,6 +13185,73 @@ def test_variant_base(scenario, tmp_path, monkeypatch):
         (variant / "image.json").write_text(json.dumps({"version": 1, "agent": "claude"}))
         assert s.variant_base(s.parse_args(["claude", "--image-variant", "py"])) is None
         assert s.variant_base(s.parse_args(["claude"])) is None
+
+
+# --- the sandbox's own browser (--browser) ----------------------------------------------------------------------
+
+def test_load_browser_module(scenario):
+    browser = s.load_browser_module()
+    if scenario == "happy":
+        assert browser.parse_profile("session") == ("session", None) and browser.CDP_PORT == 9222
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="absolute folder"):
+            browser.parse_profile("relative")
+    else:  # a fresh module each time, as the other loaders
+        assert s.load_browser_module() is not browser
+
+
+def test_check_browser(scenario, monkeypatch):
+    monkeypatch.setattr(s, "on_machine", lambda a: False)
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--browser", "--browser-control", "agent"])
+        a.services, a.vpn_profile = [], None
+        found = s.check_browser(a)
+        assert found is a.browser_container and found["ports"] == [9222] and found["kind"] == "chromium"
+    elif scenario == "sad":
+        a = s.parse_args(["claude", "--backend", "bwrap", "--browser"])
+        a.services = []
+        with pytest.raises(ValueError, match="Podman backend"):
+            s.check_browser(a)
+        a = s.parse_args(["claude", "--browser", "firefox", "--browser-control", "both"])
+        a.services = []
+        with pytest.raises(ValueError, match="needs Chromium"):
+            s.check_browser(a)
+    else:  # none: nothing loaded; an option of the browser without it is refused
+        a = s.parse_args(["claude"])
+        assert s.check_browser(a) is None and a.browser_container is None
+        a = s.parse_args(["claude", "--browser-profile", "session"])
+        with pytest.raises(ValueError, match="add --browser"):
+            s.check_browser(a)
+
+
+def test_bare_optional(scenario):
+    action = s.option_actions()["--browser"]
+    if scenario == "happy":
+        assert s.bare_optional(action, ["--browser"], 1) and s.bare_optional(action, ["--browser", "--gui"], 1)
+    elif scenario == "sad":  # a value given, or an option that takes one always
+        assert not s.bare_optional(action, ["--browser", "firefox"], 1)
+        assert not s.bare_optional(s.option_actions()["--workspace"], ["--workspace"], 1)
+    else:  # "--" ends the options: no value
+        assert s.bare_optional(action, ["--browser", "--", "-p"], 1)
+
+
+def test_share_browser_ca(scenario, tmp_path):
+    ca_dir, run = tmp_path / "ca", tmp_path / "run"
+    ca_dir.mkdir()
+    run.mkdir()
+    certificate = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    if scenario == "happy":
+        (ca_dir / "ca.pem").write_bytes(certificate)
+        assert s.RUNTIME.share_browser_ca(run, ca_dir) is True
+        assert (run / s.RUNTIME.BROWSER_CA).read_bytes() == certificate
+        assert stat.S_IMODE((run / s.RUNTIME.BROWSER_CA).stat().st_mode) == 0o644
+    elif scenario == "sad":  # no proxy (no CA), or anything with a key in it: nothing shared
+        assert s.RUNTIME.share_browser_ca(run, ca_dir) is False
+        (ca_dir / "ca.pem").write_bytes(certificate + b"-----BEGIN " + b"PRIVATE KEY-----\n")
+        assert s.RUNTIME.share_browser_ca(run, ca_dir) is False and not (run / s.RUNTIME.BROWSER_CA).exists()
+    else:  # a directory that cannot be written: False, nothing left behind
+        (ca_dir / "ca.pem").write_bytes(certificate)
+        assert s.RUNTIME.share_browser_ca(tmp_path / "missing", ca_dir) is False
 
 
 def test_port_open(scenario):
@@ -12867,6 +13478,230 @@ def test_llm_body(scenario):
         assert new == head and b"".join(raw for raw, _ in parts) == body
 
 
+# --- the LLM traffic log (runtime: the record; launcher: the options) -------------------------------------------------
+
+def test_llm_usage_merge(scenario):
+    if scenario == "happy":
+        usage = rt.llm_usage_merge({"input_tokens": 5}, {"input_tokens": 9, "output_tokens": 2,
+                                                         "output_tokens_details": {"reasoning_tokens": 1}})
+        assert usage == {"input_tokens": 9, "output_tokens": 2, "reasoning_tokens": 1}
+    elif scenario == "sad":
+        assert rt.llm_usage_merge({}, None) == {} and rt.llm_usage_merge({}, {"input_tokens": -1, "x": True}) == {}
+    else:  # streams repeat counters: the largest wins
+        assert rt.llm_usage_merge({"output_tokens": 50}, {"output_tokens": 3}) == {"output_tokens": 50}
+
+
+def test_llm_snapshot(scenario):
+    if scenario == "happy":
+        document = {"model": "m", "temperature": 0.1, "extra_params": {"k": 1}, "messages": [1], "tools": [1, 2]}
+        snapshot = rt.llm_snapshot(document)
+        document["extra_params"]["k"] = 2  # changed in place later: the snapshot keeps the agent's value
+        assert snapshot == {"fields": {"model": "m", "temperature": 0.1, "extra_params": {"k": 1}}, "tools": 2}
+    elif scenario == "sad":
+        assert rt.llm_snapshot({"tools": "none"}) == {"fields": {}, "tools": None}
+    else:
+        assert rt.llm_snapshot({"seed": {1, 2}})["fields"]["seed"] in ("{1, 2}", "{2, 1}")  # no JSON: as text
+
+
+def test_llm_changes(scenario):
+    if scenario == "happy":
+        before = rt.llm_snapshot({"temperature": 0.1, "tools": [1]})
+        changes = rt.llm_changes(before, {"temperature": 0.7, "top_k": 20, "tool_choice": "none", "tools": [1]},
+                                 {"note": {"text": "stop", "appended": True, "message": 4}})
+        assert {"field": "temperature", "from": 0.1, "to": 0.7, "why": "parameter"} in changes
+        assert {"field": "top_k", "to": 20, "why": "parameter"} in changes
+        assert {"field": "tool_choice", "to": "none", "why": "loop guard"} in changes
+        assert {"field": "messages", "why": "loop guard", "note": "stop", "where": "a new message", "message": 4} \
+            in changes
+    elif scenario == "sad":
+        assert rt.llm_changes(None, {"a": 1}, {}) == [] and rt.llm_changes(rt.llm_snapshot({}), None, {}) == []
+    else:  # nothing changed, and tools taken away
+        assert rt.llm_changes(rt.llm_snapshot({"a": 1}), {"a": 1}, {"params": {}}) == []
+        assert rt.llm_changes(rt.llm_snapshot({"tools": [1, 2]}), {}, {})[0]["from"] == "2 tools"
+
+
+def test_llm_items(scenario):
+    if scenario == "happy":
+        assert rt.llm_items({"system": "s", "messages": [1, 2]}, "messages") == ("s", [1, 2])
+        assert rt.llm_items({"instructions": "i", "input": "hi"}, "responses") == ("i", ["hi"])
+    elif scenario == "sad":
+        assert rt.llm_items(None, "chat") == (None, []) and rt.llm_items({"messages": "x"}, "chat") == (None, [])
+    else:
+        assert rt.llm_items({"prompt": "p"}, "completions") == (None, ["p"])
+        assert rt.llm_items({"prompt": ["a", "b"]}, "completions") == (None, ["a", "b"])
+
+
+def test_llm_digest(scenario):
+    if scenario == "happy":
+        assert rt.llm_digest({"a": 1, "b": 2}) == rt.llm_digest({"b": 2, "a": 1}) and len(rt.llm_digest("x")) == 12
+    elif scenario == "sad":
+        assert rt.llm_digest({"a": 1}) != rt.llm_digest({"a": 2})
+    else:
+        assert rt.llm_digest({1, 2}) and rt.llm_digest("") != rt.llm_digest(None)
+
+
+def test_llm_digests(scenario):
+    messages = [{"role": "user", "content": "hi"}, {"role": "tool", "tool_call_id": "c", "content": "out"}]
+    if scenario == "happy":
+        assert rt.llm_digests({"messages": messages}, "chat") == [rt.llm_digest("")] + [rt.llm_digest(m) for m in
+                                                                                         messages]
+    elif scenario == "sad":
+        assert rt.llm_digests({}, "chat") == [rt.llm_digest("")]
+    else:  # the loop guard's note taken out for the digest, put back afterwards; an appended message left out
+        noted = [dict(m) for m in messages]
+        noted[1]["content"] = "out\n\n[note]"
+        digests = rt.llm_digests({"messages": noted}, "chat", {"text": "[note]", "holder": (noted[1], "content")})
+        assert digests[2] == rt.llm_digest(messages[1]) and noted[1]["content"] == "out\n\n[note]"
+        added = rt.llm_digests({"messages": messages + [{"role": "user", "content": "n"}]}, "chat",
+                               {"text": "n", "appended": True})
+        assert len(added) == 3
+
+
+def test_llm_note_message(scenario):
+    block = {"type": "tool_result", "content": "x"}
+    document = {"messages": [{"role": "user", "content": "a"}, {"role": "user", "content": [block]}]}
+    if scenario == "happy":
+        assert rt.llm_note_message(document, "messages", (block, "content")) == 1
+        assert rt.llm_note_message(document, "messages", (document["messages"][0], "content")) == 0
+    elif scenario == "sad":
+        assert rt.llm_note_message(document, "messages", None) is None
+    else:
+        assert rt.llm_note_message(document, "messages", ({"other": 1}, "content")) is None
+
+
+def test_llm_cut_strings(scenario):
+    if scenario == "happy":
+        cut = rt.llm_cut_strings({"a": ["x" * 10, 5], "b": "y"}, 4)
+        assert cut["a"][0].startswith("xxxx…[sandbox-ai: 6 characters cut]") and cut["a"][1] == 5 and cut["b"] == "y"
+    elif scenario == "sad":
+        assert rt.llm_cut_strings(None, 4) is None and rt.llm_cut_strings(3.5, 1) == 3.5
+    else:
+        deep = current = []
+        for _ in range(80):
+            current.append([])
+            current = current[0]
+        assert "nested too deep" in json.dumps(rt.llm_cut_strings(deep, 4))
+
+
+def test_llm_traffic_line(scenario):
+    if scenario == "happy":
+        line, cut = rt.llm_traffic_line({"version": 1, "n": 1}, 1000)
+        assert (json.loads(line), cut) == ({"version": 1, "n": 1}, False)
+    elif scenario == "sad":
+        line, cut = rt.llm_traffic_line({"version": 1, "request": {"messages": ["m" * 3000] * 40}}, 2000)
+        assert cut and len(line) <= 2000 and json.loads(line)["truncated"]
+    else:  # the answer cut: said, also when the record fits
+        line, cut = rt.llm_traffic_line({"version": 1, "truncated": ["answer"]}, 1000)
+        assert cut and json.loads(line)["truncated"] == ["answer"]
+
+
+def test_llm_request_document(scenario):
+    if scenario == "happy":
+        packed = gzip.compress(b'{"model": "m"}')
+        assert rt.llm_request_document(packed, len(packed), "gzip") == ({"model": "m"}, None)
+    elif scenario == "sad":
+        assert rt.llm_request_document(b"{", 1, None) == (None, "not valid JSON")
+        assert rt.llm_request_document(b"xx", 2, "zstd") == (None, "compressed (zstd)")
+    else:
+        assert rt.llm_request_document(b"{}", 99, None)[0] is None  # only its start was kept
+
+
+def test_start_traffic_log(scenario, tmp_path):
+    if scenario == "happy":
+        fd = rt.start_traffic_log({"traffic": "llm-traffic-20261113-100000-r.jsonl"}, tmp_path)
+        os.write(fd, b"{}\n")
+        os.close(fd)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (tmp_path / "llm-traffic-20261113-100000-r.jsonl").exists():
+            time.sleep(0.02)
+        assert (tmp_path / "llm-traffic-20261113-100000-r.jsonl").exists()
+    elif scenario == "sad":
+        assert rt.start_traffic_log({"traffic": "../../etc/x.jsonl"}, tmp_path) is None
+        assert rt.start_traffic_log(None, tmp_path) is None
+    else:  # no log directory: no log
+        assert rt.start_traffic_log({"traffic": "llm-traffic-1-r.jsonl"}, tmp_path / "missing") is None
+
+
+def test_check_traffic_limit(scenario):
+    if scenario == "happy":
+        assert s.check_traffic_limit(4, "x") == 4 and s.check_traffic_limit(64, "x") == 64
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="x: a number of MiB from 1 to 64"):
+            s.check_traffic_limit(0, "x")
+        with pytest.raises(ValueError):
+            s.check_traffic_limit("4", "x")
+    else:
+        with pytest.raises(ValueError):
+            s.check_traffic_limit(True, "x")
+
+
+def test_llm_traffic_mode(scenario):
+    if scenario == "happy":
+        assert s.llm_traffic_mode(s.parse_args(["opencode"])) == "llm"
+        assert s.llm_traffic_mode(s.parse_args(["opencode", "--llm-traffic", "all"])) == "all"
+    elif scenario == "sad":  # no proxy: nothing sees the requests
+        assert s.llm_traffic_mode(s.parse_args(["opencode", "--offline", "--llm-traffic", "all"])) == "off"
+    else:  # the defaults file's, under the option
+        a = s.parse_args(["opencode", "--llm-traffic", "off"])
+        a.llm_traffic_default = "all"
+        assert s.llm_traffic_mode(a) == "off"
+        a.llm_traffic = None
+        assert s.llm_traffic_mode(a) == "all"
+
+
+def test_llm_traffic_config(scenario):
+    if scenario == "happy":
+        a = s.parse_args(["opencode", "--llm", "box", "--llm-traffic-limit", "2"])
+        a.run_id = "r1"
+        assert s.llm_traffic_config(a) == {"mode": "llm", "record_limit": 2 << 20, "run": "r1", "session": None}
+    elif scenario == "sad":
+        assert s.llm_traffic_config(s.parse_args(["opencode"])) is None  # llm without --llm: nothing
+        assert s.llm_traffic_config(s.parse_args(["opencode", "--llm", "box", "--llm-traffic", "off"])) is None
+    else:
+        a = s.parse_args(["claude", "--llm-traffic", "all"])
+        a.llm_traffic_limit_default = 3
+        assert s.llm_traffic_config(a)["record_limit"] == 3 << 20
+
+
+def test_llm_traffic_plan(scenario):
+    if scenario == "happy":
+        plan = s.llm_traffic_plan(s.parse_args(["claude", "--llm-traffic", "all"]))
+        assert plan == {"mode": "all", "origin": "--llm-traffic", "recorded": True, "record_limit_mib": 4,
+                        "file": "llm-traffic-TIME-RUN.jsonl"}
+    elif scenario == "sad":
+        assert s.llm_traffic_plan(s.parse_args(["claude", "--no-proxy"]))["recorded"] is False
+    else:
+        a = s.parse_args(["claude"])
+        a.llm_traffic_default = "all"
+        assert s.llm_traffic_plan(a)["origin"].endswith("defaults.json")
+
+
+def test_rotate_traffic_logs(scenario, tmp_path):
+    old = time.time() - 7200
+    for name in ("llm-traffic-20261101-100000-a.jsonl", "llm-traffic-20261102-100000-b.jsonl"):
+        (tmp_path / name).write_bytes(b"x" * 100)
+        os.utime(tmp_path / name, (old, old))
+    if scenario == "happy":
+        assert s.rotate_traffic_logs(tmp_path, limit=150) == ["llm-traffic-20261101-100000-a.jsonl"]
+    elif scenario == "sad":
+        assert s.rotate_traffic_logs(tmp_path / "missing") == []
+    else:  # one written within the hour stays
+        os.utime(tmp_path / "llm-traffic-20261101-100000-a.jsonl", None)
+        assert s.rotate_traffic_logs(tmp_path, limit=10) == ["llm-traffic-20261102-100000-b.jsonl"]
+
+
+def test_llm_traffic_notes(scenario):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--llm-traffic", "all", "--log-dir", "/tmp/logs"])
+        a.run_id = "claude-1"
+        assert "cloud provider" in s.llm_traffic_notes(a)[0] and "llm-traffic-*-claude-1.jsonl" in \
+            s.llm_traffic_notes(a)[0]
+    elif scenario == "sad":
+        assert s.llm_traffic_notes(s.parse_args(["claude"])) == []
+    else:  # only the --llm server's requests: nothing to say
+        assert s.llm_traffic_notes(s.parse_args(["opencode", "--llm", "box"])) == []
+
+
 def test_repeated_block(scenario):
     if scenario == "happy":
         assert rt.repeated_block("x" + "a loop of words, again. " * 300, 10) == len("a loop of words, again. ")
@@ -12885,3 +13720,586 @@ def test_whole_chunks(scenario):
         assert list(rt.whole_chunks(iter([]))) == []
     else:  # a size line that only starts like the last chunk's
         assert list(rt.whole_chunks(iter([(b"0a\r\n", b"")]))) == []
+
+
+# --- Hermes (sandbox/hermes.py): its module, its managed configuration, the experimental gate -------------------
+
+
+def test_load_hermes_module(scenario):
+    module = s.load_hermes_module()
+    if scenario == "happy":
+        assert module is s.load_hermes_module() and module.parse(["kanban,web-search"]) == ["kanban", "web-search"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="not a Hermes feature"):
+            module.parse(["docker"])
+    else:  # gateway:all is every platform, each feature once
+        assert module.parse(["gateway:all", "gateway:telegram", ""]) == [
+            "gateway:telegram", "gateway:discord", "gateway:slack"]
+
+
+def test_hermes_managed(scenario):
+    if scenario == "happy":
+        assert s.hermes_managed(s.parse_args(["hermes"]))
+    elif scenario == "sad":
+        assert not s.hermes_managed(s.parse_args(["claude"]))
+        assert not s.hermes_managed(s.parse_args(["hermes", "--probe"]))
+    else:  # a binary of your own runs no Hermes: nothing managed
+        assert not s.hermes_managed(s.parse_args(["hermes", "--binary", "/bin/true"]))
+
+
+def test_hermes_files(scenario):
+    if scenario == "happy":
+        files = s.hermes_files(s.parse_args(["hermes", "--mcp", "demo", "--hermes-enable", "kanban"]))
+        config = json.loads(files["hermes/config.yaml"])
+        assert config["terminal"] == {"backend": "local"} and config["kanban"] == {"dispatch_in_gateway": True}
+        assert config["mcp_servers"]["demo"]["args"] == s.mcp_bridge_args("demo")
+        assert files["hermes/.env"] == "TERMINAL_ENV=local\n"
+    elif scenario == "sad":  # an old --telemetry on: ignored - no update checks, never telemetry or another terminal
+        config = json.loads(s.hermes_files(s.parse_args(["hermes", "--telemetry", "on"]))["hermes/config.yaml"])
+        assert config["updates"] == {"check": False} and config["terminal"] == {"backend": "local"}
+        assert config["telemetry"] == {"shared_metrics": {"enabled": False, "send": False}}
+    else:  # a helper's long tasks get the long timeout
+        a = s.parse_args(["hermes", "--mcp", "helper-claude-x"])
+        config = json.loads(s.hermes_files(a)["hermes/config.yaml"])
+        assert config["mcp_servers"]["helper-claude-x"]["timeout"] == s.LONG_TOOL_TIMEOUT
+
+
+def test_check_experimental_hermes(scenario, monkeypatch, capsys):
+    """Never an opt-in: choosing Hermes starts it; the start says in one line that it is not live-tested yet."""
+    if scenario == "happy":
+        s.check_experimental_hermes(s.parse_args(["hermes"]))
+        err = capsys.readouterr().err
+        assert "Hermes: not live-tested yet" in err and err.count("\n") == 1
+        s.check_experimental_hermes(s.parse_args(["claude"]))  # nothing to say
+        assert capsys.readouterr().err == ""
+    elif scenario == "sad":  # as a helper too: a note, never a refusal
+        s.check_experimental_hermes(s.parse_args(["claude", "--helper", "hermes"]))
+        assert "not live-tested yet" in capsys.readouterr().err
+    else:  # a dry run says the same
+        s.check_experimental_hermes(s.parse_args(["hermes", "--dry-run"]))
+        assert "not live-tested yet" in capsys.readouterr().err
+
+
+# --- DeepSeek Harness and Qwen Code (sandbox/dsh.py, sandbox/qwen.py): modules, read-only configuration, the gate --
+
+
+def test_load_dsh_module(scenario):
+    module = s.load_dsh_module()
+    if scenario == "happy":
+        assert module is s.load_dsh_module() and module.VERSION == "0.2.1-rc.5"
+        assert module.command_args([]) == ["web", "--patch", module.PATCH, "--no-open", "--host", "127.0.0.1",
+                                           "--port", "3080"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="not in a sandbox"):
+            module.check(argparse.Namespace(agent="dsh", agent_args=["desktop"], allow_host=[], no_inspect=[]))
+    else:  # the launcher's own flags take no patch; --profile NAME gets it after the name
+        assert module.command_args(["--version"]) == ["--version"]
+        assert module.command_args(["--profile", "sdk"]) == ["--profile", "sdk", "--patch", module.PATCH]
+
+
+def test_load_qwen_module(scenario):
+    module = s.load_qwen_module()
+    if scenario == "happy":
+        assert module is s.load_qwen_module() and module.parse(["updates,extensions"]) == ["updates", "extensions"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="not a Qwen Code feature"):
+            module.parse(["sandbox"])
+    else:  # each feature once, case and blanks ignored
+        assert module.parse([" UPDATES ", "updates", ",,"]) == ["updates"]
+
+
+def test_load_goose_module(scenario):
+    module = s.load_goose_module()
+    if scenario == "happy":
+        assert module is s.load_goose_module() and module.VERSION == "1.57.0"
+        assert module.parse(["scheduler,model-catalog"]) == ["scheduler", "model-catalog"]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="not a Goose feature"):
+            module.parse(["telemetry"])
+        with pytest.raises(ValueError, match="needs --goose-enable updates"):
+            module.check(argparse.Namespace(agent="goose", agent_args=["update"], allow_host=[], no_inspect=[]))
+    else:  # gateway:all is every gateway; each feature once, case and blanks ignored
+        assert module.parse(["gateway:all", " SCHEDULER ", "scheduler", ",,"]) == ["gateway:telegram", "scheduler"]
+
+
+def test_agent_module(scenario):
+    if scenario == "happy":
+        assert s.agent_module("dsh") is s.load_dsh_module() and s.agent_module("qwen") is s.load_qwen_module()
+        assert s.agent_module("goose") is s.load_goose_module()
+    elif scenario == "sad":
+        assert s.agent_module("claude") is None and s.agent_module("nope") is None
+    else:  # Hermes keeps its own loader (hermes.py has more to it)
+        assert s.agent_module("hermes") is None
+
+
+def test_agent_managed(scenario):
+    if scenario == "happy":
+        assert s.agent_managed(s.parse_args(["qwen"])) and s.agent_managed(s.parse_args(["dsh"]))
+        assert s.agent_managed(s.parse_args(["goose"]))
+    elif scenario == "sad":
+        assert not s.agent_managed(s.parse_args(["claude"]))
+        assert not s.agent_managed(s.parse_args(["qwen", "--probe"]))
+    else:  # a binary of your own runs neither: nothing managed
+        assert not s.agent_managed(s.parse_args(["dsh", "--binary", "/bin/true"]))
+
+
+def test_agent_files(scenario):
+    if scenario == "happy":
+        files = s.agent_files(s.parse_args(["qwen", "--qwen-enable", "updates", "--effort", "low"]))
+        settings = json.loads(files["qwen/settings.json"])
+        assert settings["general"] == {"enableAutoUpdate": True} and settings["model"] == {"reasoningEffort": "low"}
+        assert settings["privacy"] == {"usageStatisticsEnabled": False} and settings["$version"] == 4
+        rows = json.loads(s.agent_files(s.parse_args(["dsh", "--mcp", "demo"]))["dsh/sandbox-ai.patch.yml"])
+        assert rows[0]["insert"][0]["config"]["args"] == s.mcp_bridge_args("demo")
+        config = json.loads(s.agent_files(s.parse_args(["goose", "--mcp", "demo"]))["goose/config.yaml"])
+        assert config["extensions"]["demo"]["args"] == s.mcp_bridge_args("demo")
+        assert config["GOOSE_MODE"] == "smart_approve" and config["GOOSE_TELEMETRY_ENABLED"] is False
+    elif scenario == "sad":  # an old --telemetry on: ignored - no update check, never its telemetry
+        settings = json.loads(s.agent_files(s.parse_args(["qwen", "--telemetry", "on"]))["qwen/settings.json"])
+        assert settings["general"] == {"enableAutoUpdate": False} and settings["telemetry"]["enabled"] is False
+        rows = json.loads(s.agent_files(s.parse_args(["dsh", "--telemetry", "on"]))["dsh/sandbox-ai.patch.yml"])
+        assert rows == s.load_dsh_module().TELEMETRY_PINNED
+        config = json.loads(s.agent_files(s.parse_args(["goose", "--telemetry", "on"]))["goose/config.yaml"])
+        assert config["GOOSE_TELEMETRY_ENABLED"] is False
+    else:  # a helper's long tasks get the long timeout (milliseconds in DSH)
+        rows = json.loads(s.agent_files(s.parse_args(["dsh", "--mcp", "helper-claude-x"]))["dsh/sandbox-ai.patch.yml"])
+        assert rows[0]["insert"][0]["config"]["toolCallTimeoutMs"] == s.LONG_TOOL_TIMEOUT * 1000
+        config = json.loads(s.agent_files(s.parse_args(["goose", "--mcp", "helper-claude-x"]))["goose/config.yaml"])
+        assert config["extensions"]["helper-claude-x"]["timeout"] == s.LONG_TOOL_TIMEOUT
+
+
+def test_check_experimental_agents(scenario, monkeypatch, capsys):
+    """Never an opt-in: choosing DSH, Qwen Code or Goose starts it; the start says it is not live-tested yet."""
+    if scenario == "happy":
+        s.check_experimental_agents(s.parse_args(["qwen"]))
+        assert "Qwen Code: not live-tested yet" in capsys.readouterr().err
+        s.check_experimental_agents(s.parse_args(["goose"]))
+        assert "Goose: not live-tested yet" in capsys.readouterr().err
+        s.check_experimental_agents(s.parse_args(["claude"]))  # nothing to say
+        assert capsys.readouterr().err == ""
+    elif scenario == "sad":  # as the agent or a helper: a note each, never a refusal
+        s.check_experimental_agents(s.parse_args(["dsh"]))
+        assert "DeepSeek Harness: not live-tested yet" in capsys.readouterr().err
+        s.check_experimental_agents(s.parse_args(["claude", "--helper", "dsh", "--helper", "goose"]))
+        assert capsys.readouterr().err.count("not live-tested yet") == 2
+    else:  # a dry run says the same
+        s.check_experimental_agents(s.parse_args(["qwen", "--dry-run"]))
+        assert "not live-tested yet" in capsys.readouterr().err
+
+
+def test_own_network(scenario):
+    if scenario == "happy":
+        assert s.own_network("10.1.2.0/24") and s.own_network("192.168.1.5") and s.own_network("fd00::/8")
+    elif scenario == "sad":
+        assert not s.own_network("0.0.0.0/0") and not s.own_network("8.8.8.8") and not s.own_network("::/0")
+    else:  # not an address at all, or a network only partly private
+        assert not s.own_network("example.org") and not s.own_network("10.0.0.0/7")
+
+
+def test_pinned_telemetry_environment(scenario):
+    """The opt-out variables of an agent whose telemetry is never switchable, for every start of its image (--binary
+    too; tests/test_feature_review2.py has the start)."""
+    if scenario == "happy":
+        assert s.pinned_telemetry_environment("goose")["GOOSE_TELEMETRY_OFF"] == "1"
+        assert s.pinned_telemetry_environment("qwen")["QWEN_USAGE_STATISTICS_ENABLED"] == "false"
+    elif scenario == "sad":  # another agent's telemetry is switchable (--telemetry): nothing pinned here
+        assert s.pinned_telemetry_environment("claude") == {} and s.pinned_telemetry_environment(None) == {}
+    else:  # a copy: the module's own stays as it is
+        found = s.pinned_telemetry_environment("dsh")
+        found["DSH_TELEMETRY_DISABLED"] = ""
+        assert s.pinned_telemetry_environment("dsh")["DSH_TELEMETRY_DISABLED"] == "1"
+        assert set(s.pinned_telemetry_environment("hermes")) >= {"OTEL_SDK_DISABLED", "DO_NOT_TRACK"}
+
+
+def test_check_telemetry_unproxied(scenario):
+    def start(agent, **more):
+        return argparse.Namespace(**{"agent": agent, "no_proxy": True, "offline": False, "allow": [],
+                                     "allow_tcp": [], **more})
+    if scenario == "happy":
+        s.check_telemetry_unproxied(start("goose", allow=["192.168.0.0/16"], allow_tcp=["10.0.0.2:11434"]))
+        s.check_telemetry_unproxied(start("goose", no_proxy=False, allow=["0.0.0.0/0"]))  # the proxy refuses them
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match=r"^Hermes's telemetry is always off: --allow 0\.0\.0\.0/0 .*drop --no-proxy"):
+            s.check_telemetry_unproxied(start("hermes", allow=["0.0.0.0/0"]))
+        with pytest.raises(ValueError, match=r"--allow-tcp \[2001:db8::1\]:443"):
+            s.check_telemetry_unproxied(start("qwen", allow_tcp=["[2001:db8::1]:443"]))
+    else:  # another agent's telemetry is switchable; an offline start opens nothing
+        s.check_telemetry_unproxied(start("codex", allow=["0.0.0.0/0"]))
+        s.check_telemetry_unproxied(start("dsh", offline=True, allow=["0.0.0.0/0"]))
+
+
+# -- 0.1.95, performance round 1 --
+
+def test_anchored_sub(scenario):
+    pattern = re.compile(r"\bkey=\w+")
+    text = "a key=1 b xkey=2 key=3"
+    if scenario == "happy":
+        starts = [m.start() for m in re.finditer("key", text)]
+        assert rt.anchored_sub(pattern, "[k]", text, starts) == pattern.sub("[k]", text) == "a [k] b xkey=2 [k]"
+    elif scenario == "sad":
+        assert rt.anchored_sub(pattern, "[k]", text, []) == text  # no start: nothing replaced
+        assert rt.anchored_sub(pattern, "[k]", text, [0, 1, 50]) == text  # starts where nothing begins
+    else:  # repeats and starts inside a match already replaced are passed over
+        assert rt.anchored_sub(pattern, "[k]", text, [2, 2, 3, 4, 17, 17]) == "a [k] b xkey=2 [k]"
+
+
+def test_found_at(scenario):
+    if scenario == "happy":
+        assert list(rt.found_at("ab-ab", "ab", "-")) == [0, 2, 3]
+    elif scenario == "sad":
+        assert list(rt.found_at("xyz", "ab")) == []
+    else:  # overlapping and shared places
+        assert list(rt.found_at("aaa", "aa", "a")) == [0, 0, 1, 1, 2]
+
+
+def test_names_starts(scenario):
+    if scenario == "happy":
+        assert list(rt.names_starts("x token=1 &secret=2")) == [2, 11]
+    elif scenario == "sad":
+        assert list(rt.names_starts("no equals here")) == [] and list(rt.names_starts("= =")) == []
+    else:  # re.I's letters beyond ASCII belong to the run; a digit ends it
+        assert list(rt.names_starts("\u017fecret=1 9ab=2")) == [0, 10]
+
+
+def test_lowered_starts(scenario):
+    starts = rt.lowered_starts("bearer", "token")
+    if scenario == "happy":
+        assert list(starts("A Bearer x TOKEN")) == [2, 11]
+    elif scenario == "sad":
+        assert list(starts("nothing")) == []
+    else:  # a letter str.lower() folds otherwise than re.I: search everything
+        assert starts("ba\u017fic") is None and starts("\u0130 token") is None
+
+
+def test_window_starts(scenario):
+    starts = rt.window_starts("://", 3, 1)
+    if scenario == "happy":
+        assert list(starts("xx abc://")) == [3, 4, 5]
+    elif scenario == "sad":
+        assert list(starts("no scheme")) == []
+    else:  # at the text's start, and two windows that overlap: each place once
+        assert list(starts("a://b://")) == [0, 2, 3, 4]
+
+
+def test_compact_json(scenario):
+    def plain(value):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    if scenario == "happy":
+        value = {"a": [1, {"b": "\u00e9"}], "c": None}
+        assert rt.compact_json(value) == plain(value)
+    elif scenario == "sad":
+        value = {1: "a", "b": object}
+        assert rt.compact_json(value) == plain(value)  # non-string keys: one dumps(); other objects as str()
+        looped = []
+        looped.append(looped)
+        with pytest.raises((ValueError, RecursionError)):
+            rt.compact_json(looped)
+    else:
+        value = [[[[[[{"deep": []}]]]]]]
+        assert rt.compact_json(value, 2) == plain(value) and rt.compact_json({}) == "{}"
+
+
+def test_in_background(scenario):
+    if scenario == "happy":
+        assert s.in_background(lambda x, y: x + y, 2, 3)() == 5
+    elif scenario == "sad":
+        def fails():
+            raise ValueError("no")
+        with pytest.raises(ValueError, match="no"):
+            s.in_background(fails)()
+    else:  # it runs meanwhile, before its result is asked for
+        ran = threading.Event()
+        result = s.in_background(ran.set)
+        assert ran.wait(5) and result() is None
+
+
+def test_in_threads(scenario):
+    if scenario == "happy":
+        assert s.in_threads({"a": lambda: 1, "b": lambda: 2}) == {"a": 1, "b": 2}
+    elif scenario == "sad":
+        found = s.in_threads({"a": lambda: 1 / 0})
+        assert isinstance(found["a"], ZeroDivisionError)
+    else:
+        assert s.in_threads({}) == {}
+
+
+def test_looked_up_together(scenario):
+    asked = []
+
+    def resolve(names):
+        asked.append(list(names))
+        if "gone.example.org" in names:
+            raise ValueError("Podman DNS returned no addresses for gone.example.org")
+        return {name: ["203.0.113.9"] for name in names}
+    if scenario == "happy":  # two groups: asked once, each group answered from it
+        lookup = s.looked_up_together(resolve, ["a.example.org"], ["b.example.org", "a.example.org"])
+        assert lookup(["b.example.org"]) == {"b.example.org": ["203.0.113.9"]} and lookup(["a.example.org"])
+        assert asked == [["a.example.org", "b.example.org"]]
+    elif scenario == "sad":  # the one lookup fails: each group goes to RESOLVE itself, as before
+        assert s.looked_up_together(resolve, ["a.example.org"], ["gone.example.org"]) is resolve
+        assert asked == [["a.example.org", "gone.example.org"]]
+    else:  # one group, or none: nothing asked ahead - unless AHEAD (while the MCP servers come up)
+        assert s.looked_up_together(resolve, ["a.example.org"], []) is resolve
+        assert s.looked_up_together(resolve) is resolve and asked == []
+        assert s.looked_up_together(resolve, ["a.example.org"], [], ahead=True)(["a.example.org"])
+        assert asked == [["a.example.org"]]
+
+
+def test_looked_up_ahead(scenario):
+    def resolve(names):
+        return {name: ["203.0.113.9"] for name in names}
+    if scenario == "happy":
+        lookup = s.in_background(lambda: s.looked_up_together(resolve, ["a.example.org"], ahead=True))
+        assert s.looked_up_ahead(lookup, resolve)(["a.example.org"]) == {"a.example.org": ["203.0.113.9"]}
+    elif scenario == "sad":  # the look-ahead itself broke: the names are asked as before
+        def broken():
+            raise KeyError("result")
+        assert s.looked_up_ahead(s.in_background(broken), resolve) is resolve
+    else:
+        assert s.looked_up_ahead(None, resolve) is resolve
+
+
+def test_start_image_checks(scenario, tmp_path, monkeypatch):
+    monkeypatch.delenv("SANDBOX_AI_MCP_NO_IMAGE_CHECK", raising=False)
+    monkeypatch.setattr(s.shutil, "which", lambda name, *rest, **options: "/usr/bin/" + name)
+    asked = []
+
+    def run(command, **kwargs):
+        asked.append(command[-1])
+        return subprocess.CompletedProcess(command, 0 if "codex" in command[-1] else 1)
+    monkeypatch.setattr(s.subprocess, "run", run)
+    if scenario == "happy":  # several images: asked meanwhile, the problems in their order
+        problems = s.start_image_checks(s.parse_args(["qwen", "--workspace", str(tmp_path), "--helper", "codex"]))
+        assert [p.split(" (")[0] for p in problems()] == ["The image of qwen"]
+        assert sorted(i for i in asked if "{{" not in i) == ["localhost/codex-sandbox:latest", "localhost/qwen-sandbox:latest"]
+    elif scenario == "sad":  # one image: asked at once, where it is asked for
+        check = s.start_image_checks(s.parse_args(["claude", "--workspace", str(tmp_path)]))
+        assert asked == ["localhost/claude-sandbox:latest"] and len(check()) == 1
+    else:  # Bubblewrap: nothing to ask
+        assert s.start_image_checks(s.parse_args(["claude", "--backend", "bwrap", "--workspace", str(tmp_path)]))() \
+            == [] and asked == []
+
+
+def test_start_mcp_servers(scenario):
+    order = []
+
+    class Fake:
+        def begin_running(self, name, a, vpn=None):
+            order.append(("begin", name, vpn))
+            if name == "bad-begin":
+                raise ValueError("begin")
+            return lambda: order.append(("ready", name))
+    progress = Mock()
+    if scenario == "happy":
+        s.start_mcp_servers(Fake(), None, ["a", "b"], {"b": "home"}, progress)
+        assert order == [("begin", "a", None), ("begin", "b", "home"), ("ready", "a"), ("ready", "b")]
+        assert "behind the VPN home" in progress.step.call_args_list[1].args[0]
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="begin"):
+            s.start_mcp_servers(Fake(), None, ["a", "bad-begin", "c"], {}, progress)
+        assert order == [("begin", "a", None), ("begin", "bad-begin", None), ("ready", "a")]
+    else:  # one server: no step for waiting
+        s.start_mcp_servers(Fake(), None, ["a"], {}, progress)
+        assert len(progress.step.call_args_list) == 1 and order[-1] == ("ready", "a")
+
+
+def test_build_missing_image(scenario, tmp_path, monkeypatch):
+    """A start whose own image (sandbox-ai build ...) is missing builds it first (a build as root went into root's
+    Podman store, the user's start did not see it and only said so); pulled images, dry runs, a remote Podman and
+    SANDBOX_AI_NO_AUTO_BUILD=1 build nothing, and a failed build leaves the problem as it was."""
+    monkeypatch.delenv("SANDBOX_AI_MCP_NO_IMAGE_CHECK", raising=False)
+    monkeypatch.delenv("SANDBOX_AI_NO_AUTO_BUILD", raising=False)
+    monkeypatch.setattr(s.shutil, "which", lambda name, *rest, **options: "/usr/bin/" + name)
+    if scenario != "happy":  # one pass over every case is enough; edge: an image that is pulled is never built
+        a = s.parse_args(["claude", "--workspace", str(tmp_path), "--image", "example.org/mine:1"])
+        assert s.build_missing_image(a, "claude", a.image) is False
+        return
+    built, ran = set(), []
+
+    def run(command, **kwargs):
+        ran.append(command)
+        if command[2:3] == ["exists"]:
+            return subprocess.CompletedProcess(command, 0 if command[-1] in built else 1)
+        if "build" in command and command[0] != "podman":
+            built.add(f"localhost/{command[-1]}-sandbox:latest")
+            return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(command, 1, "", "")
+    monkeypatch.setattr(s.subprocess, "run", run)
+    assert s.start_image_problems(s.parse_args(["qwen", "--workspace", str(tmp_path)])) == []
+    assert any(c[-2:] == ["build", "qwen"] and c[1] == "-I" for c in ran)
+    # A dry run (the app's check before a start) builds nothing and refuses nothing the start builds itself.
+    ran.clear()
+    built.clear()
+    assert s.start_image_problems(s.parse_args(["qwen", "--workspace", str(tmp_path), "--dry-run"])) == []
+    assert not any("build" in c for c in ran)
+    # Not built: a remote Podman, the switch, a pulled image.
+    for argv in (["codex", "--workspace", str(tmp_path), "--podman-url", "unix:///run/x.sock"],
+                 ["claude", "--workspace", str(tmp_path), "--image", "example.org/mine:1"]):
+        ran.clear()
+        built.clear()
+        assert len(s.start_image_problems(s.parse_args(argv))) == 1
+        assert not any("build" in c for c in ran)
+    monkeypatch.setenv("SANDBOX_AI_NO_AUTO_BUILD", "1")
+    ran.clear()
+    assert len(s.start_image_problems(s.parse_args(["goose", "--workspace", str(tmp_path)]))) == 1
+    assert not any("build" in c for c in ran)
+    # A failed build: the problem stays.
+    monkeypatch.delenv("SANDBOX_AI_NO_AUTO_BUILD")
+    monkeypatch.setattr(s.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", ""))
+    assert s.start_image_problems(s.parse_args(["hermes", "--workspace", str(tmp_path)]))[0].endswith(
+        ": sandbox-ai build hermes")
+
+
+def test_podman_store_note(scenario, monkeypatch, tmp_path):
+    a = s.parse_args(["qwen", "--workspace", str(tmp_path)])
+    if scenario == "happy":
+        monkeypatch.setattr(s.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, "/home/me/.local/share/containers/storage\n", ""))
+        assert s.podman_store_note(a).startswith(" (Podman's image store: /home/me/.local/share/containers/storage, "
+                                                 "user ")
+    elif scenario == "sad":
+        monkeypatch.setattr(s.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 125, "", "Error"))
+        assert s.podman_store_note(a) == ""
+    else:
+        def fail(command, **kwargs):
+            raise OSError("no podman")
+        monkeypatch.setattr(s.subprocess, "run", fail)
+        assert s.podman_store_note(a) == ""
+
+
+# --- telemetry is always off (0.1.95): the retired on, Codex's overrides ------------------------------------------
+
+def test_note_telemetry_retired(scenario, monkeypatch, capsys):
+    monkeypatch.setattr(s, "_telemetry_retired_noted", False)
+    if scenario == "happy":
+        s.note_telemetry_retired()
+        assert capsys.readouterr().err == s.TELEMETRY_RETIRED_NOTE + "\n"
+    elif scenario == "sad":  # said once per process
+        s.note_telemetry_retired()
+        s.note_telemetry_retired()
+        assert capsys.readouterr().err.count("'on' is ignored") == 1
+    else:  # through the option and the defaults file alike
+        assert s.parse_args(["claude", "--telemetry", "on"]).telemetry is None
+        assert s.parse_args(["claude", "--telemetry", "strict"]).telemetry == "strict"
+        assert "'on' is ignored" in capsys.readouterr().err
+
+
+def test_codex_telemetry_args(scenario):
+    if scenario == "happy":
+        args = s.codex_telemetry_args("off")
+        assert args[:2] == ["-c", "check_for_update_on_startup=false"] and "analytics.enabled=false" in args
+    elif scenario == "sad":  # the retired on is off
+        assert s.codex_telemetry_args("on") == s.codex_telemetry_args("off")
+    else:
+        assert s.codex_telemetry_args("strict")[-2:] == ["-c", "features.plugins=false"]
+
+
+def test_check_codex_telemetry_args(scenario):
+    if scenario == "happy":
+        s.check_codex_telemetry_args(s.parse_args(["codex", "--", "-c", "model=o4", "exec", "x"]))
+        s.check_codex_telemetry_args(s.parse_args(["claude", "--", "-c", "analytics.enabled=true"]))  # not Codex
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="Codex's telemetry is always off"):
+            s.check_codex_telemetry_args(s.parse_args(["codex", "--", "-c", "analytics.enabled=true"]))
+        with pytest.raises(ValueError, match="Codex's telemetry is always off"):
+            s.check_codex_telemetry_args(s.parse_args(["codex", "--", "--config=otel.exporter=otlp-http"]))
+    else:  # after "--" it is the prompt's, not an option
+        s.check_codex_telemetry_args(s.parse_args(["codex", "--", "exec", "--", "-c", "analytics.enabled=true"]))
+
+
+def test_codex_config_replaced(scenario):
+    if scenario == "happy":
+        assert s.codex_config_replaced("[analytics]\nenabled = true\n", "analytics", "enabled", "false") == \
+            "[analytics]\nenabled = false\n"
+    elif scenario == "sad":
+        with pytest.raises(ValueError):
+            s.codex_config_replaced("analytics = { enabled = true }\n", "analytics", "enabled", "false")
+    else:  # a dotted key at the top, and a top-level key before the first table
+        assert s.codex_config_replaced("analytics.enabled = true\n", "analytics", "enabled", "false") == \
+            "analytics.enabled = false\n"
+        assert s.codex_config_replaced("check_for_update_on_startup = true\n[x]\ncheck_for_update_on_startup = 1\n",
+                                       None, "check_for_update_on_startup", "false").startswith(
+            "check_for_update_on_startup = false\n[x]\ncheck_for_update_on_startup = 1")
+
+
+def test_will_build(scenario, tmp_path, monkeypatch):
+    monkeypatch.delenv("SANDBOX_AI_NO_AUTO_BUILD", raising=False)
+    if scenario == "happy":
+        a = s.parse_args(["dsh", "--workspace", str(tmp_path), "--dry-run"])
+        assert s.will_build(a, "dsh", a.image)
+    elif scenario == "sad":
+        a = s.parse_args(["dsh", "--workspace", str(tmp_path)])
+        assert not s.will_build(a, "dsh", a.image)  # not a dry run: the start builds it (build_missing_image)
+    else:
+        a = s.parse_args(["claude", "--workspace", str(tmp_path), "--dry-run", "--image", "example.org/x:1"])
+        assert not s.will_build(a, "claude", a.image)  # pulled, never built
+
+
+def launcher_log_text(tmp_path):
+    path = tmp_path / "state" / "sandbox-ai" / "launcher.log"
+    return path.read_text() if path.exists() else ""
+
+
+def test_load_launch_log(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    shared = s.load_launch_log()
+    if scenario == "happy":  # one copy per process, the one every module logs through
+        assert shared is sys.modules["sandbox_ai_launchlog"] is s.LOG
+    elif scenario == "sad":  # the proxy's redaction is handed over: a bearer token never reaches the log
+        shared.info("start", "Authorization: Bearer abcdefgh12345678")
+        assert "abcdefgh12345678" not in launcher_log_text(tmp_path)
+    else:  # loaded again: the same copy
+        assert s.load_launch_log() is shared
+
+
+def test_logged_run(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("SANDBOX_AI_DEBUG", "1")
+    if scenario == "happy":
+        assert s.logged_run("image", "a check", [sys.executable, "-c", "pass"], check=False).returncode == 0
+        assert "image: a check:" in launcher_log_text(tmp_path)
+    elif scenario == "sad":
+        with pytest.raises(subprocess.CalledProcessError):
+            s.logged_run("pod", "create the pod", [sys.executable, "-c", "raise SystemExit(4)"], check=True)
+        assert "create the pod" in launcher_log_text(tmp_path) and "exit status 4" in launcher_log_text(tmp_path)
+    else:  # the launcher's subprocess.run as replaced at the time of the call (tests replace it)
+        monkeypatch.setattr(s.subprocess, "run", lambda argv, **kw: SimpleNamespace(returncode=0, stderr=None))
+        assert s.logged_run("image", "faked", ["podman", "image", "exists", "x"]).returncode == 0
+
+
+def test_start_summary(scenario, tmp_path):
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--workspace", str(tmp_path)])
+        a.run_id, a.start_name = "claude-1234abcd", "brave-otter"
+        text = s.start_summary(a)
+        assert "agent claude" in text and "image localhost/claude-sandbox:latest" in text and "run claude-1234abcd" in text
+    elif scenario == "sad":  # a name with control characters is printable
+        a = s.parse_args(["codex", "--workspace", str(tmp_path)])
+        a.run_id, a.start_name = "codex-1", "x\x1b[31m"
+        assert "\x1b" not in s.start_summary(a)
+    else:  # bwrap: no image named; MCP servers and the VPN when there are some
+        a = s.parse_args(["opencode", "--backend", "bwrap", "--workspace", str(tmp_path)])
+        a.run_id, a.start_name, a.mcp, a.vpn = "opencode-1", "n", ["fetch", "fetch"], "home"
+        text = s.start_summary(a)
+        assert "image" not in text and "fetch, fetch" not in text and "MCP servers fetch" in text \
+            and "VPN home" in text
+
+
+def test_current_run_name(scenario, tmp_path):
+    """The start's name as run.json says it now (`sandbox-ai rename` while it ran), else the name it started with."""
+    a = SimpleNamespace(control_dir=str(tmp_path), start_name="brave-otter")
+    if scenario == "happy":  # renamed while it ran
+        (tmp_path / "run.json").write_text(json.dumps({"run": "claude-1", "name": "calm-heron"}))
+        assert s.current_run_name(a) == "calm-heron"
+    elif scenario == "sad":  # no run.json, a damaged one, one nested deeper than json reads: the name it started with
+        assert s.current_run_name(a) == "brave-otter"
+        (tmp_path / "run.json").write_text("{not json")
+        assert s.current_run_name(a) == "brave-otter"
+        (tmp_path / "run.json").write_text("[" * 200_000)
+        assert s.current_run_name(a) == "brave-otter"
+    else:  # a name that is no string or empty, a document that is no object, no control folder at all
+        for document in ({"name": 7}, {"name": ""}, ["name"]):
+            (tmp_path / "run.json").write_text(json.dumps(document))
+            assert s.current_run_name(a) == "brave-otter"
+        assert s.current_run_name(SimpleNamespace(control_dir=None, start_name="x")) == "x"

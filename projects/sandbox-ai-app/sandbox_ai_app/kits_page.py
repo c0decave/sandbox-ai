@@ -39,15 +39,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import applog, backend, tables, theme
-from .files import printable
+from . import applog, backend, tables, theme, widgets
+from .files import printable, printable_text
 from .host_choice import on_host
 from .state import choose_file, choose_folder
 from .i18n import N_, tr
+from .short_notices import short_notice
 from .widgets import (
-    MessageText, Task, ask_first, background, compact_combo, delete_key, fill, flow, inform, multi_select, outcome,
-    plain_label, row_key, safe_tooltip, select_keys, selected_keys, selected_rows, set_enabled, several, show_text, table,
-    warn,
+    FlowLayout, MessageText, Task, ask_first, background, compact_combo, delete_key, fill, flow, multi_select,
+    outcome, plain_label, row_key, safe_tooltip, select_keys, selected_keys, selected_rows, set_enabled, several,
+    show_text, table, warn,
 )
 
 LOCAL = "local"
@@ -124,7 +125,8 @@ class AgentsBox(QWidget):
 
     def __init__(self, agents, checked=None):
         super().__init__()
-        row = QHBoxLayout(self)
+        # A row that wraps: seven agents did not fit beside each other in a form (their names were cut).
+        row = FlowLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         self.boxes = {}
         for agent in agents:
@@ -132,7 +134,6 @@ class AgentsBox(QWidget):
             box.setChecked(checked is None or agent in checked)
             row.addWidget(box)
             self.boxes[agent] = box
-        row.addStretch()
 
     def chosen(self):
         return [agent for agent, box in self.boxes.items() if box.isChecked()]
@@ -352,39 +353,16 @@ def plugin_key(plugin):
 
 
 def with_context_menu(widget, entries):
-    """A context menu on WIDGET (a list) with what ENTRIES() gives: a QPushButton (shown as an entry with its text,
-    enabled state and tooltip; chosen: clicked), a QAction or a QMenu (as they are), None (a separator). The buttons
-    stay the one place of each action and its rules; the menu repeats them where the item is (the menu key and
-    Shift+F10 too)."""
-    widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-
-    def show(position):
-        menu = context_menu(widget, entries())
-        where = widget.viewport() if hasattr(widget, "viewport") else widget
-        menu.exec(where.mapToGlobal(position))
-        menu.deleteLater()
-    widget.customContextMenuRequested.connect(show)
+    """A context menu on WIDGET (a list) with what ENTRIES() gives (widgets.list_menu: the buttons beside it, which
+    stay the one place of each action and its rules; a QAction or QMenu as they are; None a separator)."""
+    from .widgets import list_menu
+    list_menu(widget, entries)
 
 
 def context_menu(parent, entries):
-    """The QMenu of ENTRIES (see with_context_menu)."""
-    menu = QMenu(parent)
-    menu.setToolTipsVisible(True)
-    for entry in entries:
-        if entry is None:
-            if not menu.isEmpty():
-                menu.addSeparator()
-        elif isinstance(entry, QMenu):
-            menu.addMenu(entry)
-        elif isinstance(entry, QAction):
-            menu.addAction(entry)
-        else:
-            action = menu.addAction(entry.text())
-            action.setEnabled(entry.isEnabled())
-            tip = entry.toolTip()  # as the button has it: escaped when it was set (set_enabled, safe_tooltip)
-            action.setToolTip(tip)
-            action.triggered.connect(lambda _=False, b=entry: b.click())
-    return menu
+    """The QMenu of ENTRIES (widgets.context_menu)."""
+    from .widgets import context_menu as menu_of_entries
+    return menu_of_entries(parent, entries)
 
 
 class KitsPage(QWidget):
@@ -713,7 +691,7 @@ class KitsPage(QWidget):
             return  # asked for another host (or before another refresh): never shown under this one
         if error is not None:
             self.clear_rows()  # this host's kits are not known: none of another's stay
-            self.summary.setText(tr("Cannot list the kits: {error}", error=printable(error)))
+            self.summary.setText(tr("Cannot list the kits: {error}", error=printable_text(error)))
             self.update_buttons()
             self.update_market_buttons()  # Enable, Disable, Remove … as the marketplaces read say (review 6)
             return
@@ -837,7 +815,7 @@ class KitsPage(QWidget):
                 for hook in listed:
                     child.addChild(QTreeWidgetItem([hook_text(hook)]))
                 for error in names(hooks.get("errors")):
-                    child.addChild(QTreeWidgetItem(["✘ " + printable(error)]))
+                    child.addChild(QTreeWidgetItem(["✘ " + printable_text(error)]))
                 for note in names(hooks.get("notes")):
                     child.addChild(QTreeWidgetItem(["! " + printable(note)]))
                 top.addChild(child)
@@ -949,7 +927,7 @@ class KitsPage(QWidget):
                                   "update the host (Hosts › Update). Its kits on the tab Kits work as before.",
                                   host=self.hosts.label(host)))
         elif error is not None:
-            self.clear_markets(tr("Cannot list the marketplaces: {error}", error=printable(error)))
+            self.clear_markets(tr("Cannot list the marketplaces: {error}", error=printable_text(error)))
         else:
             self.show_markets(result, host)
         self.update_buttons()
@@ -1006,7 +984,7 @@ class KitsPage(QWidget):
         for error in errors:
             lines.append("✘ " + tr("kit {kit} ({agent}): {error}", kit=printable(error.get("kit") or "?"),
                                    agent=printable(error.get("agent") or "?"),
-                                   error=printable(error.get("error") or "?")))
+                                   error=printable_text(error.get("error") or "?")))
         self.agent_notes.setText("\n".join(lines))
         self.agent_notes.setVisible(bool(lines))
         self.show_market_rows()
@@ -1328,7 +1306,7 @@ class KitsPage(QWidget):
             return
         kit, host = self.chosen_kit(), self.host()
         dialog = MarketplaceDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name, source = dialog.name.text().strip(), dialog.source.text().strip()
         if not self.valid_name(name) or not source:
@@ -1438,7 +1416,7 @@ class KitsPage(QWidget):
                    if kit.get("kind") == "default" else
                    tr("sandbox-ai's own kits are read-only: create a kit of your own (New kit…)."))
         dialog = TargetKitDialog(self, why, self.user_kits())
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return None
         name, new = dialog.chosen()
         if not self.valid_name(name) or (new and name in ("default", "built-in")):
@@ -1452,7 +1430,7 @@ class KitsPage(QWidget):
         """What a change said, in the message area (wrapped, plain text; an error in its colour); the kits are read
         again. For a host no longer chosen: only read again (its rows went when the host changed)."""
         status, out, err = outcome(result, error)
-        text = printable((out + err).strip())[-4000:]
+        text = printable_text((out + err).strip())[-4000:]
         self.update_buttons()
         self.update_market_buttons()
         if host != self.host():
@@ -1485,7 +1463,7 @@ class KitsPage(QWidget):
     def new_kit(self):
         host = self.host()
         dialog = NewKitDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name = dialog.name.text().strip()
         if not self.valid_name(name) or not dialog.agents.chosen():
@@ -1514,7 +1492,7 @@ class KitsPage(QWidget):
             return
         kit_name, create, kit = target
         dialog = NewSkillDialog(self, (sorted(kit_agents(kit)) if kit else []) or list(AGENTS))
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name = dialog.name.text().strip()
         if not self.valid_name(name, backend.SKILL_NAME) or not dialog.agents.chosen():
@@ -1548,7 +1526,7 @@ class KitsPage(QWidget):
         dialog = PluginDialog(self, self.known_plugins())
         if plugin:
             dialog.plugin.setCurrentText(plugin)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         plugin = dialog.plugin.currentText().strip()
         if not plugin:
@@ -1565,7 +1543,7 @@ class KitsPage(QWidget):
             return
         kit_name, create, _ = target
         dialog = MarketplaceDialog(self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name, source = dialog.name.text().strip(), dialog.source.text().strip()
         if not self.valid_name(name) or not source:
@@ -1586,10 +1564,10 @@ class KitsPage(QWidget):
         if kit.get("kind") != "default":
             entries += [("hook", agent, name) for agent, info in agents for name in hook_files(info)]
         if not entries:
-            inform(self, tr("Remove from the kit"), tr("The kit has no skills, plugins or hooks."))
+            short_notice(self, tr("Remove from the kit"), tr("The kit has no skills, plugins or hooks."))
             return
         dialog = RemoveDialog(self, entries)
-        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.chosen() is None:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted or dialog.chosen() is None:
             return
         kind, agent, value = dialog.chosen()
         action = {"skill": "remove-skill", "hook": "remove-hook"}.get(kind, "remove-plugin")
@@ -1606,7 +1584,7 @@ class KitsPage(QWidget):
         name, create, kit = target
         agents = (sorted(kit_agents(kit)) if kit else []) or list(AGENTS)
         dialog = HookDialog(self, agents, remote=True) if host != LOCAL else HookDialog(self, agents)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         path = dialog.file.text().strip()
         if not path or not dialog.agents.chosen():
@@ -1741,7 +1719,7 @@ class KitsPage(QWidget):
         (a failure with the way to the log), the page's message area what it said last; then the kits are read
         again."""
         status, out, err = outcome(result, error)
-        text = printable((out + err).strip())
+        text = printable_text((out + err).strip())
         cancelled = self.task.cancelled or status == backend.CANCELLED
         said = tr("cancelled") if cancelled else tr("exit status {status}", status=status)
         applog.log("INFO" if status == 0 else "WARNING" if cancelled else "ERROR", "plugins",

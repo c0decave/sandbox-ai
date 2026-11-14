@@ -2,6 +2,7 @@
 """sandbox-ai approvals: answer what running sandboxes ask.
 
   sandbox-ai approvals list [--json]             open questions of every running sandbox
+  sandbox-ai approvals show ID                   one question in full: a tool call's arguments as it will send them
   sandbox-ai approvals allow ID [--scope once|run|always] [--no-open]
   sandbox-ai approvals deny ID [--scope run|once]
   sandbox-ai approvals history [RUN]             questions and their answers
@@ -25,7 +26,7 @@ refused, the same request is refused at once for the next 2 minutes (the agent d
 and again), then asked again. On a question answered (or left unanswered) already, allow ID --scope run and deny ID
 change what the run decided, for the rest of it, and ask-again ID forgets it; allow ID --scope always on a request or
 MCP tool call writes an exception rule into the ruleset that held it (yours in place; a preset's or someone else's
-as a copy of your own), on a connection or lookup it keeps the destination in the project (net allow --keep). The name in a connection question is the
+as a copy of your own), on a connection it keeps the address in the project (net allow --keep), on a lookup the name as an answer to the open question does (approved.json; only public addresses, then and at later starts). The name in a connection question is the
 one the agent sends: what is allowed is the address, and "always" keeps the name only when the sandbox
 proved it (its own pin, or the real server's certificate on the approved connection); the question says
 which it will be.
@@ -50,6 +51,7 @@ Standard library only.
 """
 import argparse
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -69,6 +71,20 @@ import urllib.parse
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
+
+
+def launch_log():
+    """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
+    loaded = sys.modules.get("sandbox_ai_launchlog")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_launchlog", HERE / "launchlog.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loaded = sys.modules.setdefault("sandbox_ai_launchlog", module)
+    return loaded
+
+
+LOG = launch_log()
 
 
 _textout = None
@@ -296,7 +312,7 @@ def approved_for(workspace, blocked=False):
     blocked: refused at once, without a question)."""
     try:
         data = json.loads(approved_file().read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {"hosts": [], "tcp": []}
     entry = data.get(str(Path(workspace).resolve())) if isinstance(data, dict) else None
     if not isinstance(entry, dict):
@@ -439,6 +455,59 @@ def forget(project, value):
         return found
 
 
+DETAILS_LIMIT = (64 << 10) + 512  # bytes of a question's details shown (runtime.FULL_ARGUMENTS_LIMIT and its marker)
+DETAILS_KINDS = ("mcp", "tool")  # questions whose details carry the call's arguments in full ("arguments_full")
+
+
+def shown_lines(value, limit=DETAILS_LIMIT):
+    """VALUE as text of several lines that may be printed: its line breaks kept, every other character that is not
+    printable (controls, a bidi override, a zero-width space, a lone surrogate) as its JSON escape - in JSON text the
+    same value, and nothing that reorders or hides what you read - at most LIMIT bytes of it, with a line that says
+    how much more there was (never cut silently)."""
+    text = str(value)
+    data = text.encode("utf-8", "surrogatepass")
+    more = 0
+    if len(data) > limit:
+        text = data[:limit].decode("utf-8", "ignore")
+        more = len(data) - len(text.encode("utf-8", "surrogatepass"))
+
+    def escaped(c):
+        code = ord(c)
+        if code <= 0xFFFF:
+            return f"\\u{code:04x}"
+        code -= 0x10000
+        return f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}"
+    if not text.replace("\n", "").isprintable():
+        text = "".join(c if c == "\n" or c.isprintable() else escaped(c) for c in text)
+    return text + (f"\n... truncated here: {more} more bytes" if more else "")
+
+
+def question_details(question):
+    """The details of QUESTION the human reads before an answer, or "": for a tool call its arguments in full,
+    pretty-printed JSON exactly as the call will send them (the sandbox's runtime.full_arguments: credentials
+    redacted, beyond 64 KiB a line that says how much more), shown escaped (shown_lines)."""
+    if not isinstance(question, dict) or question.get("kind") not in DETAILS_KINDS:
+        return ""
+    full = question.get("arguments_full")
+    return shown_lines(full) if isinstance(full, str) else ""
+
+
+def arguments_whole(question):
+    """QUESTION's line (what) shows its call's arguments whole, as its details do: its short form is at most the 300
+    characters the line shows and the same JSON as the details. True for a question without details (one of another
+    kind, or of an older sandbox-ai, which has nothing more to show)."""
+    full = question.get("arguments_full") if isinstance(question, dict) else None
+    if not isinstance(full, str) or question.get("kind") not in DETAILS_KINDS:
+        return True
+    short = question.get("arguments")
+    if not isinstance(short, str) or len(shown(short, 2 * DETAILS_LIMIT)) > 300:
+        return False
+    try:
+        return json.loads(short) == json.loads(full)
+    except (ValueError, RecursionError):
+        return False
+
+
 def mcp_runs(state_root=None):
     """{"mcp-NAME": record} of the MCP servers that can ask (an approvals directory in their state directory);
     a record names the directory as a run's does, so listing and answering work alike."""
@@ -465,7 +534,7 @@ def questions(runs=None, answered=False):
                 continue
             try:
                 question = json.loads(path.read_text())
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 continue
             done = path.with_suffix(".done")
             if done.exists():
@@ -473,7 +542,7 @@ def questions(runs=None, answered=False):
                     continue
                 try:
                     question["result"] = json.loads(done.read_text())
-                except (OSError, ValueError):
+                except (OSError, ValueError, RecursionError):
                     pass
             elif path.with_suffix(".answer").exists() and not answered:
                 continue
@@ -556,8 +625,12 @@ def what(question):
                (f"; its Host header names {shown(claim, 300)} (not verified): a server that routes by it may "
                 f"pass the request on there" if claim else "")
     if kind == "mcp":
-        return f"call the MCP tool {shown(question.get('tool'), 128)} of {shown(question.get('server'), 40)} with " \
-               f"{shown(question.get('arguments'), 300)} (rule {shown(question.get('rule'), 80)} of " \
+        # Said before the arguments: a table (the app's, the web's) may cut a long line.
+        cut = "" if arguments_whole(question) else \
+            f" (arguments shortened here: the question's details show them in full, sandbox-ai approvals show " \
+            f"{shown(question.get('id'), 40)})"
+        return f"call the MCP tool {shown(question.get('tool'), 128)} of {shown(question.get('server'), 40)}{cut} " \
+               f"with {shown(question.get('arguments'), 300)} (rule {shown(question.get('rule'), 80)} of " \
                f"{shown(question.get('ruleset'), 120)})"
     if kind == "device":
         nodes = question.get("nodes") if isinstance(question.get("nodes"), list) else []
@@ -572,8 +645,11 @@ def what(question):
                 "about itself can be claimed by another)")
     if kind == "canary":  # canary.py: a decoy file was read, or a token of one left the sandbox
         return f"canary {shown(question.get('canary'), 40)}: {shown(question.get('summary'), 500)}"
-    if kind == "tool":
-        return f"let {shown(question.get('agent'), 20)} use its tool {shown(question.get('tool'), 128)} with " \
+    if kind == "tool":  # (its arguments in full are in its details, as an MCP call's)
+        cut = "" if arguments_whole(question) else \
+            f" (arguments shortened here: the question's details show them in full, sandbox-ai approvals show " \
+            f"{shown(question.get('id'), 40)})"
+        return f"let {shown(question.get('agent'), 20)} use its tool {shown(question.get('tool'), 128)}{cut} with " \
                f"{shown(question.get('arguments'), 300)} (rule {shown(question.get('rule'), 80)} of " \
                f"{shown(question.get('ruleset'), 120)})"
     if kind == "browser":
@@ -680,7 +756,7 @@ def run_record(approvals_dir):
     """run.json next to APPROVALS_DIR (the run's control directory), or {}."""
     try:
         record = json.loads((Path(approvals_dir).parent / "run.json").read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     return record if isinstance(record, dict) else {}
 
@@ -710,7 +786,7 @@ def wait_done(path, seconds):
         try:
             result = json.loads(path.read_text())
             return result if isinstance(result, dict) else {}
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             if time.monotonic() >= deadline:
                 return {}
             time.sleep(0.1)
@@ -811,7 +887,9 @@ def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None,
             else:
                 (opener or open_browser)(url)
         path = Path(record["directory"]) / "approvals" / f"{ident}.answer"
-        temporary = path.with_name(f".{ident}.answer")
+        # Its own temporary file: the app and `approvals allow` may answer at the same moment (one shared name: the
+        # other's rename found it gone, and the two writes could run into each other). The last answer stays.
+        temporary = path.with_name(f".{ident}.answer.{os.getpid()}-{threading.get_ident()}")
         temporary.write_text(json.dumps(reply))
         os.replace(temporary, path)
         if kind == "browser":  # nobody waits for these in the sandbox
@@ -831,9 +909,13 @@ def answer(ident, decision, scope="once", runs=None, resolver=None, opener=None,
             else:
                 notes.append("not remembered for the project: the sandbox did not apply it ("
                              f"{shown(result.get('reason', 'no reply'), 200)})")
+        LOG.info("approvals", f"{shown(name)}: question {shown(ident, 80)} answered {decision} ({scope}"
+                              f"{', automatically: --ask allow' if auto else ''}): {describe(question)}"
+                              + "".join(f"; {shown(note, 300)}" for note in notes))
         out(f"{shown(name)}: {decision} ({scope}{', automatically: --ask allow' if auto else ''}): {describe(question)}"
             + "".join(f"\n  {shown(note, 1000)}" for note in notes))
         return reply
+    LOG.info("approvals", f"answer {decision} to {shown(ident, 80)} refused: no open question of that ID")
     raise ValueError(f"no open question {ident}; see sandbox-ai approvals list")
 
 
@@ -876,8 +958,11 @@ def auto_answer(question, record, answer_with=None, out=None):
             raise ValueError(f"{shown(question['name'])} lies outside the administrator's policy (allow_hosts)")
         return answer_with(ident, "allow", scope, runs=runs, out=out or (lambda line: None), auto=True)
     except (OSError, ValueError) as exc:
-        with contextlib.suppress(OSError, ValueError):
+        LOG.info("approvals", f"--ask allow could not allow {shown(kind, 20)} question {shown(ident, 80)}: denied", exc)
+        try:
             answer_with(ident, "deny", "run", runs=runs, out=lambda line: None, auto=str(exc) or "refused")
+        except (OSError, ValueError) as denied:
+            LOG.warning("approvals", f"the automatic deny of {shown(ident, 80)} could not be written either", denied)
         return {"decision": "deny", "reason": f"{AUTO_REFUSED} ({shown(str(exc), 300)})"}
 
 
@@ -967,7 +1052,14 @@ def desktop_question(title, text, ident, actions=QUESTION_ACTIONS, answer_with=N
     notes = []
     if question is not None and actions is QUESTION_ACTIONS:
         offered = []
+        # A call whose arguments this notification cannot show whole is allowed only where they are seen whole.
+        unseen = not arguments_whole(question)
+        if unseen:
+            notes.append(f"Allow: its arguments are longer than a notification shows - read them in full first, on "
+                         f"the app's Approvals page or with: sandbox-ai approvals show {shown(ident, 40)}")
         for choice in choices(question, record):
+            if unseen and choice["decision"] == "allow":
+                continue
             if choice["enabled"]:
                 offered.append((QUESTION_NAMES[choice["decision"], choice["scope"]], choice["decision"],
                                 choice["scope"], choice["label"]))
@@ -1089,6 +1181,40 @@ def answer_wildcard(question, record, wildcard, answer_with=None, out=None, ask_
         return {"decision": "deny", "reason": f"{wildcard}: {exc}"}
 
 
+def settled(directory, asking, asker):
+    """The questions of ASKING ({file name: description}) the sandbox has decided meanwhile (ID.done), each in
+    launcher.log once: those nobody answered in time (refused), an allow that could not be applied (refused) - the
+    answers themselves are logged where they were given (answer_with) - and those gone without a decision."""
+    for name, described in list(asking.items()):
+        path = Path(directory) / name
+        done = path.with_suffix(".done")
+        try:
+            result = json.loads(done.read_text())
+        except FileNotFoundError:
+            if not path.exists():
+                del asking[name]
+                LOG.debug("approvals", f"{asker or 'a sandbox'}: question {path.stem} is gone without a decision "
+                                       f"(its run ended?): {described}")
+            continue
+        except (OSError, ValueError, RecursionError) as exc:
+            del asking[name]
+            LOG.debug("approvals", f"{asker or 'a sandbox'}: the decision of question {path.stem} could not be read",
+                      exc)
+            continue
+        del asking[name]
+        result = result if isinstance(result, dict) else {}
+        reason = str(result.get("reason") or "")
+        if reason.startswith("no answer"):
+            LOG.info("approvals", f"{asker or 'a sandbox'}: question {path.stem} refused: {reason} (nobody answered): "
+                                  f"{described}")
+        elif reason.startswith("could not be applied"):
+            LOG.warning("approvals", f"{asker or 'a sandbox'}: question {path.stem} was allowed, but refused: {reason}"
+                                     f": {described}")
+        else:
+            LOG.debug("approvals", f"{asker or 'a sandbox'}: question {path.stem} decided: {result.get('decision')} "
+                                   f"({result.get('scope')}): {described}")
+
+
 def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wildcards=answer_wildcard, auto=False,
           autos=None):
     """Notify (notify-send) about every new question in DIRECTORY until STOP is set (the launcher runs this
@@ -1103,6 +1229,7 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
         buttons = desktop_question  # buttons in the notification answer it
     notify = notify or desktop_notification
     seen = set()
+    asking = {}  # question file: its description, until the sandbox has decided it (its .done) - then how, logged
     asker = origin(run_record(directory))
     title = f"sandbox-ai asks: {asker}" if asker else "sandbox-ai asks"
     while not stop.wait(interval):
@@ -1110,6 +1237,7 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
             files = sorted(Path(directory).glob("*.json"))
         except OSError:
             continue
+        settled(directory, asking, asker)
         fresh = []
         for path in files:
             if path.name in seen or not ID.fullmatch(path.stem) or path.with_suffix(".done").exists():
@@ -1117,10 +1245,15 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
             seen.add(path.name)
             try:
                 question = json.loads(path.read_text())
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError) as exc:
+                LOG.warning("approvals", f"a question in {directory} could not be read ({path.name}): nobody is "
+                                         "told of it", exc)
                 continue
             if not isinstance(question, dict):
                 continue
+            LOG.info("approvals", f"{asker or 'a sandbox'} asks ({'answered by --ask allow' if auto else 'the human'}"
+                                  f"): {describe(question)}")
+            asking[path.name] = describe(question)
             record = {**run_record(directory), "directory": str(Path(directory).parent)}
             wildcard = under_wildcard(question, record)
             if wildcard is not None:  # --allow-host *.DOMAIN: answered here, asked of nobody
@@ -1136,6 +1269,7 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
                 fresh.append(question)
         seen &= {path.name for path in files}
         if fresh and watched():
+            LOG.debug("approvals", f"{len(fresh)} new questions: the app or the web interface asks them")
             continue  # the app or the web interface asks: one prompt per question
         if len(fresh) > burst:
             notify(title, f"{len(fresh)} new questions\nsandbox-ai approvals list")
@@ -1145,7 +1279,9 @@ def watch(directory, stop, notify=None, interval=1.0, burst=3, buttons=None, wil
                 threading.Thread(target=buttons, args=(title, describe(item), item.get("id")), daemon=True,
                                  kwargs={"question": item, "record": run_record(directory)}).start()
             else:
-                notify(title, f"{describe(item)}\nsandbox-ai approvals allow {shown(item.get('id'))}")
+                notify(title, f"{describe(item)}\n" + ("" if arguments_whole(item) else
+                                                       f"in full: sandbox-ai approvals show {shown(item.get('id'))}\n")
+                       + f"sandbox-ai approvals allow {shown(item.get('id'))}")
 
 
 DESKTOP_LEVELS = ("all", "alarms", "none")  # "desktop_notifications" in ~/.config/sandbox-ai/defaults.json
@@ -1181,6 +1317,8 @@ def desktop_notification(title, text, urgency="critical", alarm=False):
     went off) is shown all the same."""
     import html
     if not shows(alarm):
+        LOG.debug("approvals", f"no desktop notification (the app or the web interface shows it, or "
+                               f"desktop_notifications in defaults.json is {desktop_level()}): {title}")
         return None
     if sys.platform == "darwin":
         return mac_notification(title, text)
@@ -1189,10 +1327,14 @@ def desktop_notification(title, text, urgency="critical", alarm=False):
     if shutil.which("notify-send"):
         # Never an error: a notify-send that hangs (a session bus without a notification daemon) would otherwise
         # end the thread that called it, the watch of the questions or the browser listener, for the whole run.
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(["notify-send", "--app-name=sandbox-ai", f"--urgency={urgency}", title, text],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
-                           check=False)
+        with contextlib.suppress(OSError, subprocess.SubprocessError):  # (its line in launcher.log says why)
+            LOG.run("approvals", f"desktop notification: {title}", ["notify-send", "--app-name=sandbox-ai",
+                                                                    f"--urgency={urgency}", title, "(text)"],
+                    runner=lambda argv, **kwargs: subprocess.run([*argv[:-1], text], **kwargs),
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                    check=False)
+    else:
+        LOG.debug("approvals", f"no desktop notification (no notify-send): {title}")
 
 
 # macOS: a notification through AppleScript. The title and text are the script's arguments (on run argv), never put
@@ -1232,7 +1374,10 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
             connection, _ = server.accept()
         except socket.timeout:
             continue
-        except OSError:
+        except OSError as exc:
+            if exc.errno in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM, errno.ECONNABORTED):
+                time.sleep(0.1)  # (as runtime.accept_transient: the listener is fine, the run's browser stays)
+                continue
             break
         with connection:
             try:
@@ -1375,6 +1520,7 @@ def read_line(connection, limit, deadline):
 BLOCKED_TAIL = 4 << 20       # bytes read from the end of each log
 BLOCKED_LIMIT = 300          # entries at most (equal ones counted as one)
 BLOCKED_QUESTIONS = 400      # the newest questions of a run read
+QUESTION_FILE_LIMIT = 1 << 20  # characters of a question file read (its arguments in full)
 BLOCKED_KINDS = ("network", "rule", "unanswered", "denied", "mode", "policy", "cut", "blocked", "taint", "other")
 REDECIDED = ("http", "mcp", "tool", "push", "connect")  # questions the supervisor's control op decide takes
 CUT_MARK = "cut by the kill switch"
@@ -1592,8 +1738,10 @@ def blocked_of_run(run, record, tail=BLOCKED_TAIL):
             done = json.loads((questions_dir / name).with_suffix(".done").read_text()[:1 << 16])
             if not isinstance(done, dict) or done.get("decision") != "deny":
                 continue
-            question = json.loads((questions_dir / name).read_text()[:1 << 16])
-        except (OSError, ValueError):
+            # A tool call's question carries its arguments in full (64 KiB, escaped once more in the file): read
+            # as the supervisor reads it (runtime.ApprovalBroker.question_of), not cut at 64 KiB into no JSON.
+            question = json.loads((questions_dir / name).read_text()[:QUESTION_FILE_LIMIT])
+        except (OSError, ValueError, RecursionError):
             continue
         if not isinstance(question, dict):
             continue
@@ -1904,7 +2052,7 @@ def rule_exception(record, entry, write=False):
     if how == "own":
         try:
             document = json.loads(Path(path).read_text()) if Path(path).exists() else {"version": 1}
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             raise ValueError(f"{path}: {exc}") from None
         plan.update(path=str(path), changes=f"adds the rule {rule['id']} first in {path} (your own ruleset)",
                     applies="now: the running start reads its rulesets again (sandbox-ai rules reload), and every "
@@ -1937,7 +2085,7 @@ def rule_exception(record, entry, write=False):
         copy = config_dir() / OWN_RULES_DIR / copy_folder(path) / Path(path).name
         try:
             original = json.loads(Path(path).read_text())
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:
             raise ValueError(f"{path}: {exc}") from None
         plan.update(path=str(copy), original=str(path),
                     changes=f"{path} is not yours (a preset's or someone else's) and stays as it is: a copy of it "
@@ -1978,14 +2126,30 @@ def decide_again(found, decision, scope, out=print):
         raise ValueError(f"{shown(name)}: its security mode or the administrator's policy keeps no answer always; "
                          f"allow it for the run (--scope run)" + (" if they allow that" if answer_cap(
                              record, policy_scope()) == "once" else ""))
+    if kind == "dns":
+        if not target:
+            raise ValueError(f"{shown(question.get('name'))} is no host name")
+        host = target["host"]
+        # As an answer to the open question opens it (answer()): the agent chose the name, which may resolve to this
+        # host, the LAN or a VPN - only its public addresses are opened, looked up past no VPN of the run. "Always"
+        # is remembered as such an answer is (approved.json: public addresses at every later start), never kept as
+        # the project's own --allow-host, which every later start would open whatever the name resolves to then.
+        resolved = (net().vpn_resolver(record) or resolve)(host)
+        addresses = public_addresses(host, resolved)
+        if len(addresses) < len(resolved):
+            out(f"  not opened (not public): {', '.join(shown(a, 60) for a in resolved if a not in addresses)}")
+        status = net().main(["allow", str(record.get("run")), "--allow-host", host], out=out,
+                            resolver=lambda hosts: {name: list(addresses) for name in hosts})
+        if status == 0 and scope == "always":
+            remember(record["workspace"], host=host, details={
+                "question": ident, "kind": kind, "verified": "lookup",
+                "asked": what({**question, "remembers": None})[:300]})
+            out(f"{shown(name)}: {shown(host)} is allowed always for this project (its public addresses, looked up "
+                f"at every start; sandbox-ai approvals forget)")
+        with contextlib.suppress(ValueError, OSError):
+            redecide(ident, "forget", out=lambda line: None)
+        return status
     if scope == "run":
-        if kind == "dns":
-            if not target:
-                raise ValueError(f"{shown(question.get('name'))} is no host name")
-            status = net().main(["allow", str(record.get("run")), "--allow-host", target["host"]], out=out)
-            with contextlib.suppress(ValueError, OSError):
-                redecide(ident, "forget", out=lambda line: None)
-            return status
         redecide(ident, "allow", out=out)
         return 0
     if kind in ("http", "mcp"):
@@ -1995,13 +2159,37 @@ def decide_again(found, decision, scope, out=print):
             out(f"  not reloaded: {shown(plan['reloaded'], 500)}")
         redecide(ident, "allow", out=out)
         return 0
-    if kind in ("connect", "dns") and target:
-        option = ["--allow-host", target["host"]] if "host" in target else ["--allow-tcp", target["tcp"]]
-        status = net().main(["allow", str(record.get("run")), *option, "--keep"], out=out)
+    if kind == "connect" and target:
+        status = net().main(["allow", str(record.get("run")), "--allow-tcp", target["tcp"], "--keep"], out=out)
         with contextlib.suppress(ValueError, OSError):
             redecide(ident, "forget", out=lambda line: None)
         return status
     raise ValueError(f"a {shown(kind, 20)} question is allowed at most for the run (--scope run)")
+
+
+def show(ident, out=print, runs=None):
+    """`sandbox-ai approvals show ID`: question ID (open or answered) in full - who asks, what, its answer, and for a
+    tool call all of its arguments as the call will send them (details), never shortened to a line."""
+    if not ID.fullmatch(str(ident)):
+        raise ValueError(f"{shown(ident)} is not a question's ID (sandbox-ai approvals list shows them)")
+    matches = [entry for entry in questions(runs, answered=True) if entry[2].get("id") == ident]
+    if not matches:
+        raise ValueError(f"no question {shown(ident)}; see sandbox-ai approvals list")
+    for name, record, question in matches:
+        result = question.get("result") if isinstance(question.get("result"), dict) else None
+        state = "open" if result is None else \
+            f"answered: {shown(result.get('decision'), 10)} ({shown(result.get('scope'), 10)}), " \
+            f"{shown(result.get('reason', ''), 300)}"
+        out(f"question: {shown(ident)}\nsandbox:  {origin(record) or shown(name)}\nkind:     "
+            f"{shown(question.get('kind'), 40)}\nasked:    {shown(question.get('time'), 40)}\nstate:    {state}\n"
+            f"what:     {describe(question)}")
+        text = question_details(question)
+        if text:
+            out("arguments in full, as the call will send them (pretty-printed JSON; credentials redacted):")
+            out(text)
+        if result is None:
+            out(f"answer: sandbox-ai approvals allow|deny {shown(ident)} [--scope once|run]")
+    return 0
 
 
 def main(argv, out=print):
@@ -2011,6 +2199,9 @@ def main(argv, out=print):
     commands = parser.add_subparsers(dest="command", required=True)
     open_ones = commands.add_parser("list", help="open questions")
     open_ones.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts and the web interface")
+    showing = commands.add_parser("show", help="one question in full: for a tool call all of its arguments, as the "
+                                               "call will send them")
+    showing.add_argument("id")
     history = commands.add_parser("history", help="questions with their answers")
     history.add_argument("run", nargs="?")
     for name in ("allow", "deny"):
@@ -2099,7 +2290,8 @@ def main(argv, out=print):
             out(f"forgot {shown(args.entry)} for {shown(args.project, 1000)}; it applies from the next start")
             return 0
         if args.command == "list" and args.json:
-            # Everything the agent chose comes escaped (describe, origin), as in the table.
+            # Everything the agent chose comes escaped (describe, origin, question_details), as in the table. A tool
+            # call's arguments in full: "details" (several lines), "details_whole": the line shows them whole too.
             widest = policy_scope()
             out(json.dumps([{"id": shown(q.get("id")), "run": shown(name), "sandbox": origin(record),
                              "kind": shown(q.get("kind")), "time": shown(q.get("time")), "question": describe(q),
@@ -2107,7 +2299,9 @@ def main(argv, out=print):
                              "max_scope": widest_answer(q, record, widest),
                              **({"allow_refused": DNS_ONCE} if q.get("kind") == "dns"
                                 and widest_answer(q, record, widest) is None else {}),
-                             **(browser_fields(q.get("url")) if q.get("kind") == "browser" else {})}
+                             **(browser_fields(q.get("url")) if q.get("kind") == "browser" else {}),
+                             **({"details": question_details(q), "details_whole": arguments_whole(q)}
+                                if question_details(q) else {})}
                             for name, record, q in questions()], indent=2))
             return 0
         if args.command == "list":
@@ -2115,9 +2309,13 @@ def main(argv, out=print):
             textout().table(["ID", "SANDBOX", "QUESTION"],
                             [[shown(q.get("id")), origin(record), describe(q)] for _, record, q in pending],
                             out, indent=0, empty="no open questions")
+            if any(question_details(q) for _, _, q in pending):
+                out(textout().style("a tool call's arguments in full: sandbox-ai approvals show ID", "muted"))
             if pending:
                 out(textout().style("answer: sandbox-ai approvals allow|deny ID [--scope once|run|always]", "muted"))
             return 0
+        if args.command == "show":
+            return show(args.id, out)
         if args.command == "history":
             t, rows = textout(), []
             wanted = None

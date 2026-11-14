@@ -9,12 +9,21 @@ Run it on the host, in a checkout (not inside a sandbox: there is no container e
     scripts/live_check.py --build                build the images first (sandbox-ai build codex, vpn, tor): this
                                                  checks the build's DNS preflight too
     scripts/live_check.py --quick                only the new checks and the end-to-end suite
+    scripts/live_check.py --agents [NAME,...] [--build]
+                                                 the agents and parts not live-tested before (hermes, qwen, dsh,
+                                                 goose, cairn, browser; default all), with Podman only: each against
+                                                 a scripted model on this host, one MCP tool, its switches' hosts, no
+                                                 telemetry (scripts/live_check_agents.sh is the short form)
 
 It starts real sandboxes around small scripts (sandbox-ai codex --no-auth --binary ...): no login, no model, no
 key leaves this host. The live suites are tests/test_live_check.py (a workspace added and removed while running,
 a ruleset refusing a request, a canary read, a session's whole life, the VPN), tests/test_live_e2e.py (proxy,
 push check, network changes, devices, MCP, limits, approvals), tests/test_agent_sandbox_live.py and
 tests/test_escape_live.py (namespaces, mounts, egress, an escape probe), without their tests that need a login.
+With --agents: tests/test_hermes_live.py, test_qwen_live.py, test_dsh_live.py, test_goose_live.py, test_cairn_live.py
+and test_browser_live.py (tests/live_agents.py says what each checks); --build builds their images first (codex for
+the demo MCP server; team before cairn, claude before browser). The report adds what each agent reached and was
+refused (the hosts, the telemetry hosts, the tool it called) - the part to send back.
 
 The result: DIR/report.md and DIR/report.json (default ~/.local/state/sandbox-ai/live-check/DATE-TIME), one line
 per check with what failed. Exit status 0 when nothing failed. pytest comes from requirements-ci.txt (hashes
@@ -64,7 +73,7 @@ class Report:
         print(f"  {mark}  {name}" + (f"  ({detail.strip().splitlines()[0][:120]})" if detail.strip() and
                                      outcome != "passed" else ""), flush=True)
 
-    def write(self, facts):
+    def write(self, facts, extra=()):
         counts = {}
         for check in self.checks:
             counts[check["outcome"]] = counts.get(check["outcome"], 0) + 1
@@ -76,6 +85,8 @@ class Report:
         for check in self.checks:
             detail = check["detail"].replace("|", "\\|").replace("\n", " ")[:300]
             lines.append(f"| {check['outcome']} | {check['check']} | {detail} |")
+        if extra:
+            lines += ["", *extra]
         failed = [c for c in self.checks if c["outcome"] in ("failed", "error")]
         if failed:
             lines += ["", "## What failed", ""]
@@ -83,6 +94,88 @@ class Report:
                 lines += [f"### {check['check']}", "", "```", check["detail"], "```", ""]
         (self.directory / "report.md").write_text("\n".join(lines) + "\n")
         return counts
+
+
+# --agents: the suite of each, and the images it needs (built in this order with --build).
+AGENT_SUITES = {"hermes": "tests/test_hermes_live.py", "qwen": "tests/test_qwen_live.py",
+                "dsh": "tests/test_dsh_live.py", "goose": "tests/test_goose_live.py",
+                "cairn": "tests/test_cairn_live.py", "browser": "tests/test_browser_live.py"}
+AGENT_BUILDS = {"hermes": ["codex", "hermes"], "qwen": ["codex", "qwen"], "dsh": ["codex", "dsh"],
+                "goose": ["codex", "goose"], "cairn": ["team", "cairn"], "browser": ["claude", "browser"]}
+
+
+def agent_names(value):
+    """The agents of --agents VALUE (comma-separated; "all" or none given: every one), in AGENT_SUITES' order.
+    SystemExit names an unknown one."""
+    wanted = [part.strip() for part in str(value or "all").split(",") if part.strip()]
+    if not wanted or "all" in wanted:
+        return list(AGENT_SUITES)
+    unknown = [name for name in wanted if name not in AGENT_SUITES]
+    if unknown:
+        raise SystemExit(f"live_check: --agents {', '.join(unknown)}: not one of {', '.join(AGENT_SUITES)}")
+    return [name for name in AGENT_SUITES if name in wanted]
+
+
+def agent_builds(names):
+    """The `sandbox-ai build` targets the agents NAMES need, each once, in order."""
+    return list(dict.fromkeys(target for name in names for target in AGENT_BUILDS[name]))
+
+
+def agents_summary(directory):
+    """Markdown lines of what the agents' checks saw ($SANDBOX_AI_LIVE_REPORT_DIR: one JSON file per check, written by
+    tests/live_agents.py): per check the answer, the tool, the hosts reached and refused, the telemetry hosts."""
+    lines = []
+    for path in sorted(Path(directory).glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        parts = []
+        for key in ("exit", "answered", "tool_called", "mcp_gateway_calls", "telemetry_reached", "telemetry_refused",
+                    "reached", "refused", "lookups", "serve", "listen", "seen", "token_in_a_prompt"):
+            if key in data:
+                parts.append(f"{key}: {json.dumps(data[key], sort_keys=True)[:600]}")
+        lines.append(f"- **{path.stem}**: " + "; ".join(parts))
+    return lines
+
+
+def agents_main(args, directory, report, facts):
+    """--agents: build (with --build) and run the live checks of the agents and parts not live-tested before, with
+    Podman; the report adds what each check saw."""
+    names = agent_names(args.agents)
+    facts["agents"] = ", ".join(names)
+    if not shutil.which("podman"):
+        report.add("podman installed", "failed", "podman is not on PATH: these checks start Podman's images")
+        return report.write(facts)
+    status, out, err = run(["podman", "--version"], timeout=60)
+    facts["podman"] = (out or err).strip().splitlines()[0] if (out or err).strip() else f"exit {status}"
+    if args.build:
+        for target in agent_builds(names):
+            begin = datetime.datetime.now()
+            status, out, err = run([str(SAI), "build", target], timeout=3600)
+            report.add(f"sandbox-ai build {target}", "passed" if status == 0 else "failed",
+                       (out + err)[-3000:] if status else "", (datetime.datetime.now() - begin).total_seconds())
+    python = pytest_python(directory)
+    seen = directory / "agents"
+    seen.mkdir(exist_ok=True)
+    junit = directory / "live-agents.xml"
+    junit.unlink(missing_ok=True)
+    command = [python, "-X", "faulthandler", "-m", "pytest", "-p", "no:cacheprovider", "-q", "-rfEs", "--agent-live",
+               "--agent-backend", "podman", f"--junitxml={junit}", *(AGENT_SUITES[name] for name in names)]
+    print(f"  ...   the live checks of {', '.join(names)} (this takes a while)", flush=True)
+    begin = datetime.datetime.now()
+    status, out, err = run(command, timeout=4 * 3600, cwd=ROOT, env={**os.environ, "SANDBOX_AI_LIVE_REPORT_DIR": str(seen)})
+    (directory / "pytest-agents.txt").write_text(out + err)
+    results = junit_results(junit)
+    if not results or status != 0 and not any(outcome in ("failed", "error") for _, outcome, _, _ in results):
+        report.add("pytest (agents)", "error", f"exit status {status}\n" + (out + err)[-3000:],
+                   (datetime.datetime.now() - begin).total_seconds())
+    for name, outcome, detail, seconds in results:
+        report.add(name, outcome, detail if outcome != "passed" else "", seconds)
+    lines = agents_summary(seen)
+    return report.write(facts, ["## What the agents reached", "", *(lines or ["(no check wrote what it saw)"]), ""])
 
 
 def pytest_python(directory):
@@ -138,6 +231,9 @@ def main(argv=None):
     parser.add_argument("--quick", action="store_true", help="only tests/test_live_check.py and test_live_e2e.py")
     parser.add_argument("--image", metavar="IMAGE", help="the agent image for Podman (default: each agent's own)")
     parser.add_argument("--out", type=Path, metavar="DIR")
+    parser.add_argument("--agents", nargs="?", const="all", metavar="NAME[,NAME...]",
+                        help="the agents and parts not live-tested before, Podman only: "
+                             f"{', '.join(AGENT_SUITES)} (default all); with --build their images first")
     args = parser.parse_args(argv)
     if inside_a_container():
         raise SystemExit("live_check: this looks like a container or a sandbox; run it on the host")
@@ -150,6 +246,15 @@ def main(argv=None):
 
     facts = {"date": stamp, "checkout": str(ROOT), "python": platform.python_version(),
              "kernel": platform.release(), "system": platform.system()}
+    if args.agents is not None:
+        status, out, err = run([str(SAI), "--version"], timeout=60)
+        facts["sandbox-ai"] = (out or err).strip().splitlines()[0] if (out or err).strip() else f"exit {status}"
+        counts = agents_main(args, directory, report, facts)
+        print(f"\n{', '.join(f'{k} {v}' for k, v in sorted(counts.items()))}\nreport: {directory / 'report.md'} "
+              "(send it back)")
+        for line in agents_summary(directory / "agents"):
+            print(line[:400])
+        return 1 if counts.get("failed") or counts.get("error") else 0
     for key, command in (("sandbox-ai", [str(SAI), "--version"]), ("podman", ["podman", "--version"]),
                          ("bwrap", ["bwrap", "--version"]), ("git", ["git", "-C", str(ROOT), "rev-parse", "--short",
                                                                      "HEAD"])):

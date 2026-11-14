@@ -7,6 +7,7 @@ has a name (`workspace add RUN PATH --name=NAME`), the model servers of a host (
 is read or written)."""
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -124,16 +125,21 @@ def test_the_model_servers_of_a_host(sai, monkeypatch):
     assert [s["name"] for s in servers] == ["gpu", "big"]
     assert servers[0]["models"] == ["llama3:8b"] and servers[1]["models"] == ["qwen"]
     assert on("ct1", "llm", "list", "--json") in sai.calls and on("ct1", "llm", "models", "gpu", "--json") in sai.calls
-    assert on("ct1", "llm", "models", "big", "--json") not in sai.calls, "listed already: not asked"
+    # Every server is asked (all at once, each briefly): what it offers now, not only what it listed at its last check.
+    assert on("ct1", "llm", "models", "big", "--json") in sai.calls and servers[0]["answered"] is True
     sai.answers[("llm", "models", "gpu")] = (1, "", "llm: gpu does not answer")
-    assert sai.host_llm_servers("ct1")[0]["models"] == [], "a server that does not answer keeps what was listed"
+    down = sai.host_llm_servers("ct1")[0]
+    assert down["models"] == [], "a server that does not answer keeps what was listed"
+    assert down["answered"] is False and "does not answer" in down["models_error"]
     monkeypatch.setattr(sai, "llm_endpoints", lambda: [{"name": "here"}])
     sai.calls.clear()
     # This machine's servers from its own module; one that lists no models is asked for them as another host's is
     # (one added without --model offered only its bare name).
     sai.answers[("llm", "models", "here")] = (0, json.dumps([{"name": "qwen3"}]), "")
     here = sai.host_llm_servers("local")
-    assert here == [{"name": "here", "models": ["qwen3"]}]
+    assert [{k: v for k, v in e.items() if k != "model_info"} for e in here] == [
+        {"name": "here", "models": ["qwen3"], "answered": True}]
+    assert here[0]["model_info"]["qwen3"]["name"] == "qwen3"  # (what the model picker shows of each model)
     assert sai.calls and all(call[:2] != ("hosts", "run") for call in sai.calls), "asked here, not over SSH"
 
 
@@ -180,3 +186,22 @@ def test_the_real_command_line_takes_each_argv(env, args):
     status, out, err = sai.call(*args, timeout=120)
     assert not (status == 2 and "usage:" in err), (args, err)
     assert "unrecognized arguments" not in err and "invalid choice" not in err, (args, err)
+
+
+def test_every_agent_the_launcher_takes_as_a_helper_is_offered_and_recognised(sai):
+    """`sandbox-ai mcp attach --helper AGENT` and the launcher's --helper take every agent (hermes, dsh, qwen and goose
+    too): the app offers each one and names a helper's server (helper-AGENT-HASH) as that agent's, never as a server
+    of its own (its detach goes by --helper)."""
+    import importlib.util
+    root = Path(backend.__file__).resolve().parents[3] / "sandbox"
+    spec = importlib.util.spec_from_file_location("live_helpers_launcher", root / "agent_sandbox.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    choices = next(action.choices for action in launcher.build_parser()._actions if "--helper" in action.option_strings)
+    assert '"--helper", metavar="AGENT", choices=' + repr(list(backend.AGENTS)).replace("'", '"') in \
+        (root / "mcp.py").read_text(), "mcp attach --helper takes the same agents"
+    assert set(backend.LIVE_HELPERS) == set(choices)
+    for agent in choices:
+        assert backend.helper_of(f"helper-{agent}-0123abcd") == agent
+        assert backend.mcp_live_args("api", None, agent) == ["mcp", "attach", "--helper", agent, "api", "--live",
+                                                               "--json"]

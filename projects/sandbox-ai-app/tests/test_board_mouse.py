@@ -251,7 +251,10 @@ def test_a_long_text_wraps_to_three_lines_inside_the_node_and_is_whole_in_the_to
     item = page.items[page.board.first("workspace").id]
     title = page.board.first("workspace").title()
     assert len(item.titles) + len(item.details) <= TEXT_LINES and len(item.titles) == 2
-    assert item.titles[-1].endswith("…") and text_fits(item)
+    # Design review 0.1.95: a path too long for the title keeps its end, the folder's own name, and is cut in the
+    # middle ("Project folder: /" over "tmp/sai-demo-y4u…" before: the name of the folder was never shown).
+    assert item.titles[0] == title.split(": ")[0] + ":", item.titles
+    assert "…" in item.titles[-1] and item.titles[-1].endswith("/project") and text_fits(item)
     line = QFontMetricsF(item.detail_font).lineSpacing()
     assert NODE_H < item.rect().height() <= NODE_H + TEXT_LINES * line, "the node grows, not without end"
     assert str(long_path) in item.toolTip() and title.split(":")[0] in item.toolTip()

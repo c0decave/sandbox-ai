@@ -137,14 +137,6 @@ def url_host(host):
     return f"[{host}]" if ":" in host else host
 
 
-def local_config_path(project):
-    """Where the OpenCode config for PROJECT lives: outside every workspace, so the agent
-    cannot swap it for a symlink to a host file that the launcher would then copy in."""
-    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    digest = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:12]
-    return config / "sandbox-ai" / "opencode" / f"{project.name or 'root'}-{digest}.json"
-
-
 def clean_models(models):
     """Server answers are untrusted: keep well-typed entries, make text terminal-safe."""
     return llm().clean_models(models)
@@ -1140,21 +1132,6 @@ def ask_llm_models(p, endpoint, models=None, current=None, models_of=None):
         p.out("  Please enter listed numbers or model names, comma-separated")
 
 
-def ask_llm_endpoint(p, endpoints, current=None, models_of=None):
-    """NAME:MODEL[,MODEL...] for --llm with one of ENDPOINTS (registered with sandbox-ai llm)."""
-    printable = launcher().printable
-    for index, endpoint in enumerate(endpoints, 1):
-        p.out(f"  {index}  {printable(endpoint['name'])}  {endpoint['kind']}  {printable(endpoint['url'])}")
-    name = (current or "").partition(":")[0]
-    default = next((str(i) for i, e in enumerate(endpoints, 1) if e["name"] == name), "1")
-    while True:
-        number = p.ask("Endpoint number", default)
-        if number.isdigit() and 1 <= int(number) <= len(endpoints):
-            break
-        p.out(f"  Please enter a number between 1 and {len(endpoints)}")
-    return ask_llm_models(p, endpoints[int(number) - 1], current=current, models_of=models_of)
-
-
 def ask_network(p, answers, project, fetch, editing=False):
     """Local LLM server (OpenCode) or a network profile, then (advanced) the sandbox's own addresses; when
     editing, the current choices are the defaults."""
@@ -1277,7 +1254,7 @@ def ask_new(p, project, fetch, tokens):
     ask_mode(p, chosen)  # first: the questions below offer only what the mode allows
     extra = p.ask("Additional workspaces, comma-separated (mounted at /workspaces/<name>)")
     workspaces = [str(Path(value.strip()).expanduser().absolute()) for value in extra.split(",") if value.strip()]
-    agent = p.choose("Agent", ["codex", "claude", "opencode"])
+    agent = p.choose("Agent", ["codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose"])
     answers = {"agent": agent, "backend": p.choose("Backend", ["podman", "bwrap"], "podman"),
                "workspaces": workspaces, "network": "default", "local": None, "llm": None, "llm_only": False,
                "danger": False, "gui": False,
@@ -1336,8 +1313,8 @@ def config_problem(document):
     l = launcher()
     if not isinstance(document, dict) or document.get("version") != 1 or set(document) - l.CONFIG_KEYS:
         return f"expected version 1 with keys {sorted(l.CONFIG_KEYS)}"
-    if document.get("agent") not in ("codex", "claude", "opencode"):
-        return "agent must be codex, claude or opencode"
+    if document.get("agent") not in ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose"):
+        return "agent must be codex, claude, opencode, hermes, dsh, qwen or goose"
     for key in ("options", "agent_args", "workspaces"):
         values = document.get(key, [])
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
@@ -1410,7 +1387,7 @@ def edit_part(p, choice, answers, project, fetch, tokens):
         ask_mode(p, answers)
         p.out("  The options are checked against the mode before saving.")
     elif choice == "1":
-        agent = p.choose("Agent", ["codex", "claude", "opencode"], answers["agent"])
+        agent = p.choose("Agent", ["codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose"], answers["agent"])
         if agent != "opencode" and answers["local"]:
             p.out("  A local LLM server is for OpenCode only; dropped it (network: default)")
             answers["local"], answers["network"] = None, "default"
@@ -1633,7 +1610,7 @@ def review(path):
     try:
         text = data.decode("utf-8")
         document = json.loads(text)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         return path, data, None, f"{launcher().printable(path)} is not valid UTF-8 JSON: {launcher().printable(exc)}"
     # Raw bytes could hide options from view (carriage returns, escapes,
     # bidi controls); refuse those and show what will actually take effect.

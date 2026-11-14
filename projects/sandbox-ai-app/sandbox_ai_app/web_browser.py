@@ -40,12 +40,21 @@ from .terminal_tools import TerminalBar, system_browser
 MAX_TABS = 12
 VISITED_KEPT = 50  # pages in History (this run only)
 TITLE_CHARS = 28
-AGENT_NAMES = {"claude": N_("Claude Code"), "codex": N_("Codex"), "opencode": N_("OpenCode")}
+AGENT_NAMES = {"claude": N_("Claude Code"), "codex": N_("Codex"), "opencode": N_("OpenCode"),
+               "hermes": N_("Hermes Agent"), "dsh": N_("DeepSeek Harness"), "qwen": N_("Qwen Code"),
+               "goose": N_("Goose")}
 # The page a provider's host signs in on; a host of PROVIDERS not here opens at its root. API hosts (api.*) are none.
 SIGN_IN_PAGES = {"claude.ai": "https://claude.ai/login", "chatgpt.com": "https://chatgpt.com/auth/login",
                  "auth.openai.com": "https://auth.openai.com/log-in", "opencode.ai": "https://opencode.ai/auth",
                  "platform.claude.com": "https://platform.claude.com/login",
-                 "console.anthropic.com": "https://console.anthropic.com/login"}
+                 "console.anthropic.com": "https://console.anthropic.com/login",
+                 # Hermes' Nous Portal: its device login (sandbox-ai login hermes) shows a code to enter here.
+                 "portal.nousresearch.com": "https://portal.nousresearch.com/",
+                 # DeepSeek's platform (DSH's account, API keys) and Qwen OAuth's device page (sandbox-ai login qwen).
+                 "platform.deepseek.com": "https://platform.deepseek.com/sign_in",
+                 "chat.qwen.ai": "https://chat.qwen.ai/auth"}
+# Provider hosts that are APIs under another name: no sign-in page (Qwen OAuth's inference, DashScope).
+API_HOSTS = {"portal.qwen.ai", "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"}
 _open = []  # the one browser window (more tabs, not more windows)
 
 
@@ -58,8 +67,8 @@ def quick_links(launcher=None):
         if agent in T.LOGIN_FRONTIER:
             listed += [h for other in ("claude", "codex") for h in T.provider_hosts(launcher).get(other, [])]
         for host in dict.fromkeys(h.lower() for h in listed):
-            if host.startswith("api.") or not host:
-                continue
+            if host.startswith("api.") or host.split(".", 1)[0].endswith("-api") or host in API_HOSTS or not host:
+                continue  # an API host (api.anthropic.com, inference-api.nousresearch.com) has no sign-in page
             links.append((agent, host, SIGN_IN_PAGES.get(host, f"https://{host}/")))
     return links
 
@@ -283,6 +292,8 @@ if not L.MISSING:
             self.bar = TerminalBar(self)
             layout.addWidget(self.bar)
             self.tabs = QTabWidget()
+            from .widgets import inset_close_tabs
+            inset_close_tabs(self.tabs)  # (the [x] inside its tab)
             self.tabs.setDocumentMode(True)
             self.tabs.setTabsClosable(True)
             self.tabs.setMovable(True)
@@ -383,6 +394,8 @@ if not L.MISSING:
                 self.show_address()
 
         def loaded(self, tab, ok):
+            log("DEBUG" if ok else "INFO", f"{'loaded' if ok else 'did not load'}: "
+                f"{T.shown_url(T.without_query(tab.page.url().toString()), 200)}")
             self.show_loading(tab, False)
             if tab is self.current():
                 self.show_address()
@@ -566,14 +579,17 @@ if not L.MISSING:
                     mode = stat.S_IMODE(os.stat(target).st_mode)
                     os.chmod(target, mode & ~0o111)  # never run (nor opened) by the app
                 except OSError as exc:
+                    log("WARNING", f"download {entry['name']!r} not saved: {exc}")
                     self.bar.say(tr("Not saved: {why}", why=exc), seconds=0, level="error")
                     return
+                log("INFO", f"download saved: {target}")
                 entry["saved"] = target
                 if entry in self.downloads:
                     self.downloads.remove(entry)
                 self.bar.say(tr("Saved: {path}", path=str(target)), seconds=0, level="info")
             elif state in (S.DownloadCancelled, S.DownloadInterrupted):
                 why = entry["item"].interruptReasonString() if state == S.DownloadInterrupted else tr("cancelled")
+                log("INFO", f"download {entry['name']!r} not finished: {why}")
                 if entry.get("folder"):
                     self.bar.say(tr("“{name}” was not downloaded: {why}", name=entry["name"], why=why), seconds=0,
                                  level="warn")
@@ -603,14 +619,68 @@ def window():
     return found[0] if found else None
 
 
+CHECK_TIMEOUT = 20  # seconds: Chromium's sandbox check before the window (it takes 5 s at most itself)
+_pending = []  # [(url, parent, done)] asked for while the check runs: one check, then each is answered
+
+
+def log(level, text):
+    from . import applog
+    applog.log(level, "browser", text)
+
+
+def valid(widget):
+    """WIDGET while it exists (a message's parent), else None."""
+    try:
+        from shiboken6 import isValid
+        return widget if widget is not None and isValid(widget) else None
+    except (ImportError, RuntimeError):
+        return None
+
+
+def say(parent, text, seconds=10):
+    """TEXT in the status bar of PARENT's window (the window's own feedback for a click), if it has one."""
+    try:
+        from shiboken6 import isValid
+        window_ = parent.window() if parent is not None and isValid(parent) else None
+    except (ImportError, RuntimeError):
+        window_ = None
+    if window_ is not None and hasattr(window_, "statusBar"):
+        window_.statusBar().showMessage(text, seconds * 1000)
+
+
+def raise_window(made, parent=None):
+    """MADE shown, not minimised, on the screen of PARENT's window (or its own), inside it, raised and active."""
+    if made.isMinimized():
+        made.setWindowState(made.windowState() & ~Qt.WindowState.WindowMinimized)
+    if not made.isVisible():
+        try:
+            from shiboken6 import isValid
+            anchor = parent.window() if parent is not None and isValid(parent) else None
+        except (ImportError, RuntimeError):
+            anchor = None
+        screen = (anchor.screen() if anchor is not None else None) or made.screen()
+        if screen is not None:  # (never where no screen is: centred on the window's screen)
+            area = screen.availableGeometry()
+            made.move(area.center().x() - made.width() // 2, area.center().y() - made.height() // 2)
+    made.show()
+    from .widgets import fit_on_screen
+    fit_on_screen(made)
+    made.raise_()
+    made.activateWindow()
+
+
 def open_browser(url=None, parent=None, check=None, done=None):
     """The app's browser at URL (a new tab of its window when it is open). Without QtWebEngine, or when Chromium's
-    sandbox cannot start (chromium.check, in a thread; CHECK replaces it in tests), URL opens in the system browser
-    and DONE(None, why) is told; else DONE(window, "")."""
+    sandbox cannot start (chromium.check, in a thread, at most CHECK_TIMEOUT seconds; CHECK replaces it in tests), URL
+    opens in the system browser and DONE(None, why) is told - without DONE in a message; else DONE(window, "").
+    A click gets an answer at once ("Starting the browser…" in the status bar, a busy cursor while the check runs);
+    every step is written to app.log."""
+    log("INFO", "the browser is asked for" + (f" at {T.shown_url(url, 200)}" if url else ""))
     if L.MISSING:
         if url:
             system_browser(url)
         why = tr("QtWebEngine is not installed ({error})", error=L.MISSING)
+        log("WARNING", f"no browser window: {why}")
         if done is not None:
             done(None, why)
         else:
@@ -626,35 +696,69 @@ def open_browser(url=None, parent=None, check=None, done=None):
             existing.open_url(url)
         elif existing.current() is None:
             existing.new_tab(focus=True)
-        existing.show()
-        existing.raise_()
-        existing.activateWindow()
+        raise_window(existing, parent)
+        log("INFO", "the browser window was open: shown")
         if done is not None:
             done(existing, "")
         return existing
 
     def ready(result, error):
-        if error is not None or not result.ok:
-            why = chromium.unavailable_text(result) if error is None else str(error)
-            if url:
-                system_browser(url)
-            if done is not None:
-                done(None, why)
-            else:
-                from .widgets import inform
-                inform(parent, tr("Browser"), why, modal=False)
-            return
-        made = Browser()
-        _open[:] = [made]
-        made.new_tab(url, focus=not url)
-        made.show()
-        made.raise_()
-        if done is not None:
-            done(made, "")
+        waiting, _pending[:] = list(_pending), []
+        if check is None:
+            from PySide6.QtWidgets import QApplication
+            if QApplication.overrideCursor() is not None:
+                QApplication.restoreOverrideCursor()
+        try:
+            if error is not None or not result.ok:
+                why = chromium.unavailable_text(result) if error is None else \
+                    tr("The check of Chromium's sandbox failed: {error}", error=str(error) or type(error).__name__)
+                log("WARNING", f"no browser window: {why}")
+                for url_, parent_, done_ in waiting:
+                    if url_:
+                        system_browser(url_)
+                    say(parent_, tr("The browser did not start (see the message)"))
+                    if done_ is not None:
+                        done_(None, why)
+                    else:
+                        from .widgets import inform
+                        inform(valid(parent_), tr("Browser"), why, modal=False)
+                return
+            made = window() or Browser()
+            _open[:] = [made]
+            for url_, _parent, _done in waiting:
+                if url_ or made.current() is None:
+                    made.new_tab(url_, focus=not url_)
+            raise_window(made, waiting[0][1] if waiting else parent)
+            log("INFO", f"the browser window is shown ({made.width()}x{made.height()} at {made.x()},{made.y()})")
+            for _url, parent_, done_ in waiting:
+                say(parent_, tr("The browser is open"), 4)
+                if done_ is not None:
+                    done_(made, "")
+        except Exception as exc:  # noqa: BLE001 - never a click that ends in nothing: said, and in app.log
+            import traceback
+            log("ERROR", "the browser window could not be made: " + "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:])
+            why = tr("The browser could not be opened: {error}", error=f"{type(exc).__name__}: {exc}")
+            for url_, parent_, done_ in waiting:
+                if url_:
+                    system_browser(url_)
+                if done_ is not None:
+                    done_(None, why)
+                else:
+                    from .widgets import warn
+                    warn(valid(parent_), tr("Browser"), why, modal=False)
 
+    _pending.append((url, parent, done))
     if check is not None:
         ready(check(), None)
         return window()
+    if len(_pending) > 1:  # (a second click while the check runs: answered with the first)
+        say(parent, tr("Starting the browser…"))
+        return None
+    say(parent, tr("Starting the browser…"))
+    from PySide6.QtWidgets import QApplication
+    QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+    log("INFO", "checking Chromium's sandbox before the browser window")
     from .widgets import background
-    background(chromium.check, done=ready, owner=parent)
+    background(chromium.check, done=ready, timeout=CHECK_TIMEOUT)
     return None

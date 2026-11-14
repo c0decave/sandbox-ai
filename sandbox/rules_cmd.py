@@ -348,7 +348,7 @@ def parser():
     showing = commands.add_parser("show", help="the rulesets of a start here, or what a running start holds",
                                   allow_abbrev=False)
     showing.add_argument("name", nargs="?", metavar="NAME", help="a running start (sandbox-ai list)")
-    showing.add_argument("-a", "--agent", choices=("claude", "codex", "opencode"),
+    showing.add_argument("-a", "--agent", choices=("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"),
                          help="the agent of the start (default: the project file's, else claude)")
     showing.add_argument("-p", "--project", metavar="DIR", help="the project folder (default: here)")
     showing.add_argument("-j", "--json", action="store_true", help="as JSON")
@@ -367,7 +367,7 @@ def project_agent(directory):
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None
     agent = document.get("agent") if isinstance(document, dict) else None
-    return agent if agent in ("claude", "codex", "opencode") else None
+    return agent if agent in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose") else None
 
 
 def main(argv, out=print):

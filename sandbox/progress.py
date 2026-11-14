@@ -98,6 +98,183 @@ class Progress:
             self.say(f"{what} in {seconds(took)}")
 
 
+# The steps of a session's start, as its supervisor says them (agent_sandbox: progress.step), for the bar on a
+# terminal (Bar): what each step's line begins with, and its short name.
+PHASES = (("mcp", "MCP servers", ("starting the MCP server", "waiting for the MCP servers")),
+          ("vpn", "VPN", ("bringing up the VPN",)),
+          ("kits", "kits", ("preparing the kits",)),
+          ("pod", "sandbox", ("starting the sandbox",)),
+          ("terminal", "terminal", ()))
+BAR_WIDTH = 20  # cells of the bar
+BAR_EVERY = 0.5  # seconds between two drawings of the bar while nothing new is said
+
+
+def phase_of(text):
+    """The step (PHASES' key) a supervisor's line TEXT (without its prefix) begins, or None."""
+    for key, _title, starts in PHASES:
+        if any(str(text).startswith(start) for start in starts):
+            return key
+    return None
+
+
+# Tor's bootstrap as the VPN container says it (vpn_runtime.wait_bootstrap), of the start's VPN or relayed from an
+# MCP server's own Tor (mcp.wait_for_socket): "vpn: tor: bootstrapped 69% (Loading relay descriptors), attempt 1 of 3".
+TOR_LINE = re.compile(r"(?:MCP server ([^:]{1,80}): )?vpn: tor: (bootstrapped|still at) ([0-9]{1,3})%(.{0,160})")
+
+
+def tor_detail(text):
+    """(step, text for the bar) of a line of Tor's bootstrap - "Tor 69% (Loading relay descriptors), attempt 1 of
+    3", the MCP server's name before it for its own Tor - or None for any other line."""
+    found = TOR_LINE.fullmatch(str(text))
+    if not found:
+        return None
+    who, _kind, percent, rest = found.groups()
+    return ("mcp" if who else "vpn"), f"{who + ': ' if who else ''}Tor {percent}%{rest}"
+
+
+def bar_wanted(stream=None, environ=None):
+    """Whether a start's progress is a bar (STREAM, default standard error, is a terminal) or plain lines (a log, a
+    script, SANDBOX_AI_PROGRESS=lines, TERM=dumb)."""
+    environ = os.environ if environ is None else environ
+    stream = sys.stderr if stream is None else stream
+    if environ.get("SANDBOX_AI_PROGRESS") == "lines" or environ.get("TERM") == "dumb":
+        return False
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+class Bar:
+    """A session's start on a terminal: one line drawn again in place - a bar of its steps (MCP servers, VPN, kits,
+    the sandbox, its terminal: those it has, KEYS), the step now and the time so far - instead of a line per step and
+    "still starting (17 s)…" lines. What is no step (a warning, an error) is printed above it. WRITE: where it goes
+    (default standard error)."""
+
+    def __init__(self, keys=None, write=None, clock=time.monotonic, prefix=PREFIX, width=BAR_WIDTH):
+        wanted = set(keys) if keys is not None else {key for key, _, _ in PHASES}
+        self.phases = [(key, title) for key, title, _ in PHASES if key in wanted or key in ("pod", "terminal")]
+        self.write = write or (lambda text: (sys.stderr.write(text), sys.stderr.flush()))
+        self.clock, self.prefix, self.width = clock, prefix, width
+        self.begun = self.drawn = clock()
+        self.index, self.detail, self.shown = 0, "starting…", False
+
+    def keys(self):
+        return [key for key, _ in self.phases]
+
+    def text(self):
+        done = min(self.index, len(self.phases))
+        filled = int(self.width * done / max(1, len(self.phases)))
+        title = self.phases[min(self.index, len(self.phases) - 1)][1]
+        return (f"{self.prefix}: [{'#' * filled}{'-' * (self.width - filled)}] {min(done + 1, len(self.phases))}/"
+                f"{len(self.phases)} {title}: {shown(self.detail, 70)} ({seconds(self.clock() - self.begun)})")
+
+    def draw(self):
+        self.write("\r" + self.text() + "\x1b[K")
+        self.shown, self.drawn = True, self.clock()
+
+    def line(self, text):
+        """A line of the supervisor (TEXT, without its prefix): a step moves the bar, Tor's bootstrap (tor_detail)
+        becomes the step's text, anything else goes above it."""
+        phase = phase_of(text)
+        tor = tor_detail(text)
+        if phase is not None and phase in self.keys():
+            self.index = max(self.index, self.keys().index(phase))
+            self.detail = text
+        elif tor is not None:
+            phase, self.detail = tor
+            if phase in self.keys():
+                self.index = max(self.index, self.keys().index(phase))
+        else:
+            self.write(("\r\x1b[K" if self.shown else "") + f"{self.prefix}: {shown(text, 300)}\n")
+        self.draw()
+
+    def tick(self):
+        """Drawn again now and then while nothing is said: the time goes on."""
+        if self.clock() - self.drawn >= BAR_EVERY:
+            self.draw()
+
+    def ready(self):
+        self.index = len(self.phases)
+        self.write("\r\x1b[K" + f"{self.prefix}: [{'#' * self.width}] ready in "
+                   f"{seconds(self.clock() - self.begun)}\n")
+
+    def failed(self):
+        """The start ended without its terminal: the bar's line ends here (the reason follows)."""
+        if self.shown:
+            self.write("\n")
+
+
+START_IDLE = 120  # seconds a start may say nothing new (once past the time it was given) before it counts as stuck
+START_CAP = 1200  # seconds a start may take at most, also while it still says new steps (more for a Tor's settings)
+
+
+class StartWatch:
+    """Whether a start still goes on, judged by its log LOG (a session's or an MCP server's supervisor.log): it
+    goes on while the log grows - a new step, Tor's bootstrap percentage, "still at 69%" - and is given up only
+    after IDLE seconds without a new line (once past the time it was given), or after CAP seconds in all.
+    A start through Tor (the VPN's bootstrap and check, MCP servers each behind a Tor of their own) takes minutes;
+    a fixed time gave it up while it still started."""
+
+    def __init__(self, log, clock=time.monotonic, idle=START_IDLE, cap=START_CAP):
+        self.log, self.clock, self.idle_limit, self.cap = log, clock, idle, cap
+        self.begun = self.said = clock()
+        self.size = self.size_now()
+
+    def size_now(self):
+        try:
+            return os.stat(self.log).st_size
+        except OSError:
+            return -1
+
+    def look(self):
+        """Looks at the log (each poll): a new line is progress."""
+        size = self.size_now()
+        if size != self.size:
+            self.size, self.said = size, self.clock()
+        return self
+
+    def idle(self):
+        return self.clock() - self.said
+
+    def waited(self):
+        return self.clock() - self.begun
+
+    def going_on(self):
+        return self.look().idle() < self.idle_limit
+
+    def over(self, past_deadline=True):
+        """None while the wait goes on, else why it ends: "cap" (it took CAP seconds) or "idle" (PAST_DEADLINE, the
+        time it was given, and nothing new for IDLE seconds)."""
+        self.look()
+        if self.waited() >= self.cap:
+            return "cap"
+        if past_deadline and self.idle() >= self.idle_limit:
+            return "idle"
+        return None
+
+    def last_line(self):
+        """The log's last line (a step, Tor's percentage: where the start is), shown; "" without one."""
+        try:
+            with open(self.log, "rb") as stream:
+                stream.seek(max(0, self.size_now() - 4096))
+                lines = [line for line in stream.read().decode(errors="replace").splitlines() if line.strip()]
+        except OSError:
+            return ""
+        return shown(lines[-1], 200) if lines else ""
+
+    def why(self, kind):
+        """What over() found, said: since when the start said nothing and its last line, or how long it took."""
+        last = self.last_line()
+        at = f"; its last line: {last}" if last else ""
+        if kind == "cap":
+            return (f"it took {int(self.waited())} s, the longest a start may take ({int(self.cap)} s), though it still "
+                    f"said new steps{at}")
+        since = time.strftime("%H:%M:%S", time.localtime(time.time() - self.idle()))
+        return (f"it said nothing new for {int(self.idle())} s (since {since}, {int(self.waited() - self.idle())} s "
+                f"after it began){at}")
+
+
 class Output:
     """A Podman build's or pull's output, line by line, as Progress lines: what WHAT stands for ("building the image
     claude", "pulling the image of fetch"); its steps, at most STEP_LINES lines of each step's output (the rest

@@ -218,9 +218,9 @@ def test_a_tab_closed_after_the_question_is_the_one_asked_about(window, env, mon
     assert asked == ["Close tab"] and keys(window) == [f"project:{three}"]
 
 
-def test_tabs_are_moved_and_kept_for_the_next_start(window, env, monkeypatch):
+def test_tabs_are_moved_and_kept_for_the_next_start(window, env, monkeypatch, sleepers):
     one, two, three = project(env, "one"), project(env, "two"), project(env, "three")
-    fake_session(env, "work", two)
+    session_dir = fake_session(env, "work", two)
     for folder in (one, two, three):
         window.set_project(folder)
     read_now(window.sandboxes)
@@ -233,12 +233,27 @@ def test_tabs_are_moved_and_kept_for_the_next_start(window, env, monkeypatch):
     assert [t["kind"] for t in saved["tabs"]] == ["project", "project", "project", "session"]
     assert saved["tab_current"] == f"project:{two}"
     (three / "gone").mkdir()
+    # The session runs at the next start (its supervisor: a sleeper with the session's arguments): its tab comes back.
+    supervisor = sleepers("/x/agent_sandbox.py", "codex", "--tmux-socket-dir", session_dir / "tmux")
+    data = json.loads((session_dir / "session.json").read_text())
+    data.update(pid=supervisor.pid, pid_start=window.sai.launcher.process_start(supervisor.pid))
+    (session_dir / "session.json").write_text(json.dumps(data))
     again = make_window(monkeypatch)
     read_now(again.sandboxes)  # the first read (in the background): the session's tab gets its state from it
     try:
         assert keys(again) == [f"project:{three}", f"project:{one}", f"project:{two}", "session:work"]
         assert current(again) == f"project:{two}" and again.project == str(two)
-        assert again.tabs.entry(3)["state"] == "stopped" and again.tabs.entry(3)["agent"] == "codex"
+        assert again.tabs.entry(3)["state"] == "running" and again.tabs.entry(3)["agent"] == "codex"
+    finally:
+        close(again)
+    # A kept tab whose session has ended meanwhile is not restored (a tab of an ended start makes no sense).
+    supervisor.kill()
+    supervisor.wait()
+    again = make_window(monkeypatch)
+    read_now(again.sandboxes)
+    try:
+        assert keys(again) == [f"project:{three}", f"project:{one}", f"project:{two}"]
+        assert current(again) == f"project:{two}"
     finally:
         close(again)
     # A project whose folder is gone is left out.
