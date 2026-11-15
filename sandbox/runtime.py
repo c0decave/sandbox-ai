@@ -9608,6 +9608,9 @@ CUT_BY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # who asked for a cut:
 # on its way out; the rejection ends it at once (EHOSTUNREACH), as Tor's kill switch does. UDP: the send fails.
 CUT_REJECT = "reject with icmpx type admin-prohibited"
 TOR_SOCKS_ADDRESS = "127.0.0.1"  # where Tor's SocksPort listens in the sandbox (vpn_runtime.tor_config)
+# Tor's resolver address in the sandbox (vpn_runtime.TOR_DNS): port 53 there is the resolver in front of tor's DNSPort
+# (TorDnsFront), another port tor's DNSPort itself (TOR_DNS_PORT) - a lookup through Tor whatever the port.
+TOR_DNS_ADDRESS = "127.0.53.1"
 CUT_BY_LIMIT = 256      # names in one cut request (sandbox-ai net cut --all-runs: a run and every run it acts for)
 
 
@@ -9680,10 +9683,14 @@ def cut_class(cut, address, port, protocol="tcp"):
     sandbox's own loopback: its services, the DNS stub), "host" (the host's ports: the loopback ports forwarded or
     relayed, the Mac's address in podman machine), "dns" (a nameserver other than the stub: a lookup leaves for the
     internet, whatever the nameserver's address), "local" or "remote" (the internet). Tor's SocksPort on loopback
-    is "remote": tor, whose own connections pass the cut, carries what the agent sends there to the internet."""
+    is "remote": tor, whose own connections pass the cut, carries what the agent sends there to the internet. Tor's
+    resolver address (TOR_DNS_ADDRESS) is "dns" on every port: tor's DNSPort listens beside the resolver in front of
+    it, and a question there leaves through Tor as one on port 53 does."""
     ip = ipaddress.ip_address(str(address))
     port = int(port)
     if ip.is_loopback:
+        if cut.get("tor") and str(ip) == TOR_DNS_ADDRESS:
+            return "dns"
         if protocol == "tcp" and str(ip) == TOR_SOCKS_ADDRESS and cut.get("tor_socks") == port:
             return "remote"
         if protocol == "tcp" and str(ip) in HOST_LOOPBACK and port in cut.get("host_ports", ()):
@@ -10052,6 +10059,12 @@ def cut_mode_rules(cut, mode):
     if mode != "local":  # lookups: only the DNS stub, which forwards nothing while the cut holds (nameservers())
         add(f"ct original ip daddr != {DNS_STUB} meta l4proto {{ tcp, udp }} ct original proto-dst 53 drop")
         add("meta nfproto ipv6 meta l4proto { tcp, udp } ct original proto-dst 53 drop")
+        if cut.get("tor"):
+            # Tor's resolver address, whole: tor's DNSPort listens there on a port of its own (behind the resolver
+            # on port 53), and tor, whose own packets pass the cut, would carry a question asked there directly out -
+            # every name a message, every answer one back. (The resolver's own questions to tor carry the checks'
+            # mark, which the output chain accepts before this chain.)
+            add(f"ct original ip daddr {TOR_DNS_ADDRESS} drop")
     add("ct original ip daddr 127.0.0.0/8 return")  # the sandbox's own loopback (the host's ports were dropped above)
     add("ct original ip6 daddr ::1 return")
     v4 = [net for net in LOCAL_NETWORKS if ":" not in net]

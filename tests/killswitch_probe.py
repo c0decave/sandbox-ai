@@ -197,6 +197,9 @@ ATTEMPTS = {
     "udp dns 1.1.1.1:53": lambda: udp(socket.AF_INET, "1.1.1.1", 53),
     "udp dns stub 127.0.0.1:53": lambda: udp(socket.AF_INET, "127.0.0.1", 53),
     "udp other resolver 127.0.53.1:53": lambda: udp(socket.AF_INET, "127.0.53.1", 53),
+    # tor's DNSPort behind the resolver in front of it (vpn_runtime.TOR_DNS_PORT): a lookup through Tor behind Tor,
+    # the sandbox's own loopback in every other run.
+    "udp tor's DNSPort 127.0.53.1:9053": lambda: udp(socket.AF_INET, "127.0.53.1", 9053),
     # The start's tunnel, lent to its own MCP servers: what its VPN container sends for them.
     "tcp lent (marked) 198.51.100.7:443": lambda: tcp(socket.AF_INET, "198.51.100.7", 443, LEND_MARK),
     "tcp lent to the provider (marked) 192.0.2.10:443": lambda: tcp(socket.AF_INET, "192.0.2.10", 443, LEND_MARK),

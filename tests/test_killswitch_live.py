@@ -42,6 +42,7 @@ NONE = {"tcp provider 192.0.2.10:443": "proxy", "tcp provider 192.0.2.10:80": "p
         "tcp internet 198.51.100.7:443": "proxy", "tcp host port 127.0.0.1:8080": "proxy",
         "udp lan 192.168.1.20:5353": "sent", "udp internet 198.51.100.7:443": "sent", "udp dns 1.1.1.1:53": "sent",
         "udp other resolver 127.0.53.1:53": "sent",
+        "udp tor's DNSPort 127.0.53.1:9053": "sent",
         # Lent connections (the VPN container's, for the start's MCP servers): past the proxy and the allow-list.
         "tcp lent (marked) 198.51.100.7:443": "direct", "tcp lent to the provider (marked) 192.0.2.10:443": "direct",
         "udp lent lookup (marked) 1.1.1.1:53": "sent", **OWN}
@@ -54,18 +55,22 @@ LENT = {"tcp lent (marked) 198.51.100.7:443", "tcp lent to the provider (marked)
 LENT_API = {"tcp lent to the provider (marked) 192.0.2.10:443"}
 INTERNET = {"tcp provider 192.0.2.10:443", "tcp provider 192.0.2.10:80", "tcp internet 198.51.100.7:443",
             "udp internet 198.51.100.7:443", "udp dns 1.1.1.1:53", "udp other resolver 127.0.53.1:53"} | LENT
+# tor's DNSPort (behind the resolver in front of it, on a port of its own at Tor's resolver address): behind Tor a
+# lookup that tor - whose own packets pass every cut - carries out, so only "local" keeps it; without Tor nothing
+# listens there and it is the sandbox's own loopback, which no cut takes.
+TOR_DNSPORT = {"udp tor's DNSPort 127.0.53.1:9053"}
 KEPT = {
-    "remote": LAN | {"tcp host port 127.0.0.1:8080"},
-    "local": INTERNET,
-    "api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"} | LENT_API,
-    "all": set(),
+    "remote": LAN | {"tcp host port 127.0.0.1:8080"} | TOR_DNSPORT,
+    "local": INTERNET | TOR_DNSPORT,
+    "api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"} | LENT_API | TOR_DNSPORT,
+    "all": set() | TOR_DNSPORT,
     # Behind Tor only the bypass target is the local network: everything else lies past Tor.
     "tor remote": {"tcp bypass 192.168.1.20:1234", "tcp host port 127.0.0.1:8080"},
-    "tor local": INTERNET | LAN - {"tcp bypass 192.168.1.20:1234"},
+    "tor local": INTERNET | LAN - {"tcp bypass 192.168.1.20:1234"} | TOR_DNSPORT,
     "tor api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"} | LENT_API,
     "tor all": set(),
     # Two cuts at once (a server shared by two runs): only what both keep.
-    "remote+api": {"tcp llm 10.0.0.5:11434"},
+    "remote+api": {"tcp llm 10.0.0.5:11434"} | TOR_DNSPORT,
 }
 
 
