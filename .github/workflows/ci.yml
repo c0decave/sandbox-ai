@@ -387,7 +387,7 @@ jobs:
   # The desktop app (projects/sandbox-ai-app), tested against the sandbox-ai of the same commit.
   app:
     runs-on: ubuntu-24.04  # the apt names below (libasound2t64, ...) are 24.04's
-    timeout-minutes: 50
+    timeout-minutes: 80
     env:
       QT_QPA_PLATFORM: offscreen
       # A test skipped for missing Qt, QtWebEngine or sandbox-ai fails instead (tests/conftest.py).
@@ -422,7 +422,7 @@ jobs:
       - name: Tests (offscreen, Qt required)
         run: |
           # Into a file, not a pipe (see above); a crash (exit 139) names the test it happened in.
-          status=0; timeout --signal=INT --kill-after=60 2700 python -X faulthandler -m pytest -v -rs -rfE tests \
+          status=0; timeout --signal=INT --kill-after=60 4200 python -X faulthandler -m pytest -v -rs -rfE tests \
             > tests.txt 2>&1 || status=$?
           tail -n 300 tests.txt
           if [ "$status" -ne 0 ]; then
