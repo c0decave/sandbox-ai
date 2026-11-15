@@ -487,8 +487,14 @@ class NewVariantDialog(QDialog):
         layout.addRow(tr("Name"), self.name)
         layout.addRow(tr("Agent"), self.agent)
         layout.addRow("", self.copy)
-        # A base image of yours (sandbox-ai images new NAME --base IMAGE): only those that can be one (Debian 12).
+        # A base image of yours (sandbox-ai images new NAME --base IMAGE): those that can be one (Debian 12) to choose,
+        # any other name typed (sandbox-ai says why it cannot be one); none yet: where one is added.
         self.base = QComboBox()
+        self.base.setEditable(True)
+        self.base.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.base.lineEdit().setPlaceholderText(tr("the agent's own base, or one of your images"))
+        self.base.setCompleter(None)  # (never completed to an entry's words: "None yet", "(your image, UNCHECKED)")
+        self.base.setAccessibleName(tr("Base image"))
         self.base.addItem(tr("the agent's own base (sandbox-ai's image)"), "")
         for entry in bases:
             index = self.base.count()
@@ -501,8 +507,13 @@ class NewVariantDialog(QDialog):
             else:
                 self.base.addItem(tr("{name} (your image, UNCHECKED)", name=entry["name"]), entry["name"])
                 self.base.setItemData(index, unchecked_text(), Qt.ItemDataRole.ToolTipRole)
+        if not bases:  # none yet: where one is added (greyed)
+            self.base.addItem(tr("None yet - Your images (this page) adds one"), "")
+            self.base.model().item(self.base.count() - 1).setEnabled(False)
+        self.base.setCurrentIndex(0)
         self.base_note = plain_label(role="notice-error")
         self.base.currentIndexChanged.connect(self.check)
+        self.base.editTextChanged.connect(self.check)
         layout.addRow(tr("Base image"), self.base)
         layout.addRow(self.base_note)
         self.problem = plain_label(role="notice-error", selectable=True)
@@ -523,8 +534,15 @@ class NewVariantDialog(QDialog):
                              tr("Lower-case letters, digits, '.', '_' and '-', up to 30 characters; not an agent's name."))
         self.base_note.setText(tr("The sandbox's own supervisor (firewall, connection proxy, approvals) runs from this "
                                   "image's programs: choose only an image you trust as much as sandbox-ai's own. The "
-                                  "security modes high and paranoid refuse it.") if self.base.currentData() else "")
+                                  "security modes high and paranoid refuse it.") if self.base_name() else "")
         self.ok.setEnabled(good)
+
+    def base_name(self):
+        """The base chosen: one of your images by its entry, a name typed, or "" (the agent's own base)."""
+        index = self.base.currentIndex()
+        if index >= 0 and self.base.currentText() == self.base.itemText(index):
+            return self.base.itemData(index) or ""
+        return self.base.currentText().strip()
 
 
 # -- your own images: from a registry or your own Containerfile (sandbox-ai images pull|build-image|list|remove) --
@@ -793,7 +811,6 @@ class ImagesPage(QWidget):
         self.images.itemSelectionChanged.connect(self.selection_changed)
         self.asking = False  # selection_changed's question is open
         images_layout.addWidget(self.images)
-        row = QHBoxLayout()
         self.refresh_button = button(tr("Refresh"), tr("Ask Podman again"), self.refresh)
         self.build_button = button(tr("Build"), tr("sandbox-ai build: the base image, then the extension layer "
                                                    "(where commands run is set on the System page)"), self.build)
@@ -822,13 +839,10 @@ class ImagesPage(QWidget):
         more.addAction(tr("Delete the variant, keep its image…"), lambda: self.delete_variant(keep_image=True))
         more.addAction(tr("Drop the extension of the agent's image…"), self.drop_extension)
         self.more_button.setMenu(more)
-        for widget in (self.refresh_button, self.build_button, self.more_builds, self.new_button,
-                       self.delete_button, self.more_button):
-            row.addWidget(widget)
         widgets.list_menu(self.images, lambda: [self.build_button, self.more_builds, None, self.new_button,
                                                 self.delete_button, self.more_button, None, self.refresh_button])
-        row.addStretch()
-        images_layout.addLayout(row)
+        images_layout.addWidget(widgets.flow(self.refresh_button, self.build_button, self.more_builds,
+                                             self.new_button, self.delete_button, self.more_button))  # (wraps)
         self.status = plain_label(selectable=True, log="images")
         images_layout.addWidget(self.status)
         splitter.addWidget(images)
@@ -983,6 +997,13 @@ class ImagesPage(QWidget):
 
     def host(self):
         return self.hosts.host() or LOCAL
+
+    def show_your_images(self):
+        """The tab Your images, read again (a start was refused for a service's image that is none of yours)."""
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == tr("Your images"):
+                self.tabs.setCurrentIndex(index)
+        self.refresh_user_images()
 
     def run_argv(self, *args, host=None):
         """argv of `sandbox-ai ARGS` on HOST (default: the one chosen; one taken before a question or dialog: the
@@ -1427,7 +1448,6 @@ class ImagesPage(QWidget):
         self.user_table.setAccessibleName(tr("Your images"))
         self.user_table.itemSelectionChanged.connect(self.update_user_buttons)
         layout.addWidget(self.user_table)
-        row = QHBoxLayout()
         self.pull_button = button(tr("Add from a registry…"), tr("Pull an image once and pin it by its digest: "
                                                                  "sandbox-ai images pull"), self.pull_image)
         self.build_image_button = button(tr("Add from a Containerfile…"),
@@ -1443,14 +1463,12 @@ class ImagesPage(QWidget):
         self.derive_button = button(tr("Add OS packages…"), tr("A new image of yours: the selected one with packages "
                                                                "of its own distribution (apk, dnf, apt-get …): "
                                                                "sandbox-ai images derive"), self.derive_image)
-        for widget in (self.pull_button, self.browse_button, self.build_image_button, self.derive_button,
-                       self.remove_image_button, user_refresh):
-            row.addWidget(widget)
         widgets.list_menu(self.user_table, lambda: [self.remove_image_button, self.derive_button, None,
                                                     self.pull_button, self.browse_button, self.build_image_button,
                                                     None, user_refresh])
-        row.addStretch()
-        layout.addLayout(row)
+        # six buttons (wider in German): a row that wraps, so that the page lets the window shrink back
+        layout.addWidget(widgets.flow(self.pull_button, self.browse_button, self.build_image_button,
+                                      self.derive_button, self.remove_image_button, user_refresh))
         self.user_status = plain_label(selectable=True)
         layout.addWidget(self.user_status)
         self.user_entries = []
@@ -1474,10 +1492,13 @@ class ImagesPage(QWidget):
                 tr("This sandbox-ai has no images of your own yet; update it (sandbox-ai update).")
                 if "invalid choice" in text else tr("Cannot list your images: {error}", error=printable(text[-300:])))
             return
-        self.show_user_images(document)
+        self.show_user_images(document, listed=True)
 
-    def show_user_images(self, document):
+    def show_user_images(self, document, listed=False):
         self.user_entries = user_image_entries(document)
+        if listed:  # every field that offers your images (a service's image, a preset's) offers these now
+            from . import name_fields
+            name_fields.publish(self.sai, "image", self.host(), [e["name"] for e in self.user_entries])
         fill(self.user_table, [[e["name"], tr("UNCHECKED") if e["unchecked"] else tr("reviewed"),
                                 e["source"] or (tr("registry") if e["kind"] == "pulled" else tr("Containerfile")),
                                 e["image"], e["id"], e["user"] or tr("unknown"), e["ports"], e["system"],
@@ -1603,7 +1624,7 @@ class ImagesPage(QWidget):
                                   getattr(module, "taggable", module.valid_name), getattr(self, "user_entries", []))
         if widgets.exec_dropped(dialog):
             self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked(),
-                                host=host, base=dialog.base.currentData() or None)
+                                host=host, base=dialog.base_name() or None)
 
     def create_variant(self, name, agent, empty=False, host=None, base=None):
         host = self.host() if host is None else host

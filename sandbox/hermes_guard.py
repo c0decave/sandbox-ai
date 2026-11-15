@@ -307,11 +307,23 @@ class Finder:
         pass
 
 
+def process_argv():
+    """This process's whole command line (the interpreter, its options, -m MODULE, the arguments): sys.orig_argv
+    (Python 3.10+); before, /proc/self/cmdline (in a .pth sys.argv is not set yet)."""
+    if hasattr(sys, "orig_argv"):
+        return sys.orig_argv
+    try:
+        with open("/proc/self/cmdline", "rb") as handle:
+            return [part.decode("utf-8", "surrogateescape") for part in handle.read().split(b"\0") if part]
+    except OSError:
+        return []
+
+
 def install(argv=None, environ=None):
     """At the start of every process of Hermes' Python (its .pth): refuse a Hermes command line that would turn
     telemetry on (MESSAGE, exit status 2), pin the variables, patch Hermes' modules as they are imported. Once."""
     environ = os.environ if environ is None else environ
-    args = cli_args(list(sys.orig_argv if argv is None and hasattr(sys, "orig_argv") else argv or []))
+    args = cli_args(list(argv if argv is not None else process_argv()))
     if args is not None:
         found = refused(args) or refused_environment(environ)
         if found:

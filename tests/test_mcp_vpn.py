@@ -974,6 +974,46 @@ def test_a_redirected_lookup_passes_the_kill_switch_only_through_the_tunnel():
     assert rt.killswitch_problem(rt.killswitch_rules("wg0") + rules) is None
 
 
+def test_a_redirected_lookup_leaves_with_the_tunnels_own_address():
+    """CI's killswitch job (0.1.96, the redirected lookup past the kill switch for the first time): an MCP server's
+    lookup at the resolver on the uplink's own network (pasta's, the host's: 192.168.50.1) got "no answer". The
+    kernel chose the lookup's source address with its first route - the uplink's own, to a resolver on the uplink's
+    network - and the redirect changes the destination only: the lookup went into the tunnel with the uplink's
+    address, which the VPN's server drops (WireGuard: not one of the peer's allowed addresses; any provider: not the
+    address it gave). A postrouting NAT chain gives a redirected lookup that leaves by the tunnel the tunnel's own
+    address; the answer comes back through the same connection."""
+    rules = rt.mcp_dns_rules("10.66.0.1", "wg0", source="10.66.0.2")
+    table = rules[:rules.index(f"add chain inet {rt.TABLE}")].splitlines()
+    assert " chain dns_source { type nat hook postrouting priority 100; policy accept;" in table
+    for proto in ("udp", "tcp"):
+        assert f'  ct status dnat ip daddr 10.66.0.1 {proto} dport 53 oifname "wg0" snat ip to 10.66.0.2' in table
+    # Only what was redirected, and only into the tunnel: nothing else gets another address.
+    assert [line.split(" snat ")[0].strip() for line in rules.splitlines() if " snat " in line] == [
+        f'ct status dnat ip daddr 10.66.0.1 {proto} dport 53 oifname "wg0"' for proto in ("udp", "tcp")]
+    assert "masquerade" not in rules  # (snat is of the redirect's own kernel module: nothing new to load)
+    # Without an IPv4 address of the tunnel there is nothing to give: the rules are as before.
+    plain = rt.mcp_dns_rules("10.66.0.1", "wg0")
+    assert "dns_source" not in plain and " snat " not in plain
+    assert rt.mcp_dns_rules("10.66.0.1", "wg0", source=None) == plain
+    # The kill switch's own part is the same with it, and stays a kill switch.
+    assert [line for line in rules.splitlines() if f"inet {rt.TABLE} " in line] == \
+        [line for line in plain.splitlines() if f"inet {rt.TABLE} " in line]
+    assert rt.killswitch_problem(rt.killswitch_rules("wg0") + rules) is None
+    for wrong in ("fd00::2", "10.66.0.2/32", "10.66.0.2 accept", ""):
+        with pytest.raises(ValueError):
+            rt.mcp_dns_rules("10.66.0.1", "wg0", source=wrong)
+
+
+@pytest.mark.parametrize("addresses, expected", [
+    (["10.66.0.2/32"], "10.66.0.2"),                                # WireGuard: as the profile writes it
+    (["fd00::2/128", "10.64.0.9/32"], "10.64.0.9"),                 # the first IPv4 one
+    (["100.101.102.103", "fd7a:115c:a1e0::1"], "100.101.102.103"),  # Tailscale, OpenVPN: bare addresses
+    (["fd00::2/128"], None), ([], None), (None, None), (["not an address", 7], None)])
+def test_the_tunnels_own_ipv4_address(addresses, expected):
+    assert rt.mcp_dns_source({"addresses": addresses}) == expected
+    assert rt.mcp_dns_source({}) is None
+
+
 class Recorder:
     def __init__(self):
         self.commands, self.children = [], []
@@ -1002,6 +1042,25 @@ def test_the_runtime_loads_the_redirect_only_for_an_mcp_servers_container(monkey
         assert loaded == [rt.mcp_dns_rules("10.66.0.1", "wg0")] and ready["tunnel"]["mcp_dns"] == "10.66.0.1"
     else:
         assert loaded == [] and "mcp_dns" not in ready["tunnel"]
+
+
+def test_the_runtime_gives_the_redirect_the_tunnels_address(monkeypatch):
+    """(the tunnel as up_wireguard returns it: its addresses as the profile has them)"""
+    runner = Recorder()
+    tunnel = {"interface": "wg0", "dns": ["10.66.0.1"], "addresses": ["fd00:66::2/128", "10.66.0.2/32"],
+              "ipv4": True, "ipv6": True}
+    monkeypatch.setattr(rt, "up_wireguard", lambda payload, runner: dict(tunnel))
+    monkeypatch.setattr(rt, "gather_checks", lambda payload, tunnel, runner: {})
+    monkeypatch.setattr(rt, "resolve_hosts", lambda names, tunnel, tailnet=False: {})
+    payload = {"profile": {"type": "wireguard"}, "secrets": {}, "mcp": True}
+    out = []
+    stdin = types.SimpleNamespace(readline=lambda: json.dumps(payload))
+    assert rt.main(["check"], stdin=stdin, out=types.SimpleNamespace(write=out.append, flush=lambda: None),
+                   runner=runner) == 0
+    loaded = [data for command, data in runner.commands if command == ["nft", "-f", "-"]]
+    assert loaded == [rt.mcp_dns_rules("10.66.0.1", "wg0", source="10.66.0.2")]
+    assert 'oifname "wg0" snat ip to 10.66.0.2' in loaded[0]
+    assert json.loads(out[-1])["tunnel"]["mcp_dns_source"] == "10.66.0.2"
 
 
 def test_the_runtime_refuses_a_tailnet_only_profile_for_an_mcp_server(monkeypatch):
@@ -1245,6 +1304,7 @@ def test_the_rules_an_mcp_vpn_container_loads_parse():
     job). Each rule set the VPN container loads goes through nft's own parser here."""
     killswitch = rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)])
     for rules in (killswitch + rt.mcp_dns_rules("10.66.0.1", "wg0"),  # (it adds to the kill switch's table)
+                  killswitch + rt.mcp_dns_rules("10.66.0.1", "wg0", source="10.66.0.2"),
                   killswitch,
                   rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)], mask=0xff00, any_marked=True,
                                       tunnel_ipv6=False)):

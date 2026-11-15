@@ -7,8 +7,9 @@ port per attempt - must stay unreached for the agent itself, a container on the 
 proxy's connection log (the connection went to the proxy, not past it) and no request may arrive at its server. This
 test reaches each server itself first: they do answer. slirp4netns must work (the dev image has it); pasta only where
 the Podman inside supports it as root (4.4 and later: Debian bookworm's 4.3 has no pasta mode), else the test fails.
-The agent's loopback is the containers' (they share its network), and none of the reserved IDs (the proxy's,
-PulseAudio's, tor's) is mapped.
+The agent's loopback is the containers' (they share its network namespace: a server of the agent's on 127.0.0.1,
+which the agent itself reaches first, answers a container too, and both are in the same namespace), a container's
+/dev/null can be written, and none of the reserved IDs (the proxy's, PulseAudio's, tor's) is mapped.
 
 Needs Podman, /dev/net/tun and the dev image variant (sandbox-ai build claude; sandbox-ai images recipe dev --from
 claude; sandbox-ai build dev), or SANDBOX_AI_NESTED_IMAGE naming an image with Podman and busybox-static; skipped
@@ -25,6 +26,8 @@ import subprocess
 import urllib.request
 
 import pytest
+
+import ci_annotations
 
 ROOT = Path(__file__).resolve().parents[1]
 PODMAN = shutil.which("podman")
@@ -62,13 +65,14 @@ def host_address():
 # placeholders are filled in by the test.
 SCRIPT = r"""
 result() { echo "RESULT $1 $2"; }
-attempt() {  # NAME, then the command that fetches the page: reached, or refused
+attempt() {  # NAME, then the command that fetches the page: reached, or refused (NAME_said: its own last words)
   name=$1; shift
   if "$@" >/tmp/$name.out 2>/tmp/$name.err && grep -q '"method": "GET"' /tmp/$name.out; then
     result "$name" reached
   else
     result "$name" refused
   fi
+  result "${name}_said" "$(tail -c 200 /tmp/$name.err | tr '\n' ' ')"
 }
 python3 -I -c 'import sys; print("RESULT uid_map", sys.argv[1].replace("\n", ";"))' "$(cat /proc/self/uid_map)"
 python3 -I -c 'import sys; print("RESULT gid_map", sys.argv[1].replace("\n", ";"))' "$(cat /proc/self/gid_map)"
@@ -92,13 +96,32 @@ mkdir -p /tmp/rootfs/bin /tmp/rootfs/tmp && cp /bin/busybox /tmp/rootfs/bin/busy
 IMG=localhost/nested-probe:latest
 podman run --rm $IMG /bin/busybox echo hello >/tmp/run.out 2>/tmp/run.err \
   && result run "$(cat /tmp/run.out)" || result run "failed:$(tail -c 400 /tmp/run.err | tr '\n' ' ')"
-# The agent's loopback is the containers' (they share its network namespace).
-python3 -I -m http.server 8765 --bind 127.0.0.1 --directory /tmp/rootfs >/dev/null 2>&1 &
-sleep 2
-podman run --rm $IMG /bin/busybox wget -q -T 10 -O /dev/null http://127.0.0.1:8765/bin/ \
-  && result loopback ok || result loopback failed
-# A destination that answers when it is reached, one port per attempt: refused for every one of them.
 WGET="/bin/busybox wget -q -T 10 -O -"
+# The agent's loopback is the containers' (they share its network namespace): a server of the agent's own there,
+# asked by the agent itself first (the control: until it answers, 20 s at most - what is not there, no container
+# reaches), then from a container. What each says when it fails is kept (CI's first run this far said "failed",
+# no more), and so is whose network namespace a container is in, what listens there and what the server saw.
+python3 -I -m http.server 8765 --bind 127.0.0.1 --directory /tmp/rootfs >/tmp/http.log 2>&1 &
+HTTP=$!
+tries=0
+until $WGET http://127.0.0.1:8765/bin/ >/dev/null 2>/tmp/loopback_agent.err; do
+  tries=$((tries + 1)); [ $tries -ge 20 ] && break; sleep 1
+done
+[ $tries -lt 20 ] && result loopback_agent ok \
+  || result loopback_agent "failed:$(tail -c 300 /tmp/loopback_agent.err | tr '\n' ' ') server: $(tail -c 300 /tmp/http.log | tr '\n' ' ')"
+podman run --rm $IMG $WGET http://127.0.0.1:8765/bin/ >/tmp/loopback.out 2>/tmp/loopback.err \
+  && result loopback ok || result loopback "failed:$(tail -c 400 /tmp/loopback.err | tr '\n' ' ')"
+result netns "$(readlink /proc/self/ns/net) $(podman run --rm $IMG /bin/busybox readlink /proc/self/ns/net 2>&1 | tail -n 1 | cut -c1-200)"
+result listening "$(podman run --rm $IMG /bin/busybox netstat -ltn 2>&1 | tr '\n' ';' | cut -c1-500)"
+result addresses "$(podman run --rm $IMG /bin/busybox ip -o addr 2>&1 | cut -c1-90 | tr '\n' ';' | cut -c1-500)"
+result served "$(grep -c 'GET /bin/' /tmp/http.log) $(tail -n 3 /tmp/http.log | tr '\n' '|' | cut -c1-300)"
+result server "$(kill -0 $HTTP 2>/dev/null && echo alive || echo gone) after the containers"
+# What Podman itself says of a container's network as it starts one (its debug lines that name it).
+result run_debug "$(podman --log-level=debug run --rm $IMG /bin/busybox true 2>&1 | grep -i -E 'netns|network|slirp|cni' | tail -n 12 | tr '\n' '|' | cut -c1-2500)"
+# A container's /dev/null is one it can write (crun binds the agent's own into it).
+podman run --rm $IMG /bin/busybox sh -c 'echo written >/dev/null' >/dev/null 2>/tmp/devnull.err \
+  && result devnull ok || result devnull "failed:$(tail -c 300 /tmp/devnull.err | tr '\n' ' ')"
+# A destination that answers when it is reached, one port per attempt: refused for every one of them.
 attempt agent $WGET http://HOST:PORT_agent/agent
 attempt shared podman run --rm $IMG $WGET http://HOST:PORT_shared/shared
 attempt user1 podman run --rm --user 1:1 $IMG $WGET http://HOST:PORT_user1/user1
@@ -110,7 +133,7 @@ for mode in slirp4netns pasta; do
     result $mode "unavailable:$(tail -c 300 /tmp/$mode-start.err | tr '\n' ' ')"
   fi
 done
-kill %1 2>/dev/null
+kill $HTTP 2>/dev/null
 exit 0
 """
 
@@ -140,6 +163,42 @@ def known_limitation(found):
         return (f"{KNOWN_LIMITATION}: crun may not mount mqueue in the sandbox here ({run[len('failed:'):][:200]}); "
                 "--nested-containers stays not live-tested")
     return None
+
+
+def loopback_problem(found):
+    """Why the containers do not have the agent's loopback, in words - or None when a container reached the agent's
+    server there. Told apart, because each has another remedy: the test's own server never answered (nothing is
+    known of the containers); the containers are in another network namespace than the agent (the drop-in's
+    netns = "host" was not taken: they are not behind the sandbox's firewall and proxy as the agent is, whatever
+    else passes); or they share it and the connection still failed (what the container's wget said)."""
+    agent, container = found.get("loopback_agent"), found.get("loopback")
+    if agent != "ok":
+        return (f"the test's own server on the agent's loopback did not answer the agent itself ({agent!r}): "
+                f"nothing is known of the containers (a container's attempt: {container!r})")
+    own, _, inside = found.get("netns", "").partition(" ")
+    if own.startswith("net:[") and inside.startswith("net:[") and own != inside:
+        return (f"the containers do not share the agent's network namespace (the agent {own}, a container {inside}) "
+                f"although sandbox-ai's containers.conf says netns = \"host\": Podman "
+                f"{found.get('podman_version', 'unknown')} inside did not take it; a container's attempt at the "
+                f"agent's loopback: {container!r}")
+    if container != "ok":
+        shared = "in the agent's network namespace" if own and own == inside else \
+            f"(its network namespace: {inside or 'not read'}; the agent's: {own or 'not read'})"
+        return (f"a container {shared} did not reach the agent's server on 127.0.0.1: {container!r}; the server "
+                f"saw: {found.get('served')!r} and is {found.get('server')!r}; listening for the container: "
+                f"{found.get('listening')!r}")
+    return None
+
+
+def account(code, found, stderr, lines=50):
+    """What a failure says (it becomes CI's annotation: what matters first, in a few KB): the exit status, every
+    result but Podman's long debug account, the last LINES lines of the start's standard error, then that account.
+    Everything in full goes to the report (ci_annotations.report: "nested")."""
+    brief = {name: value for name, value in found.items() if name not in ("podman_debug", "run_debug")}
+    debug = "\n".join(found.get(name, "").replace("|", "\n").strip() for name in ("run_debug", "podman_debug"))
+    return (f"exit {code}\nRESULTS:\n{json.dumps(brief, indent=1)}\n"
+            f"STDERR (its last {lines} lines; all of it in the report):\n"
+            + "\n".join(stderr.splitlines()[-lines:]) + f"\nPODMAN'S DEBUG ACCOUNT:\n{debug.strip()}")
 
 
 def covered_outside(text):
@@ -187,17 +246,23 @@ def test_podman_inside_the_sandbox_stays_behind_its_firewall_and_proxy(tmp_path)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=60)
-            pytest.fail(f"the nested sandbox timed out\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+            ci_annotations.report("nested", ci_annotations.sections({
+                "results (the sandbox timed out)": json.dumps(results(stdout), indent=1), "standard error": stderr,
+                "standard output": stdout}))
+            pytest.fail("the nested sandbox timed out\n" + account("none (timed out)", results(stdout), stderr))
     finally:
         for started in servers.values():
             started["stop"]()
     found = results(stdout)
     found["ipc"] = "shared" if "no IPC namespace of its own" in stderr else "own"
-    # Everything, in full, with every failure: CI shows only the failure's lines (they become an annotation).
     (tmp_path / "stdout.txt").write_text(stdout)
     (tmp_path / "stderr.txt").write_text(stderr)
-    report = (f"exit {process.returncode}\nRESULTS:\n{json.dumps(found, indent=1)}\nSTDOUT:\n{stdout}\n"
-              f"STDERR:\n{stderr}")
+    logged = "\n".join(p.read_text(errors="replace") for p in logs.rglob("connections-*.jsonl"))
+    # A failure says what matters first (CI's annotation of it); everything in full is the report beside it.
+    report = account(process.returncode, found, stderr)
+    ci_annotations.report("nested", ci_annotations.sections({
+        "exit": str(process.returncode), "results": json.dumps(found, indent=1), "standard error": stderr,
+        "standard output": stdout, "the proxy's connection log (its end)": logged[-4000:]}))
     if process.returncode != 0:
         pytest.fail(f"the nested sandbox ended with {process.returncode}\n{report}")
     # The agent's own user namespace: root is the sandbox's root, the reserved IDs are mapped nowhere.
@@ -211,9 +276,14 @@ def test_podman_inside_the_sandbox_stays_behind_its_firewall_and_proxy(tmp_path)
         seen = {key: found.get(key) for key in ("podman_version", "podman_info", "caps", "unshare_ipc", "ipc_ns",
                                                "mqueue")}
         pytest.skip(" ".join(f"{limitation} {json.dumps(seen)}".split()))
-    for name, wanted in (("unshare", "ok"), ("import", "ok"), ("run", "hello"), ("loopback", "ok")):
+    for name, wanted in (("unshare", "ok"), ("import", "ok"), ("run", "hello")):
         if found.get(name) != wanted:
             pytest.fail(f"{name}: {found.get(name)!r}, not {wanted!r}\n{report}")
+    problem = loopback_problem(found)
+    if problem:
+        pytest.fail(f"loopback: {problem}\n{report}")
+    if found.get("devnull") != "ok":
+        pytest.fail(f"devnull: a container cannot write its /dev/null: {found.get('devnull')!r}\n{report}")
     required = ["agent", "shared", "user1", "slirp4netns"]
     if pasta_supported(found.get("podman_version")):
         required.append("pasta")
@@ -222,7 +292,6 @@ def test_podman_inside_the_sandbox_stays_behind_its_firewall_and_proxy(tmp_path)
     for name in required:
         if found.get(name) != "refused":  # "unavailable" fails here too
             pytest.fail(f"{name}: {found.get(name)!r}, not refused\n{report}")
-    logged = "\n".join(p.read_text(errors="replace") for p in logs.rglob("connections-*.jsonl"))
     for name in required:
         port = servers[name]["http"]
         if f"{address}:{port}" not in logged:

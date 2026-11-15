@@ -209,7 +209,8 @@ def test_the_release_files_leave_the_internal_documents_out(tmp_path):
     spec = importlib.util.spec_from_file_location("make_dist_ht3", ROOT / "scripts/make_dist.py")
     make_dist = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(make_dist)
-    assert all((ROOT / name).is_file() for name in INTERNAL_DOCS), "still in the checkout"
+    # In the private checkout they are there (and must stay out of the release files); the public snapshot has them
+    # removed already, and the release files must not ask for them there either.
     assert not set(INTERNAL_DOCS) & set(make_dist.release_files())
     with tarfile.open(make_dist.bundle(tmp_path, "0.0.0")) as bundle:
         names = {member.name.split("/", 1)[1] for member in bundle.getmembers() if "/" in member.name}

@@ -55,6 +55,30 @@ def sh(*command, data=None, check=True):
     return done.stdout.decode(errors="replace")
 
 
+# What a namespace looks like, for the report of a failure: CI's job log cannot be read from everywhere, the report
+# can (tests/ci_annotations.py). The connections of the lookups: where each went after the redirect, and with which
+# address it left ("src=... dst=..." twice: as it was sent, and as its answer is expected).
+NAMESPACE_FACTS = (("ip", "-br", "addr"), ("ip", "-4", "route"), ("ip", "-6", "route"),
+                   ("conntrack", "-L", "-p", "udp", "--orig-port-dst", "53"),
+                   ("grep", "-w", "udp", "/proc/net/nf_conntrack"))
+
+
+def facts(prefix=(), commands=NAMESPACE_FACTS, limit=2500):
+    """{command: what it printed (its last LIMIT characters), or how it failed} of COMMANDS, each run with PREFIX
+    (nsenter into a namespace). Never fails and never waits long: a tool that is not there is said, no more."""
+    found = {}
+    for command in commands:
+        try:
+            done = subprocess.run([*prefix, *command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            said = done.stdout.decode(errors="replace")
+            if done.returncode != 0:
+                said = f"failed ({done.returncode}): {done.stderr.decode(errors='replace')} {said}"
+        except (OSError, subprocess.SubprocessError) as exc:
+            said = f"did not run: {exc}"
+        found[" ".join(command)] = said.strip()[-limit:]
+    return found
+
+
 # --- the MCP server's attempts (--client, inside the vpn namespace) ---------------------------------------------
 
 REFUSED = {errno.EACCES, errno.EPERM, errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH}
@@ -268,6 +292,15 @@ def main(runtime_path):
         report["killswitch"] = sh(*inside, sys.executable, "-I", runtime_path, "killswitch", check=False).strip()
         report["rules"] = sh(*inside, "nft", "list", "ruleset", check=False)
         report["up"] = attempts()
+        # Both ends as they are right after the attempts: the routes a lookup takes before and after the redirect,
+        # the tunnel's counters (WireGuard's server counts a packet with a source address that is not the peer's as
+        # a receive error and drops it), who listens outside.
+        report["facts"] = {
+            "vpn": facts(inside, NAMESPACE_FACTS + (
+                ("ip", "route", "get", LAN), ("ip", "route", "get", TUNNEL_SERVER, "from", OWN),
+                ("ip", "-s", "link", "show", "wg0"), ("wg", "show", "wg0"))),
+            "outside": facts((), (("ip", "-br", "addr"), ("ip", "-s", "link", "show", "wgs"), ("wg", "show", "wgs"),
+                                  ("ss", "-H", "-lun")))}
 
         # The VPN's server stops answering: nothing may take another way.
         sh("ip", "link", "set", "wgs", "down")

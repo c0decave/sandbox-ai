@@ -216,7 +216,7 @@ def refused(agent, args, environ):
     if found is None and agent == "qwen" and environ.get("QWEN_CODE_RELAUNCH_ARGS"):
         try:
             relaunch = json.loads(environ["QWEN_CODE_RELAUNCH_ARGS"])
-        except ValueError:
+        except (ValueError, RecursionError):
             relaunch = None
         if isinstance(relaunch, list):
             found = refused_args(agent, relaunch)

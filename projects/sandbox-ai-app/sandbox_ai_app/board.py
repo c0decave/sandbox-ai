@@ -639,14 +639,13 @@ def service_props(sai, spec):
 
 
 def service_spec(props):
-    """The --service value of a service node: only what differs from the defaults, in a fixed order (the same text
-    as sandbox-ai's services.spec_text), or the text as it was given when it could not be read."""
+    """The --service value of a service node: its image always (without image= the launcher takes the name as the
+    image, which surprised a user who never named one), then only what differs from the defaults, in a fixed order
+    (the same text as sandbox-ai's services.spec_text), or the text as it was given when it could not be read."""
     if props.get("raw"):
         return str(props["raw"])
-    items = []
     name = str(props.get("name", ""))
-    if props.get("image") and props["image"] != name:
-        items.append(f"image={props['image']}")
+    items = [f"image={props.get('image') or name}"]
     ports = [int(p) for p in props.get("ports") or [] if str(p).isdigit()]
     items += [f"port={port}" for port in ports]
     ready = props.get("ready")
@@ -670,6 +669,48 @@ def service_spec(props):
         if key in props and str(props[key]) != str(SERVICE_DEFAULTS[key]):
             items.append(f"{key}={props[key]}")
     return name + (":" + ",".join(items) if items else "")
+
+
+def your_images_text(user_images):
+    """USER_IMAGES (their names) as a short list, or "none yet"."""
+    names = sorted(str(name) for name in user_images or ())
+    return ", ".join(printable(name) for name in names[:12]) + (", …" if len(names) > 12 else "") if names \
+        else tr("none yet")
+
+
+def image_problem(name, image, user_images):
+    """What is said of the service NAME whose image IMAGE is none of USER_IMAGES (their names): which service, which
+    image, the images there are, and where to add one; an image that is its name (--service NAME without image=:
+    its name is its image) said so."""
+    if image == name:
+        return tr("The service {name} has no image of yours: without an image chosen its name is its image, and you "
+                  "have no image {image} (your images: {mine}). Choose one of yours in its properties, or add one "
+                  "(Images page, Your images).", name=printable(name), image=printable(image or "?"),
+                  mine=your_images_text(user_images))
+    return tr("The service {name}: {image} is none of your images (your images: {mine}). Choose one of yours in its "
+              "properties, or add it (Images page, Your images).", name=printable(name), image=printable(image or "?"),
+              mine=your_images_text(user_images))
+
+
+def service_image_problems(sai, specs, user_images):
+    """[text] of the --service values SPECS whose image is none of USER_IMAGES (their names; None: not known, nothing
+    said): the Start page's check before a start (a value sandbox-ai's parser refuses is the launcher's to say)."""
+    if user_images is None:
+        return []
+    module = services_module(sai)
+    found = []
+    for spec in specs or []:
+        try:
+            props = dict(module.parse_spec(str(spec))) if module is not None else None
+        except ValueError:
+            continue
+        if props is None:
+            name, _, rest = str(spec).partition(":")
+            image = next((item.partition("=")[2] for item in rest.split(",") if item.startswith("image=")), name)
+            props = {"name": name, "image": image}
+        if props.get("image") not in user_images:
+            found.append(image_problem(props.get("name", "?"), props.get("image"), user_images))
+    return found
 
 
 def service_problems(sai, board, user_images=None):
@@ -704,8 +745,7 @@ def service_problems(sai, board, user_images=None):
             add(tr("Choose the image of the service {name}: one of your images (Images page, Your images).",
                    name=printable(props["name"])), node)
         elif user_images is not None and props.get("image") not in user_images:
-            add(tr("{image} is none of your images: add it (Images page, Your images), or choose another.",
-                   image=printable(props.get("image") or "?")), node)
+            add(image_problem(props["name"], props.get("image"), user_images), node)
         if props["name"] in names:
             add(tr("Two services are named {name}.", name=printable(props["name"])), node)
         names[props["name"]] = node
@@ -993,6 +1033,21 @@ def _replace(value, function):
     if isinstance(value, dict):
         return {key: _replace(item, function) for key, item in value.items()}
     return value
+
+
+IMAGE_MARKER = re.compile(r"(?:^|[:,])image=(<(?:text|image):[a-z0-9][a-z0-9-]{0,31}>)")
+
+
+def image_markers(texts):
+    """The placeholders (<kind:name>) that stand as a service's image (image=<text:postgres> in a --service value) in
+    TEXTS (strings, lists and objects walked): what is filled in there is the name of one of your images."""
+    return {match for text in _strings(list(texts) if not isinstance(texts, (str, dict)) else texts)
+            for match in IMAGE_MARKER.findall(text)}
+
+
+def board_image_markers(board):
+    """image_markers of BOARD's service parts (a part whose --service value holds a placeholder keeps it as given)."""
+    return image_markers([str(node.props.get("raw") or "") for node in board.of_kind("service")])
 
 
 def placeholder_label(board, marker):

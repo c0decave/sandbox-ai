@@ -1200,10 +1200,24 @@ def mcp_dns_resolver(tunnel):
     return FALLBACK_DNS[0]
 
 
+def mcp_dns_source(tunnel):
+    """The tunnel's own IPv4 address - the first of its addresses ("10.66.0.2/32" as a WireGuard profile writes it,
+    or bare as OpenVPN and Tailscale report theirs) - or None: the source address of an MCP server's redirected
+    lookups (mcp_dns_rules)."""
+    for address in tunnel.get("addresses") or []:
+        if not isinstance(address, str):  # (ipaddress takes a number for an address too)
+            continue
+        with contextlib.suppress(ValueError):
+            found = ipaddress.ip_interface(address).ip
+            if found.version == 4:
+                return str(found)
+    return None
+
+
 MCP_DNS_TUNNEL_CHAIN = "mcp_dns_tunnel_only"
 
 
-def mcp_dns_rules(resolver, interface, mark=CHECK_MARK):
+def mcp_dns_rules(resolver, interface, mark=CHECK_MARK, source=None):
     """For the VPN container of an MCP image server (payload "mcp"): every lookup on port 53, whatever resolver the
     server's /etc/resolv.conf names (the one Podman gave the VPN container: pasta's forwarder or the host's own),
     goes to the VPN's RESOLVER, through the tunnel (INTERFACE); one over IPv6 is refused. The runtime's own checks
@@ -1217,11 +1231,28 @@ def mcp_dns_rules(resolver, interface, mark=CHECK_MARK):
     table gets two more rules: its output chain lets a redirected lookup (conntrack: destination NAT) to RESOLVER:53
     pass, and a postrouting chain of its own - which sees the interface the packet really leaves by - drops such a
     lookup that would leave by any other interface than INTERFACE (the tunnel gone, its route back on the uplink).
-    Both in the kill switch's table: they never outlive it, nor it them."""
+    Both in the kill switch's table: they never outlive it, nor it them.
+
+    SOURCE (the tunnel's own IPv4 address, mcp_dns_source): the address a redirected lookup leaves the tunnel with.
+    The kernel chooses a packet's source address with its first route too, and the redirect changes the destination
+    only: a lookup sent to a resolver on the uplink's own network went into the tunnel with the UPLINK's address,
+    which the VPN's server drops - WireGuard as not one of the peer's allowed addresses, any provider as not the
+    address it gave (CI's killswitch job, once the lookup passed the kill switch: "no answer from 192.168.50.1"; on a
+    host whose resolver is on its own network, as pasta copies it into the container, no MCP server behind a VPN
+    resolved a name). A postrouting NAT chain gives each redirected lookup that leaves by INTERFACE the address
+    SOURCE (snat: of the redirect's own kernel module, and the address is known - no masquerade to load); its answer
+    comes back through the same connection. Without SOURCE (a tunnel without an IPv4 address) there is no such
+    chain."""
     resolver = ipaddress.IPv4Address(resolver)
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", str(interface or "")):
         raise ValueError(f"not an interface name: {interface!r}")
     redirected = f"ct status dnat ip daddr {resolver}"
+    source_chain = []
+    if source is not None:
+        source = ipaddress.IPv4Address(source)
+        source_chain = [" chain dns_source { type nat hook postrouting priority 100; policy accept;",
+                        f'  {redirected} udp dport 53 oifname "{interface}" snat ip to {source}',
+                        f'  {redirected} tcp dport 53 oifname "{interface}" snat ip to {source}', " }"]
     return "\n".join([
         f"table inet {MCP_DNS_TABLE} {{",
         # (no nft keyword as a chain's name: "redirect" made nft -f fail, and with it every such VPN container)
@@ -1229,6 +1260,7 @@ def mcp_dns_rules(resolver, interface, mark=CHECK_MARK):
         f"  meta mark {int(mark):#x} return",
         f"  meta nfproto ipv4 udp dport 53 dnat ip to {resolver}:53",
         f"  meta nfproto ipv4 tcp dport 53 dnat ip to {resolver}:53", " }",
+        *source_chain,
         " chain dns_refuse { type filter hook output priority -6; policy accept;",
         f"  meta mark {int(mark):#x} return",
         "  meta nfproto ipv6 udp dport 53 reject with icmpx type admin-prohibited",
@@ -2503,7 +2535,10 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None, clock=time.monotoni
                 raise ValueError("a Tailscale profile without an exit node carries only the tailnet; it cannot be "
                                  "an MCP server's way out")
             tunnel["mcp_dns"] = mcp_dns_resolver(tunnel)
-            runner.run(["nft", "-f", "-"], data=mcp_dns_rules(tunnel["mcp_dns"], tunnel["interface"]))
+            source = mcp_dns_source(tunnel)
+            if source:
+                tunnel["mcp_dns_source"] = source
+            runner.run(["nft", "-f", "-"], data=mcp_dns_rules(tunnel["mcp_dns"], tunnel["interface"], source=source))
         emit("ready", out=out, tunnel=tunnel, checks=checks, hosts=hosts)
     except Exception as exc:  # noqa: BLE001 - everything ends as an event the launcher shows
         emit("error", out=out, message=redact(f"{exc}", secret_values(payload)))

@@ -131,7 +131,7 @@ class Turn:
         line = raw.decode("utf-8", "replace").rstrip("\r\n")
         try:
             event = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             event = None
         if not isinstance(event, dict):
             if line.strip():

@@ -3148,16 +3148,39 @@ class SandboxAI:
                        and isinstance(e.get("target"), str)
                        and re.fullmatch(KIT_NAME, str(e["target"]).partition("@")[0])})
 
-    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
-                     "--git-token-secret")
+    def host_agent_images(self, host):
+        """[Podman image name] of the agents' images and their variants on HOST (`sandbox-ai images --json` there:
+        localhost/claude-sandbox:latest ...), what --image takes. ValueError: not answered."""
+        data = self.host_json(host, "images", "--json", timeout=90)
+        if not isinstance(data, list):
+            raise ValueError("sandbox-ai images --json: not a list of images")
+        return sorted({str(e["image"]) for e in data if isinstance(e, dict) and isinstance(e.get("image"), str)
+                       and e["image"].strip()})
+
+    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--image", "--service",
+                     "--secret-env", "--api-key", "--git-token-secret")
 
     def host_start_choices(self, host):
         """({option: [name]}, {option: problem}) of what HOST has for the Start page's choosers: --vpn its VPN profiles
         (vpn list --json), --kit its kits that are named (kits list --json), --identity its identities (identities
-        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants (images --json),
+        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants and --image the
+        agents' images (images --json, read once), --service your images (images list; this machine: their record),
         --secret-env, --api-key and --git-token-secret the names of its secrets (secrets list, read once; never a
         value). A list that could not be read is a problem (its field stays typed in)."""
-        secrets_read = []
+        secrets_read, images_read = [], []
+
+        def agent_images():
+            if not images_read:
+                try:
+                    images_read.append((self.host_json(host, "images", "--json", timeout=90), None))
+                except Exception as exc:  # noqa: BLE001 - said for both options
+                    images_read.append((None, exc))
+            data, problem = images_read[0]
+            if problem is not None:
+                raise problem
+            if not isinstance(data, list):
+                raise ValueError("sandbox-ai images --json: not a list of images")
+            return [e for e in data if isinstance(e, dict)]
 
         def secret_names():
             if not secrets_read:
@@ -3176,7 +3199,13 @@ class SandboxAI:
                               and k.get("kind") not in ("always", "default")],
             "--identity": lambda: list(self.host_identities(host)),
             "--mcp": lambda: [row[0] for row in self.host_mcp_servers(host)],
-            "--image-variant": lambda: self.host_image_variants(host),
+            # (a name several agents have a variant of is listed as NAME@AGENT: --image-variant takes NAME)
+            "--image-variant": lambda: [str(e["target"]).partition("@")[0] for e in agent_images()
+                                        if e.get("variant") and isinstance(e.get("target"), str)
+                                        and re.fullmatch(KIT_NAME, str(e["target"]).partition("@")[0])],
+            "--image": lambda: [str(e["image"]) for e in agent_images() if isinstance(e.get("image"), str)],
+            "--service": lambda: [str(row["name"]) for row in self.user_images(host)
+                                  if isinstance(row, dict) and isinstance(row.get("name"), str)],
             "--secret-env": secret_names, "--api-key": secret_names, "--git-token-secret": secret_names,
         }
         found, problems = {}, {}

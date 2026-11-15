@@ -32,6 +32,7 @@ import sys
 
 import pytest
 
+import ci_annotations
 from test_mcp_vpn_live import PREFIX
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,12 +61,34 @@ pytestmark = pytest.mark.skipif(not mount_namespace(), reason="needs nft, ip, un
                                 "kernel module")
 
 
+def report_text(found, stderr=""):
+    """The probe's report for a failed CI step's annotations (tests/ci_annotations.py): the phases that failed in the
+    probe first, then each phase as it came, then the namespaces' addresses, routes, connections and rules (the
+    phase "network"), then what the probe said on standard error."""
+    failed_first = [name for name, value in found.items() if isinstance(value, dict) and "error" in value]
+    network = found.get("network")
+    listed = isinstance(network, dict) and "error" not in network  # (else the phase failed: said as it is)
+    document = {name: value for name, value in found.items() if not (listed and name == "network")}
+    for where, commands in (network if listed else {}).items():
+        document.update({f"{where}$ {command}": text for command, text in commands.items()}
+                        if isinstance(commands, dict) else {f"network: {where}": commands})
+    if stderr.strip():
+        document["the probe's standard error"] = stderr[-3000:]
+    return ci_annotations.sections(document, order=failed_first)
+
+
 @pytest.fixture(scope="module")
 def report():
     done = subprocess.run([*PREFIX, sys.executable, "-I", str(PROBE), str(RUNTIME)], capture_output=True, text=True,
                           timeout=900)
+    try:
+        found = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        found = None
+    ci_annotations.report("mcp-lent-vpn", report_text(
+        found if isinstance(found, dict) else {"stdout": done.stdout[-3000:]}, done.stderr))
     assert done.returncode == 0, f"the probe failed ({done.returncode}): {done.stderr[-3000:]}"
-    found = json.loads(done.stdout.strip().splitlines()[-1])
+    assert isinstance(found, dict), f"the probe printed no report: {done.stdout[-1000:]!r}"
     assert "setup" not in found, f"the probe's setup failed: {found['setup']}"
     return found
 

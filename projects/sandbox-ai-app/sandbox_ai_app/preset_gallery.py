@@ -753,6 +753,14 @@ class PlaceholderForm(QDialog):
             field = NameField("secret", self.sai, self.host, placeholder=tr("empty: fill in later"))
             field.setText(default)
             return field
+        if getattr(placeholder, "names", "") == "image" or \
+                placeholder.marker in B.image_markers(getattr(self.preset, "options", ()) or ()):
+            # a service's image: your images there to choose from (none yet: where one is added), any other typed
+            from .name_fields import NameField
+            field = NameField("image", self.sai, self.host, placeholder=tr("empty: fill in later"))
+            field.setAccessibleName(placeholder.label)
+            field.setText(default)
+            return field
         combo = QComboBox()
         combo.setEditable(placeholder.kind != "gpu")
         combo.addItem("")

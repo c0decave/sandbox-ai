@@ -26,6 +26,8 @@ import sys
 
 import pytest
 
+import ci_annotations
+
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "tests" / "mcp_vpn_probe.py"
 RUNTIME = ROOT / "sandbox" / "vpn_runtime.py"
@@ -56,13 +58,46 @@ pytestmark = pytest.mark.skipif(PREFIX is None, reason="needs nft, ip, unshare, 
                                                        "with CAP_NET_ADMIN and WireGuard's kernel module")
 
 
+def report_text(found, stderr=""):
+    """The probe's report for a failed CI step's annotations (tests/ci_annotations.py), what a failure needs first:
+    what the server tried with the VPN up and who arrived outside, both ends' addresses, routes, connections and
+    counters, the rules loaded - then the rest."""
+    document = {}
+    for phase in ("up", "before"):
+        if isinstance(found.get(phase), dict):
+            document[f"{phase}: results"] = found[phase].get("results")
+            document[f"{phase}: arrived"] = found[phase].get("arrived")
+        if phase == "up":
+            for where, commands in (found.get("facts") or {}).items():
+                document.update({f"{where}$ {command}": said for command, said in commands.items()})
+            document["rules"] = found.get("rules") or ""
+            document["events"] = found.get("events")
+    document.update({key: value for key, value in found.items()
+                     if key not in ("up", "before", "facts", "rules", "events")})
+    if stderr.strip():
+        document["the probe's standard error"] = stderr[-3000:]
+    return ci_annotations.sections(document)
+
+
+def said(found):
+    """FOUND as an assertion's message: as text. (pytest writes an object given as the message with reprlib - four
+    entries of a dict, then "..." - and that was all CI showed of the eleven attempts.)"""
+    return json.dumps(found)
+
+
 @pytest.fixture(scope="module")
 def report():
     done = subprocess.run([*PREFIX, sys.executable, "-I", str(PROBE), str(RUNTIME)], capture_output=True, text=True,
                           timeout=600)
+    try:
+        found = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        found = None
+    ci_annotations.report("mcp-vpn", report_text(found if isinstance(found, dict) else {"stdout": done.stdout[-3000:]},
+                                                 done.stderr))
     assert done.returncode == 0, done.stderr[-3000:]
-    found = json.loads(done.stdout.strip().splitlines()[-1])
-    assert found.get("up"), f"the VPN did not come up: {found.get('events')} {found.get('stderr', '')}"
+    assert isinstance(found, dict), f"the probe printed no report: {done.stdout[-1000:]!r}"
+    assert found.get("up"), f"the VPN did not come up: {said(found.get('events'))} {found.get('stderr', '')}"
     return found
 
 
@@ -73,17 +108,20 @@ def peers(phase):
 def test_without_the_vpn_every_way_is_open(report):
     """(the control: a leak would show)"""
     before = report["before"]["results"]
-    assert before["tcp internet"] == before["tcp lan"] == before["tcp6 lan"] == "connected", before
-    assert before["dns lan resolver"] == [LAN_ANSWER] and before["dns public resolver"] == [LAN_ANSWER], before
+    assert before["tcp internet"] == before["tcp lan"] == before["tcp6 lan"] == "connected", said(before)
+    assert before["dns lan resolver"] == [LAN_ANSWER] and before["dns public resolver"] == [LAN_ANSWER], said(before)
     assert OWN in peers(report["before"]) and "fd00:50::2" in peers(report["before"])
 
 
 def test_the_vpn_comes_up_with_its_kill_switch_and_the_redirect(report):
     assert report["events"][-1]["event"] == "ready"
     assert report["events"][-1]["tunnel"]["mcp_dns"] == "10.66.0.1"
+    assert report["events"][-1]["tunnel"]["mcp_dns_source"] == TUNNEL
     assert json.loads(report["killswitch"]) == {"ok": True}
     rules = report["rules"]
     assert "table inet sandbox_ai_vpn" in rules and "table inet sandbox_ai_mcp_dns" in rules
+    # A redirected lookup leaves with the tunnel's own address (the kernel loaded the rule as it was written).
+    assert f"snat ip to {TUNNEL}" in rules and "chain dns_source" in rules, rules
 
 
 def test_its_connections_leave_only_through_the_tunnel_with_the_tunnels_address(report):
@@ -94,12 +132,18 @@ def test_its_connections_leave_only_through_the_tunnel_with_the_tunnels_address(
 
 
 def test_its_lookups_go_to_the_vpns_resolver_whatever_it_asks(report):
+    """The resolver on the uplink's own network (what pasta gives a container of a host whose resolver is on its
+    LAN) and a public one: both answered by the VPN's resolver, and both asked with the TUNNEL's address - the lookup
+    at the LAN's resolver was first routed to the uplink, with the uplink's address, which the VPN's server drops
+    (CI: "no answer from 192.168.50.1")."""
     up = report["up"]
-    assert up["results"]["dns lan resolver"] == [VPN_ANSWER], up["results"]
-    assert up["results"]["dns public resolver"] == [VPN_ANSWER], up["results"]
+    facts = "\n".join(f"{where}$ {command}\n{text}" for where, commands in (report.get("facts") or {}).items()
+                      for command, text in commands.items() if "conntrack" in command or "link show" in command)
+    assert up["results"]["dns lan resolver"] == [VPN_ANSWER], f"{said(up)}\n{facts}"
+    assert up["results"]["dns public resolver"] == [VPN_ANSWER], f"{said(up)}\n{facts}"
     lookups = [entry for entry in up["arrived"] if entry[0] == "dns"]
-    assert lookups and all(entry == ["dns", TUNNEL, "10.66.0.1"] for entry in lookups), lookups
-    assert up["results"]["dns6 lan resolver"].startswith("failed"), up["results"]
+    assert len(lookups) >= 2 and all(entry == ["dns", TUNNEL, "10.66.0.1"] for entry in lookups), said(up["arrived"])
+    assert up["results"]["dns6 lan resolver"].startswith("failed"), said(up["results"])
 
 
 def test_nothing_else_leaves_lan_host_endpoint_udp_ipv6(report):
@@ -108,7 +152,8 @@ def test_nothing_else_leaves_lan_host_endpoint_udp_ipv6(report):
         assert results[name] in ("refused", "timeout"), (name, results[name])
     for name in ("udp lan", "udp internet", "udp6 lan"):
         assert results[name] in ("refused", "sent"), (name, results[name])
-    assert OWN not in peers(report["up"]) and not any(":" in peer for peer in peers(report["up"])), report["up"]
+    assert OWN not in peers(report["up"]) and not any(":" in peer for peer in peers(report["up"])), \
+        said(report["up"])
     udp = [entry for entry in report["up"]["arrived"] if entry[0] == "udp"]
     assert all(entry[1] == TUNNEL for entry in udp), udp  # (through the tunnel is fine; past it nothing)
 

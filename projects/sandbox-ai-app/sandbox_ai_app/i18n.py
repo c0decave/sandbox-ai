@@ -362,9 +362,6 @@ TEXTS = {
     "A service's name is lower-case letters, digits and '-' (up to 24).": {
         'en': "A service's name is lower-case letters, digits and '-' (up to 24).",
         'de': "Der Name eines Service besteht aus Kleinbuchstaben, Ziffern und '-' (bis zu 24)."},
-    '{image} is none of your images: add it (Images page, Your images), or choose another.': {
-        'en': '{image} is none of your images: add it (Images page, Your images), or choose another.',
-        'de': '{image} ist keines Ihrer Images: Fügen Sie es hinzu (Seite Images, Eigene Images), oder wählen Sie ein anderes.'},
     'Choose the image of the service {name}: one of your images (Images page, Your images).': {
         'en': 'Choose the image of the service {name}: one of your images (Images page, Your images).',
         'de': 'Wählen Sie das Image des Dienstes {name}: eines Ihrer Images (Seite Images, Eigene Images).'},
@@ -14980,4 +14977,73 @@ TEXTS = {
     "none of its own (the start's, if it has one)": {
         'en': "none of its own (the start's, if it has one)",
         'de': 'keines eigenes (das des Starts, falls er eines hat)'},
+    'None yet - the Images page, Your images, adds one': {
+        'en': 'None yet - the Images page, Your images, adds one',
+        'de': 'Noch keines - die Seite Images, Eigene Images, fügt eines hinzu'},
+    'None yet - the Images page, New variant, makes one': {
+        'en': 'None yet - the Images page, New variant, makes one',
+        'de': 'Noch keine - die Seite Images, Neue Variante, legt eine an'},
+    "None yet - the Images page builds the agents' images": {
+        'en': "None yet - the Images page builds the agents' images",
+        'de': 'Noch keines - die Seite Images baut die Images der Agenten'},
+    'None yet - the LLM servers page adds one': {
+        'en': 'None yet - the LLM servers page adds one',
+        'de': 'Noch keiner - die Seite LLM-Server fügt einen hinzu'},
+    'None yet - the Credentials page keeps one': {
+        'en': 'None yet - the Credentials page keeps one',
+        'de': 'Noch keines - die Seite Zugangsdaten bewahrt eines auf'},
+    'None yet - the VPN page adds one': {
+        'en': 'None yet - the VPN page adds one',
+        'de': 'Noch keines - die Seite VPN fügt eines hinzu'},
+    'None yet': {
+        'en': 'None yet',
+        'de': 'Noch keines'},
+    'The service {name} has no image of yours: without an image chosen its name is its image, and you have no image {image} (your images: {mine}). Choose one of yours in its properties, or add one (Images page, Your images).': {
+        'en': 'The service {name} has no image of yours: without an image chosen its name is its image, and you have no image {image} (your images: {mine}). Choose one of yours in its properties, or add one (Images page, Your images).',
+        'de': 'Der Service {name} hat kein Image von Ihnen: Ohne gewähltes Image ist sein Name sein Image, und Sie haben kein Image {image} (Ihre Images: {mine}). Wählen Sie in seinen Eigenschaften eines Ihrer Images, oder fügen Sie eines hinzu (Seite Images, Eigene Images).'},
+    'The service {name}: {image} is none of your images (your images: {mine}). Choose one of yours in its properties, or add it (Images page, Your images).': {
+        'en': 'The service {name}: {image} is none of your images (your images: {mine}). Choose one of yours in its properties, or add it (Images page, Your images).',
+        'de': 'Der Service {name}: {image} ist keines Ihrer Images (Ihre Images: {mine}). Wählen Sie in seinen Eigenschaften eines Ihrer Images, oder fügen Sie es hinzu (Seite Images, Eigene Images).'},
+    'Your images on {host} could not be read (sandbox-ai images list), so the image of the service {name} is not checked: look at the Images page, Your images, then start again.': {
+        'en': 'Your images on {host} could not be read (sandbox-ai images list), so the image of the service {name} is not checked: look at the Images page, Your images, then start again.',
+        'de': 'Ihre Images auf {host} ließen sich nicht lesen (sandbox-ai images list), daher ist das Image des Service {name} nicht geprüft: Sehen Sie auf der Seite Images unter Eigene Images nach und starten Sie dann erneut.'},
+    "the agent's own base, or one of your images": {
+        'en': "the agent's own base, or one of your images",
+        'de': 'die eigene Basis des Agenten oder eines Ihrer Images'},
+    'None yet - Your images (this page) adds one': {
+        'en': 'None yet - Your images (this page) adds one',
+        'de': 'Noch keines - Eigene Images (diese Seite) fügt eines hinzu'},
+    'Add a service of one of your images on {host}': {
+        'en': 'Add a service of one of your images on {host}',
+        'de': 'Einen Service aus einem Ihrer Images auf {host} hinzufügen'},
+    'the Images page, Your images, adds one': {
+        'en': 'the Images page, Your images, adds one',
+        'de': 'die Seite Images, Eigene Images, fügt eines hinzu'},
+    'the Images page, New variant, makes one': {
+        'en': 'the Images page, New variant, makes one',
+        'de': 'die Seite Images, Neue Variante, legt eine an'},
+    "the Images page builds the agents' images": {
+        'en': "the Images page builds the agents' images",
+        'de': 'die Seite Images baut die Images der Agenten'},
+    'the VPN page adds one': {
+        'en': 'the VPN page adds one',
+        'de': 'die Seite VPN fügt eines hinzu'},
+    'the MCP servers page adds one': {
+        'en': 'the MCP servers page adds one',
+        'de': 'die Seite MCP-Server fügt einen hinzu'},
+    'the Kits & plugins page adds one': {
+        'en': 'the Kits & plugins page adds one',
+        'de': 'die Seite Kits & Plugins fügt eines hinzu'},
+    'the Identities page adds one': {
+        'en': 'the Identities page adds one',
+        'de': 'die Seite Identitäten fügt eine hinzu'},
+    'NAME:image=IMAGE,port=PORT per line - "+" adds one of your images': {
+        'en': 'NAME:image=IMAGE,port=PORT per line - "+" adds one of your images',
+        'de': 'NAME:image=IMAGE,port=PORT pro Zeile - "+" fügt eines Ihrer Images hinzu'},
+    "Your images on {host} could not be read (sandbox-ai images list), so the services' images are not checked: {error}": {
+        'en': "Your images on {host} could not be read (sandbox-ai images list), so the services' images are not checked: {error}",
+        'de': 'Ihre Images auf {host} ließen sich nicht lesen (sandbox-ai images list), daher sind die Images der Services nicht geprüft: {error}'},
+    "The preset's value “{label}” is {image}, none of your images (your images: {mine}): choose one of yours, or add it (Images page, Your images).": {
+        'en': "The preset's value “{label}” is {image}, none of your images (your images: {mine}): choose one of yours, or add it (Images page, Your images).",
+        'de': 'Der Wert „{label}“ der Vorlage ist {image}, keines Ihrer Images (Ihre Images: {mine}): Wählen Sie eines Ihrer Images, oder fügen Sie es hinzu (Seite Images, Eigene Images).'},
 }

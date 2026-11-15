@@ -638,6 +638,13 @@ def main(runtime_path):
                                                    "tcp api, another port": ["tcp", API, PORT],
                                                    "udp internet": ["udp", INTERNET, UDP_PORT]}))
 
+            # --- the namespaces as they are with everything up: for the report of a failure (CI's annotations) -
+            phase("network", lambda: {
+                **{name: base.facts(inside[name], base.NAMESPACE_FACTS + (("nft", "list", "ruleset"),), limit=6000)
+                   for name in inside},
+                "outside": base.facts((), (("ip", "-br", "addr"), ("ip", "-s", "link", "show", "wgs"),
+                                           ("wg", "show", "wgs"), ("ss", "-H", "-lun")))})
+
             # --- sandbox-ai net cut: the supervisor's own kill switch, loaded into the start's namespace -------
             network = srt.RuntimeNetwork({"loopback": [], "https": [f"{API}/32"]}, None,
                                          lambda script: sh(*inside["start"], "nft", "-f", "-", data=script.encode()))

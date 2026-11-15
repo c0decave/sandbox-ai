@@ -51,7 +51,9 @@ class Placeholder:
     optional: bool = False  # left empty: what holds it is left out instead
     follows: str = ""  # the marker of an LLM server whose VPN this one is (filled in from its registration)
     default: str = ""  # what the form offers first (sandbox-ai's presets: the value's default, e.g. a port)
-    names: str = ""  # "secret": a secret's name (sandbox-ai's presets: a value of kind secret), offered from the host's
+    # "secret": a secret's name (sandbox-ai's presets: a value of kind secret), offered from the host's secrets;
+    # "image": one of your images (a value that stands as a service's image), offered from your images there
+    names: str = ""
 
     @property
     def kind(self):
@@ -703,7 +705,7 @@ def from_document(sai, document):
                and B.PLACEHOLDER.fullmatch(entry["marker"]) and isinstance(entry.get("label", ""), str)
                and isinstance(entry.get("hint", ""), str) and isinstance(entry.get("optional", False), bool)
                and isinstance(entry.get("follows", ""), str) and isinstance(entry.get("default", ""), str)
-               and entry.get("names", "") in ("", "secret"),
+               and entry.get("names", "") in ("", "secret", "image"),
                N_("A placeholder has a marker, a label, a hint and whether it is optional."))
         marks.append(Placeholder(entry["marker"], entry.get("label", "")[:120] or entry["marker"],
                                  entry.get("hint", "")[:200], entry.get("optional", False),
@@ -864,6 +866,11 @@ def from_sandbox_ai(sai, document, host="local"):
     if not isinstance(document, dict):
         raise ValueError(tr("Not a preset of sandbox-ai."))
     values = document.get("values") if isinstance(document.get("values"), dict) else {}
+    # The values that stand as a service's image (image={postgres} in a --service value; a value of kind image):
+    # the name of one of your images, offered from your images.
+    images = {name for name in values if (values[name] or {}).get("kind") == "image" or any(
+        re.search(r"(?:^|[:,])image=\{" + re.escape(name) + r"\}", str(option)) for option in document.get("options")
+        or [])}
     markers = {}
     for name, spec in values.items():
         kind = SAI_KINDS.get((spec or {}).get("kind"), "text")
@@ -896,7 +903,8 @@ def from_sandbox_ai(sai, document, host="local"):
                           "hint": str((spec or {}).get("hint", ""))[:300], "optional": bool((spec or {}).get("optional")),
                           "follows": "", **({"default": str(spec["default"])[:200]}
                                             if (spec or {}).get("default") not in (None, "") else {}),
-                          **({"names": "secret"} if (spec or {}).get("kind") == "secret" else {})}
+                          **({"names": "secret"} if (spec or {}).get("kind") == "secret" else
+                             {"names": "image"} if name in images else {})}
                          for name, spec in values.items()],
         "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]
                  + ([tr("From the preset directory {path}", path=str(folder)[:900])]

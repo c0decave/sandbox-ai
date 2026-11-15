@@ -52,6 +52,18 @@ def test_a_service_survives_the_board(sai, spec):
     assert B.service_spec(node.props) == sai.module("services").spec_text(node.props)
 
 
+def test_a_service_always_names_its_image(sai):
+    """2026-11-15, live: a service without image= silently took its name as its image, which confused the user. The
+    board writes image= always, even when it is the name; a part with no image yet names its own (the launcher's
+    reading), the same text as sandbox-ai's spec_text."""
+    board = B.from_argv(sai, "claude", ["--service", "search", "--service", "web:image=web,port=8080"])
+    back = B.to_argv(sai, board)
+    assert [back[i + 1] for i, v in enumerate(back) if v == "--service"] == ["search:image=search",
+                                                                           "web:image=web,port=8080"]
+    assert B.service_spec({"name": "cache", "ports": [6379]}) == "cache:image=cache,port=6379"
+    assert sai.module("services").spec_text({"name": "cache", "image": "", "ports": [6379]}) == "cache:image=cache,port=6379"
+
+
 def test_services_are_parts_of_their_own(sai):
     board = B.from_argv(sai, "claude", [w for spec in SPECS for w in ("--service", spec)])
     services = board.of_kind("service")

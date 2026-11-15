@@ -45,6 +45,8 @@ from .widgets import (
 )
 
 NF_OPTIONS = ("--secret-env", "--api-key", "--git-token-secret")  # their lines name a secret (name_fields)
+# Options whose value names something the host has (name_fields' kinds): an editable list of those, any other typed.
+VALUE_NAMES = {"--vpn": "vpn", "--image-variant": "variant", "--image": "agent_image", "--llm": "llm"}
 
 
 def alive(widget):
@@ -59,6 +61,15 @@ LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 OTHER_IMAGE = "\x00other"  # the image drop-down's "Other…" (no image's name: a name is typed in then)
 REMOTE_CHECK_DELAY = 2000  # ms after an edit before another host's launcher checks the board (a dry run over SSH)
 HOST_RETRY = 60  # seconds before another host's launcher options are asked for again after a failed read
+
+
+class OpeningCombo(QComboBox):
+    """A combo box that says when its list is opened (opening): its entries are read again then."""
+    opening = Signal()
+
+    def showPopup(self):  # noqa: N802
+        self.opening.emit()
+        super().showPopup()
 
 
 HISTORY_STEPS = 20  # steps of Undo kept per project in the state file (with its draft)
@@ -1256,6 +1267,7 @@ class BoardPage(Prerequisites, QWidget):
     server_properties = Signal(str, str)  # an MCP server's Properties (its defaults for every start): name, host
     # The same with a board's values filled in ({limits, variables}), for OK to make them the server's defaults
     server_defaults = Signal(str, str, object)
+    images_wanted = Signal()  # a start refused for a service's image: the Images page, Your images
 
     def __init__(self, sai, terminal, settings=None):
         super().__init__()
@@ -1279,6 +1291,10 @@ class BoardPage(Prerequisites, QWidget):
         # Your images (sandbox-ai images list) and the variants' bases of the host it starts on: the services choose
         # from them, the checks and the score use them (None: not read yet).
         self.user_images, self.image_bases, self.user_images_loading = None, None, False
+        # Your images listed elsewhere (the Images page added or removed one): the image lists read them again when
+        # opened next.
+        from .name_fields import hub as names_hub
+        names_hub().changed.connect(self.names_changed)
         self.state, self.saved_boards, self.restored = None, {}, set()  # drafts and zoom kept between starts
         self.forbidden = self.read_forbidden()
         self.policy_data = self.read_policy()
@@ -2713,6 +2729,7 @@ class BoardPage(Prerequisites, QWidget):
             return
         self.user_images_failed = rows is None  # not answered: the services' images are not checked then
         self.user_images = rows if isinstance(rows, list) else []
+        self.user_images_read_at = time.monotonic()
         self.image_bases = bases if isinstance(bases, dict) else {}
         for combo in getattr(self, "image_combos", []):  # (the guide's question, open meanwhile: its list now)
             if alive(combo):
@@ -2724,6 +2741,13 @@ class BoardPage(Prerequisites, QWidget):
         if self.inspected in self.items and self.board.node(self.inspected) is not None and \
                 self.board.node(self.inspected).kind in ("service", "engine"):
             self.inspect_timer.start()
+        then, self.after_images = getattr(self, "after_images", None), None
+        if then is not None:  # a start waited for them (read just now: a failed read is not tried again by it)
+            self.images_just_read = True
+            try:
+                then()
+            finally:
+                self.images_just_read = False
 
     def load_user_images(self):
         if getattr(self, "user_images_loading", False):
@@ -2755,7 +2779,7 @@ class BoardPage(Prerequisites, QWidget):
         each with its kind and what it is pinned as), then "Other…" for a name typed in - CURRENT chosen, or typed in
         when it lists no such image. Read in the background where not known yet: the list follows once read. The
         inspector and the guide's question use it; its items' data are the names."""
-        combo = QComboBox()
+        combo = OpeningCombo()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         combo.lineEdit().setPlaceholderText(tr("Choose one of your images, or type a name…"))
@@ -2774,7 +2798,23 @@ class BoardPage(Prerequisites, QWidget):
                 combo.setEditText("")
                 combo.lineEdit().setFocus()
         combo.activated.connect(other)
+        combo.opening.connect(lambda: self.reread_user_images(combo))
         return combo
+
+    def names_changed(self, kind, host):
+        if kind == "image" and alive(self) and host == self.host():
+            self.user_images_read_at = 0.0
+
+    def reread_user_images(self, combo=None):
+        """Your images read again (an image combo opened: one added meanwhile, in a terminal or on the Images page, is
+        offered); COMBO is filled once they are. Not again while a read runs or one ended a moment ago."""
+        if combo is not None:
+            waiting = getattr(self, "image_combos", [])
+            self.image_combos = [c for c in waiting if alive(c) and c is not combo] + [combo]
+        if getattr(self, "user_images_loading", False) or \
+                time.monotonic() - getattr(self, "user_images_read_at", 0.0) < 3.0:
+            return
+        self.load_user_images()
 
     def fill_image_combo(self, combo, current):
         """COMBO (image_combo) with your images as known now, "Other…" last, CURRENT chosen or typed in."""
@@ -3432,7 +3472,6 @@ class BoardPage(Prerequisites, QWidget):
                              "page)"))
         opened = bool(getattr(self, "agent_llm_open", False) or (llm.props.get("params") or {}))
         button.setChecked(opened)
-        holder.setVisible(opened)
 
         def toggled(on):
             self.agent_llm_open = on
@@ -3441,6 +3480,7 @@ class BoardPage(Prerequisites, QWidget):
         self.inspector.addRow("", button)
         self.llm_param_rows(llm, form=form)
         self.inspector.addRow(holder)
+        holder.setVisible(opened)  # only once in its place (tests/test_no_flash.py)
         self.agent_llm_button, self.agent_llm_box = button, holder
 
     def text_row(self, node, key, label, placeholder):
@@ -3525,8 +3565,8 @@ class BoardPage(Prerequisites, QWidget):
         elif option.kind == "list":
             widget = LinesEdit(value or [])
             widget.changed.connect(lambda values: self.set_prop(node_id, long, values))
-        elif long == "--vpn":  # that host's VPN profiles to choose from, any other name typed
-            widget = NameField("vpn", self.sai, self.host(), placeholder=option.metavar or "")
+        elif long in VALUE_NAMES:  # what that host has to choose from (its VPN profiles, variants ...), any other typed
+            widget = NameField(VALUE_NAMES[long], self.sai, self.host(), placeholder=option.metavar or "")
             widget.setText("" if value is None else str(value))
             widget.setAccessibleName(long)
             widget.editingFinished.connect(lambda: self.set_prop(node_id, long, widget.text().strip()))
@@ -4234,12 +4274,15 @@ class BoardPage(Prerequisites, QWidget):
         from .preset_gallery import PlaceholderForm
         from . import presets as PR
 
+        images = B.board_image_markers(self.board)  # a service's image: offered from your images
+
         class Left:  # what PlaceholderForm reads of a preset
             agent = None
             title = tr("the board")
             placeholders = tuple(PR.Placeholder(marker, B.placeholder_label(self.board, marker),
                                                 (self.board.labels.get(marker) or ["", ""])[1] if
-                                                len(self.board.labels.get(marker) or []) > 1 else "")
+                                                len(self.board.labels.get(marker) or []) > 1 else "",
+                                                names="image" if marker in images else "")
                                  for marker, _ in left)
 
             @staticmethod
@@ -4403,8 +4446,18 @@ class BoardPage(Prerequisites, QWidget):
                    owner=self, work=True, timeout=4 * 3600, done=built)
 
     def errors(self):
-        """The board's errors, and what the launcher's check of this very board refused about its MCP servers."""
-        found = [p for p in B.problems(self.sai, self.board, self.policy()) if p.level == "error"]
+        """The board's errors (a service's image checked against your images: start reads them first), and what the
+        launcher's check of this very board refused about its MCP servers."""
+        found = [p for p in B.problems(self.sai, self.board, self.policy(), self.user_image_names())
+                 if p.level == "error"]
+        services = [n for n in self.board.included() if n.kind == "service" and not n.props.get("raw")]
+        if services and getattr(self, "user_images_failed", False):
+            # (not read: no service's image could be checked - the start would only be refused by the launcher)
+            found.append(B.Problem("error", tr(
+                "Your images on {host} could not be read (sandbox-ai images list), so the image of the service "
+                "{name} is not checked: look at the Images page, Your images, then start again.",
+                host=tr("this computer") if self.host() == LOCAL else printable(self.host()),
+                name=printable(services[0].props.get("name") or "?")), services[0].id))
         if getattr(self, "launcher_state", None) == self.board.state():
             found += [p for p in getattr(self, "launcher_found", []) if p.level == "error"]
         return found
@@ -4503,6 +4556,10 @@ class BoardPage(Prerequisites, QWidget):
             applog.log("INFO", "board", "not started: the board's placeholders are not all filled in")
             self.say_left_to_fill()
             return False
+        if self.images_unread(lambda: self.start(embedded, session, recheck)):
+            applog.log("INFO", "board", "the start waits for your images (sandbox-ai images list): its services' "
+                                        "images are checked first")
+            return False
         errors = self.errors()
         found = getattr(self, "launcher_found", [])
         if busy_now(self) and all(problem in found for problem in errors) and \
@@ -4526,7 +4583,7 @@ class BoardPage(Prerequisites, QWidget):
             self.check()
             return False
         if errors:
-            warn(self, tr("Not started"), "\n".join(p.text for p in errors))
+            self.say_not_started(errors)
             return False
         if not self.create_missing(then=lambda: self.start(embedded, session), ask=True):
             applog.log("INFO", "board", "the start waits: the board's missing folders are made first (or were not)")
@@ -4576,6 +4633,30 @@ class BoardPage(Prerequisites, QWidget):
         if servers:
             return self.start_from_project_file(servers, embedded, session)
         return self.run_start(B.launcher_argv(self.sai, self.board, local=host == LOCAL), embedded, session)
+
+    def images_unread(self, then):
+        """True while the board has services and your images are not read yet, or their last read failed (the check of
+        their images needs them): they are read, and THEN runs once they are - for this very board on this host."""
+        if not any(n.kind == "service" for n in self.board.included()) or self.user_image_names() is not None \
+                or getattr(self, "images_just_read", False):
+            return False
+        state, host = self.board.state(), self.host()
+        self.after_images = lambda: then() if self.board.state() == state and self.host() == host else None
+        self.show_notice(tr("Reading your images (sandbox-ai images list)…"))
+        self.load_user_images()
+        return True
+
+    def say_not_started(self, errors):
+        """Not started, and why (ERRORS); one about a service's image offers the Images page (Your images)."""
+        text = "\n".join(p.text for p in errors)
+        mine = self.user_image_names()
+        lacking = {n.id for n in self.board.of_kind("service") if not n.props.get("raw") and (
+            mine is None or not str(n.props.get("image") or "").strip() or n.props.get("image") not in mine)}
+        if any(p.node in lacking for p in errors):
+            if confirm(self, tr("Not started"), text, tr("Open the Images page"), reject=tr("Close")):
+                self.images_wanted.emit()
+            return
+        warn(self, tr("Not started"), text)
 
     def start_refused(self, embedded, session, recheck):
         """True (said, or checked again first) when the launcher's last check refused this very board for a reason
