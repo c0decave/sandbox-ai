@@ -474,15 +474,16 @@ def test_start_while_starting_slowly(tmp_path, monkeypatch):
     gives up once it has said nothing for a while."""
     sessions = load_sessions()
     slow = SlowStart(tmp_path, last=600)
-    monkeypatch.setattr(sessions.time, "sleep", slow.sleep)
+    # wait_ready's own SLEEP: time.sleep patched for the whole process moved the test's clock with other threads'
+    # pauses too (CI: 2,343,420 s)
     process = type("Supervisor", (), {"poll": lambda self: None, "returncode": None})()
-    sessions.wait_ready(tmp_path, process, follow=0, out=lambda text: None, clock=slow.clock, bar=False)
+    sessions.wait_ready(tmp_path, process, follow=0, out=lambda text: None, clock=slow.clock, bar=False,
+                        sleep=slow.sleep)
     assert slow.now >= 600
     stuck = SlowStart(tmp_path / "stuck", last=10 ** 6, quiet_after=180)
-    monkeypatch.setattr(sessions.time, "sleep", stuck.sleep)
     with pytest.raises(RuntimeError, match="did not become ready"):
         sessions.wait_ready(tmp_path / "stuck", process, follow=0, out=lambda text: None, clock=stuck.clock,
-                            bar=False)
+                            bar=False, sleep=stuck.sleep)
     assert 180 <= stuck.now <= 180 + sessions.TERMINAL_PATIENCE + 120
 
 

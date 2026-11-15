@@ -285,7 +285,7 @@ def test_the_agents_wait_for_a_slow_server():
                                                              "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": "1200000"}
     assert "stream_idle_timeout_ms = 1200000" in llm.codex_profile(endpoint, "m", wait=1200)
     options = llm.opencode_config(endpoint, "m", wait=1200)["provider"][llm.provider_id(endpoint)]["options"]
-    assert options["chunkTimeout"] == options["timeout"] == 1200000
+    assert options["chunkTimeout"] == options["headerTimeout"] == 1200000 and options["timeout"] is False
     mine = argparse.Namespace(llm_param=["stream_idle_timeout=1200"], env=["CLAUDE_STREAM_IDLE_TIMEOUT_MS"],
                               secret_env=[])
     assert "CLAUDE_STREAM_IDLE_TIMEOUT_MS" not in llm.claude_wait_environment(mine, endpoint, "m")

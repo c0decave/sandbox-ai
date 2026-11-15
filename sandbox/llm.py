@@ -1445,9 +1445,12 @@ PARAMS = {
                                                   "in RAM, slower, more room for the model)"),
     # The agents' wait for a slow server (a large local model may be silent for minutes before its first token):
     # Claude Code CLAUDE_STREAM_IDLE_TIMEOUT_MS and CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS (2.1.322), Codex
-    # stream_idle_timeout_ms of its provider (0.169.0), OpenCode chunkTimeout and timeout of its provider (1.19.5).
-    "stream_idle_timeout": (int, 10, 86400, "seconds an agent waits for the next part of a streamed answer before it "
-                                            "gives up (Claude Code, Codex, OpenCode; never sent to the server)"),
+    # stream_idle_timeout_ms of its provider (0.169.0), OpenCode chunkTimeout and headerTimeout of its provider
+    # (1.19.5), Qwen Code its provider entry's timeout and streamIdleTimeoutMs (0.26.4), Goose OPENAI_TIMEOUT and
+    # GOOSE_STREAM_TIMEOUT (1.57.0). Unset: LOCAL_WAIT for a model server of your own (agent_wait).
+    "stream_idle_timeout": (int, 10, 86400, "seconds an agent waits for the first and the next part of a streamed "
+                                            "answer before it gives up (default: an hour for a server of your own; "
+                                            "never sent to the server)"),
 }
 # Never sent with a request: at the model's load (LOAD_ONLY, by the start or `llm load`), or into the agents'
 # configurations (AGENT_ONLY).
@@ -2984,7 +2987,8 @@ def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, ou
     offered. CONTEXTS ({model: tokens}): limit.context and limit.output of the models whose window is known;
     OUTPUTS ({model: tokens}, their max_tokens): limit.output at most that. LOOP (loop_config): its OpenCode layers -
     steps (agent.<name>.steps), compaction (compaction, tool_output), instructions (the loop guard's file). WAIT
-    (stream_idle_timeout, seconds): the provider's chunkTimeout and timeout (OpenCode's own: 5 minutes each)."""
+    (agent_wait, seconds): the provider's headerTimeout and chunkTimeout (OpenCode's own: 5 minutes each), and no
+    timeout of the whole request."""
     pid = provider_id(endpoint)
     names = list(dict.fromkeys([model, *(allowed if allowed else endpoint.get("models", []))]))
 
@@ -3002,7 +3006,11 @@ def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, ou
                                  "models": {name: entry(name) for name in names}}},
               "model": f"{pid}/{model}", "small_model": f"{pid}/{model}", "share": "disabled"}
     if wait:
-        config["provider"][pid]["options"].update({"timeout": wait * 1000, "chunkTimeout": wait * 1000})
+        # OpenCode 1.19.5 (OpenCode 2 alike) wraps the provider's fetch: headerTimeout (response headers) and
+        # chunkTimeout (between two chunks), 300000 ms each by default, timeout (the whole request; false: none). A
+        # silent prefill ended with "Provider response headers timed out after 300000ms" and the request sent again.
+        config["provider"][pid]["options"].update({"timeout": False, "headerTimeout": wait * 1000,
+                                                   "chunkTimeout": wait * 1000})
     if only:
         config["enabled_providers"] = [pid]
     loop = loop or {}
@@ -3231,11 +3239,19 @@ def hermes_config(a):
 
 
 QWEN_SETTINGS = "/etc/qwen-code/settings.json"  # qwen.py's SETTINGS (this module loads no sibling)
-# Qwen Code's generationConfig of the server's model (its modelProviders entry, which wins over model.generationConfig
-# and, for timeout, over QWEN_CODE_API_TIMEOUT_MS): a large local model may be silent for minutes before its first
-# token. 20 minutes without a byte of the stream (upstream: 4) and per request, 2 retries (qwen.LLM_ENV has the same
-# for the variables and the stream's whole-life cap; the proxy waits longer: runtime.IDLE_TIMEOUT).
-QWEN_GENERATION = {"timeout": 20 * 60 * 1000, "streamIdleTimeoutMs": 20 * 60 * 1000, "maxRetries": 2}
+# Qwen Code's waits for --llm, all from agent_wait (LOCAL_WAIT for a server of your own): a large local model may be
+# silent for minutes before its first token. Qwen Code 0.26.4 takes a modelProviders model's timeout (per request,
+# 120 s by default) and streamIdleTimeoutMs (240 s) from that entry's generationConfig - not from model.generationConfig
+# nor, for timeout, QWEN_CODE_API_TIMEOUT_MS; the variables QWEN_WAITS say the same for any other model. A stream's
+# whole-life cap (15 minutes upstream) has only QWEN_STREAM_MAX_LIFETIME_MS: never under LOCAL_WAIT. 2 retries.
+QWEN_RETRIES = 2
+QWEN_WAITS = ("QWEN_STREAM_IDLE_TIMEOUT_MS", "QWEN_CODE_API_TIMEOUT_MS")
+QWEN_LIFETIME = "QWEN_STREAM_MAX_LIFETIME_MS"
+# Qwen Code 0.26.4's managed auto-memory sends one more request with the whole conversation after every turn (memory
+# extraction), auto-dream one to consolidate the memories: on a local model each is a long prefill of its own (the
+# local-model research's mock: 6 requests for a two-turn task, 4 with both off). Off for --llm; ~/.qwen/QWEN.md, the
+# memory you keep, is not touched.
+QWEN_MEMORY = {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}
 GOOSE_CONFIG = "/etc/goose/config.yaml"  # goose.py's CONFIG
 GOOSE_LOOP_FILE = "/etc/goose/sandbox-ai-loop-guard.md"  # goose.py's LOOP_FILE
 DSH_PATCH = "/etc/dsh/sandbox-ai.patch.yml"  # dsh.py's PATCH
@@ -3253,10 +3269,26 @@ def llm_context(a, found, model):
                                        loaded_context(found, model, behind_vpn=behind)))
 
 
+def qwen_generation(wait):
+    """A Qwen Code provider entry's generationConfig waits for WAIT seconds (None: Qwen Code's own) and retries."""
+    return {**({"timeout": wait * 1000, "streamIdleTimeoutMs": wait * 1000} if wait else {}),
+            "maxRetries": QWEN_RETRIES}
+
+
+def qwen_wait_environment(a, found, model):
+    """Qwen Code's wait variables for agent_wait (your own --env of them wins)."""
+    wait = agent_wait(a, found, model)
+    env = {**({name: str(wait * 1000) for name in QWEN_WAITS} if wait else {}),
+           QWEN_LIFETIME: str(max(wait or 0, LOCAL_WAIT) * 1000)}
+    given = passed_names(a)
+    return {name: value for name, value in env.items() if name not in given}
+
+
 def qwen_settings(a):
     """Qwen Code's system settings for --llm (laid over its defaults by qwen.managed_settings): OpenAI-compatible
-    auth, the model, the server as the model's provider (its /v1 URL, the context window when known, the key from
-    OPENAI_API_KEY: the placeholder), and the loop guard's turn limit and Qwen Code's own loop detection."""
+    auth, the model, the server as the model's provider (its /v1 URL, the context window when known, the waits of
+    agent_wait, the key from OPENAI_API_KEY: the placeholder), no managed auto-memory (QWEN_MEMORY), and the loop
+    guard's turn limit and Qwen Code's own loop detection."""
     found, model = selection(a)
     names = offered_models(a)[0]
     contexts = model_limits(a, found, names)[0]
@@ -3265,12 +3297,12 @@ def qwen_settings(a):
     def entry(name):
         # Each model of the server its own entry (Qwen Code tells them apart by id and baseUrl): /model offers them.
         made = {"id": name, "name": f"{name} ({found['name']}, sandbox-ai)", "baseUrl": agent_url(found),
-                "envKey": "OPENAI_API_KEY", "generationConfig": dict(QWEN_GENERATION)}
+                "envKey": "OPENAI_API_KEY", "generationConfig": qwen_generation(agent_wait(a, found, name))}
         if contexts.get(name):
             made["generationConfig"]["contextWindowSize"] = contexts[name]
         return made
     settings = {"security": {"auth": {"selectedType": "openai"}}, "model": {"name": model},
-                "modelProviders": {"openai": [entry(name) for name in names]}}
+                "modelProviders": {"openai": [entry(name) for name in names]}, "memory": dict(QWEN_MEMORY)}
     loop = loop_guard_of(a, found)
     if loop["enabled"]:
         settings["model"].update({"skipLoopDetection": False, "loopProtection": "stop"})
@@ -3298,13 +3330,23 @@ def dsh_config(a):
     return {"route": route, "model": model, "instructions": LOOP_TEXT if loop.get("instructions") else None}
 
 
+# Goose 1.57.0's waits, in seconds: OPENAI_TIMEOUT (its openai provider's request, 600 by default: a silent prefill
+# was given up after 600 s and sent again, three times) and GOOSE_STREAM_TIMEOUT (a stream's wait, which its error
+# names beside OLLAMA_STREAM_TIMEOUT). --llm uses only the openai provider. With both at an hour it waited through
+# 420 s of silence (the local-model research's runs/delayfix_silent_goose).
+GOOSE_WAITS = ("OPENAI_TIMEOUT", "GOOSE_STREAM_TIMEOUT")
+
+
 def goose_environment(a, found, model):
     """Goose's variables for --llm (they win over every configuration file of Goose's): its OpenAI provider at the
-    server's /v1 URL with the model, the placeholder as key, the context window when known, and the loop guard's turn
-    limit (GOOSE_MAX_TURNS) and instructions (the Top Of Mind extension adds GOOSE_MOIM_MESSAGE_FILE's text to every
-    turn; goose.files writes it)."""
+    server's /v1 URL with the model, the placeholder as key, its waits of agent_wait (your own --env of them wins), the
+    context window when known, and the loop guard's turn limit (GOOSE_MAX_TURNS) and instructions (the Top Of Mind
+    extension adds GOOSE_MOIM_MESSAGE_FILE's text to every turn; goose.files writes it)."""
     env = {"GOOSE_PROVIDER": "openai", "GOOSE_MODEL": model, "OPENAI_BASE_URL": agent_url(found),
            "OPENAI_API_KEY": placeholder_for(a, found)}
+    wait, given = agent_wait(a, found, model), passed_names(a)
+    if wait:
+        env.update({name: str(wait) for name in GOOSE_WAITS if name not in given})
     context = llm_context(a, found, model)
     if context:
         env["GOOSE_CONTEXT_LIMIT"] = str(context)
@@ -3325,24 +3367,38 @@ def goose_loop_text(a):
     return LOOP_TEXT if loop_guard_of(a, found).get("instructions") else None
 
 
+# The agents' wait for a model server of your own (local_model_server) where stream_idle_timeout is not set: a fresh
+# 50-100k prompt on a large local model takes 2-6 minutes before its first token, and the agents' own waits (Qwen Code
+# 120 s per request, OpenCode and Codex 300 s, Goose 600 s) gave up during that prefill and sent everything again, for
+# ever (the local-model research's mock server: evidence/timeouts_mock.txt). An hour: the proxy's own idle limit
+# (runtime.IDLE_TIMEOUT), so sandbox-ai's path never cuts a stream sooner either.
+LOCAL_WAIT = 3600
+
+
 def agent_wait(a, found, model):
-    """The seconds the agent waits for the next part of a streamed answer (stream_idle_timeout of the start or the
-    server), or None: the agent's own."""
+    """The seconds the agent waits for a streamed answer's first and next part: stream_idle_timeout of the start or
+    the server, else LOCAL_WAIT for a model server of your own, else None (a public service: the agent's own)."""
     try:
         override = start_params(a, found)[0]
     except ValueError:
         override = {}  # validate() reports it
-    return effective_params(found, model, override)[0].get("stream_idle_timeout")
+    wait = effective_params(found, model, override)[0].get("stream_idle_timeout")
+    return wait or (LOCAL_WAIT if local_model_server(found) else None)
 
 
 CLAUDE_WAITS = ("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS")
 
 
+def passed_names(a):
+    """The variables you pass to the start yourself (--env NAME, --secret-env NAME=SECRET)."""
+    return set(getattr(a, "env", None) or []) | {value.partition("=")[0]
+                                                 for value in getattr(a, "secret_env", None) or []}
+
+
 def claude_wait_environment(a, found, model):
-    """Claude Code's waits for stream_idle_timeout (your own --env of them wins)."""
+    """Claude Code's waits for agent_wait (your own --env of them wins)."""
     wait = agent_wait(a, found, model)
-    given = set(getattr(a, "env", None) or []) | {value.partition("=")[0]
-                                                   for value in getattr(a, "secret_env", None) or []}
+    given = passed_names(a)
     return {name: str(wait * 1000) for name in CLAUDE_WAITS if name not in given} if wait else {}
 
 
@@ -3351,15 +3407,14 @@ def agent_environment(a, windows=True):
     Code's window variables (which ask the server; yours of them win, so they are never refused)."""
     found, model = selection(a)
     if a.agent == "claude":
-        given = set(getattr(a, "env", None) or []) | {value.partition("=")[0]
-                                                       for value in getattr(a, "secret_env", None) or []}
-        return {**claude_environment(found, model, given), **claude_wait_environment(a, found, model),
+        return {**claude_environment(found, model, passed_names(a)), **claude_wait_environment(a, found, model),
                 **(claude_window_environment(a, found, model) if windows else {})}
     if a.agent == "goose":
         return goose_environment(a, found, model)
     if a.agent == "qwen":
-        # Its OpenAI-compatible auth reads these too (the system settings name the same server and model).
-        return {"OPENAI_API_KEY": PLACEHOLDER, "OPENAI_BASE_URL": agent_url(found), "OPENAI_MODEL": model}
+        # Its OpenAI-compatible auth reads these too (the system settings name the same server and model); its waits.
+        return {"OPENAI_API_KEY": PLACEHOLDER, "OPENAI_BASE_URL": agent_url(found), "OPENAI_MODEL": model,
+                **qwen_wait_environment(a, found, model)}
     if a.agent == "dsh":
         return {KEY_VARIABLE: PLACEHOLDER}
     if a.agent == "hermes":
@@ -3506,6 +3561,8 @@ def plan_params(a, endpoint, model):
             # Where the values that are not sent go: the model's load (LM Studio) and the agents' configuration.
             "at_load": {key: values[key] for key in values if key in load},
             "agents_told": {key: values[key] for key in values if key in AGENT_ONLY},
+            # The seconds the agent waits for the server's answer (agent_wait): None is the agent's own.
+            "agent_wait": agent_wait(a, endpoint, model),
             "server_only": server_only(endpoint["kind"]),
             "family": (family_preset(model) or None) if loop["sampling"] else None, "loop_guard": loop}
 

@@ -2002,11 +2002,16 @@ def llm_agent_configuration(m):
     elif m.agent == "codex":
         profile = run.home_text[".codex/sandbox-ai-llm.config.toml"]
         assert 'base_url = "http://10.0.0.5:11434/v1"' in profile and 'model = "qwen3-coder:30b"' in profile
+        # A server of your own: the provider waits an hour for a long prefill (llm.LOCAL_WAIT).
+        assert "\nstream_idle_timeout_ms = 3600000\n" in profile.partition("[model_providers.")[2].partition("\n[")[0]
         assert run.config["command"][1:3] == ["--profile", "sandbox-ai-llm"] and run.env["SANDBOX_AI_LLM_KEY"] == PLACEHOLDER
     else:
         config = json.loads(run.home_text[".config/opencode/sandbox-ai-llm.json"])
         assert run.env["OPENCODE_CONFIG"] == "/root/.config/opencode/sandbox-ai-llm.json"
-        assert config["provider"]["llm-gpu"]["options"] == {"baseURL": "http://10.0.0.5:11434/v1", "apiKey": PLACEHOLDER}
+        # A server of your own: an hour for the response headers and each chunk, no limit for the whole request.
+        assert config["provider"]["llm-gpu"]["options"] == {"baseURL": "http://10.0.0.5:11434/v1", "apiKey": PLACEHOLDER,
+                                                            "timeout": False, "headerTimeout": 3_600_000,
+                                                            "chunkTimeout": 3_600_000}
         assert config["model"] == "llm-gpu/qwen3-coder:30b"
     assert not any(s.AUTH_TARGETS[m.agent] == name for name in run.home_files)  # no cloud login handed over
 
@@ -3021,10 +3026,13 @@ def qwen_with_a_local_model(qm):
     assert entry["id"] == "qwen3:8b" and entry["baseUrl"] == url and entry["envKey"] == "OPENAI_API_KEY"
     assert settings["model"]["skipLoopDetection"] is False
     assert settings["model"]["maxSessionTurns"] == QWEN_MODULE.MAX_SESSION_TURNS, "the guard's steps only when set"
-    # A slow local model: 20 minutes idle and per request in the entry (it wins over model.generationConfig).
-    assert {"timeout": 1_200_000, "streamIdleTimeoutMs": 1_200_000, "maxRetries": 2}.items() <= \
+    # A slow local model: an hour idle and per request in the entry (it wins over model.generationConfig), the same in
+    # the variables (llm.agent_wait); no memory extraction after every turn.
+    assert {"timeout": 3_600_000, "streamIdleTimeoutMs": 3_600_000, "maxRetries": 2}.items() <= \
         entry["generationConfig"].items()
-    assert run.env["QWEN_STREAM_MAX_LIFETIME_MS"] == "3600000" and run.env["QWEN_STREAM_IDLE_TIMEOUT_MS"] == "1200000"
+    assert run.env["QWEN_STREAM_MAX_LIFETIME_MS"] == "3600000" and run.env["QWEN_STREAM_IDLE_TIMEOUT_MS"] == "3600000"
+    assert run.env["QWEN_CODE_API_TIMEOUT_MS"] == "3600000"
+    assert settings["memory"] == {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}
     assert run.env["OPENAI_API_KEY"] == PLACEHOLDER and run.env["OPENAI_BASE_URL"] == url
     command = run.config["command"]
     assert command[command.index("--append-system-prompt") + 1] == s.load_llm_module().LOOP_TEXT

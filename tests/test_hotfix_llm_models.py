@@ -116,7 +116,8 @@ def test_qwen_code_lists_every_model_with_its_timeouts_and_window(studio):
     assert [entry["id"] for entry in entries] == [MODEL, *OTHERS] and settings["model"]["name"] == MODEL
     for entry in entries:  # the structure of the slow-model timeouts kept for each
         assert entry["baseUrl"].endswith("/v1") and entry["envKey"] == "OPENAI_API_KEY"
-        assert {k: entry["generationConfig"][k] for k in llm.QWEN_GENERATION} == llm.QWEN_GENERATION
+        expected = llm.qwen_generation(llm.LOCAL_WAIT)
+        assert {k: entry["generationConfig"][k] for k in expected} == expected
     assert entries[0]["generationConfig"]["contextWindowSize"] == 65536
     assert entries[1]["generationConfig"]["contextWindowSize"] == 131072
 

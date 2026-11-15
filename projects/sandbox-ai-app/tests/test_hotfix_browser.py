@@ -56,10 +56,15 @@ class RealDisplay:
         self.socket.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.socket.parent.chmod(0o700)
         self.runtime.VNC_DIR = self.socket.parent
+        self.kept_drop = None
         self.display, self.processes, self.xev = free_display(), [], None
         self.start()
 
     def start(self):
+        if os.geteuid() != 0 and self.kept_drop is None:
+            # The browser container's runtime runs as root and drops every capability (setpriv); a test as a user
+            # cannot (setpriv's 127, CI) and has none to drop: the display itself is what this test is about.
+            self.kept_drop, self.runtime.DROP_ALL = self.runtime.DROP_ALL, []
         self.processes = self.runtime.start_gui({"display": self.display, "screen": "320x200x24", "vnc": True,
                                                  "private": True, "selection": True})
         stream = self.events.open("ab")
@@ -77,6 +82,8 @@ class RealDisplay:
         return self.events.read_text(errors="replace") if self.events.exists() else ""
 
     def stop(self):
+        if getattr(self, "kept_drop", None) is not None:
+            self.runtime.DROP_ALL, self.kept_drop = self.kept_drop, None
         for process in [self.xev, *reversed(self.processes)]:
             if process is not None and process.poll() is None:
                 process.terminate()

@@ -894,8 +894,9 @@ Mit `--llm` bekommt Qwen Code OpenAI-kompatible Anmeldung mit der `/v1`-URL des 
 Modell und seinem Kontextfenster in seinen Systemeinstellungen, den Schlüssel als Platzhalter;
 die Parameter pro Modell und der Schleifenschutz des Relays gelten auf der Leitung, der
 eigene Schleifenschutz von Qwen Code ist an, die Anweisungen des Schutzes kommen in den
-Systemprompt; auf ein langsames Modell wird 20 Minuten ohne ein Byte gewartet (60 pro
-Antwort). Jeder Start begrenzt eine Sitzung auf 120 Runden (`model.maxSessionTurns`; die
+Systemprompt; auf ein langsames Modell eines eigenen Servers wird eine Stunde ohne ein Byte
+gewartet (`stream_idle_timeout`: *Langsame erste Antworten* unter LLM-Server), das verwaltete
+Auto-Gedächtnis ist aus. Jeder Start begrenzt eine Sitzung auf 120 Runden (`model.maxSessionTurns`; die
 Schritte des Schleifenschutzes, wo Sie sie setzen). `--model`, `--effort` (`none` bis `max`,
 `model.reasoningEffort`) und `-D` (YOLO: `--yolo` und `tools.approvalMode` in seinen
 Systemeinstellungen, Ordnervertrauen aus) wirken; die Skills seiner Kits liegen in
@@ -3245,15 +3246,16 @@ OpenAI-kompatible Chat-API nimmt es seit 0.35.0), `ttl` (LM Studio: die
 Leerlauf-TTL eines per JIT geladenen Modells), `flash_attention` und
 `offload_kv_cache_to_gpu` (LM Studio, beim Laden des Modells: ein Start oder
 `llm load` lädt es damit und mit `num_ctx`) und `stream_idle_timeout` (Sekunden,
-die die Agenten auf den nächsten Teil einer gestreamten Antwort warten: Claude
-Code, Codex, OpenCode); `sandbox-ai llm params` zeigt sie mit ihren Bereichen
+die die Agenten auf den ersten und den nächsten Teil einer gestreamten Antwort
+warten; bei einem eigenen Server standardmäßig eine Stunde, siehe *Langsame erste
+Antworten* unten); `sandbox-ai llm params` zeigt sie mit ihren Bereichen
 und den Servern, die sie annehmen, und nennt, was nur der Start des Servers
 selbst festlegt (den KV-Cache-Typ: `OLLAMA_KV_CACHE_TYPE`, llama-server
 `--cache-type-k`/`-v`, vLLM `--kv-cache-dtype`; die K/V-Cache-Quantisierung
 von LM Studio in seinen Ladeeinstellungen; das Kontextfenster von llama.cpp und
 vLLM). Jeder Wert wird geprüft (Name, Typ, Bereich, Serverart), bevor er
 gespeichert wird; der Probelauf eines Starts zeigt die wirksamen Werte
-(`llm.params`: `values`, `at_load`, `agents_told`, `server_only`).
+(`llm.params`: `values`, `at_load`, `agents_told`, `agent_wait`, `server_only`).
 Der Verbindungs-Proxy setzt sie in die Requests an diesen Server, gleich
 welcher Agent sie schickt (nie an einen anderen Server): ein Wert, wo der
 Request keinen hat, einer mit `--force-param` an Stelle des Werts des
@@ -3295,6 +3297,39 @@ eines Starts: `--llm-param loop_guard.warn=4`. Was OpenCode selbst tut
 (`doom_loop` in 1.x: drei gleiche Aufrufe in einer Antwort, eine Rückfrage;
 in OpenCode 2 entfallen), warum lokale Modelle in Loops geraten, und die
 Recherche dazu: [docs/llm-loops.md](docs/llm-loops.md) (Englisch).
+
+**Langsame erste Antworten: die Agenten warten.** Ein frischer Prompt mit
+50.000-100.000 Token braucht bei einem großen lokalen Modell (etwa einem
+120B-Modell) 2-6 Minuten bis zum ersten Token. Die eigenen Wartezeiten der
+Agenten sind kürzer - Qwen Code 2 Minuten pro Anfrage, OpenCode und Codex 5,
+Claude Code 6, Goose 10 - und wenn sie aufgeben, schicken sie die ganze Anfrage
+noch einmal, endlos, während der Server sie erneut liest. Daher lässt ein Start
+mit `--llm` sie bei einem eigenen Modellserver (Ollama, LM Studio, llama.cpp,
+vLLM, ein OpenAI-kompatibler Server auf dem Loopback des Hosts oder an einer
+lokalen Adresse) eine Stunde warten, so lange wie der Verbindungs-Proxy selbst:
+Codex' `stream_idle_timeout_ms` seines Providers, OpenCodes `headerTimeout` und
+`chunkTimeout` seines Providers (und keine Grenze für die ganze Anfrage), Qwen
+Codes `timeout` und `streamIdleTimeoutMs` seines Provider-Eintrags mit
+`QWEN_STREAM_IDLE_TIMEOUT_MS` und `QWEN_CODE_API_TIMEOUT_MS`
+(`QWEN_STREAM_MAX_LIFETIME_MS` nie unter einer Stunde), Gooses `OPENAI_TIMEOUT`
+und `GOOSE_STREAM_TIMEOUT`, Claude Codes `CLAUDE_STREAM_IDLE_TIMEOUT_MS` und
+`CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS`; Hermes wartet, so lange der Server
+braucht. `stream_idle_timeout` setzt einen anderen Wert (für einen Server: `llm
+set NAME --param stream_idle_timeout=900`; für einen Start: `--llm-param
+stream_idle_timeout=900`), Ihr eigenes `--env` einer dieser Variablen gilt, und
+ein öffentlicher Dienst (OpenRouter und ähnliche) behält die eigenen Wartezeiten
+jedes Agenten; der Probelauf zeigt den Wert (`llm.params.agent_wait`). Claude
+Code gibt trotzdem nach 6 Minuten ohne ein Byte auf, was seine Variablen auch
+sagen, DSH (sein pi-ai-Client) nach 5; für beide wurde keine Einstellung
+gefunden. Mit ihnen, und für einen zügigen Agenten ohnehin, halten Sie einen
+frischen Prefill unter etwa 5 Minuten: ein kleineres Kontextfenster (`num_ctx`),
+ein kleineres oder schnelleres Modell, ein Server, der seinen Prompt-Cache
+zwischen den Schritten behält. Mit `--llm` sind Qwen Codes verwaltetes
+Auto-Gedächtnis und Auto-Dream aus (jedes schickte nach jeder Runde das ganze
+Gespräch noch einmal). Der Watchdog des Schleifenschutzes (`watchdog_requests`,
+`watchdog_minutes`; aus, wenn nicht gesetzt) beendet eine Runde, die zu lange
+läuft, und das LLM-Verkehrsprotokoll zeigt bei jeder Anfrage die Zeit bis zum
+ersten Byte.
 
 **Was Agent und Modell austauschen: das LLM-Verkehrsprotokoll.** Für jede
 Anfrage an den `--llm`-Server schreibt der Verbindungs-Proxy einen Eintrag in

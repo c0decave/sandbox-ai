@@ -465,22 +465,37 @@ def test_llm_turn_limit_follows_only_explicit_loop_guard_steps(tmp_path, monkeyp
     assert qwen.managed_settings(a, llm=llm.qwen_settings(a))["model"]["maxSessionTurns"] == 120
 
 
-def test_a_slow_local_model_is_waited_for_twenty_minutes(tmp_path, monkeypatch):
+def test_a_slow_local_model_is_waited_for_an_hour(tmp_path, monkeypatch):
     """User (LM Studio, qwen3-coder-next): Qwen Code ended with "No stream activity for 240000ms" - a big model on a
     long context takes minutes before its first token. Qwen Code 0.26.4 takes a provider model's
     streamIdleTimeoutMs, timeout and maxRetries from its modelProviders entry ("provider configuration takes
     precedence, so model.generationConfig is ignored"; QWEN_CODE_API_TIMEOUT_MS only where the entry has no
-    timeout), the stream's whole-life cap only from QWEN_STREAM_MAX_LIFETIME_MS (15 minutes by default). With --llm:
-    20 minutes idle and per request, 60 minutes per stream, 2 retries; the variables say the same."""
+    timeout), the stream's whole-life cap only from QWEN_STREAM_MAX_LIFETIME_MS (15 minutes by default). With --llm
+    at a server of your own: llm.agent_wait (an hour) idle and per request, an hour per stream, 2 retries; the
+    variables (llm.agent_environment) say the same. tests/test_llm_waits.py has the rest."""
     a = llm_start(tmp_path, monkeypatch)
     entry = llm.qwen_settings(a)["modelProviders"]["openai"][0]
-    assert entry["generationConfig"] == {"timeout": 1_200_000, "streamIdleTimeoutMs": 1_200_000, "maxRetries": 2}
-    assert llm.QWEN_GENERATION == entry["generationConfig"]
-    env = qwen.environment(a)
-    assert env["QWEN_STREAM_IDLE_TIMEOUT_MS"] == "1200000" and env["QWEN_CODE_API_TIMEOUT_MS"] == "1200000"
+    assert entry["generationConfig"] == {"timeout": 3_600_000, "streamIdleTimeoutMs": 3_600_000, "maxRetries": 2}
+    env = llm.agent_environment(argparse.Namespace(**{**vars(a), "agent": "qwen", "env": [], "secret_env": []}))
+    assert env["QWEN_STREAM_IDLE_TIMEOUT_MS"] == "3600000" and env["QWEN_CODE_API_TIMEOUT_MS"] == "3600000"
     assert env["QWEN_STREAM_MAX_LIFETIME_MS"] == "3600000"
     assert not {"QWEN_STREAM_IDLE_TIMEOUT_MS", "QWEN_STREAM_MAX_LIFETIME_MS", "QWEN_CODE_API_TIMEOUT_MS"} & set(
         qwen.environment(ns())), "Qwen OAuth and DashScope keep Qwen Code's own"
+
+
+def test_llm_starts_send_no_memory_extraction_after_each_turn(tmp_path, monkeypatch):
+    """Qwen Code 0.26.4's managed auto-memory (memory.enableManagedAutoMemory, on by default) sends one more request
+    with the whole conversation after every turn to extract memories, and auto-dream (enableManagedAutoDream) one to
+    consolidate them: on a local model each is a long prefill of its own. The local-model research's mock server
+    counted 6 requests for a two-turn task with them on, 4 with both off (runs/mock2_qwen, mock2_qwen_nomem). Off in
+    the system settings of every --llm start; other starts keep Qwen Code's own."""
+    a = llm_start(tmp_path, monkeypatch)
+    settings = qwen.managed_settings(a, llm=llm.qwen_settings(a))
+    assert settings["memory"] == {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}
+    assert "memory" not in qwen.managed_settings(ns())
+    dangerous = ns(llm="lms", llm_param=[], vpn=None, dangerously_skip_permissions=True)
+    assert qwen.managed_settings(dangerous, llm=llm.qwen_settings(dangerous))["memory"][
+        "enableManagedAutoMemory"] is False
 
 
 def test_qwen_is_told_the_context_window_the_server_has_loaded(tmp_path, monkeypatch):
@@ -499,7 +514,7 @@ def test_the_proxy_never_cuts_a_model_stream_qwen_still_waits_for():
     as Qwen Code does: a connection quiet both ways ends after IDLE_TIMEOUT only, and the loop guard's watchdog is off
     unless set."""
     runtime = load("runtime_qwen_tests", "sandbox/runtime.py")
-    assert runtime.IDLE_TIMEOUT * 1000 >= llm.QWEN_GENERATION["streamIdleTimeoutMs"]
-    assert runtime.IDLE_TIMEOUT * 1000 >= llm.QWEN_GENERATION["timeout"]
+    assert runtime.IDLE_TIMEOUT * 1000 >= llm.qwen_generation(llm.LOCAL_WAIT)["streamIdleTimeoutMs"]
+    assert runtime.IDLE_TIMEOUT * 1000 >= llm.qwen_generation(llm.LOCAL_WAIT)["timeout"]
     assert runtime.relay.__defaults__[0] == runtime.IDLE_TIMEOUT
     assert llm.LOOP_DEFAULTS["watchdog_minutes"] == 0 and llm.LOOP_DEFAULTS["watchdog_requests"] == 0

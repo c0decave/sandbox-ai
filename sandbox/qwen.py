@@ -105,12 +105,8 @@ DANGER_SETTINGS = {"tools": {"approvalMode": "yolo"}, "security": {"folderTrust"
 # the loop guard's steps set (defaults.json, the server's, --llm-param loop_guard.steps=N) takes those instead.
 MAX_SESSION_TURNS = 120
 # --llm: a large local model on a long context may take minutes before its first token ("No stream activity for
-# 240000ms" was the user's LM Studio). The idle wait, the request's timeout and the retries are the provider entry's
-# generationConfig (llm.QWEN_GENERATION: Qwen Code takes a provider model's from there, not from model.generationConfig);
-# the variables say the same for any other model (QWEN_CODE_API_TIMEOUT_MS only counts where the entry has no
-# timeout). A stream's whole-life cap (15 minutes upstream) has no setting: only QWEN_STREAM_MAX_LIFETIME_MS.
-LLM_ENV = {"QWEN_STREAM_IDLE_TIMEOUT_MS": str(20 * 60 * 1000), "QWEN_CODE_API_TIMEOUT_MS": str(20 * 60 * 1000),
-           "QWEN_STREAM_MAX_LIFETIME_MS": str(60 * 60 * 1000)}
+# 240000ms" was the user's LM Studio). The waits come from one value, llm.agent_wait: the provider entry's
+# generationConfig (llm.qwen_generation) and the variables (llm.qwen_wait_environment, in llm.agent_environment).
 
 
 def merge(base, over):
@@ -303,10 +299,9 @@ def files(a, settings):
 
 def environment(a):
     """Qwen Code's variables: where its system settings are, its own sandbox off, the telemetry opt-outs, no model
-    catalog download unless enabled, synchronized output also in tmux; with --llm the long waits for a slow model."""
+    catalog download unless enabled, synchronized output also in tmux (--llm's waits: llm.agent_environment)."""
     dropped = {variable for name in features(a) for variable in FEATURES[name].get("drops", [])}
-    env = {key: value for key, value in {**BASE_ENV, **TELEMETRY_ENV}.items() if key not in dropped}
-    return {**env, **(LLM_ENV if getattr(a, "llm", None) else {})}
+    return {key: value for key, value in {**BASE_ENV, **TELEMETRY_ENV}.items() if key not in dropped}
 
 
 def plan(a):
