@@ -12,8 +12,13 @@
           FAKE_PODMAN_RUN=STATUS[:SECONDS]: the start goes on instead - its pod is made (`pod exists|inspect|rm`
           know it), its sandbox (`run --pod`) runs SECONDS and ends with STATUS. FAKE_PODMAN_POD_CREATE_FAIL and
           FAKE_PODMAN_LOOKUP_FAIL=STATUS:MESSAGE: `pod create` or the host lookup says MESSAGE and fails with STATUS.
+          FAKE_PODMAN_KEEP=DIR (with FAKE_PODMAN_RUN): the sandbox's session directory is copied to DIR/session.
           FAKE_TOR_SCHEDULE: the Tor container of a Tor profile runs the real vpn_runtime.py with a fake tor whose
-          bootstrap goes as the schedule says (FAKE_TOR, below; FAKE_TOR_SPEED, FAKE_TOR_DIR).
+          bootstrap goes as the schedule says (FAKE_TOR, below; FAKE_TOR_SPEED, FAKE_TOR_DIR). FAKE_VPN_DIR: a VPN
+          container runs the real vpn_runtime.py with the kernel stood in for (FAKE_VPN, below): a start's lent
+          tunnel and its MCP servers' borrowing VPN containers meet through a real Unix socket.
+          `images search`'s package index (a run named sandbox-ai-package-index-*) prints the file
+          FAKE_PODMAN_PACKAGE_INDEX; FAKE_PODMAN_PACKAGE_INDEX_STATUS=3: it fails as without network.
   tmux    never a real server: every call fails (and is logged).
   ssh     every host is unreachable (exit status 255, "No route to host"); `ssh -G` answers. Logged to FAKE_SSH_LOG.
   npm     `npm view PACKAGE version` answers 2.0.0 (the agents built at their newest release).
@@ -104,6 +109,8 @@ if args[:1] == ["images"] or args[:2] in (["image", "ls"], ["image", "list"]):
     if "json" in (option("--format") or "") or "--format=json" in args:
         print(json.dumps([{"Names": [n], "Id": "f" * 64, "Labels": v["labels"], "Size": 1, "Created": 0}
                           for n, v in images().items()]))
+    elif option("--format") == "{{.ID}}":  # (every image has the ID f...f, as image inspect says)
+        print("\n".join("f" * 64 for _ in images()))
     else:
         print("\n".join(images()))
     sys.exit(0)
@@ -143,6 +150,23 @@ if args[:1] == ["run"] and os.environ.get("FAKE_TOR_SCHEDULE") and "localhost/sa
     sys.path.insert(0, os.environ["FAKE_TOR_FAKES"])
     import fake_tor
     sys.exit(fake_tor.container(args))
+if args[:1] == ["run"] and os.environ.get("FAKE_VPN_DIR") and "localhost/sandbox-ai-vpn:latest" in args:
+    # A VPN container (FAKE_VPN_DIR): the real vpn_runtime.py the launcher mounts, the kernel a fake (fake_vpn).
+    sys.path.insert(0, os.environ["FAKE_TOR_FAKES"])
+    import fake_vpn
+    sys.exit(fake_vpn.container(args))
+if args[:1] == ["run"] and any(a.startswith("--name=sandbox-ai-package-index-") for a in args):
+    # images search: the package index read in a throwaway container (FAKE_PODMAN_PACKAGE_INDEX: what it prints,
+    # FAKE_PODMAN_PACKAGE_INDEX_STATUS: its exit status - 3 is "no network")
+    status = int(os.environ.get("FAKE_PODMAN_PACKAGE_INDEX_STATUS") or 0)
+    if status:
+        print("W: Failed to fetch http://deb.debian.org/debian/dists/bookworm/InRelease  Temporary failure "
+              "resolving 'deb.debian.org'", file=sys.stderr)
+        sys.exit(status)
+    given = os.environ.get("FAKE_PODMAN_PACKAGE_INDEX")
+    print("Get:1 http://deb.debian.org/debian bookworm InRelease", file=sys.stderr)
+    sys.stdout.write(Path(given).read_text() if given else "")
+    sys.exit(0)
 if args[:1] == ["run"] and "--pod" not in args and "-c" in args:
     failing("FAKE_PODMAN_LOOKUP_FAIL")
     names = json.loads(args[args.index("-c") + 2])  # the launcher's host lookup in the image
@@ -165,6 +189,13 @@ if os.environ.get("FAKE_PODMAN_RUN") is not None and (args[:2] == ["pod", "creat
         print("f" * 64)
         sys.exit(0)
     status, _, seconds = os.environ["FAKE_PODMAN_RUN"].partition(":")
+    keep = os.environ.get("FAKE_PODMAN_KEEP")
+    if keep:  # FAKE_PODMAN_KEEP=DIR: the session directory the sandbox got (its config.json: the agent's command)
+        import shutil
+        for arg in args:
+            if arg.startswith("type=bind,") and ",dst=/sandbox/session," in arg:
+                shutil.copytree(arg.split("src=", 1)[1].split(",dst=", 1)[0], Path(keep) / "session",
+                                dirs_exist_ok=True)
     print("fake podman: the sandbox runs", file=sys.stderr)
     time.sleep(float(seconds or 0))
     sys.exit(int(status or 0))
@@ -243,7 +274,9 @@ def tor():
 
 
 def container(args):
-    source = next(re.search(r"src=([^,]+)", a)[1] for a in args if "dst=/vpn/vpn_runtime.py" in a)
+    # FAKE_TOR_RUNTIME=FILE: that vpn_runtime.py instead of the one the launcher mounts (an older release's).
+    source = os.environ.get("FAKE_TOR_RUNTIME") or next(
+        re.search(r"src=([^,]+)", a)[1] for a in args if "dst=/vpn/vpn_runtime.py" in a)
     spec = importlib.util.spec_from_file_location("vpn_runtime_in_fake_tor", source)
     rt = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rt)
@@ -251,6 +284,8 @@ def container(args):
     rt.TOR_DATA.mkdir(parents=True, exist_ok=True)
     rt.tor_uid = lambda name=None: rt.TOR_UID
     rt.own_data_directory = lambda uid, path=None: None
+    if hasattr(rt, "TorDnsFront"):  # (its port 53 needs root; tests/test_tor_dns_ipv4_only.py runs the real one)
+        rt.TorDnsFront.start = lambda self: self
     os.chown = lambda path, uid, gid, follow_symlinks=True: None  # (fresh_guard: root's CHOWN in the container)
     table = DIRECTORY / "nft-table"
 
@@ -289,7 +324,9 @@ def container(args):
         # real checks (ECHO: what check.torproject.org answers, by default a Tor exit) and
         # lookups of the names, against a DNSPort that answers SERVFAIL for SECONDS after the first lookup (tor
         # without a circuit yet), always for the names FAILING, and for a SLOW name for its SECONDS after it was
-        # first asked; .onion names it maps at once. Each lookup goes to events.jsonl.
+        # first asked; .onion names it maps at once. "silent_for": SECONDS: before that, for SECONDS after the first
+        # lookup, it gives no answer at all to any name, .onion ones included (what dns_lookup raises then: "no
+        # answer from SERVER" after its timeout). Each lookup goes to events.jsonl.
         first, named = [], {}
 
         def lookup(name, server, qtype, timeout=4.0, port=53):
@@ -297,6 +334,10 @@ def container(args):
             first or first.append(now)
             named.setdefault(name, now)
             onion = name.endswith(".onion")
+            if now - first[0] < plan.get("silent_for", 0):
+                time.sleep(timeout / SPEED)
+                event(dns=name, server=server, port=port, answer="none")
+                raise TimeoutError(f"no answer from {server}")
             failing = not onion and (name in plan.get("failing", []) or now - first[0] < plan.get("servfail_for", 0)
                                      or now - named[name] < (plan.get("slow") or {}).get(name, 0))
             event(dns=name, server=server, port=port, answer="SERVFAIL" if failing else "ok")
@@ -322,6 +363,109 @@ def container(args):
 
 if __name__ == "__main__" and sys.argv[1:] == ["tor"]:
     tor()
+'''
+
+# A VPN container of a WireGuard (or Tailscale, OpenVPN) profile (podman run ... localhost/sandbox-ai-vpn:latest, with
+# FAKE_VPN_DIR set): the real vpn_runtime.py the launcher mounts runs its own main() - the kill switch, the tunnel's
+# setup, a lent tunnel's lender (the start's container) or its borrower (an MCP server's) - with only the kernel stood in
+# for: nft keeps its table in a file, ip and wg answer as on a host, the checks answer as a clean VPN exit would, and a
+# borrower's relay binds nothing (its ports need root; the lender is asked all the same). The folder of a lent tunnel
+# is the one its --mount names on this host: the lender's Unix socket is real, and so is each borrower's ping to it.
+# What happened goes to FAKE_VPN_DIR/events.jsonl: each tunnel brought up (with the names of the secrets it got and
+# whether it lends), each tunnel borrowed (from which run), each ping a lender answered. The run's token of a lent
+# tunnel: each container that got one says a digest of it and whether it found it in its command line or environment
+# (it must come on standard input only), and keeps it in FAKE_VPN_DIR/tokens/CONTAINER for the test to look for in
+# logs. FAKE_VPN_LEND_FAIL: the lender cannot start (its socket cannot be bound), with that text.
+FAKE_VPN = r'''
+import hashlib, importlib.util, json, os, re, subprocess, sys
+from pathlib import Path
+
+DIRECTORY = Path(os.environ.get("FAKE_VPN_DIR", "/nonexistent"))
+
+
+def event(**fields):
+    DIRECTORY.mkdir(parents=True, exist_ok=True)
+    with open(DIRECTORY / "events.jsonl", "a") as stream:
+        stream.write(json.dumps(fields) + "\n")
+
+
+def container(args):
+    source = next(re.search(r"src=([^,]+)", a)[1] for a in args if "dst=/vpn/vpn_runtime.py" in a)
+    spec = importlib.util.spec_from_file_location("vpn_runtime_in_fake_vpn", source)
+    rt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rt)
+    name = args[args.index("--name") + 1]
+    rt.RUN = DIRECTORY / f"run-{name}"
+    rt.RUN.mkdir(parents=True, exist_ok=True)
+    rt.SERVE_STATE = rt.RUN / "serve.json"
+    lend = next((a for a in args if ",dst=/run/sandbox-ai-lend" in a), None)
+    if lend:
+        # The folder on this host; the socket by a relative path in it (a Unix socket's path has at most 107 bytes,
+        # and a test's folder is deeper than the container's /run/sandbox-ai-lend).
+        rt.LEND_DIR = Path(re.search(r"src=([^,]+)", lend)[1])
+        os.chdir(rt.LEND_DIR)
+        rt.LEND_SOCKET = Path("lend.sock")
+    table = rt.RUN / "nft-table"
+
+    class Runner(rt.Runner):
+        def run(self, command, data=None, check=True):
+            if command[:2] == ["nft", "-f"]:
+                table.write_text((table.read_text() if table.exists() else "") + (data or ""))
+            elif command[:2] == ["nft", "list"]:
+                return subprocess.CompletedProcess(command, 0, table.read_text() if table.exists() else "", "")
+            elif command[:4] == ["ip", "-4", "route", "show"]:
+                return subprocess.CompletedProcess(command, 0, "default via 10.0.2.2 dev eth0 proto static\n", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        def spawn(self, command, log):
+            raise AssertionError(f"the fake VPN container runs no daemon: {command}")
+
+    def checks(payload, tunnel, runner, **kw):
+        servers = list(tunnel.get("dns") or [])
+        return {"ipv4": {"ip": "198.51.100.9", "url": "https://am.i.mullvad.net/json"},
+                "ipv6": {"error": "Operation not permitted", "kind": "blocked"},
+                "dns": {"servers": servers, "configured": bool(servers),
+                        "routes": {server: tunnel["interface"] for server in servers},
+                        "answers": {server: True for server in servers}, "egress": ["198.51.100.10"]}}
+    rt.gather_checks = checks
+    rt.resolve_hosts = lambda names, tunnel, tailnet=False, lookup=None: {n: ["192.0.2.1"] for n in names}
+    rt.Borrower.start = lambda self: self
+    up_wireguard, up_borrowed, facts = rt.up_wireguard, rt.up_borrowed, rt.Lender.facts
+
+    def token_seen(payload):
+        token = (payload.get("secrets") or {}).get("lend_token")
+        if not isinstance(token, str):
+            return
+        (DIRECTORY / "tokens").mkdir(parents=True, exist_ok=True)
+        (DIRECTORY / "tokens" / name).write_text(token)
+        event(container=name, token=hashlib.sha256(token.encode()).hexdigest()[:16],
+              token_in_argv=any(token in arg for arg in args), token_in_env=any(token in v for v in os.environ.values()))
+
+    if os.environ.get("FAKE_VPN_LEND_FAIL"):
+        def no_lender(self):
+            raise OSError(os.environ["FAKE_VPN_LEND_FAIL"])
+        rt.Lender.start = no_lender
+
+    def wireguard(payload, runner, *more, **kw):
+        event(container=name, up="wireguard", secrets=sorted(payload.get("secrets") or {}),
+              lend=bool(payload.get("lend")), required=(payload.get("lend") or {}).get("required")
+              if isinstance(payload.get("lend"), dict) else None)
+        token_seen(payload)
+        return up_wireguard(payload, runner, *more, **kw)
+
+    def borrowed(payload, runner, *more, **kw):
+        event(container=name, up="borrowed", secrets=sorted(payload.get("secrets") or {}),
+              borrow=payload.get("borrow"))
+        token_seen(payload)
+        tunnel = up_borrowed(payload, runner, *more, **kw)
+        event(container=name, borrowed=tunnel.get("lent"))
+        return tunnel
+
+    def pinged(self):
+        event(container=name, lender="ping", profile=self.profile)
+        return facts(self)
+    rt.up_wireguard, rt.up_borrowed, rt.Lender.facts = wireguard, borrowed, pinged
+    return rt.main([args[-1]], runner=Runner())
 '''
 
 TMUX = '''#!/bin/sh
@@ -411,6 +555,7 @@ class Host:
             (self.bin / name).write_text(text)
             (self.bin / name).chmod(0o755)
         (self.bin / "fake_tor.py").write_text(FAKE_TOR)
+        (self.bin / "fake_vpn.py").write_text(FAKE_VPN)
         self.shimmed = os.geteuid() == 0
         if self.shimmed:
             (self.bin / "uidshim.py").write_text(UIDSHIM)

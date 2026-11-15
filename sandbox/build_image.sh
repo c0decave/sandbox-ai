@@ -30,7 +30,8 @@ release; "all" builds it too.
 
 "all" builds every image sandbox-ai has: the seven agents, team, cairn, browser,
 vpn, tor and each of your variants (sandbox-ai images), one build each, so one
-that fails stops none of the others; the end says what was built and what failed.
+that fails stops none of the others; the end says what was built and what failed. Several targets in a
+row (sandbox-ai build claude codex team) are built the same way, one after the other.
 
 dsh builds localhost/dsh-sandbox with DeepSeek Harness, qwen localhost/qwen-sandbox
 with Qwen Code, each at the release sandbox-ai reviewed (docs/DSH_REVIEW.md,

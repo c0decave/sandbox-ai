@@ -92,7 +92,7 @@ def valid_model(model):
 
 def valid_models(text):
     """TEXT if it is one model or several, comma-separated (--llm NAME:MODEL,MODEL...: the first is the agent's,
-    OpenCode offers exactly these), each a valid_model; else None."""
+    the agent offers exactly these), each a valid_model; else None."""
     if not isinstance(text, str):
         return None
     parts = text.split(",")

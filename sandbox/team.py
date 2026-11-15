@@ -2,7 +2,8 @@
 """A team of agents: one sandbox per agent on a shared workspace, started and stopped together, with a task board
 between them (`sandbox-ai team`).
 
-  sandbox-ai team start NAME --agents claude,codex[,opencode] [-w DIR] [-- LAUNCHER OPTIONS]
+  sandbox-ai team start NAME --agents claude,codex[,...] [-w DIR] [--vpn PROFILE] [--member-vpn AGENT=PROFILE]
+                        [--allow-shared-openvpn] [-- LAUNCHER OPTIONS]
   sandbox-ai team list | show NAME | post NAME AGENT TASK | stop NAME | delete NAME --yes
 
 Each member is a named session (NAME-AGENT: attach, pause, resume, stop like any start). The first agent leads:
@@ -10,6 +11,18 @@ it starts with a prompt that tells it about its team. The others start with a pr
 board, do them and report back. The board is the MCP server team-NAME (team_board.py) in a sandbox of its own,
 without network; every member reaches it through its relay, so mcp rules, questions and mcp-calls.jsonl hold.
 Its file lies in the team's directory (TEAMS/NAME/board); `team post` writes there from the host.
+
+Members: any of AGENTS (claude, codex, opencode, hermes, dsh, qwen, goose), each started with its first prompt in its
+own interactive form (prompt_args) and the board as its --mcp server.
+
+A VPN: --vpn PROFILE (or --vpn in the options after --) puts it in front of every member, --member-vpn AGENT=PROFILE
+gives one member another. Each member is a sandbox of its own with its own VPN container, so one profile in several
+members means several tunnels of it at once: Tor is fine (each member its own Tor, said); WireGuard - Mullvad's too -
+is refused (the same key twice gets the same tunnel address, and the server sends to whichever spoke last), with
+what to do instead; OpenVPN only with --allow-shared-openvpn (many servers end the first connection of an account or
+certificate when it connects twice); a persistent Tailscale node runs once (an --ephemeral profile in parallel). A
+profile another sandbox holds already is refused before the first member starts (vpn.profile_holder). The team's
+record keeps the choice; each member is a session that keeps its own --vpn when it is resumed or restarted.
 """
 import argparse
 import importlib.util
@@ -23,7 +36,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
 TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # NAME-opencode stays a session name; team-NAME an MCP name
 BOARD_SCRIPT = HERE / "team_board.py"
 BOARD_TARGET = "/opt/sandbox-ai/team_board.py"
@@ -43,6 +56,16 @@ def load_module(name, file):
 
 def board_module():
     return load_module("team_board_for_team", "team_board.py")
+
+
+_vpn = None
+
+
+def vpn_module():
+    global _vpn
+    if _vpn is None:
+        _vpn = load_module("vpn_for_team", "vpn.py")
+    return _vpn
 
 
 _launcher = None
@@ -86,9 +109,18 @@ def load(name):
     if not isinstance(data, dict) or data.get("name") != name or not isinstance(members, list) or len(members) < 2 \
             or any(m not in AGENTS for m in members) or len(set(members)) != len(members) \
             or data.get("lead") not in members or not isinstance(data.get("workspace"), str) \
-            or not isinstance(data.get("options"), list) or not all(isinstance(o, str) for o in data["options"]):
+            or not isinstance(data.get("options"), list) or not all(isinstance(o, str) for o in data["options"]) \
+            or not isinstance(data.get("vpn"), (str, type(None))) \
+            or not isinstance(data.get("member_vpn", {}), dict) \
+            or any(k not in members or not isinstance(v, str) for k, v in data.get("member_vpn", {}).items()):
         raise ValueError(f"the record of team {name} is damaged: {record_path(name)}")
     return data
+
+
+def member_vpns(data):
+    """{agent: the VPN profile in front of it, or None} of team DATA: --member-vpn's, else --vpn's."""
+    own = data.get("member_vpn") or {}
+    return {agent: own.get(agent) or data.get("vpn") for agent in data["members"]}
 
 
 def names():
@@ -136,17 +168,119 @@ def member_prompt(data, agent):
 
 
 def prompt_args(agent, prompt):
-    """The agent's interactive start with a first prompt."""
-    return ["--prompt", prompt] if agent == "opencode" else [prompt]
+    """The agent's interactive start with a first prompt, in the agent's own form (as presets.prompt_args gives a
+    preset's first task): the text is an option's own value where the agent has one, so it is never read as an
+    option. Each stays interactive after it, so that you can attach and talk to it."""
+    if agent == "opencode":
+        return ["--prompt", prompt]
+    if agent == "hermes":
+        return ["chat", "--query=" + prompt]  # Hermes' chat seeds its interactive session with the query
+    if agent == "qwen":
+        return ["--prompt-interactive=" + prompt]  # Qwen Code runs it and stays interactive
+    if agent == "goose":
+        return ["run", "--interactive", "--text=" + prompt]  # Goose runs it and stays interactive
+    if agent == "dsh":
+        # sandbox-ai's chat for DSH (DSH has no chat in the terminal of its own): the prompt is its first message,
+        # then the chat waits for yours; its runs have the board as their MCP server (dsh.mcp_rows).
+        return ["chat", "--prompt=" + prompt]
+    return [prompt]
 
 
 def launcher_argv(data, agent):
     role = lead_prompt(data) if agent == data["lead"] else member_prompt(data, agent)
+    vpn = member_vpns(data).get(agent)
     # --workspaces-as-given: the team's workspace is /work, never a project file of the directory the team was
     # started from (the web service's, the caller's), which the launcher would otherwise make the main workspace.
     return [sys.executable, "-I", str(HERE / "agent_sandbox.py"), agent, "--session", member_name(data["name"], agent),
             "--workspace", data["workspace"], "--workspaces-as-given", "--mcp", server_name(data["name"]),
-            *data["options"], "--", *prompt_args(agent, role)]
+            *data["options"], *(["--vpn", vpn] if vpn else []), "--", *prompt_args(agent, role)]
+
+
+def split_vpn(canonical):
+    """(the --vpn of the options CANONICAL - in their long forms - or None, the options without it). Given twice
+    with two profiles: an error (each member would take the last)."""
+    found, kept, index = [], [], 0
+    while index < len(canonical):
+        token = canonical[index]
+        if token == "--":
+            kept += canonical[index:]
+            break
+        if token == "--vpn" and index + 1 < len(canonical):
+            found.append(canonical[index + 1])
+            index += 2
+            continue
+        if token.startswith("--vpn="):
+            found.append(token.split("=", 1)[1])
+        else:
+            kept.append(token)
+        index += 1
+    if len(set(found)) > 1:
+        raise ValueError(f"--vpn is given {len(found)} times in the options ({', '.join(found)}); give one, or each "
+                         "member its own: --member-vpn AGENT=PROFILE")
+    return (found[0] if found else None), kept
+
+
+def vpn_label(name, profile):
+    provider = profile.get("provider")
+    return f"{name} ({provider if provider not in (None, 'generic') else profile['type']})"
+
+
+def vpn_plan(agents, vpn, member_vpn, shared_openvpn=False, out=print, holder=None):
+    """Check the VPNs of the members AGENTS (VPN for all, MEMBER_VPN {agent: profile} each) before anything starts:
+    every profile there, one that would run in several members at once only where it can (vpn.sharing: Tor and an
+    ephemeral Tailscale profile said, WireGuard and a persistent Tailscale node refused with what to do instead,
+    OpenVPN only with SHARED_OPENVPN), and none that another sandbox holds already (HOLDER(profile), default
+    vpn.profile_holder). {agent: profile or None}; ValueError with the reason."""
+    unknown = sorted(set(member_vpn) - set(agents))
+    if unknown:
+        raise ValueError(f"--member-vpn {unknown[0]}=...: {unknown[0]} is no member of this team "
+                         f"(--agents {','.join(agents)})")
+    chosen = {agent: member_vpn.get(agent) or vpn for agent in agents}
+    if not any(chosen.values()):
+        return chosen
+    v = vpn_module()
+    holder = holder or v.profile_holder
+    groups = {}
+    for agent, profile in chosen.items():
+        if profile:
+            groups.setdefault(profile, []).append(agent)
+    for name, members in groups.items():
+        profile = v.load_profile(name)  # (a missing or damaged one: its own message)
+        kind, (why, fix), label = v.sharing(profile), v.sharing_text(profile), vpn_label(name, profile)
+        held = holder(profile)
+        if held and kind == "once":
+            raise ValueError(f"VPN profile {label} is in use by {held}; {why} ({fix})")
+        if len(members) > 1:
+            who = ", ".join(members)
+            if kind == "shared":
+                out(f"sandbox-ai team: VPN {label} for {who}: {why}" +
+                    (" - each member gets its own" if profile["type"] == "tor" else ""))
+            elif kind == "once":
+                raise ValueError(f"VPN profile {label} would run in {len(members)} members at once ({who}): {why}. "
+                                 f"Instead: {fix}; one per member with --member-vpn AGENT=PROFILE")
+            elif not shared_openvpn:
+                raise ValueError(f"VPN profile {label} would run in {len(members)} members at once ({who}): {why}. "
+                                 "If your server allows it, confirm with --allow-shared-openvpn; else give each member "
+                                 "a profile of its own: --member-vpn AGENT=PROFILE")
+            else:
+                out(f"sandbox-ai team: VPN {label} for {who} (confirmed with --allow-shared-openvpn): {why}")
+        if held and kind == "ask":
+            out(f"sandbox-ai team: VPN {label} is in use by {held} as well: {why}")
+    return chosen
+
+
+def parse_member_vpn(values):
+    """{agent: profile} of --member-vpn AGENT=PROFILE (repeatable)."""
+    found = {}
+    for value in values or []:
+        agent, equals, profile = str(value).partition("=")
+        if not equals or agent not in AGENTS or not profile:
+            raise ValueError(f"--member-vpn {value}: AGENT=PROFILE, AGENT one of {', '.join(AGENTS)}")
+        if agent in found and found[agent] != profile:
+            raise ValueError(f"--member-vpn: {agent} is given twice")
+        vpn_module().check_name(profile)
+        found[agent] = profile
+    return found
 
 
 TEAM_CHOSEN = ("--session", "--name", "--project-name", "--workspace", "--workspace-ro", "--mcp-socket-dir",
@@ -166,18 +300,29 @@ def existing_sessions(name, agents):
     return taken
 
 
-def start(name, agents, workspace, options, out=print, run=subprocess.run, taken=None):
+def start(name, agents, workspace, options, out=print, run=subprocess.run, taken=None, vpn=None, member_vpn=None,
+          shared_openvpn=False, holder=None):
     check_name(name)
     if record_path(name).exists() or (teams_dir() / name).exists():
         raise ValueError(f"team {name} exists; see: sandbox-ai team show {name}, or delete it first")
     agents = list(dict.fromkeys(agents))
     if len(agents) < 2 or any(agent not in AGENTS for agent in agents):
-        raise ValueError(f"--agents: two or three of {', '.join(AGENTS)}, the first leads")
+        raise ValueError(f"--agents: two or more of {', '.join(AGENTS)}, the first leads")
     launcher = load_module("agent_sandbox_for_team", "agent_sandbox.py")
     canonical = launcher.canonical_options(list(options))  # short forms (-s, -w, ...) as their long options
     forbidden = [o for o in canonical if o.split("=", 1)[0] in TEAM_CHOSEN]
     if forbidden:
         raise ValueError(f"the team chooses these itself: {' '.join(forbidden)}")
+    # --vpn after -- reaches every member: the same as the team's --vpn, and checked the same way.
+    given, rest = split_vpn(canonical)
+    if given is not None:
+        if vpn is not None and vpn != given:
+            raise ValueError(f"--vpn {vpn} and --vpn {given} in the options: give one")
+        vpn, options = given, rest
+    member_vpn = dict(member_vpn or {})
+    if vpn is not None:
+        vpn_module().check_name(vpn)
+    vpn_plan(agents, vpn, member_vpn, shared_openvpn, out, holder)
     # A member is a session of its own name: one that exists already (another project's) is never taken over.
     taken = existing_sessions(name, agents) if taken is None else taken
     if taken:
@@ -185,8 +330,9 @@ def start(name, agents, workspace, options, out=print, run=subprocess.run, taken
     directory = teams_dir() / name
     (directory / "board").mkdir(mode=0o700, parents=True)
     data = {"version": 1, "name": name, "members": agents, "lead": agents[0],
-            "workspace": str(Path(workspace).expanduser().resolve()), "options": list(options),
-            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            "workspace": str(Path(workspace).expanduser().resolve()), "options": list(options), "vpn": vpn,
+            "member_vpn": {agent: profile for agent, profile in member_vpn.items() if profile != vpn},
+            "shared_openvpn": bool(shared_openvpn), "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     record_path(name).write_text(json.dumps(data, indent=2) + "\n")
     record_path(name).chmod(0o600)
     for agent in agents:
@@ -227,9 +373,11 @@ def show(name, out=print, as_json=False):
         out(json.dumps({**data, "states": states, "board": board}, indent=2))
         return 0
     out(f"team {name}: {data['workspace']}")
+    vpns = member_vpns(data)
     for agent in data["members"]:
         role = "lead" if agent == data["lead"] else "member"
-        out(f"  {member_name(name, agent):<30} {role:<7} {states[agent]}")
+        out(f"  {member_name(name, agent):<30} {role:<7} {states[agent]}" +
+            (f"  vpn {printable(vpns[agent])}" if vpns[agent] else ""))
     if board.get("error"):
         out(f"  board: {printable(board['error'])}")
     for task in board["tasks"][-20:]:
@@ -343,8 +491,15 @@ def main(argv, out=print):
     commands = parser.add_subparsers(dest="command", required=True)
     begin = commands.add_parser("start", help="start a team: one sandbox per agent, the first leads")
     begin.add_argument("name")
-    begin.add_argument("--agents", required=True, help="claude,codex[,opencode]: the first leads")
+    begin.add_argument("--agents", required=True, help=f"two or more of {','.join(AGENTS)}: the first leads")
     begin.add_argument("-w", "--workspace", default=".", help="the shared workspace (default: this directory)")
+    begin.add_argument("--vpn", metavar="PROFILE", help="the VPN profile in front of every member (each member its "
+                       "own VPN container: Tor in each; WireGuard and Mullvad in one member at a time)")
+    begin.add_argument("--member-vpn", action="append", default=[], metavar="AGENT=PROFILE",
+                       help="another VPN profile for one member (repeatable)")
+    begin.add_argument("--allow-shared-openvpn", action="store_true",
+                       help="let one OpenVPN profile run in several members at once (your server must allow an "
+                            "account or certificate twice: duplicate-cn)")
     begin.epilog = "Launcher options for every member follow a --: team start NAME --agents A,B -w DIR -- OPTIONS"
     commands.add_parser("list", help="the teams")
     shown = commands.add_parser("show", help="a team's members and its board")
@@ -364,7 +519,8 @@ def main(argv, out=print):
     a = parser.parse_args(argv, namespace=argparse.Namespace(options=options))
     try:
         if a.command == "start":
-            return start(a.name, a.agents.split(","), a.workspace, a.options, out)
+            return start(a.name, a.agents.split(","), a.workspace, a.options, out, vpn=a.vpn,
+                         member_vpn=parse_member_vpn(a.member_vpn), shared_openvpn=a.allow_shared_openvpn)
         if a.command == "list":
             for name in names():
                 try:

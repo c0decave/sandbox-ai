@@ -296,6 +296,7 @@ class ActivityPage(QWidget):
         self.refilter.setInterval(700)
         self.refilter.timeout.connect(self.restart)
         self.tabs = QTabWidget()
+        widgets.arrow_tabs(self.tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         timeline = QWidget()
         layout = QVBoxLayout(timeline)
         self.source = QComboBox()

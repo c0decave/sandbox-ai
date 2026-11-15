@@ -15,8 +15,8 @@ import threading
 import time
 
 from PySide6.QtCore import (
-    QAbstractItemModel, QAbstractTableModel, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QProcess, QRect,
-    QSize, Qt, QTimer, Signal, Slot,
+    QAbstractItemModel, QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
+    QProcess, QRect, QSize, Qt, QTimer, Signal, Slot,
 )
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QFont, QFontMetrics, QPainter, QPalette, QTextDocument, QTextOption,
@@ -2261,7 +2261,14 @@ def context_menu(parent, entries):
             menu.addSeparator()
             pending = False
         if isinstance(entry, QMenu):
-            menu.addMenu(entry)
+            # A submenu of this menu's own with the same actions, never the page's menu itself: this menu is dropped
+            # after use (exec_dropped), and with it went what it held as a submenu - the page's menu entries were
+            # deleted under it ("Internal C++ object (QAction) already deleted": hotfix round 1).
+            sub = menu.addMenu(entry.title())
+            sub.setToolTipsVisible(True)
+            sub.setEnabled(entry.isEnabled())
+            for action in entry.actions():
+                sub.addAction(action)
         elif isinstance(entry, QAction):
             menu.addAction(entry)
         elif isinstance(entry, tuple):
@@ -3469,8 +3476,235 @@ def tab_close_button(bar, tooltip=None):
     return holder, close
 
 
-class InsetCloseTabBar(QTabBar):
-    """A QTabBar whose closable tabs get tab_close_button (inside the tab) instead of Qt's own close button."""
+# -- a tab row's arrows --
+# Every tab row of the app is an ArrowTabBar (arrow_tabs, inset_close_tabs, the window's ProjectTabs). When its tabs no
+# longer fit, ← → and ▾ appear together at the row's right end: ← and → select the tab before or after the current one
+# (held, they repeat; each is off at its end), ▾ lists every tab. Qt's own scroll buttons only scrolled without
+# choosing, were drawn by the style (hardly visible in some themes) and came hardly ever: with a middle elide Qt shrank
+# every title to a few letters first. Now a title keeps its width (one longer than TAB_TITLE_CHARS characters is
+# shortened in the middle, whole on hover), Qt scrolls the row, and the arrows lie over the room Qt keeps at the right
+# end for its own buttons (the bar's scroller is as wide as the arrows; Qt's buttons stay below them).
+TAB_TITLE_CHARS = 32
+TAB_ARROW_MIN = 20  # px: the smallest side of an arrow button
+
+
+class TabArrows(QWidget):
+    """The ← → ▾ of an ArrowTabBar, at its right end while its tabs do not fit."""
+
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.bar = bar
+        self.side = TAB_ARROW_MIN
+        self.setObjectName("tabArrows")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 0, 0)
+        row.setSpacing(1)
+        self.left = self.button("tab-left", tr("Previous tab"), lambda: self.step(-1), repeat=True)
+        self.right = self.button("tab-right", tr("Next tab"), lambda: self.step(1), repeat=True)
+        self.listed = self.button("tab-list", tr("All tabs"), self.show_menu)
+        for button in (self.left, self.right, self.listed):
+            row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.hide()
+        bar.currentChanged.connect(lambda _index: self.update_state())
+
+    def button(self, glyph_name, tip, action, repeat=False):
+        button = QToolButton(self)
+        button.setObjectName("tabArrow")
+        button.glyph_name = glyph_name
+        button.setAutoRaise(True)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # (the keyboard has Ctrl+Tab and Ctrl+PgUp/PgDn)
+        button.setToolTip(tip)
+        button.setAccessibleName(tip)
+        if repeat:
+            button.setAutoRepeat(True)
+            button.setAutoRepeatDelay(400)
+            button.setAutoRepeatInterval(150)
+        button.clicked.connect(lambda _=False: action())
+        return button
+
+    def width_needed(self):
+        """The arrows' width (even: Qt keeps half the scroller's width per button of its own)."""
+        margins = self.layout().contentsMargins()
+        width = 3 * self.side + 2 * self.layout().spacing() + margins.left() + margins.right()
+        return width + width % 2
+
+    def restyle(self):
+        """Icons in the theme's text colour, sized to the bar's font; the bar keeps room for them at its right end."""
+        height = self.bar.fontMetrics().height()
+        self.side = max(TAB_ARROW_MIN, height + 6)
+        icon = max(14, round(height * 0.9))
+        color_ = theme.colors()["text"]
+        for button in (self.left, self.right, self.listed):
+            button.setIcon(theme.glyph(button.glyph_name, color_, icon * 2))  # (sharp on a HiDPI screen too)
+            button.setIconSize(QSize(icon, icon))
+            button.setFixedSize(self.side, self.side)
+        sheet = f"QTabBar::scroller {{ width: {self.width_needed()}px; }}"
+        if self.bar.styleSheet() != sheet:
+            self.bar.setStyleSheet(sheet)
+        self.place()
+
+    def place(self):
+        """Shown at the bar's right end while Qt scrolls the tabs (its own scroll buttons are shown), else hidden."""
+        bar = self.bar
+        overflow = bar.scrolls()
+        if overflow:
+            width = self.width_needed()
+            side = min(self.side, max(TAB_ARROW_MIN, bar.height()))
+            for button in (self.left, self.right, self.listed):
+                if button.width() != side:
+                    button.setFixedSize(side, side)
+            self.setGeometry(bar.width() - width, 0, width, bar.height())
+            self.raise_()  # (above Qt's buttons and the close buttons of tabs scrolled below it)
+        self.setVisible(overflow)
+        self.update_state()
+
+    def neighbour(self, step, wrap=False):
+        """The index of the next enabled tab STEP (-1 or 1) away from the current one (WRAP: past an end, from the
+        other end), or -1."""
+        count, current = self.bar.count(), self.bar.currentIndex()
+        for distance in range(1, count):
+            index = current + step * distance
+            if wrap:
+                index %= count
+            elif not 0 <= index < count:
+                return -1
+            if self.bar.isTabEnabled(index):
+                return index
+        return -1
+
+    def update_state(self):
+        self.left.setEnabled(self.neighbour(-1) >= 0)
+        self.right.setEnabled(self.neighbour(1) >= 0)
+
+    def step(self, step, wrap=False):
+        index = self.neighbour(step, wrap)
+        if index >= 0:
+            self.bar.setCurrentIndex(index)  # (Qt scrolls it into view)
+
+    def menu(self):
+        """A menu of every tab (the current one checked); choosing one makes it current."""
+        menu = QMenu(self)
+        current = self.bar.currentIndex()
+        for index in range(self.bar.count()):
+            action = menu.addAction(self.bar.tabIcon(index), self.bar.tabText(index))
+            action.setCheckable(True)
+            action.setChecked(index == current)
+            action.setEnabled(self.bar.isTabEnabled(index))
+            action.triggered.connect(lambda _=False, i=index: self.bar.setCurrentIndex(i))
+        return menu
+
+    def show_menu(self):
+        menu = self.menu()
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.popup(self.listed.mapToGlobal(QPoint(0, self.listed.height())))
+
+
+class ArrowTabBar(QTabBar):
+    """The app's tab row: whole titles that scroll, with TabArrows at the right end when they do not fit."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setUsesScrollButtons(True)
+        self.setElideMode(Qt.TextElideMode.ElideMiddle)  # (a title longer than TAB_TITLE_CHARS only: tabSizeHint)
+        self.qt_scroll = [button for button in self.findChildren(QToolButton)
+                          if button.objectName() in ("ScrollLeftButton", "ScrollRightButton")]
+        self.arrows = TabArrows(self)
+        self.arrows.restyle()
+
+    def scrolls(self):
+        """Whether the tabs do not fit (Qt shows its scroll buttons, below the arrows)."""
+        if self.qt_scroll:
+            return any(not button.isHidden() for button in self.qt_scroll)
+        return sum(self.tabSizeHint(i).width() for i in range(self.count())) > self.width()  # (another Qt)
+
+    def title_overflow(self, index):
+        """How many pixels the title of tab INDEX is wider than TAB_TITLE_CHARS characters (0: it is shown whole)."""
+        text = self.tabText(index).replace("&&", "\0").replace("&", "").replace("\0", "&")
+        metrics = self.fontMetrics()
+        return max(0, metrics.horizontalAdvance(text) - metrics.averageCharWidth() * TAB_TITLE_CHARS)
+
+    def full_title_tip(self, index):
+        """The whole title of tab INDEX when it is shortened, else None."""
+        if self.title_overflow(index) <= 0:
+            return None
+        return self.tabText(index).replace("&&", "\0").replace("&", "").replace("\0", "&")
+
+    def tabSizeHint(self, index):  # noqa: N802
+        hint = super().tabSizeHint(index)
+        over = self.title_overflow(index)
+        if over:
+            hint.setWidth(hint.width() - over)
+        return hint
+
+    def minimumTabSizeHint(self, index):  # noqa: N802
+        return self.tabSizeHint(index)  # (never shrunk further: the row scrolls instead)
+
+    def tabLayoutChange(self):  # noqa: N802
+        super().tabLayoutChange()
+        self.arrows.place()
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self.arrows.place()
+
+    def tabInserted(self, index):  # noqa: N802
+        super().tabInserted(index)
+        self.arrows.update_state()
+
+    def tabRemoved(self, index):  # noqa: N802
+        super().tabRemoved(index)
+        self.arrows.update_state()
+
+    def changeEvent(self, event):  # noqa: N802
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange, QEvent.Type.PaletteChange):
+            self.arrows.restyle()
+
+    def page_key(self, event):
+        """-1 or 1 for Ctrl+PgUp or Ctrl+PgDn (as in browsers and editors), else 0."""
+        if event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier != Qt.KeyboardModifier.ControlModifier:
+            return 0
+        return {Qt.Key.Key_PageUp: -1, Qt.Key.Key_PageDown: 1}.get(event.key(), 0)
+
+    def keyPressEvent(self, event):  # noqa: N802
+        step = self.page_key(event)
+        if step:
+            self.arrows.step(step, wrap=True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        """The tab widget's keys (arrow_tabs): a page's widget left Ctrl+PgUp/PgDn to it."""
+        if event.type() == QEvent.Type.KeyPress and self.page_key(event):
+            self.keyPressEvent(event)
+            return True
+        return False
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            index = self.tabAt(event.pos())
+            tip = self.full_title_tip(index) if index >= 0 and not self.tabToolTip(index) else None
+            if tip:
+                from PySide6.QtWidgets import QToolTip
+                QToolTip.showText(event.globalPos(), safe_tooltip(tip), self)
+                return True
+        return super().event(event)
+
+
+def arrow_tabs(tabs):
+    """TABS (a QTabWidget, before its first tab) gets the app's tab row (ArrowTabBar); Ctrl+PgUp and Ctrl+PgDn on its
+    pages go through its tabs (Ctrl+Tab is Qt's own)."""
+    bar = ArrowTabBar()
+    tabs.setTabBar(bar)
+    tabs.installEventFilter(bar)
+    return bar
+
+
+class InsetCloseTabBar(ArrowTabBar):
+    """An ArrowTabBar whose closable tabs get tab_close_button (inside the tab) instead of Qt's own close button."""
 
     def tabInserted(self, index):  # noqa: N802
         super().tabInserted(index)

@@ -79,11 +79,14 @@ MCP_CATALOG_FILES = (MCP_CATALOG, MCP_CATALOG + ".sig", "projects/sandbox-ai-mcp
 # ARCHIVE: it installs nothing else).
 VIDEOS = "sandbox-ai-videos.tar"
 VIDEO_NAME = re.compile(r"sandbox-ai-app-(\d{2})-([a-z]+)-([a-z]{2})\.(mp4|vtt)")
+# Internal notes kept in the checkout that no release file carries (MANIFEST.in excludes them from the sdist too):
+# the hosts this checkout's own agent reaches, how the MCP catalog's signing key is handled.
+INTERNAL = ("docs/AGENT_HOSTS.md", "docs/MCP_SIGNING_AXROSS.md")
 
 
 def release_files():
-    """Tracked and new, not ignored files; local tool state (.claude/) never ships. The app's files come from
-    its own repository (the checkout's git sees only one directory there)."""
+    """Tracked and new, not ignored files; local tool state (.claude/) and the INTERNAL notes never ship. The app's
+    files come from its own repository (the checkout's git sees only one directory there)."""
     names = set(git("ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0"))
     if (ROOT / APP / "sandbox_ai_app" / "__main__.py").is_file():
         listed = subprocess.run(["git", "-C", str(ROOT / APP), "ls-files", "-z", "--cached", "--others",
@@ -91,7 +94,7 @@ def release_files():
         names |= {f"{APP}/{n}" for n in listed.split("\0") if n}
     if (ROOT / MCP_CATALOG).is_file():  # read by sandbox-ai mcp before its published URL
         names |= {name for name in MCP_CATALOG_FILES if (ROOT / name).is_file()}
-    return sorted(n for n in names if n and not n.startswith((".claude/", "dist/"))
+    return sorted(n for n in names if n and not n.startswith((".claude/", "dist/")) and n not in INTERNAL
                   and (ROOT / n).is_file() and not (ROOT / n).is_symlink())
 
 

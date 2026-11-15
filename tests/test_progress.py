@@ -233,14 +233,13 @@ def test_a_sessions_terminal_says_what_its_supervisor_says_while_it_starts(tmp_p
         elif piece:
             with open(log, "a") as stream:
                 stream.write(piece)
-    monkeypatch.setattr(sessions.time, "sleep", sleep)
 
     class Running:
         returncode = None
 
         def poll(self):
             return None
-    sessions.wait_ready(directory, Running(), timeout=600, follow=follow, out=lines.append, clock=clock)
+    sessions.wait_ready(directory, Running(), timeout=600, follow=follow, out=lines.append, clock=clock, sleep=sleep)
     assert lines[0] == "agent-sandbox: starting the MCP server fetch (its image is pulled once, its sandbox started)…"
     assert not any("old line" in line or "noise" in line or "ghp_" in line for line in lines)
     assert "agent-sandbox: secret GH_TOKEN=*** given" in lines
@@ -274,10 +273,9 @@ def test_on_a_terminal_a_sessions_start_is_a_progress_bar_of_its_steps(tmp_path,
         elif piece:
             with open(log, "a") as stream:
                 stream.write(piece)
-    monkeypatch.setattr(sessions.time, "sleep", sleep)
     bar = progress.Bar(["mcp", "kits", "pod", "terminal"], write=written.append, clock=clock)
     process = type("Running", (), {"returncode": None, "poll": lambda self: None})()
-    sessions.wait_ready(directory, process, timeout=600, follow=0, clock=clock, bar=bar)
+    sessions.wait_ready(directory, process, timeout=600, follow=0, clock=clock, bar=bar, sleep=sleep)
     text = "".join(written)
     drawn = [piece for piece in written if piece.startswith("\ragent-sandbox: [")]
     assert drawn and all(piece.endswith("\x1b[K") for piece in drawn), "drawn again in place, never a new line"

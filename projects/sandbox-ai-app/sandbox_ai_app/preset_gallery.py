@@ -602,12 +602,35 @@ class PresetGallery(QDialog):
             return None
         try:
             preset = PR.import_file(self.sai, path)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Not imported"), printable_text(exc))
+            return None
+        # A preset from elsewhere: each of its own MCP servers that reaches the network comes in only after a yes
+        # for it (the user: "beim Import einzeln fragen"); the default is no, and what is left out is said.
+        left = [name for name, facts in PR.networked_servers(self.sai, preset)
+                if not self.include_server(preset, name, facts)]
+        preset = PR.without_servers(preset, left)
+        try:
             PR.add_mine(self.sai, preset)
         except (OSError, ValueError) as exc:
             warn(self, tr("Not imported"), printable_text(exc))
             return None
         self.populate(select=preset.key)
+        if left:
+            short_notice(self, tr("Import a preset"), tr("Imported without the MCP servers {names}: they reach the "
+                                                         "network and were not confirmed.", names=", ".join(left)))
         return preset
+
+    def include_server(self, preset, name, facts):
+        """True when the human includes the imported PRESET's MCP server NAME (FACTS: networked_servers') - asked
+        with what it runs, what network it has and its VPN; Leave it out is the default (Enter, Esc)."""
+        text = tr("The imported preset {preset} brings its own MCP server {name}, which reaches the network.\n\n"
+                  "Runs: {what}\nNetwork access: {network}\nVPN: {vpn}\n\nInclude it? Left out, the preset is "
+                  "imported without it.", preset=printable(preset.title), name=printable(name), what=facts["what"],
+                  network=facts["network"], vpn=facts["vpn"] or tr("none of its own (the start's, if it has one)"))
+        # (never ask_first: a setting that skips questions must not include a server; Leave it out is the default)
+        return widgets.choose(self, tr("MCP server {name} with network", name=printable(name)), text,
+                              [("include", tr("Include it"))], cancel=tr("Leave it out")) == "include"
 
     def export_preset(self, path=None):
         if self.selected is None:
@@ -728,6 +751,14 @@ class PlaceholderForm(QDialog):
         if getattr(placeholder, "names", "") == "secret":  # the host's secrets to choose from (names only)
             from .name_fields import NameField
             field = NameField("secret", self.sai, self.host, placeholder=tr("empty: fill in later"))
+            field.setText(default)
+            return field
+        if getattr(placeholder, "names", "") == "image" or \
+                placeholder.marker in B.image_markers(getattr(self.preset, "options", ()) or ()):
+            # a service's image: your images there to choose from (none yet: where one is added), any other typed
+            from .name_fields import NameField
+            field = NameField("image", self.sai, self.host, placeholder=tr("empty: fill in later"))
+            field.setAccessibleName(placeholder.label)
             field.setText(default)
             return field
         combo = QComboBox()

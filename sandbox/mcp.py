@@ -35,6 +35,9 @@ full only) its containers join the network namespace of a VPN container (sandbox
 lets nothing out but through the tunnel; a server with a command takes --vpn PROFILE in its options. Every
 server's network is decided in server_network and proven after its start (verify_network; each connection of an
 image server by vpn.py's guard): one that would reach the network outside the VPN meant for it does not run.
+Behind its start's profile that runs in one sandbox at a time (a WireGuard key, Mullvad's too, a persistent
+Tailscale node) a server brings up no second tunnel of the key: its VPN container borrows the start's tunnel
+(LentVpn, vpn.lends), as an instance of that run alone, stopped when the run ends (stop_lent).
 
 The relay in front of every server is a gateway: the MCP rules of the starting agent's rulesets allow,
 ask or deny each tool call (runtime.py, McpGateway). Its records and questions reach the server's state
@@ -2198,10 +2201,32 @@ def network_of(definition):
     return l.MODES.mcp_has_network(definition, l), option_value(options, "--vpn")
 
 
-def vpn_conflicts(name, definition, vpn, tor):
+class LentVpn(str):
+    """The name of the VPN profile a server reaches the network through when it borrows its start's tunnel of it
+    (vpn.lends: a WireGuard key, Mullvad's too, or a persistent Tailscale node runs in one sandbox at a time, so the
+    start lends its tunnel instead of the server bringing up a second one of the same key). A str: compared, saved
+    and shown as the profile's name. LENT_BY: the start's run, None while the start does not run (its checks)."""
+
+    def __new__(cls, profile, lent_by=None):
+        value = super().__new__(cls, profile)
+        value.lent_by = lent_by
+        return value
+
+
+def lent_of(vpn):
+    """(True, the run) for a VPN the server borrows (LentVpn), else (False, None). Told by its kind's name and its
+    attribute, not by the class: the launcher and this file are each loaded by path, and another copy of this module
+    (the launcher's own) makes its LentVpn - a str with lent_by all the same (a plain str has no such attribute)."""
+    if isinstance(vpn, str) and type(vpn).__name__ == "LentVpn" and hasattr(vpn, "lent_by"):
+        run = vpn.lent_by
+        return True, run if isinstance(run, str) else None
+    return False, None
+
+
+def vpn_conflicts(name, definition, vpn, tor, lent=False):
     """Why the command server NAME cannot be started behind the start's VPN (its own start would refuse it, after the
-    agent's start had begun), or None: its own resolvers (--nameserver), with Tor no connection proxy (--no-proxy) or
-    the host's ports without --vpn-bypass-host-ports."""
+    agent's start had begun), or None: its own resolvers (--nameserver), with Tor or a lent tunnel (LENT) no
+    connection proxy (--no-proxy), with Tor the host's ports without --vpn-bypass-host-ports."""
     if "command" not in definition:
         return None
     options = launcher().canonical_options(definition.get("options", []))
@@ -2209,6 +2234,10 @@ def vpn_conflicts(name, definition, vpn, tor):
     if "--nameserver" in given:
         return (f"MCP server {name} names resolvers of its own (--nameserver), which conflicts with the start's "
                 f"--vpn {vpn}: drop it from its options (the VPN's resolvers answer)")
+    if lent and "--no-proxy" in given:
+        return (f"MCP server {name} has --no-proxy, and it reaches the network through the start's tunnel of {vpn}, "
+                "lent to it: the connection proxy is what hands its connections to the tunnel's relay. Drop it from "
+                "its options")
     if not tor and "--vpn-bypass-tcp" in given:
         return (f"MCP server {name} has --vpn-bypass-tcp, which goes with a Tor profile only, and the start's --vpn "
                 f"{vpn} is none: drop it from its options")
@@ -2350,19 +2379,26 @@ def server_network(name, definition, vpn=None, vpn_module=None):
     all), "vpn" (the profile it leaves through, or None), "vpn_type", "own" (that VPN is the definition's own),
     "definition" (as started: with the VPN, an image server in its Podman form), "network" (an image server's
     connections: its one podman --network option), "vpn_container" (theirs), "launcher" (what a command server's or
-    helper's launcher gets for it)}. ValueError for a server that would reach the network outside that VPN: a VPN
-    for a server without network, a server under Bubblewrap only, a profile that is no way out (vpn.egress_problem)."""
+    helper's launcher gets for it), "lent" (VPN is a LentVpn: the start's tunnel, borrowed - an image server's VPN
+    container and a command server's or helper's launcher borrow it from "lent_by", the start's run)}. ValueError for
+    a server that would reach the network outside that VPN: a VPN for a server without network, a server under
+    Bubblewrap only, a profile that is no way out (vpn.egress_problem), a borrowed tunnel of a profile not lent."""
     l = launcher()
     kind = server_kind(definition)
     reaches, own = network_of(definition)
     chosen = vpn if vpn is not None else own
+    lent, lent_by = lent_of(vpn)
     if chosen is not None and vpn_module is None:
         vpn_module = l.load_vpn_module()  # (once; VPN_MODULE where the caller has it already)
     if vpn is not None:
         vpn_module.check_name(vpn)
     plan = {"server": name, "kind": kind, "reaches": bool(reaches), "vpn": chosen, "vpn_type": None,
-            "own": chosen is not None and chosen == own and vpn in (None, own), "definition": definition,
-            "network": None, "vpn_container": None, "launcher": []}
+            "own": chosen is not None and chosen == own and vpn in (None, own) and not lent, "definition": definition,
+            "network": None, "vpn_container": None, "launcher": [], "lent": lent, "lent_by": lent_by}
+    if lent and not reaches:
+        raise ValueError(f"MCP server {name} reaches no network: it borrows no tunnel")
+    if lent_by is not None:
+        vpn_module.check_run(lent_by)
     if kind == "image":
         if chosen is not None:
             if "image" not in definition:
@@ -2378,12 +2414,16 @@ def server_network(name, definition, vpn=None, vpn_module=None):
             # full: pasta without the host's loopback or forwarded ports, as the agents' own sandboxes.
             plan["network"] = f"--network={l.POD_NETWORK}" if reaches else "--network=none"
     elif vpn is not None:
-        # Behind the start's VPN (or mcp start --vpn): a failed check stops the server, whatever its options say.
-        plan["launcher"] = ["--vpn", vpn, "--vpn-check", "stop"]
+        # Behind the start's VPN (or mcp start --vpn): a failed check stops the server, whatever its options say;
+        # behind the start's tunnel, lent: borrowed from the start's run (a server's options cannot name that).
+        plan["launcher"] = ["--vpn", str(vpn), "--vpn-check", "stop",
+                            *(["--vpn-lent-by", lent_by] if lent_by is not None else [])]
     if chosen is not None and reaches:
         try:
             profile = vpn_module.load_profile(chosen)
         except (OSError, ValueError) as exc:
+            if lent:
+                raise ValueError(f"MCP server {name}: the VPN profile {chosen} of the start's tunnel: {exc}") from None
             LOG.debug("mcp", f"{name}: the VPN profile {chosen} is not read here (its own start refuses it)", exc)
             profile = None  # a missing or damaged profile: the VPN's own start refuses it (nothing starts)
         if profile is not None:
@@ -2391,6 +2431,9 @@ def server_network(name, definition, vpn=None, vpn_module=None):
             problem = vpn_module.egress_problem(profile, name)
             if problem:
                 raise ValueError(problem)
+            if lent and not vpn_module.lends(profile):
+                raise ValueError(f"MCP server {name}: a start does not lend its tunnel of {chosen} "
+                                 f"({profile.get('type')}): the server brings up one of its own")
             if plan["vpn_type"] == "tor":
                 # A server that cannot work behind Tor is refused, not started broken (TOR_LIMITS); what does not
                 # work of one that works in part is said when it starts (begin_running).
@@ -2407,6 +2450,10 @@ def checked_plan(plan, kind):
     if not isinstance(plan, dict) or plan.get("kind") != kind or "definition" not in plan:
         raise ValueError(f"an MCP server's command is built from its network plan (mcp.server_network), "
                          f"not from {type(plan).__name__}")
+    if plan.get("lent") and (not plan.get("vpn") or not isinstance(plan.get("lent_by"), str)):
+        # Borrowed from a start that does not run (its checks, a stopped start): nothing to borrow from yet.
+        raise ValueError(f"MCP server {plan.get('server')} borrows the tunnel of its start's --vpn {plan.get('vpn')}, "
+                         "which lends it only while it runs: the server comes up with that start")
     network = plan.get("network")
     if kind == "image":
         behind = f"--network=container:{plan.get('vpn_container')}"
@@ -2414,8 +2461,9 @@ def checked_plan(plan, kind):
                 "--network=none", f"--network={launcher().POD_NETWORK}") \
                 or plan["definition"].get("vpn") != plan.get("vpn"):
             raise ValueError(f"MCP server {plan.get('server')}: its network plan does not hold ({network})")
-    elif plan.get("vpn") and not plan.get("own") and plan.get("launcher") != ["--vpn", plan["vpn"], "--vpn-check",
-                                                                              "stop"]:
+    elif plan.get("vpn") and not plan.get("own") and plan.get("launcher") != [
+            "--vpn", plan["vpn"], "--vpn-check", "stop", *(["--vpn-lent-by", plan.get("lent_by")] if plan.get("lent")
+                                                           else [])]:
         raise ValueError(f"MCP server {plan.get('server')}: its network plan does not hold (behind {plan['vpn']})")
     return plan["definition"], network
 
@@ -2466,13 +2514,19 @@ def vpn_for_servers(a, names, profile_type=None):
     own sandbox, its own network) reached the internet from your address while the agent went through the VPN
     (a Tor start's browser server showed your own IP). A server with a VPN of its own keeps it; with a Tor profile
     it must be Tor too. ValueError for a server that would leave outside Tor. PROFILE_TYPE: the start's profile type
-    (read when not given)."""
+    (read when not given).
+
+    A profile that runs in one sandbox at a time (vpn.lends: a WireGuard key, Mullvad's too, a persistent Tailscale
+    node) is never brought up twice: a server behind the start's, or whose own definition names that same profile,
+    borrows the start's tunnel (a LentVpn, the start's run) - one key, one tunnel, the agent and its servers behind
+    it. A server whose own definition names another profile keeps a tunnel of its own of that one."""
     if not getattr(a, "vpn", None):
         return {name: None for name in names}
     servers = {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
     vpn_module = launcher().load_vpn_module()
-    if profile_type is None:
-        profile_type = (getattr(a, "vpn_profile", None) or vpn_module.load_profile(a.vpn)).get("type")
+    profile = getattr(a, "vpn_profile", None) or vpn_module.load_profile(a.vpn)
+    profile_type = profile_type or profile.get("type")
+    lent = LentVpn(a.vpn, getattr(a, "run_id", None)) if vpn_module.lends(profile) else None
     found = {}
     for name in names:
         definition = servers.get(name)
@@ -2492,16 +2546,28 @@ def vpn_for_servers(a, names, profile_type=None):
                     raise ValueError(f"MCP server {name} reaches the network through the VPN {own}, not through Tor: "
                                      f"with --vpn {a.vpn} (Tor) every connection must go through Tor. Give it a Tor "
                                      f"profile (sandbox-ai mcp add {name} ... --vpn {a.vpn}) or start without it")
-            found[name] = None
+            # Its own profile is the start's, which runs once at a time: the start's tunnel, borrowed (not the same
+            # key twice); another profile of its own: a tunnel of its own of that one.
+            found[name] = lent if lent is not None and own == a.vpn else None
+            conflict = vpn_conflicts(name, definition, a.vpn, False, lent=True) if found[name] else None
+            if conflict:
+                raise ValueError(conflict)
         else:
             if "rootfs" in definition and "image" not in definition:
                 raise ValueError(f"MCP server {name} reaches the network and runs under Bubblewrap only, where no VPN "
                                  f"can be put in front of it: with --vpn {a.vpn} it would leave from your own address. "
                                  "Add its Podman form, or start without it")
-            conflict = vpn_conflicts(name, definition, a.vpn, profile_type == "tor")
+            conflict = vpn_conflicts(name, definition, a.vpn, profile_type == "tor", lent=lent is not None)
             if conflict:
                 raise ValueError(conflict)
-            found[name] = a.vpn
+            found[name] = lent if lent is not None else a.vpn
+        if lent_of(found[name])[0] and server_kind(definition) == "image" and getattr(a, "podman_url", None) and \
+                not launcher().on_machine(a):  # (on macOS a catalog server is refused anyway: start_problems)
+            # (its bridge and VPN container run with this host's Podman; the start's tunnel is lent on the other)
+            raise ValueError(f"MCP server {name} is a catalog server, whose containers run with this host's Podman, "
+                             f"and the start's tunnel of {a.vpn} is lent on the engine of --podman-url: it cannot "
+                             f"borrow it. Give it another profile (sandbox-ai mcp set {name} --vpn OTHER) or start "
+                             "without --podman-url")
         if reaches:
             # What its start would refuse (a profile that is no way out, a VPN its form cannot take): refused now,
             # before the agent's start has begun.
@@ -2509,13 +2575,43 @@ def vpn_for_servers(a, names, profile_type=None):
     return found
 
 
+def held_elsewhere(name, plan, vpn_module=None):
+    """Why the server NAME cannot bring up the tunnel of its own its PLAN asks for (server_network), or None: its
+    profile runs in one sandbox at a time (vpn.sharing "once") and another sandbox holds it now (the lock its own VPN
+    container would take: refused there too, but late, inside the server's start). A start's own servers borrow its
+    tunnel instead (vpn_for_servers); this names the holder and that way."""
+    if not plan.get("vpn") or not plan.get("reaches") or plan.get("lent"):
+        return None
+    vpn_module = vpn_module or launcher().load_vpn_module()
+    try:
+        profile = {"name": str(plan["vpn"]), **vpn_module.load_profile(plan["vpn"])}
+        if vpn_module.sharing(profile) != "once":
+            return None
+        holder = vpn_module.profile_holder(profile)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None  # (its own start says why: its VPN container takes the profile's lock, or is refused)
+    if holder is None:
+        return None
+    why, fix = vpn_module.sharing_text(profile)
+    return (f"MCP server {name} would bring up a tunnel of its own of the VPN profile {plan['vpn']}, which is in use "
+            f"by {holder}: {why}. A start's own MCP servers share its tunnel instead - start it with that start "
+            f"(sandbox-ai mcp start {server_of(name)} --for START, or sandbox-ai mcp attach {server_of(name)} START "
+            f"--live), or give it another profile (sandbox-ai mcp start {server_of(name)} --vpn OTHER; {fix})")
+
+
 def server_vpn(a, name, explicit=None):
     """The VPN to start the server NAME behind for the start A (vpn_for_servers), with EXPLICIT (mcp start --vpn)
-    in its place where given: with a Tor start that one must be a Tor profile too. ValueError where the server
-    would leave outside the start's VPN."""
+    in its place where given: with a Tor start that one must be a Tor profile too; the start's own profile where
+    it lends its tunnel is that tunnel, borrowed (vpn_for_servers). ValueError where the server would leave outside
+    the start's VPN."""
     behind = vpn_for_servers(a, [name]).get(name)
     if explicit is None or explicit == behind:
         return behind
+    if getattr(a, "vpn", None) and explicit == a.vpn:
+        vpn_module = launcher().load_vpn_module()
+        profile = getattr(a, "vpn_profile", None) or vpn_module.load_profile(a.vpn)
+        if vpn_module.lends(profile):
+            return LentVpn(a.vpn, getattr(a, "run_id", None))
     if getattr(a, "vpn", None):
         vpn_module = launcher().load_vpn_module()
         kinds = {}
@@ -2533,7 +2629,15 @@ def server_vpn(a, name, explicit=None):
 def check_running_vpn(name, vpn):
     """A server NAME (an instance: instance_of) that runs already, but not behind VPN (the one the start puts it
     behind, or the one of its own definition: ensure_running hands that in too), is refused: it would serve the start
-    from outside that VPN. Nothing to check for VPN None or a server that does not run."""
+    from outside that VPN. Nothing to check for VPN None or a server that does not run. An instance that borrows a
+    start's tunnel (its state's "lent_by") serves that start alone: never one behind another tunnel (another run's,
+    or one of its own) - and for a VPN borrowed (LentVpn) only that run's instance counts (the start gets its own)."""
+    lent, run = lent_of(vpn)
+    if vpn is not None and status(name) == "running" and load_state(name).get("lent_by") not in (None, run):
+        raise ValueError(f"MCP server {name} is running behind the tunnel of the run {load_state(name)['lent_by']}, "
+                         f"lent to it, which is not this one's way out; stop it first: sandbox-ai mcp stop {name}")
+    if lent and load_state(name).get("lent_by") is None:
+        return  # (not the start's own instance: that one is NAME.HASH of its run - ensure_running)
     if vpn is not None and status(name) == "running" and load_state(name).get("vpn") != vpn:
         raise ValueError(f"MCP server {name} is running without the VPN {vpn}"
                          + (f" (it runs behind {load_state(name)['vpn']})" if load_state(name).get("vpn") else "")
@@ -2609,14 +2713,23 @@ def own_instance(name, digest):
     return f"{name}.{hashlib.sha256(str(digest).encode()).hexdigest()[:8]}"
 
 
-def start_instance(name, a, servers=None):
+def start_instance(name, a, servers=None, lent_by=None):
     """(instance, definition, digest, note) of server NAME for the start A (start_definition), where an instance of
     the same name runs with another definition or other rules already (another project's server of this name, a
     definition changed by mcp set, another ruleset): an instance of its own for this start, NAME.HASH of what it runs
     - the one running serves its starts on, unchanged, and nothing of it reaches this start. NOTE says so (None: the
     instance is the start's as it is). ValueError for a helper or a team's board (one of each runs) and for an unknown
-    server."""
+    server. LENT_BY (the run whose tunnel it borrows, vpn_for_servers): always an instance of that run's own,
+    NAME.HASH of the run too - it serves that run alone and goes with it (stop_lent), and no other start, another
+    tunnel behind it, ever reaches it (a helper is its start's own already, by its name)."""
     instance, definition, digest = start_definition(name, a, servers)
+    if lent_by is not None:
+        launcher().load_vpn_module().check_run(lent_by)
+        if "helper" in definition:
+            return instance, definition, digest, None
+        if not separable(name, definition):
+            raise ValueError(f"MCP server {name} is a team's board, which reaches no network: it borrows no tunnel")
+        return own_instance(name, f"{digest}|lent-by:{lent_by}"), definition, digest, None
     if status(instance) != "running" or load_state(instance).get("definition") == digest:
         return instance, definition, digest, None
     if not separable(name, definition):
@@ -2718,12 +2831,19 @@ def start_problems(a, names, servers=None, present=None):
                 vpn_module.load_profile(own_vpn)
             except (OSError, ValueError) as exc:
                 own_problems.append(f"MCP server {name}: its VPN: {exc}")
+        behind = None
         if getattr(a, "vpn", None):
             try:
-                vpn_for_servers(a, [name])
+                # Behind the start's VPN; where that runs once at a time (WireGuard, Mullvad, a persistent Tailscale
+                # node) the start's own tunnel, borrowed - its instance is the run's own, chosen when it starts.
+                behind = vpn_for_servers(a, [name]).get(name)
             except (OSError, ValueError) as exc:
                 own_problems.append(str(exc))
-        if not own_problems:
+        if not own_problems and lent_of(behind)[0]:
+            notes.append(f"MCP server {name} reaches the network through the start's tunnel of {a.vpn}, lent to it "
+                         "(one key, one tunnel: no second tunnel of the same profile); it comes up once that tunnel "
+                         "is up, and stops with the start")
+        elif not own_problems:
             try:
                 instance, _definition, _digest, note = start_instance(name, a, servers)
             except ValueError as exc:
@@ -2762,8 +2882,8 @@ def ensure_running(name, a, vpn=None):
     """Start the server sandbox for NAME unless it already runs; returns 'running' or 'started'. VPN (sandbox-ai
     mcp start --vpn) puts that VPN profile in front for this start, whatever the definition says. The instance is
     start_instance's: NAME, NAME.HASH for a start with limits, folders or variables of its own, or one of its own
-    where NAME runs with another definition."""
-    instance, _definition, _digest, note = start_instance(name, a)
+    where NAME runs with another definition; behind the start's tunnel, borrowed (a LentVpn), the run's own."""
+    instance, _definition, _digest, note = start_instance(name, a, lent_by=lent_run(name, vpn))
     if note and (getattr(a, "mcp_instances", None) or {}).get(name) != instance:
         print(f"agent-sandbox: {note}", file=sys.stderr)  # (the start's check said it already otherwise)
     remember_instance(a, name, instance)
@@ -2771,12 +2891,22 @@ def ensure_running(name, a, vpn=None):
         return ensure_running_locked(name, a, vpn, instance)
 
 
+def lent_run(name, vpn):
+    """The run whose tunnel the server NAME borrows behind VPN (LentVpn), None for any other VPN; ValueError for a
+    tunnel borrowed from a start that does not run (nothing lends it yet)."""
+    lent, run = lent_of(vpn)
+    if lent and run is None:
+        raise ValueError(f"MCP server {name} borrows the tunnel of its start's --vpn {vpn}, which lends it only while "
+                         "it runs: the server comes up with that start")
+    return run
+
+
 def begin_running(name, a, vpn=None):
     """ensure_running without its wait: the server for NAME started (unless it runs) and left starting; the function
     returned waits until it is ready (its socket, its network checked, "started" said) and returns 'running' or
     'started'. The server's lock is held until then: a start begins each of its servers, then waits for them, so that
     their sandboxes come up side by side instead of one after another."""
-    instance, _definition, _digest, note = start_instance(name, a)
+    instance, _definition, _digest, note = start_instance(name, a, lent_by=lent_run(name, vpn))
     if note and (getattr(a, "mcp_instances", None) or {}).get(name) != instance:
         print(f"agent-sandbox: {note}", file=sys.stderr)  # (the start's check said it already otherwise)
     remember_instance(a, name, instance)
@@ -2911,6 +3041,17 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
             return "running"
         LOG.info("mcp", f"{label}: runs, but its socket or its VPN is gone; it is stopped and started again")
         stop_locked(instance)  # alive but its socket (or its VPN) is gone: replace it rather than start a second one
+    held = held_elsewhere(instance, plan)  # a tunnel of its own of a profile another sandbox holds: said now
+    if held:
+        LOG.warning("mcp", f"{label}: refused - {held}")
+        raise ValueError(held)
+    lender = launcher().load_vpn_module() if plan["lent"] else None
+    not_lent = lender.lent_tunnel_problem(plan["lent_by"], lender.lends_by_volume(a)) if lender is not None else None
+    if not_lent:
+        # (a run that ended, or one whose lender could not start: it went on without it and wrote down why)
+        LOG.warning("mcp", f"{label}: refused - the run {plan['lent_by']} does not lend its tunnel: {not_lent}")
+        raise ValueError(f"MCP server {label} borrows the tunnel of the run {plan['lent_by']} (--vpn {plan['vpn']}), "
+                         f"which does not lend it now: {not_lent}")
     check_vpn_starts(instance, plan)  # never back outside the VPN of a running start that reaches it
     sock = launcher().mcp_socket_dir(instance)
     definition = plan["definition"]
@@ -2962,8 +3103,11 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
             # that chooses a network.
             if plan["vpn_type"] == "tor" and not definition.get("mounts"):
                 check_tor_image_user(name, definition["image"])  # with mounts it runs as 0:0 anyway
-            cmd = [sys.executable, "-I", str(HERE / "vpn.py"), "--internal-mcp-vpn", plan["vpn"],
-                   plan["vpn_container"], str(sock.resolve()), "--", *bridge,
+            # Behind the start's tunnel, lent: the VPN container borrows it (no tunnel, no key of its own).
+            wrapper = ["--internal-mcp-borrow", str(plan["vpn"]), plan["vpn_container"], str(sock.resolve()),
+                       plan["lent_by"]] if plan["lent"] else \
+                ["--internal-mcp-vpn", str(plan["vpn"]), plan["vpn_container"], str(sock.resolve())]
+            cmd = [sys.executable, "-I", str(HERE / "vpn.py"), *wrapper, "--", *bridge,
                    *watched(directory, instance, definition, connection_command(plan))]
         environment = dict(os.environ)
         environment.update(variables)
@@ -2980,7 +3124,8 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
                           **({"mounts": [{key: m.get(key, "ro") for key in ("target", "host", "mode")}
                                          for m in definition["mounts"]]} if definition.get("mounts") else {}),
                           **({"rootfs": definition["rootfs"]["sha256"]} if engine == "bwrap" else {}),
-                          "vpn": plan["vpn"], "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "vpn": plan["vpn"], "lent_by": plan["lent_by"],
+                          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
         def started():
             waited(instance, lambda: wait_for_socket(sock / "server.sock", log, process, name=label), log)
@@ -3001,7 +3146,7 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         save_state(name, {"pid": process.pid, "pid_start": launcher().process_start(process.pid, PROC),
                           "command": cmd[cmd.index("--", cmd.index("--internal-mcp-serve")) + 1:],
                           "helper": definition["helper"], "backend": a.backend, "podman_url": a.podman_url,
-                          "definition": digest, "vpn": plan["vpn"],
+                          "definition": digest, "vpn": plan["vpn"], "lent_by": plan["lent_by"],
                           "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
         def started():
@@ -3020,7 +3165,7 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
                           "server": name, "limits": default_limits(definition),
                           "command": definition["command"], "backend": a.backend,
                           "podman_url": a.podman_url, "definition": digest, "vpn": plan["vpn"],
-                          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                          "lent_by": plan["lent_by"], "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                           "started_for": started_for(a)})
     def started():
         waited(instance, lambda: wait_for_socket(sock / "server.sock", log, process, name=label,
@@ -3213,6 +3358,34 @@ def stop_locked(name, timeout=30, quiet=False):
     return 0
 
 
+def lent_instances(run):
+    """The running instances that borrow the tunnel of the run RUN (their state's "lent_by")."""
+    root = state_dir("x").parent
+    try:
+        names = sorted(path.name for path in root.iterdir() if path.is_dir() and not path.is_symlink())
+    except OSError:
+        return []
+    return [name for name in names if re.fullmatch(INSTANCE_PATTERN, name) and load_state(name).get("lent_by") == run
+            and status(name) == "running"]
+
+
+def stop_lent(run, timeout=30):
+    """When the run RUN ends (agent_sandbox, before its tunnel goes): every server that borrows its tunnel is stopped -
+    it served that run alone, and without the tunnel it would reach nothing (its kill switch holds). Returns their
+    names; one that cannot be stopped is said and logged, the others are stopped all the same."""
+    stopped = []
+    for name in lent_instances(run):
+        try:
+            with server_lock(name):
+                stop_locked(name, timeout, quiet=True)
+            stopped.append(name)
+        except (OSError, ValueError) as exc:
+            LOG.warning("mcp", f"{name}: borrowed the tunnel of the run {run}, which ends; it could not be stopped", exc)
+            print(f"agent-sandbox: MCP server {name} could not be stopped ({exc}); it reaches nothing without the "
+                  f"tunnel of {run} (sandbox-ai mcp stop {name})", file=sys.stderr)
+    return stopped
+
+
 # --- an MCP server for a named start (mcp start NAME --for START, mcp attach NAME START) ---------------------
 
 # Why a running sandbox reaches a new MCP server only after a restart unless it is attached with --live: its agent
@@ -3246,7 +3419,7 @@ def start_arguments(data, extra=()):
     with sessions.in_directory(data["cwd"]):
         argv, _ = l.load_presets_module().apply(l.canonical_options([data["agent"], *sessions.run_options(data), *extra]),
                                                 canonical=l.canonical_options, with_mode=True,
-                                                credential=l.copies_credential)
+                                                credential=l.copies_credential, private=l.private_source)
         argv = l.canonical_options(argv)
         try:
             a = l.parse_args(argv)
@@ -3302,11 +3475,13 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
     servers = definitions(a.project_document)
     if name not in servers:
         raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+    running = entry["state"] in ("running", "paused")
+    if running and isinstance(entry.get("run"), str):
+        a.run_id = entry["run"]  # (the run that lends its tunnel to the start's own servers while it runs)
     if getattr(a, "vpn", None):
         # A server that would leave outside the start's VPN (Tor: outside Tor), or one running already without it, is
         # refused now: not after a restart has stopped the start.
         check_running_vpn(instance_of(a, name), server_vpn(a, name, vpn))
-    running = entry["state"] in ("running", "paused")
     result = {"server": name, "start": entry["name"], "state": entry["state"], "server_started": False}
     named = name in starts.mcp_names(data["options"])
     # A run of a version that did not record its servers (no "mcp_running"): its options are taken for it.
@@ -3317,8 +3492,13 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
         return result
     if start_server:
         a.started_for = {"start": key, "run": entry.get("run")}
-        # As the start starts it: behind its VPN where the server reaches the network (with Tor: Tor only).
-        result["server_started"] = ensure_running(name, a, server_vpn(a, name, vpn)) == "started"
+        # As the start starts it: behind its VPN where the server reaches the network (with Tor: Tor only); behind
+        # its tunnel, borrowed, where the start lends it - only while it runs (else it comes up with its next start).
+        if not running and lent_of(server_vpn(a, name, vpn))[0]:
+            out(f"MCP server {name} borrows the tunnel of {shown}'s --vpn {a.vpn} (one key, one tunnel); it comes up "
+                f"with {shown}'s next start")
+        else:
+            result["server_started"] = ensure_running(name, a, server_vpn(a, name, vpn)) == "started"
     if running and not restart and ask is not None:
         restart = ask(f"{shown} runs; {LIVE}. Restart it now with {name}? The agent continues its conversation.")
     if running and restart:
@@ -3668,8 +3848,11 @@ def attach_live(name, start, helper=None, out=print):
               "agent_restart": LIVE_AGENTS[agent]["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
     a.started_for = {"start": entry.get("id") if entry.get("directory") else None, "run": record.get("run")}
     if record.get("vpn_profile"):
-        # The VPN the run has (its --llm server's, say), whatever its kept options say now.
+        # The VPN the run has (its --llm server's, say), whatever its kept options say now; the run that lends its
+        # tunnel (vpn.lends) to the servers it reaches.
         a.vpn, a.vpn_profile = record["vpn_profile"], None
+        if isinstance(record.get("run"), str):
+            a.run_id = record["run"]
     # Its own checks, as at a start; behind the run's VPN where it reaches the network (with Tor: Tor only). A server
     # that runs already without it is refused (ensure_running).
     result["server_started"] = ensure_running(name, a, server_vpn(a, name)) == "started"

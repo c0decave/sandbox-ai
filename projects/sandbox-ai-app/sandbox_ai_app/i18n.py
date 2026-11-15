@@ -362,9 +362,6 @@ TEXTS = {
     "A service's name is lower-case letters, digits and '-' (up to 24).": {
         'en': "A service's name is lower-case letters, digits and '-' (up to 24).",
         'de': "Der Name eines Service besteht aus Kleinbuchstaben, Ziffern und '-' (bis zu 24)."},
-    '{image} is none of your images: add it (Images page, Your images), or choose another.': {
-        'en': '{image} is none of your images: add it (Images page, Your images), or choose another.',
-        'de': '{image} ist keines Ihrer Images: Fügen Sie es hinzu (Seite Images, Eigene Images), oder wählen Sie ein anderes.'},
     'Choose the image of the service {name}: one of your images (Images page, Your images).': {
         'en': 'Choose the image of the service {name}: one of your images (Images page, Your images).',
         'de': 'Wählen Sie das Image des Dienstes {name}: eines Ihrer Images (Seite Images, Eigene Images).'},
@@ -497,6 +494,226 @@ TEXTS = {
     'Pull and pin': {
         'en': 'Pull and pin',
         'de': 'Holen und pinnen'},
+    # == finding packages and browsing registries (package_search.py, registry_browser.py) ==
+    '{count} of {total} packages of {system} ({manager}) in {image}': {
+        'en': '{count} of {total} packages of {system} ({manager}) in {image}',
+        'de': '{count} von {total} Paketen von {system} ({manager}) in {image}'},
+    'This sandbox-ai cannot search packages yet; update it (sandbox-ai update).': {
+        'en': 'This sandbox-ai cannot search packages yet; update it (sandbox-ai update).',
+        'de': 'Dieses sandbox-ai kann noch keine Pakete suchen; aktualisieren Sie es (sandbox-ai update).'},
+    'The search failed (exit status {status}).': {
+        'en': 'The search failed (exit status {status}).',
+        'de': 'Die Suche ist fehlgeschlagen (Exit-Status {status}).'},
+    'Find packages': {
+        'en': 'Find packages',
+        'de': 'Pakete finden'},
+    'Search for packages': {
+        'en': 'Search for packages',
+        'de': 'Nach Paketen suchen'},
+    'Stop this search': {
+        'en': 'Stop this search',
+        'de': 'Diese Suche anhalten'},
+    'Packages found': {
+        'en': 'Packages found',
+        'de': 'Gefundene Pakete'},
+    'Add the selected packages to the list (saved with Save)': {
+        'en': 'Add the selected packages to the list (saved with Save)',
+        'de': 'Die gewählten Pakete der Liste hinzufügen (gespeichert mit Speichern)'},
+    '{count} found on npm': {
+        'en': '{count} found on npm',
+        'de': '{count} auf npm gefunden'},
+    '{count} found on PyPI (the exact name, then names holding the words)': {
+        'en': '{count} found on PyPI (the exact name, then names holding the words)',
+        'de': '{count} auf PyPI gefunden (der genaue Name, dann Namen, die die Wörter enthalten)'},
+    'Add OS packages to {name}': {
+        'en': 'Add OS packages to {name}',
+        'de': 'OS-Pakete zu {name} hinzufügen'},
+    'Name of the new image': {
+        'en': 'Name of the new image',
+        'de': 'Name des neuen Images'},
+    'Packages to add': {
+        'en': 'Packages to add',
+        'de': 'Hinzuzufügende Pakete'},
+    'package name': {
+        'en': 'package name',
+        'de': 'Paketname'},
+    'Build it': {
+        'en': 'Build it',
+        'de': 'Bauen'},
+    'Read the index again': {
+        'en': 'Read the index again',
+        'de': 'Index neu lesen'},
+    'Fetch the package index of the image anew (it is kept for a week)': {
+        'en': 'Fetch the package index of the image anew (it is kept for a week)',
+        'de': 'Den Paketindex des Images neu holen (er wird eine Woche behalten)'},
+    'Select an image first: its own distribution is searched.': {
+        'en': 'Select an image first: its own distribution is searched.',
+        'de': 'Wählen Sie zuerst ein Image: Durchsucht wird seine eigene Distribution.'},
+    'Type a word to search for.': {
+        'en': 'Type a word to search for.',
+        'de': 'Geben Sie ein Suchwort ein.'},
+    'Searching the packages of {name}… (the first search reads its package index in a container of the image: a minute or two)': {
+        'en': 'Searching the packages of {name}… (the first search reads its package index in a container of the image: a minute or two)',
+        'de': 'Die Pakete von {name} werden durchsucht … (die erste Suche liest den Paketindex in einem Container des Images: ein, zwei Minuten)'},
+    'Searching npm…': {
+        'en': 'Searching npm…',
+        'de': 'npm wird durchsucht …'},
+    "Looking up on PyPI… (the first search downloads PyPI's list of project names, about 30 MB, kept for a day)": {
+        'en': "Looking up on PyPI… (the first search downloads PyPI's list of project names, about 30 MB, kept for a day)",
+        'de': 'Suche auf PyPI … (die erste Suche lädt die Liste der Projektnamen von PyPI, etwa 30 MB, einen Tag lang behalten)'},
+    'No network: {where} cannot be reached from this computer ({error}).': {
+        'en': 'No network: {where} cannot be reached from this computer ({error}).',
+        'de': 'Kein Netz: {where} ist von diesem Computer aus nicht erreichbar ({error}).'},
+    'Search cancelled.': {
+        'en': 'Search cancelled.',
+        'de': 'Suche abgebrochen.'},
+    "{name} is {system}. The packages are installed with its own package manager and the network an extension's build has; the result is another of your images, UNCHECKED like this one.": {
+        'en': "{name} is {system}. The packages are installed with its own package manager and the network an extension's build has; the result is another of your images, UNCHECKED like this one.",
+        'de': '{name} ist {system}. Die Pakete werden mit seinem eigenen Paketmanager und dem Netz installiert, das der Bau einer Erweiterung hat; das Ergebnis ist ein weiteres Ihrer Images, UNGEPRÜFT wie dieses.'},
+    'Add it to the packages': {
+        'en': 'Add it to the packages',
+        'de': 'Zu den Paketen hinzufügen'},
+    'Remove the selected package': {
+        'en': 'Remove the selected package',
+        'de': 'Das gewählte Paket entfernen'},
+    "search the image's distribution, e.g. json or ffmpeg": {
+        'en': "search the image's distribution, e.g. json or ffmpeg",
+        'de': 'Distribution des Images durchsuchen, z. B. json oder ffmpeg'},
+    'search npm, e.g. typescript or eslint': {
+        'en': 'search npm, e.g. typescript or eslint',
+        'de': 'npm durchsuchen, z. B. typescript oder eslint'},
+    'search PyPI, e.g. ruff or httpie': {
+        'en': 'search PyPI, e.g. ruff or httpie',
+        'de': 'PyPI durchsuchen, z. B. ruff oder httpie'},
+    "Search the package index of the image's distribution (read once in a container of the image, with the network an extension's build has)": {
+        'en': "Search the package index of the image's distribution (read once in a container of the image, with the network an extension's build has)",
+        'de': 'Den Paketindex der Distribution des Images durchsuchen (einmal in einem Container des Images gelesen, mit dem Netz, das der Bau einer Erweiterung hat)'},
+    'Search the npm registry (registry.npmjs.org) from this computer': {
+        'en': 'Search the npm registry (registry.npmjs.org) from this computer',
+        'de': 'Die npm-Registry (registry.npmjs.org) von diesem Computer aus durchsuchen'},
+    "Look up the name on PyPI, and names holding the words in PyPI's list of projects (downloaded at most once a day; PyPI has no search API)": {
+        'en': "Look up the name on PyPI, and names holding the words in PyPI's list of projects (downloaded at most once a day; PyPI has no search API)",
+        'de': 'Den Namen auf PyPI nachschlagen und Namen mit den Wörtern in der Projektliste von PyPI finden (höchstens einmal am Tag geladen; PyPI hat keine Such-API)'},
+    'without network: {why}': {
+        'en': 'without network: {why}',
+        'de': 'ohne Netz: {why}'},
+    'Docker Hub': {
+        'en': 'Docker Hub',
+        'de': 'Docker Hub'},
+    'GitHub Container Registry': {
+        'en': 'GitHub Container Registry',
+        'de': 'GitHub Container Registry'},
+    'Quay': {
+        'en': 'Quay',
+        'de': 'Quay'},
+    'Google Container Registry': {
+        'en': 'Google Container Registry',
+        'de': 'Google Container Registry'},
+    "Google's mirror of Docker Hub": {
+        'en': "Google's mirror of Docker Hub",
+        'de': 'Googles Spiegel von Docker Hub'},
+    'Amazon ECR Public': {
+        'en': 'Amazon ECR Public',
+        'de': 'Amazon ECR Public'},
+    'Microsoft Artifact Registry': {
+        'en': 'Microsoft Artifact Registry',
+        'de': 'Microsoft Artifact Registry'},
+    'GitLab': {
+        'en': 'GitLab',
+        'de': 'GitLab'},
+    'Red Hat': {
+        'en': 'Red Hat',
+        'de': 'Red Hat'},
+    '{registry} has no search: type a repository, e.g. org/app.': {
+        'en': '{registry} has no search: type a repository, e.g. org/app.',
+        'de': '{registry} hat keine Suche: Geben Sie ein Repository ein, z. B. org/app.'},
+    'Browse registries': {
+        'en': 'Browse registries',
+        'de': 'Registries durchsuchen'},
+    'Registry': {
+        'en': 'Registry',
+        'de': 'Registry'},
+    'your registry, e.g. registry.example.org': {
+        'en': 'your registry, e.g. registry.example.org',
+        'de': 'Ihre Registry, z. B. registry.example.org'},
+    'Search the registry': {
+        'en': 'Search the registry',
+        'de': 'Die Registry durchsuchen'},
+    'Search the registry, or look the repository up where it has no search': {
+        'en': 'Search the registry, or look the repository up where it has no search',
+        'de': 'Die Registry durchsuchen oder, wo sie keine Suche hat, das Repository nachschlagen'},
+    'Repositories found': {
+        'en': 'Repositories found',
+        'de': 'Gefundene Repositorys'},
+    'Asking {registry}…': {
+        'en': 'Asking {registry}…',
+        'de': '{registry} wird gefragt …'},
+    '{count} repositories': {
+        'en': '{count} repositories',
+        'de': '{count} Repositorys'},
+    'No network: {registry} cannot be reached from this computer ({error}).': {
+        'en': 'No network: {registry} cannot be reached from this computer ({error}).',
+        'de': 'Kein Netz: {registry} ist von diesem Computer aus nicht erreichbar ({error}).'},
+    '{registry} has no public repository {name}.': {
+        'en': '{registry} has no public repository {name}.',
+        'de': '{registry} hat kein öffentliches Repository {name}.'},
+    'Reading the tags of {name}…': {
+        'en': 'Reading the tags of {name}…',
+        'de': 'Die Tags von {name} werden gelesen …'},
+    '{count} tags of {name}': {
+        'en': '{count} tags of {name}',
+        'de': '{count} Tags von {name}'},
+    'Add registry': {
+        'en': 'Add registry',
+        'de': 'Registry hinzufügen'},
+    'Add your own registry to this list (kept by the app)': {
+        'en': 'Add your own registry to this list (kept by the app)',
+        'de': 'Ihre eigene Registry dieser Liste hinzufügen (von der App behalten)'},
+    'Stars': {
+        'en': 'Stars',
+        'de': 'Sterne'},
+    'Official': {
+        'en': 'Official',
+        'de': 'Offiziell'},
+    'Add pulls the image once and pins it by its digest (sandbox-ai images pull). Nobody reviewed it: it stays UNCHECKED.': {
+        'en': 'Add pulls the image once and pins it by its digest (sandbox-ai images pull). Nobody reviewed it: it stays UNCHECKED.',
+        'de': 'Hinzufügen lädt das Image einmal und pinnt es über seinen Digest (sandbox-ai images pull). Niemand hat es geprüft: Es bleibt UNGEPRÜFT.'},
+    "Not a registry's host name (e.g. registry.example.org or registry.example.org:5000).": {
+        'en': "Not a registry's host name (e.g. registry.example.org or registry.example.org:5000).",
+        'de': 'Kein Hostname einer Registry (z. B. registry.example.org oder registry.example.org:5000).'},
+    'search, e.g. postgres or redis': {
+        'en': 'search, e.g. postgres or redis',
+        'de': 'suchen, z. B. postgres oder redis'},
+    'repository, e.g. org/app (this registry has no search)': {
+        'en': 'repository, e.g. org/app (this registry has no search)',
+        'de': 'Repository, z. B. org/app (diese Registry hat keine Suche)'},
+    'Image: {reference}': {
+        'en': 'Image: {reference}',
+        'de': 'Image: {reference}'},
+    'Choose a repository and a tag.': {
+        'en': 'Choose a repository and a tag.',
+        'de': 'Wählen Sie ein Repository und einen Tag.'},
+    '{host} (yours) · no search: name and tags': {
+        'en': '{host} (yours) · no search: name and tags',
+        'de': '{host} (Ihre) · keine Suche: Name und Tags'},
+    'official': {
+        'en': 'official',
+        'de': 'offiziell'},
+    'no search: name and tags': {
+        'en': 'no search: name and tags',
+        'de': 'keine Suche: Name und Tags'},
+    'Browse registries…': {
+        'en': 'Browse registries…',
+        'de': 'Registries durchsuchen …'},
+    'Docker Hub, GitHub, Quay, Google, Amazon, Microsoft, GitLab, Red Hat and your own: search, tags, then the pinned pull': {
+        'en': 'Docker Hub, GitHub, Quay, Google, Amazon, Microsoft, GitLab, Red Hat and your own: search, tags, then the pinned pull',
+        'de': 'Docker Hub, GitHub, Quay, Google, Amazon, Microsoft, GitLab, Red Hat und Ihre eigenen: Suche, Tags, dann der gepinnte Pull'},
+    'Add OS packages…': {
+        'en': 'Add OS packages…',
+        'de': 'OS-Pakete hinzufügen …'},
+    'A new image of yours: the selected one with packages of its own distribution (apk, dnf, apt-get …): sandbox-ai images derive': {
+        'en': 'A new image of yours: the selected one with packages of its own distribution (apk, dnf, apt-get …): sandbox-ai images derive',
+        'de': 'Ein neues Image von Ihnen: das gewählte mit Paketen seiner eigenen Distribution (apk, dnf, apt-get …): sandbox-ai images derive'},
     'Not an image reference.': {
         'en': 'Not an image reference.',
         'de': 'Keine Image-Referenz.'},
@@ -2197,9 +2414,9 @@ TEXTS = {
     "A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit.": {
         'en': "A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit.",
         'de': "Der Name eines Teams: 1-20 Zeichen aus a-z, 0-9, '_' und '-', beginnend mit einem Buchstaben oder einer Ziffer."},
-    'A team has two or three agents: choose at least one member besides the lead.': {
-        'en': 'A team has two or three agents: choose at least one member besides the lead.',
-        'de': 'Ein Team hat zwei oder drei Agenten: Wählen Sie neben der Leitung mindestens ein Mitglied.'},
+    'A team has two or more agents: choose at least one member besides the lead.': {
+        'en': 'A team has two or more agents: choose at least one member besides the lead.',
+        'de': 'Ein Team hat zwei oder mehr Agenten: Wählen Sie neben der Leitung mindestens ein Mitglied.'},
     'The workspace is an absolute path.': {
         'en': 'The workspace is an absolute path.',
         'de': 'Der Arbeitsordner ist ein absoluter Pfad.'},
@@ -6946,6 +7163,9 @@ TEXTS = {
     'Close tab': {
         'en': 'Close tab',
         'de': 'Tab schließen'},
+    'All tabs': {
+        'en': 'All tabs',
+        'de': 'Alle Tabs'},
     'Fit the board': {
         'en': 'Fit the board',
         'de': 'Board zentrieren'},
@@ -8259,6 +8479,12 @@ TEXTS = {
     'its address and port only': {
         'en': 'its address and port only',
         'de': 'nur seine Adresse und sein Port'},
+    'models: {models}': {
+        'en': 'models: {models}',
+        'de': 'Modelle: {models}'},
+    'all its models': {
+        'en': 'all its models',
+        'de': 'alle seine Modelle'},
     'ask (default)': {
         'en': 'ask (default)',
         'de': 'nachfragen (Standard)'},
@@ -8541,6 +8767,21 @@ TEXTS = {
     'A preset from elsewhere may not carry {options}: it is not yours - only your command line, your defaults or a preset you save yourself chooses that.': {
         'en': 'A preset from elsewhere may not carry {options}: it is not yours - only your command line, your defaults or a preset you save yourself chooses that.',
         'de': 'Eine Vorlage von anderswo darf {options} nicht enthalten: Sie ist nicht Ihre - das wählen nur Ihre Befehlszeile, Ihre Vorgaben oder eine Vorlage, die Sie selbst speichern.'},
+    'A preset from elsewhere may not give the agent or its MCP servers {what}: keys and logins are not yours to pass on - give such a folder yourself, at the use.': {
+        'en': 'A preset from elsewhere may not give the agent or its MCP servers {what}: keys and logins are not yours to pass on - give such a folder yourself, at the use.',
+        'de': 'Eine Vorlage von anderswo darf dem Agenten oder seinen MCP-Servern {what} nicht geben: Schlüssel und Anmeldungen gehören nicht Ihnen, um sie weiterzugeben - geben Sie einen solchen Ordner selbst an, beim Verwenden.'},
+    'A preset from elsewhere may not carry {options}: it lets the run past its VPN or Tor, from your own address - only you choose that, at the use.': {
+        'en': 'A preset from elsewhere may not carry {options}: it lets the run past its VPN or Tor, from your own address - only you choose that, at the use.',
+        'de': 'Eine Vorlage von anderswo darf {options} nicht enthalten: Es lässt den Lauf an seinem VPN oder Tor vorbei, von Ihrer eigenen Adresse aus - das wählen nur Sie, beim Verwenden.'},
+    '--copy {source} copies a login in': {
+        'en': '--copy {source} copies a login in',
+        'de': '--copy {source} kopiert eine Anmeldung hinein'},
+    "the MCP server {name}'s folder {host}": {
+        'en': "the MCP server {name}'s folder {host}",
+        'de': 'den Ordner {host} des MCP-Servers {name}'},
+    "The preset's texts hold control, direction or zero-width characters: it would show as something else than it is.": {
+        'en': "The preset's texts hold control, direction or zero-width characters: it would show as something else than it is.",
+        'de': 'Die Texte der Vorlage enthalten Steuer-, Richtungs- oder Nullbreitenzeichen: Sie würde anders aussehen, als sie ist.'},
     'mcp_servers must be an object of at most 16 servers.': {
         'en': 'mcp_servers must be an object of at most 16 servers.',
         'de': 'mcp_servers muss ein Objekt mit höchstens 16 Servern sein.'},
@@ -11917,9 +12158,6 @@ TEXTS = {
     "Empty every field: nothing set, the agent's and the server's own values hold": {
         'en': "Empty every field: nothing set, the agent's and the server's own values hold",
         'de': 'Alle Felder leeren: Nichts gesetzt, die eigenen Werte des Agenten und des Servers gelten'},
-    'Parameters of {name}': {
-        'en': 'Parameters of {name}',
-        'de': 'Parameter von {name}'},
     'every model': {
         'en': 'every model',
         'de': 'jedes Modell'},
@@ -11935,9 +12173,6 @@ TEXTS = {
     'Other models': {
         'en': 'Other models',
         'de': 'Andere Modelle'},
-    "Sampling parameters the connection proxy applies to this server's requests only, whatever agent sends them: set where the agent's request has none, forced ones in place of the agent's own; max_tokens is a ceiling, num_ctx the context window the agents are told.": {
-        'en': "Sampling parameters the connection proxy applies to this server's requests only, whatever agent sends them: set where the agent's request has none, forced ones in place of the agent's own; max_tokens is a ceiling, num_ctx the context window the agents are told.",
-        'de': 'Sampling-Parameter, die der Verbindungs-Proxy nur auf die Anfragen an diesen Server anwendet, gleich welcher Agent sie sendet: gesetzt, wo die Anfrage des Agenten keinen hat, erzwungene statt des eigenen Werts des Agenten; max_tokens ist eine Obergrenze, num_ctx das Kontextfenster, das die Agenten genannt bekommen.'},
     'not set': {
         'en': 'not set',
         'de': 'nicht gesetzt'},
@@ -11959,15 +12194,9 @@ TEXTS = {
     "A ceiling: the agent's own lower value stays.": {
         'en': "A ceiling: the agent's own lower value stays.",
         'de': 'Eine Obergrenze: Ein niedrigerer Wert des Agenten bleibt.'},
-    'Parameters…': {
-        'en': 'Parameters…',
-        'de': 'Parameter…'},
     'Parameters': {
         'en': 'Parameters',
         'de': 'Parameter'},
-    "Sampling parameters (temperature, top_k, repeat_penalty, max_tokens, num_ctx …), the loop guard and the other models (sandbox-ai llm set): every model's, or the model selected below": {
-        'en': "Sampling parameters (temperature, top_k, repeat_penalty, max_tokens, num_ctx …), the loop guard and the other models (sandbox-ai llm set): every model's, or the model selected below",
-        'de': 'Sampling-Parameter (temperature, top_k, repeat_penalty, max_tokens, num_ctx …), der Loop Guard und die anderen Modelle (sandbox-ai llm set): die jedes Modells oder die des unten gewählten Modells'},
     'Saving the parameters of {name}…': {
         'en': 'Saving the parameters of {name}…',
         'de': 'Die Parameter von {name} werden gespeichert…'},
@@ -11989,9 +12218,9 @@ TEXTS = {
     "This sandbox-ai has no --llm-param: the server's own parameters hold.": {
         'en': "This sandbox-ai has no --llm-param: the server's own parameters hold.",
         'de': 'Dieses sandbox-ai kennt kein --llm-param: Die eigenen Parameter des Servers gelten.'},
-    "This board's model parameters (--llm-param): in place of the agent's and the server's own for these starts; empty: the server's (its Parameters… on the LLM servers page).": {
-        'en': "This board's model parameters (--llm-param): in place of the agent's and the server's own for these starts; empty: the server's (its Parameters… on the LLM servers page).",
-        'de': 'Die Modellparameter dieses Boards (--llm-param): statt der eigenen des Agenten und des Servers für diese Starts; leer: die des Servers (seine Parameter… auf der Seite LLM-Server).'},
+    "This board's model parameters (--llm-param): in place of the agent's and the server's own for these starts; empty: the server's (its Advanced settings… on the LLM servers page).": {
+        'en': "This board's model parameters (--llm-param): in place of the agent's and the server's own for these starts; empty: the server's (its Advanced settings… on the LLM servers page).",
+        'de': 'Die Modellparameter dieses Boards (--llm-param): statt der eigenen des Agenten und des Servers für diese Starts; leer: die des Servers (Erweiterte Einstellungen… auf der Seite LLM-Server).'},
     'Model parameters for this board': {
         'en': 'Model parameters for this board',
         'de': 'Modellparameter für dieses Board'},
@@ -12061,9 +12290,9 @@ TEXTS = {
     'Loop guard for local models': {
         'en': 'Loop guard for local models',
         'de': 'Loop Guard für lokale Modelle'},
-    "What sandbox-ai does against a model that repeats itself, for every LLM server (--llm): empty layers keep sandbox-ai's own default; a server's own layers (its Parameters… on the LLM servers page) and a start's win (loop_guard in {path}).": {
-        'en': "What sandbox-ai does against a model that repeats itself, for every LLM server (--llm): empty layers keep sandbox-ai's own default; a server's own layers (its Parameters… on the LLM servers page) and a start's win (loop_guard in {path}).",
-        'de': 'Was sandbox-ai gegen ein Modell tut, das sich wiederholt, für jeden LLM-Server (--llm): Leere Ebenen behalten den Standard von sandbox-ai; die eigenen Ebenen eines Servers (seine Parameter… auf der Seite LLM-Server) und die eines Starts gehen vor (loop_guard in {path}).'},
+    "What sandbox-ai does against a model that repeats itself, for every LLM server (--llm): empty layers keep sandbox-ai's own default; a server's own layers (its Advanced settings… on the LLM servers page) and a start's win (loop_guard in {path}).": {
+        'en': "What sandbox-ai does against a model that repeats itself, for every LLM server (--llm): empty layers keep sandbox-ai's own default; a server's own layers (its Advanced settings… on the LLM servers page) and a start's win (loop_guard in {path}).",
+        'de': 'Was sandbox-ai gegen ein Modell tut, das sich wiederholt, für jeden LLM-Server (--llm): Leere Ebenen behalten den Standard von sandbox-ai; die eigenen Ebenen eines Servers (Erweiterte Einstellungen… auf der Seite LLM-Server) und die eines Starts gehen vor (loop_guard in {path}).'},
     'This sandbox-ai has no loop guard layers yet: update it.': {
         'en': 'This sandbox-ai has no loop guard layers yet: update it.',
         'de': 'Dieses sandbox-ai kennt noch keine Ebenen des Loop Guards: Aktualisieren Sie es.'},
@@ -13650,9 +13879,9 @@ TEXTS = {
     'The model to load (sandbox-ai llm models lists them)': {
         'en': 'The model to load (sandbox-ai llm models lists them)',
         'de': 'Das zu ladende Modell (sandbox-ai llm models listet sie)'},
-    "Tokens the model is loaded with; empty: num_ctx of its parameters (Parameters…), else the server's own": {
-        'en': "Tokens the model is loaded with; empty: num_ctx of its parameters (Parameters…), else the server's own",
-        'de': 'Tokens, mit denen das Modell geladen wird; leer: num_ctx seiner Parameter (Parameter…), sonst der eigene Wert des Servers'},
+    "Tokens the model is loaded with; empty: num_ctx of its parameters (Advanced settings…), else the server's own": {
+        'en': "Tokens the model is loaded with; empty: num_ctx of its parameters (Advanced settings…), else the server's own",
+        'de': 'Tokens, mit denen das Modell geladen wird; leer: num_ctx seiner Parameter (Erweiterte Einstellungen…), sonst der eigene Wert des Servers'},
     'Unload after idle (seconds)': {
         'en': 'Unload after idle (seconds)',
         'de': 'Nach Leerlauf entladen (Sekunden)'},
@@ -13989,6 +14218,18 @@ TEXTS = {
     'the server sends a rectangle outside its display': {
         'en': 'the server sends a rectangle outside its display',
         'de': 'der Server schickt ein Rechteck außerhalb seiner Anzeige'},
+    '{why} - connecting again…': {
+        'en': '{why} - connecting again…',
+        'de': '{why} – neue Verbindung wird aufgebaut…'},
+    "Open in the sandbox's browser": {
+        'en': "Open in the sandbox's browser",
+        'de': 'Im Browser der Sandbox öffnen'},
+    "{url} is an address of the sandbox (its own loopback): this computer's browser would reach something else "
+    "there. Open it in the sandbox's own browser (--browser).": {
+        'en': "{url} is an address of the sandbox (its own loopback): this computer's browser would reach something "
+              "else there. Open it in the sandbox's own browser (--browser).",
+        'de': '{url} ist eine Adresse der Sandbox (ihr eigenes Loopback): Der Browser dieses Computers würde dort '
+              'etwas anderes erreichen. Öffnen Sie sie im eigenen Browser der Sandbox (--browser).'},
     "The browser's display was closed (the run ended?)": {
         'en': "The browser's display was closed (the run ended?)",
         'de': 'Die Anzeige des Browsers wurde geschlossen (der Lauf endete?)'},
@@ -14257,6 +14498,18 @@ TEXTS = {
     'MCP server {name}: not added - it needs a folder for {target} (the MCP page adds it with one).': {
         'en': 'MCP server {name}: not added - it needs a folder for {target} (the MCP page adds it with one).',
         'de': 'MCP-Server {name}: nicht hinzugefügt - er braucht einen Ordner für {target} (die MCP-Seite fügt ihn mit einem hinzu).'},
+    'The MCP server {name} needs {hosts}. sandbox-ai cannot limit a server to these hosts yet: it is added with the outside network (--network full), or not at all. Give it the outside network?': {
+        'en': 'The MCP server {name} needs {hosts}. sandbox-ai cannot limit a server to these hosts yet: it is added with the outside network (--network full), or not at all. Give it the outside network?',
+        'de': 'Der MCP-Server {name} braucht {hosts}. sandbox-ai kann einen Server noch nicht auf diese Hosts beschränken: Er wird mit dem Netz nach draußen (--network full) hinzugefügt oder gar nicht. Ihm das Netz nach draußen geben?'},
+    'Give it the network': {
+        'en': 'Give it the network',
+        'de': 'Netz geben'},
+    'MCP server {name}: not added - it needs the outside network for {hosts} (the MCP page adds it with --network full).': {
+        'en': 'MCP server {name}: not added - it needs the outside network for {hosts} (the MCP page adds it with --network full).',
+        'de': 'MCP-Server {name}: nicht hinzugefügt - er braucht das Netz nach draußen für {hosts} (die MCP-Seite fügt ihn mit --network full hinzu).'},
+    'not tried: an earlier step failed': {
+        'en': 'not tried: an earlier step failed',
+        'de': 'nicht versucht: ein Schritt davor ist fehlgeschlagen'},
     'Starting the browser…': {
         'en': 'Starting the browser…',
         'de': 'Der Browser startet…'},
@@ -14488,4 +14741,309 @@ TEXTS = {
     "building the Tor VPN's image first": {
         'en': "building the Tor VPN's image first",
         'de': 'zuerst wird das Image des Tor-VPN gebaut'},
+    # == notifications: copying (notifications.Toast); the Images page's tabs and what they show (images_page) ==
+    'Copy the message': {
+        'en': 'Copy the message',
+        'de': 'Die Meldung kopieren'},
+    'Copied': {
+        'en': 'Copied',
+        'de': 'Kopiert'},
+    'What the selected image has installed: its Debian, npm and Python packages with their versions, read from the built image.': {
+        'en': 'What the selected image has installed: its Debian, npm and Python packages with their versions, read from the built image.',
+        'de': 'Was im ausgewählten Image installiert ist: seine Debian-, npm- und Python-Pakete mit ihren Versionen, aus dem gebauten Image gelesen.'},
+    'What sandbox-ai adds to the selected image when it builds it: your packages, files and Containerfile lines, a layer on top (Save, then Build).': {
+        'en': 'What sandbox-ai adds to the selected image when it builds it: your packages, files and Containerfile lines, a layer on top (Save, then Build).',
+        'de': 'Was sandbox-ai dem ausgewählten Image beim Bauen hinzufügt: Ihre Pakete, Dateien und Containerfile-Zeilen, eine Schicht obendrauf (Speichern, dann Bauen).'},
+    'Select an image or a variant above: its installed packages and its extension show here.': {
+        'en': 'Select an image or a variant above: its installed packages and its extension show here.',
+        'de': 'Wählen Sie oben ein Image oder eine Variante: Hier erscheinen seine installierten Pakete und seine Erweiterung.'},
+    'Installed packages and extension of {name} (image {image})': {
+        'en': 'Installed packages and extension of {name} (image {image})',
+        'de': 'Installierte Pakete und Erweiterung von {name} (Image {image})'},
+    'Installed packages and extension of {name}': {
+        'en': 'Installed packages and extension of {name}',
+        'de': 'Installierte Pakete und Erweiterung von {name}'},
+    'Show thinking': {
+        'en': 'Show thinking',
+        'de': 'Denkprozess anzeigen'},
+    'This sandbox-ai has no --show-thinking yet: update it': {
+        'en': 'This sandbox-ai has no --show-thinking yet: update it',
+        'de': 'Dieses sandbox-ai kennt --show-thinking noch nicht: aktualisieren Sie es'},
+    'Advanced settings of the model…': {
+        'en': 'Advanced settings of the model…',
+        'de': 'Erweiterte Einstellungen des Modells…'},
+    'Advanced settings of the model': {
+        'en': 'Advanced settings of the model',
+        'de': 'Erweiterte Einstellungen des Modells'},
+    "Temperature, context length, max. output tokens, keeping the model loaded, LM Studio's load settings (Flash Attention, KV cache) and more - only what this server takes - for this board's start, over the server's defaults (Advanced settings… on the LLM servers page)": {
+        'en': "Temperature, context length, max. output tokens, keeping the model loaded, LM Studio's load settings (Flash Attention, KV cache) and more - only what this server takes - for this board's start, over the server's defaults (Advanced settings… on the LLM servers page)",
+        'de': 'Temperatur, Kontextlänge, max. Ausgabe-Tokens, Geladenhalten des Modells, die Ladeeinstellungen von LM Studio (Flash Attention, KV-Cache) und mehr - nur was dieser Server annimmt - für den Start dieses Boards, über den Vorgaben des Servers (Erweiterte Einstellungen… auf der Seite LLM-Server)'},
+    'thinking shown': {
+        'en': 'thinking shown',
+        'de': 'Denkprozess sichtbar'},
+    'thinking hidden': {
+        'en': 'thinking hidden',
+        'de': 'Denkprozess verborgen'},
+    "Whether the agent shows its model's thinking (reasoning) in its terminal: shown, hidden, or the agent's own default. Qwen Code has no setting for it (Ctrl+O unfolds it in the session).": {
+        'en': "Whether the agent shows its model's thinking (reasoning) in its terminal: shown, hidden, or the agent's own default. Qwen Code has no setting for it (Ctrl+O unfolds it in the session).",
+        'de': 'Ob der Agent den Denkprozess (Reasoning) seines Modells im Terminal zeigt: sichtbar, verborgen oder die eigene Vorgabe des Agenten. Qwen Code hat dafür keine Einstellung (Strg+O klappt ihn in der Sitzung auf).'},
+    'Advanced settings…': {
+        'en': 'Advanced settings…',
+        'de': 'Erweiterte Einstellungen…'},
+    'Advanced settings': {
+        'en': 'Advanced settings',
+        'de': 'Erweiterte Einstellungen'},
+    "The server's defaults for every start (sandbox-ai llm set): sampling (temperature, top_k, repeat_penalty …), max. output tokens, context length, keeping the model loaded, LM Studio's load settings (Flash Attention, KV cache), the agents' stream timeout - only what this kind of server takes -, the loop guard and the other models: every model's, or the model selected below. What only the server's own start sets (KV cache type …) is shown": {
+        'en': "The server's defaults for every start (sandbox-ai llm set): sampling (temperature, top_k, repeat_penalty …), max. output tokens, context length, keeping the model loaded, LM Studio's load settings (Flash Attention, KV cache), the agents' stream timeout - only what this kind of server takes -, the loop guard and the other models: every model's, or the model selected below. What only the server's own start sets (KV cache type …) is shown",
+        'de': 'Die Vorgaben des Servers für jeden Start (sandbox-ai llm set): Sampling (temperature, top_k, repeat_penalty …), max. Ausgabe-Tokens, Kontextlänge, Geladenhalten des Modells, die Ladeeinstellungen von LM Studio (Flash Attention, KV-Cache), die Stream-Wartezeit der Agenten - nur was diese Art Server annimmt -, der Schleifenschutz und die anderen Modelle: für jedes Modell oder das unten gewählte. Was nur der Start des Servers selbst festlegt (KV-Cache-Typ …), wird angezeigt'},
+    'Temperature': {
+        'en': 'Temperature',
+        'de': 'Temperatur'},
+    'Top P': {
+        'en': 'Top P',
+        'de': 'Top P'},
+    'Top K': {
+        'en': 'Top K',
+        'de': 'Top K'},
+    'Min P': {
+        'en': 'Min P',
+        'de': 'Min P'},
+    'Repeat penalty': {
+        'en': 'Repeat penalty',
+        'de': 'Wiederholungsstrafe'},
+    'Repeat window': {
+        'en': 'Repeat window',
+        'de': 'Wiederholungsfenster'},
+    'Repetition penalty': {
+        'en': 'Repetition penalty',
+        'de': 'Wiederholungsstrafe (vLLM)'},
+    'Presence penalty': {
+        'en': 'Presence penalty',
+        'de': 'Präsenzstrafe'},
+    'Frequency penalty': {
+        'en': 'Frequency penalty',
+        'de': 'Häufigkeitsstrafe'},
+    'DRY multiplier': {
+        'en': 'DRY multiplier',
+        'de': 'DRY-Multiplikator'},
+    'Max. output tokens': {
+        'en': 'Max. output tokens',
+        'de': 'Max. Ausgabe-Tokens'},
+    'Seed': {
+        'en': 'Seed',
+        'de': 'Seed'},
+    'Context length': {
+        'en': 'Context length',
+        'de': 'Kontextlänge'},
+    'Reuse the KV cache (cache_prompt)': {
+        'en': 'Reuse the KV cache (cache_prompt)',
+        'de': 'KV-Cache wiederverwenden (cache_prompt)'},
+    'Keep loaded (seconds)': {
+        'en': 'Keep loaded (seconds)',
+        'de': 'Geladen halten (Sekunden)'},
+    'Idle TTL (seconds)': {
+        'en': 'Idle TTL (seconds)',
+        'de': 'Leerlauf-TTL (Sekunden)'},
+    'Flash Attention (at load)': {
+        'en': 'Flash Attention (at load)',
+        'de': 'Flash Attention (beim Laden)'},
+    'KV cache in GPU memory (at load)': {
+        'en': 'KV cache in GPU memory (at load)',
+        'de': 'KV-Cache im GPU-Speicher (beim Laden)'},
+    'Stream idle timeout (seconds)': {
+        'en': 'Stream idle timeout (seconds)',
+        'de': 'Stream-Wartezeit (Sekunden)'},
+    'Set on the server only': {
+        'en': 'Set on the server only',
+        'de': 'Nur am Server einstellbar'},
+    'Set on the server only (shown, not set by sandbox-ai):': {
+        'en': 'Set on the server only (shown, not set by sandbox-ai):',
+        'de': 'Nur am Server einstellbar (angezeigt, nicht von sandbox-ai gesetzt):'},
+    'Advanced settings of {name}': {
+        'en': 'Advanced settings of {name}',
+        'de': 'Erweiterte Einstellungen von {name}'},
+    "The server's defaults for every start (a board's values win for its start). Sampling parameters the connection proxy applies to this server's requests only, whatever agent sends them: set where the agent's request has none, forced ones in place of the agent's own; max_tokens is a ceiling, num_ctx the context window the agents are told. Only what this kind of server takes is offered: per request, at the model's load (LM Studio) or in the agents' configuration.": {
+        'en': "The server's defaults for every start (a board's values win for its start). Sampling parameters the connection proxy applies to this server's requests only, whatever agent sends them: set where the agent's request has none, forced ones in place of the agent's own; max_tokens is a ceiling, num_ctx the context window the agents are told. Only what this kind of server takes is offered: per request, at the model's load (LM Studio) or in the agents' configuration.",
+        'de': 'Die Vorgaben des Servers für jeden Start (die Werte eines Boards gelten für dessen Start vorrangig). Sampling-Parameter, die der Verbindungs-Proxy nur auf die Anfragen an diesen Server anwendet, egal welcher Agent sie sendet: gesetzt, wo die Anfrage des Agenten keinen Wert hat, erzwungene anstelle des eigenen Werts des Agenten; max_tokens ist eine Obergrenze, num_ctx das Kontextfenster, das den Agenten genannt wird. Angeboten wird nur, was diese Art Server annimmt: pro Anfrage, beim Laden des Modells (LM Studio) oder in der Konfiguration der Agenten.'},
+    "Claude Code's setting showThinkingSummaries": {
+        'en': "Claude Code's setting showThinkingSummaries",
+        'de': 'Die Einstellung showThinkingSummaries von Claude Code'},
+    "Codex's hide_agent_reasoning and show_raw_agent_reasoning": {
+        'en': "Codex's hide_agent_reasoning and show_raw_agent_reasoning",
+        'de': 'hide_agent_reasoning und show_raw_agent_reasoning von Codex'},
+    "OpenCode's thinking_mode (as /thinking in OpenCode switches it)": {
+        'en': "OpenCode's thinking_mode (as /thinking in OpenCode switches it)",
+        'de': 'thinking_mode von OpenCode (wie /thinking in OpenCode es umschaltet)'},
+    "Hermes' display.show_reasoning (as /reasoning show|hide)": {
+        'en': "Hermes' display.show_reasoning (as /reasoning show|hide)",
+        'de': 'display.show_reasoning von Hermes (wie /reasoning show|hide)'},
+    "sandbox-ai's chat for DeepSeek Harness (/thinking on|off in the chat)": {
+        'en': "sandbox-ai's chat for DeepSeek Harness (/thinking on|off in the chat)",
+        'de': 'Der Chat von sandbox-ai für DeepSeek Harness (/thinking on|off im Chat)'},
+    "Goose's GOOSE_CLI_SHOW_THINKING": {
+        'en': "Goose's GOOSE_CLI_SHOW_THINKING",
+        'de': 'GOOSE_CLI_SHOW_THINKING von Goose'},
+    'Qwen Code has no setting for it: its thinking is folded in the terminal, Ctrl+O (or Alt+T) unfolds it in the session': {
+        'en': 'Qwen Code has no setting for it: its thinking is folded in the terminal, Ctrl+O (or Alt+T) unfolds it in the session',
+        'de': 'Qwen Code hat dafür keine Einstellung: sein Denkprozess ist im Terminal eingeklappt, Strg+O (oder Alt+T) klappt ihn in der Sitzung auf'},
+    "Shows or hides the model's thinking (reasoning) in the agent's terminal: --show-thinking, {switch}": {
+        'en': "Shows or hides the model's thinking (reasoning) in the agent's terminal: --show-thinking, {switch}",
+        'de': 'Zeigt oder verbirgt den Denkprozess (Reasoning) des Modells im Terminal des Agenten: --show-thinking, {switch}'},
+    'This agent has no setting for it': {
+        'en': 'This agent has no setting for it',
+        'de': 'Dieser Agent hat dafür keine Einstellung'},
+    "the agent's default (shown)": {
+        'en': "the agent's default (shown)",
+        'de': 'Vorgabe des Agenten (sichtbar)'},
+    "the agent's default (hidden)": {
+        'en': "the agent's default (hidden)",
+        'de': 'Vorgabe des Agenten (verborgen)'},
+    'shown': {
+        'en': 'shown',
+        'de': 'sichtbar'},
+    'hidden': {
+        'en': 'hidden',
+        'de': 'verborgen'},
+    "Empty: the agent's default ({value})": {
+        'en': "Empty: the agent's default ({value})",
+        'de': 'Leer: die Vorgabe des Agenten ({value})'},
+    # == hotfix 0.1.96: teams and VPNs, imported presets' MCP servers ==
+    'Per member (advanced)': {
+        'en': 'Per member (advanced)',
+        'de': 'Pro Mitglied (erweitert)'},
+    'Allow one OpenVPN profile in several members (your server must allow it: duplicate-cn)': {
+        'en': 'Allow one OpenVPN profile in several members (your server must allow it: duplicate-cn)',
+        'de': 'Ein OpenVPN-Profil in mehreren Mitgliedern erlauben (Ihr Server muss es zulassen: duplicate-cn)'},
+    '{profile}: each member gets a Tor of its own (its own circuits and its own exit).': {
+        'en': '{profile}: each member gets a Tor of its own (its own circuits and its own exit).',
+        'de': '{profile}: Jedes Mitglied bekommt ein eigenes Tor (eigene Circuits und eigenen Exit).'},
+    'The VPN in front of every member: each member is a sandbox of its own with its own VPN container (sandbox-ai team start --vpn). One profile in several members: Tor is fine, WireGuard and Mullvad need one profile per member, OpenVPN only when you confirm': {
+        'en': 'The VPN in front of every member: each member is a sandbox of its own with its own VPN container (sandbox-ai team start --vpn). One profile in several members: Tor is fine, WireGuard and Mullvad need one profile per member, OpenVPN only when you confirm',
+        'de': 'Das VPN vor jedem Mitglied: Jedes Mitglied ist eine eigene Sandbox mit eigenem VPN-Container (sandbox-ai team start --vpn). Ein Profil in mehreren Mitgliedern: Tor ist in Ordnung, WireGuard und Mullvad brauchen ein Profil je Mitglied, OpenVPN nur mit Ihrer Bestätigung'},
+    'Another VPN profile for a member (sandbox-ai team start --member-vpn AGENT=PROFILE)': {
+        'en': 'Another VPN profile for a member (sandbox-ai team start --member-vpn AGENT=PROFILE)',
+        'de': 'Ein anderes VPN-Profil für ein Mitglied (sandbox-ai team start --member-vpn AGENT=PROFIL)'},
+    "(the team's)": {
+        'en': "(the team's)",
+        'de': '(das des Teams)'},
+    'VPN profile of {agent}': {
+        'en': 'VPN profile of {agent}',
+        'de': 'VPN-Profil von {agent}'},
+    'Could not list the VPN profiles: {error}': {
+        'en': 'Could not list the VPN profiles: {error}',
+        'de': 'Die VPN-Profile konnten nicht gelesen werden: {error}'},
+    '{profile}: each member gets a new ephemeral Tailscale node.': {
+        'en': '{profile}: each member gets a new ephemeral Tailscale node.',
+        'de': '{profile}: Jedes Mitglied bekommt einen neuen kurzlebigen (ephemeral) Tailscale-Knoten.'},
+    '{profile} would run in {count} members at once ({members}): a Tailscale node runs once at a time. Use an ephemeral profile (vpn add … --ephemeral) or one per member.': {
+        'en': '{profile} would run in {count} members at once ({members}): a Tailscale node runs once at a time. Use an ephemeral profile (vpn add … --ephemeral) or one per member.',
+        'de': '{profile} liefe in {count} Mitgliedern zugleich ({members}): Ein Tailscale-Knoten läuft nur einmal zur selben Zeit. Nehmen Sie ein kurzlebiges Profil (vpn add … --ephemeral) oder eines pro Mitglied.'},
+    '{profile} would run in {count} members at once ({members}): a WireGuard key works in one sandbox at a time - the same key twice gets the same tunnel address, and the server sends to whichever tunnel spoke last, so both break. Give each member a profile of its own (Mullvad allows several devices per account, each with its own key) or use Tor.': {
+        'en': '{profile} would run in {count} members at once ({members}): a WireGuard key works in one sandbox at a time - the same key twice gets the same tunnel address, and the server sends to whichever tunnel spoke last, so both break. Give each member a profile of its own (Mullvad allows several devices per account, each with its own key) or use Tor.',
+        'de': '{profile} liefe in {count} Mitgliedern zugleich ({members}): Ein WireGuard-Schlüssel funktioniert nur in einer Sandbox zur selben Zeit - derselbe Schlüssel zweimal bekommt dieselbe Tunnel-Adresse, und der Server schickt an den Tunnel, der zuletzt gesendet hat, so dass beide ausfallen. Geben Sie jedem Mitglied ein eigenes Profil (Mullvad erlaubt mehrere Geräte pro Konto, jedes mit eigenem Schlüssel) oder nehmen Sie Tor.'},
+    '{profile} would run in {count} members at once ({members}): many OpenVPN servers take one account or certificate once, and a second connection ends the first. Tick the box below if your server allows it (duplicate-cn), or give each member a profile of its own.': {
+        'en': '{profile} would run in {count} members at once ({members}): many OpenVPN servers take one account or certificate once, and a second connection ends the first. Tick the box below if your server allows it (duplicate-cn), or give each member a profile of its own.',
+        'de': '{profile} liefe in {count} Mitgliedern zugleich ({members}): Viele OpenVPN-Server nehmen ein Konto oder Zertifikat nur einmal an, eine zweite Verbindung beendet die erste. Setzen Sie den Haken unten, wenn Ihr Server es zulässt (duplicate-cn), oder geben Sie jedem Mitglied ein eigenes Profil.'},
+    '{profile} runs in {count} members at once ({members}), as you confirmed: if a tunnel drops, give each member a profile of its own.': {
+        'en': '{profile} runs in {count} members at once ({members}), as you confirmed: if a tunnel drops, give each member a profile of its own.',
+        'de': '{profile} läuft in {count} Mitgliedern zugleich ({members}), wie Sie bestätigt haben: Bricht ein Tunnel ab, geben Sie jedem Mitglied ein eigenes Profil.'},
+    'the network of its container ({network})': {
+        'en': 'the network of its container ({network})',
+        'de': 'das Netzwerk seines Containers ({network})'},
+    'the agent {agent} as a helper': {
+        'en': 'the agent {agent} as a helper',
+        'de': 'der Agent {agent} als Helfer'},
+    'its model provider': {
+        'en': 'its model provider',
+        'de': 'sein Modellanbieter'},
+    'the network a sandbox has by default': {
+        'en': 'the network a sandbox has by default',
+        'de': 'das Netzwerk, das eine Sandbox standardmäßig hat'},
+    'The imported preset {preset} brings its own MCP server {name}, which reaches the network.\n\nRuns: {what}\nNetwork access: {network}\nVPN: {vpn}\n\nInclude it? Left out, the preset is imported without it.': {
+        'en': 'The imported preset {preset} brings its own MCP server {name}, which reaches the network.\n\nRuns: {what}\nNetwork access: {network}\nVPN: {vpn}\n\nInclude it? Left out, the preset is imported without it.',
+        'de': 'Die importierte Vorlage {preset} bringt einen eigenen MCP-Server {name} mit, der das Netzwerk erreicht.\n\nFührt aus: {what}\nNetzwerkzugriff: {network}\nVPN: {vpn}\n\nÜbernehmen? Weggelassen wird die Vorlage ohne ihn importiert.'},
+    'MCP server {name} with network': {
+        'en': 'MCP server {name} with network',
+        'de': 'MCP-Server {name} mit Netzwerk'},
+    'Include it': {
+        'en': 'Include it',
+        'de': 'Übernehmen'},
+    'Imported without the MCP servers {names}: they reach the network and were not confirmed.': {
+        'en': 'Imported without the MCP servers {names}: they reach the network and were not confirmed.',
+        'de': 'Ohne die MCP-Server {names} importiert: Sie erreichen das Netzwerk und wurden nicht bestätigt.'},
+    'Leave it out': {
+        'en': 'Leave it out',
+        'de': 'Weglassen'},
+    "none of its own (the start's, if it has one)": {
+        'en': "none of its own (the start's, if it has one)",
+        'de': 'keines eigenes (das des Starts, falls er eines hat)'},
+    'None yet - the Images page, Your images, adds one': {
+        'en': 'None yet - the Images page, Your images, adds one',
+        'de': 'Noch keines - die Seite Images, Eigene Images, fügt eines hinzu'},
+    'None yet - the Images page, New variant, makes one': {
+        'en': 'None yet - the Images page, New variant, makes one',
+        'de': 'Noch keine - die Seite Images, Neue Variante, legt eine an'},
+    "None yet - the Images page builds the agents' images": {
+        'en': "None yet - the Images page builds the agents' images",
+        'de': 'Noch keines - die Seite Images baut die Images der Agenten'},
+    'None yet - the LLM servers page adds one': {
+        'en': 'None yet - the LLM servers page adds one',
+        'de': 'Noch keiner - die Seite LLM-Server fügt einen hinzu'},
+    'None yet - the Credentials page keeps one': {
+        'en': 'None yet - the Credentials page keeps one',
+        'de': 'Noch keines - die Seite Zugangsdaten bewahrt eines auf'},
+    'None yet - the VPN page adds one': {
+        'en': 'None yet - the VPN page adds one',
+        'de': 'Noch keines - die Seite VPN fügt eines hinzu'},
+    'None yet': {
+        'en': 'None yet',
+        'de': 'Noch keines'},
+    'The service {name} has no image of yours: without an image chosen its name is its image, and you have no image {image} (your images: {mine}). Choose one of yours in its properties, or add one (Images page, Your images).': {
+        'en': 'The service {name} has no image of yours: without an image chosen its name is its image, and you have no image {image} (your images: {mine}). Choose one of yours in its properties, or add one (Images page, Your images).',
+        'de': 'Der Service {name} hat kein Image von Ihnen: Ohne gewähltes Image ist sein Name sein Image, und Sie haben kein Image {image} (Ihre Images: {mine}). Wählen Sie in seinen Eigenschaften eines Ihrer Images, oder fügen Sie eines hinzu (Seite Images, Eigene Images).'},
+    'The service {name}: {image} is none of your images (your images: {mine}). Choose one of yours in its properties, or add it (Images page, Your images).': {
+        'en': 'The service {name}: {image} is none of your images (your images: {mine}). Choose one of yours in its properties, or add it (Images page, Your images).',
+        'de': 'Der Service {name}: {image} ist keines Ihrer Images (Ihre Images: {mine}). Wählen Sie in seinen Eigenschaften eines Ihrer Images, oder fügen Sie es hinzu (Seite Images, Eigene Images).'},
+    'Your images on {host} could not be read (sandbox-ai images list), so the image of the service {name} is not checked: look at the Images page, Your images, then start again.': {
+        'en': 'Your images on {host} could not be read (sandbox-ai images list), so the image of the service {name} is not checked: look at the Images page, Your images, then start again.',
+        'de': 'Ihre Images auf {host} ließen sich nicht lesen (sandbox-ai images list), daher ist das Image des Service {name} nicht geprüft: Sehen Sie auf der Seite Images unter Eigene Images nach und starten Sie dann erneut.'},
+    "the agent's own base, or one of your images": {
+        'en': "the agent's own base, or one of your images",
+        'de': 'die eigene Basis des Agenten oder eines Ihrer Images'},
+    'None yet - Your images (this page) adds one': {
+        'en': 'None yet - Your images (this page) adds one',
+        'de': 'Noch keines - Eigene Images (diese Seite) fügt eines hinzu'},
+    'Add a service of one of your images on {host}': {
+        'en': 'Add a service of one of your images on {host}',
+        'de': 'Einen Service aus einem Ihrer Images auf {host} hinzufügen'},
+    'the Images page, Your images, adds one': {
+        'en': 'the Images page, Your images, adds one',
+        'de': 'die Seite Images, Eigene Images, fügt eines hinzu'},
+    'the Images page, New variant, makes one': {
+        'en': 'the Images page, New variant, makes one',
+        'de': 'die Seite Images, Neue Variante, legt eine an'},
+    "the Images page builds the agents' images": {
+        'en': "the Images page builds the agents' images",
+        'de': 'die Seite Images baut die Images der Agenten'},
+    'the VPN page adds one': {
+        'en': 'the VPN page adds one',
+        'de': 'die Seite VPN fügt eines hinzu'},
+    'the MCP servers page adds one': {
+        'en': 'the MCP servers page adds one',
+        'de': 'die Seite MCP-Server fügt einen hinzu'},
+    'the Kits & plugins page adds one': {
+        'en': 'the Kits & plugins page adds one',
+        'de': 'die Seite Kits & Plugins fügt eines hinzu'},
+    'the Identities page adds one': {
+        'en': 'the Identities page adds one',
+        'de': 'die Seite Identitäten fügt eine hinzu'},
+    'NAME:image=IMAGE,port=PORT per line - "+" adds one of your images': {
+        'en': 'NAME:image=IMAGE,port=PORT per line - "+" adds one of your images',
+        'de': 'NAME:image=IMAGE,port=PORT pro Zeile - "+" fügt eines Ihrer Images hinzu'},
+    "Your images on {host} could not be read (sandbox-ai images list), so the services' images are not checked: {error}": {
+        'en': "Your images on {host} could not be read (sandbox-ai images list), so the services' images are not checked: {error}",
+        'de': 'Ihre Images auf {host} ließen sich nicht lesen (sandbox-ai images list), daher sind die Images der Services nicht geprüft: {error}'},
+    "The preset's value “{label}” is {image}, none of your images (your images: {mine}): choose one of yours, or add it (Images page, Your images).": {
+        'en': "The preset's value “{label}” is {image}, none of your images (your images: {mine}): choose one of yours, or add it (Images page, Your images).",
+        'de': 'Der Wert „{label}“ der Vorlage ist {image}, keines Ihrer Images (Ihre Images: {mine}): Wählen Sie eines Ihrer Images, oder fügen Sie es hinzu (Seite Images, Eigene Images).'},
 }

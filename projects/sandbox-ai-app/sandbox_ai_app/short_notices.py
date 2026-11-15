@@ -2,11 +2,14 @@
 "Forgotten.", "Nothing to remove.") shows for a moment near the bottom of the window and goes by itself - no box,
 no OK to click.
 
-A notice is a small frame inside the window (never a window of its own: it takes no focus, the window stays active,
-the keyboard stays where it was). It stays VISIBLE_MS (a longer text a little longer, LONGEST_MS at most), then fades
-out over FADE_MS; while the pointer is over it, it stays (and goes HOVER_MS after the pointer left); a click takes it
-away at once. Several stack upwards from the bottom, MAX_SHOWN at a time (the oldest goes first). Screen readers get
-it as an alert (its title as the accessible name, its text as the description).
+A notice is a small frame inside the window (never a window of its own: it takes no focus when it appears, the
+window stays active, the keyboard stays where it was). It stays VISIBLE_MS (a longer text a little longer,
+LONGEST_MS at most), then fades out over FADE_MS; while the pointer is over it, or the focus is in it, it stays (and
+goes HOVER_MS after the pointer left); a click that marks nothing takes it away. Its text says at a glance what it
+is about (rich_notice.py: addresses, decisions, states, commands in their colours) and can be marked with the mouse
+and copied: Ctrl+C (the whole text when nothing is marked), its right click's Copy and Copy all; after Esc, or when it
+goes, the keyboard is back where it was. Several stack upwards from the bottom, MAX_SHOWN at a time (the oldest goes
+first). Screen readers get it as an alert (its title as the accessible name, its text as the description, plain).
 
 Every notice is also written to the app's log (INFO, component "notice": app.log and the log window) and to the
 status bar of the main window - also with the setting short_notices off ("Show short notices (toasts)"), which
@@ -17,10 +20,11 @@ What needs reading (an error, a warning with a decision, a question) stays a dia
 from __future__ import annotations
 
 from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPropertyAnimation, Qt, QTimer
-from PySide6.QtGui import QPainter, QPainterPath, QColor, QPen
-from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QApplication, QFrame, QGraphicsOpacityEffect, QMainWindow, QVBoxLayout, QWidget
 
 from . import applog, theme
+from .notifications import NoticeText
 from .files import printable_text
 from .widgets import safe_tooltip
 
@@ -111,8 +115,43 @@ def short_notice(parent, title_text, text, details=None, modal=None, warning=Fal
     return Stack.of(window).add(title_text, text)
 
 
+class NoticeLabel(NoticeText):
+    """A notice's text (notifications.NoticeText: rich text that wraps, marked and copied), centred; the keyboard
+    only after a click into it (a notice never takes it when it appears)."""
+
+    def __init__(self, notice, text):
+        super().__init__("short_notice_text", centered=True, focus=Qt.FocusPolicy.ClickFocus)
+        self.notice = notice
+        self.pressed_at = None
+        self.copy_all.connect(notice.copy_all)
+        self.set_message(text, TEXT_LIMIT)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        self.pressed_at = event.position()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        super().mouseReleaseEvent(event)
+        start, self.pressed_at = self.pressed_at, None
+        moved = start is not None and (event.position() - start).manhattanLength() > 4
+        if event.button() == Qt.MouseButton.LeftButton and start is not None and not moved \
+                and not self.hasSelectedText():
+            self.notice.dismiss_soon()  # a click that marked nothing: as on the notice's edge (not a double click)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802
+        self.notice.dismiss_timer.stop()  # a double click marks a word
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.notice.dismiss()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class Notice(QFrame):
-    """One notice inside WINDOW: the text, the theme's colours, a fade at its end; never focused."""
+    """One notice inside WINDOW: the text, the theme's colours, a fade at its end; never focused when it appears."""
 
     def __init__(self, window, title, text, stack):
         super().__init__(window)
@@ -123,14 +162,7 @@ class Notice(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 8, 14, 8)
-        shown = text if len(text) <= TEXT_LIMIT else text[:TEXT_LIMIT - 1] + "…"
-        self.label = QLabel(shown)
-        self.label.setObjectName("short_notice_text")
-        self.label.setTextFormat(Qt.TextFormat.PlainText)  # what a command or an agent wrote is never markup
-        self.label.setWordWrap(True)
-        self.label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label = NoticeLabel(self, text)
         layout.addWidget(self.label)
         self.setAccessibleName(title or text)
         self.setAccessibleDescription(text)
@@ -138,7 +170,8 @@ class Notice(QFrame):
             self.setToolTip(safe_tooltip(title))  # (a title may name a start or a path)
         colors = theme.data()["colors"]
         self.background, self.border = QColor(colors["base"]), QColor(colors["accent"])
-        self.label.setStyleSheet(f"QLabel {{ color: {colors['text']}; background: transparent; }}")
+        self.label.setStyleSheet(f"QTextEdit {{ color: {colors['text']}; background: transparent; border: none;"
+                                 " padding: 0; margin: 0; }")
         self.opacity = QGraphicsOpacityEffect(self)
         self.opacity.setOpacity(1.0)
         self.setGraphicsEffect(self.opacity)
@@ -150,9 +183,13 @@ class Notice(QFrame):
         self.fade.finished.connect(self.dismiss)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.fade.start)
+        self.timer.timeout.connect(self.expire)
+        self.dismiss_timer = QTimer(self)
+        self.dismiss_timer.setSingleShot(True)
+        self.dismiss_timer.timeout.connect(self.dismiss)
         self.ms = lifetime(text)
-        self.gone = False
+        self.gone, self.menu_open, self.previous_focus = False, False, None
+        QApplication.instance().focusChanged.connect(self.focus_moved)
 
     def start(self):
         self.show()
@@ -167,6 +204,49 @@ class Notice(QFrame):
             QAccessible.updateAccessibility(QAccessibleEvent(self, QAccessible.Event.Alert))
         except Exception:  # noqa: BLE001 - no accessibility bridge: the log and the status bar have it
             pass
+
+    def plain(self):
+        return self.label.plain()
+
+    def keeps(self):
+        """Not faded now: the pointer is over it, the focus is in its text (marking, copying) or its menu is open."""
+        return self.underMouse() or self.label.hasFocus() or self.menu_open
+
+    def expire(self):
+        if self.keeps():
+            self.timer.start(HOVER_MS)
+            return
+        self.fade.start()
+
+    def focus_moved(self, old, new):
+        if new is self.label and old is not None and old is not self.label:
+            self.previous_focus = old  # (given back when the notice goes)
+
+    def copy_all(self):
+        QGuiApplication.clipboard().setText(self.plain())
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        """Copy (what is marked) and Copy all; the notice stays while its menu is open."""
+        from PySide6.QtWidgets import QMenu
+
+        from .i18n import tr
+        self.timer.stop()
+        self.fade.stop()
+        self.opacity.setOpacity(1.0)
+        menu = QMenu(self)
+        selected = self.label.selectedText()
+        copy = menu.addAction(tr("Copy"), lambda: QGuiApplication.clipboard().setText(selected))
+        copy.setEnabled(bool(selected))
+        menu.addAction(tr("Copy all"), self.copy_all)
+        self.menu_open = True
+        menu.exec(event.globalPos())
+        import shiboken6
+        if not shiboken6.isValid(self):
+            return
+        self.menu_open = False
+        menu.deleteLater()
+        if not self.gone:
+            self.timer.start(HOVER_MS)
 
     def paintEvent(self, _event):  # noqa: N802
         painter = QPainter(self)
@@ -188,9 +268,13 @@ class Notice(QFrame):
             self.timer.start(HOVER_MS)
         super().leaveEvent(event)
 
-    def mousePressEvent(self, event):  # noqa: N802 - a click takes it away
+    def mousePressEvent(self, event):  # noqa: N802 - a click on its edge takes it away
         self.dismiss()
         event.accept()
+
+    def dismiss_soon(self):
+        """A click into its text that marked nothing: it goes, unless that click was the first of a double click."""
+        self.dismiss_timer.start(QApplication.doubleClickInterval())
 
     def dismiss(self):
         if self.gone:
@@ -198,7 +282,15 @@ class Notice(QFrame):
         self.gone = True
         self.timer.stop()
         self.fade.stop()
+        self.dismiss_timer.stop()
+        try:
+            QApplication.instance().focusChanged.disconnect(self.focus_moved)
+        except (RuntimeError, TypeError):
+            pass
+        had_focus, previous = self.label.hasFocus(), self.previous_focus
         self.hide()
+        if had_focus and _alive(previous) and previous.isVisible():
+            previous.setFocus(Qt.FocusReason.OtherFocusReason)  # the keyboard back where it was
         self.stack.remove(self)
         self.deleteLater()
 
@@ -250,11 +342,12 @@ class Stack(QObject):
         for notice in reversed(self.notices):  # the newest lowest
             margins = notice.layout().contentsMargins()
             inner = room - margins.left() - margins.right()
-            metrics = notice.label.fontMetrics()
-            wanted = min(inner, max(metrics.horizontalAdvance(line) for line in notice.label.text().split("\n")) + 4)
+            wanted = min(inner, notice.label.ideal_width() + 4)
             width = wanted + margins.left() + margins.right()
-            height = notice.label.heightForWidth(wanted) + margins.top() + margins.bottom()
-            height = max(height, notice.label.sizeHint().height() + margins.top() + margins.bottom())
+            # Every wrapped line shown, no more: the height of its text at that width (a rich text label's size hint
+            # guesses a narrower width, and the notice was twice as high as its text)
+            height = max(notice.label.heightForWidth(wanted), notice.label.fontMetrics().height()) \
+                + margins.top() + margins.bottom()
             notice.setGeometry((self.window.width() - width) // 2, bottom - height, width, height)
             notice.raise_()
             bottom -= height + MARGIN // 2

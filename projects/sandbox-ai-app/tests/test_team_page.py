@@ -161,7 +161,7 @@ def test_the_start_dialog_checks_what_it_is_given(qapp, env):
     dialog.options.setText("")
     for box in dialog.members.values():
         box.setChecked(False)
-    with pytest.raises(ValueError, match="two or three"):
+    with pytest.raises(ValueError, match="two or more"):
         dialog.request()
     dialog.lead.setCurrentIndex(dialog.lead.findData("codex"))
     assert not dialog.members["codex"].isEnabled(), "the lead is no member besides itself"

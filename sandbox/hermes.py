@@ -11,8 +11,12 @@ The review behind every default here: docs/HERMES_REVIEW.md (Hermes v0.22.5).
 
 Standard library only.
 """
+import importlib.util
 import json
+from pathlib import Path
 import re
+
+HERE = Path(__file__).resolve().parent
 
 # The release reviewed and built into localhost/hermes-sandbox (Containerfile.hermes): the newest one at least 14
 # days old when it was taken in.
@@ -98,13 +102,44 @@ FEATURE_SYNTAX = re.compile(r"[a-z][a-z-]*(?::[a-z]+)?")
 # variables are set; its hosts and those of the analytics and crash reporting services a dependency could use are
 # never opened (a start that would open them is refused) and the connection proxy refuses them in every Hermes run.
 TELEMETRY_HOSTS = ("telemetry.nousresearch.com", "*.posthog.com", "*.sentry.io")
-TELEMETRY_ENV = {
-    "CUA_DRIVER_RS_TELEMETRY_ENABLED": "0",  # the computer-use driver's PostHog events (tools/computer_use)
-    "OTEL_SDK_DISABLED": "true",  # OpenTelemetry (opentelemetry-api is in the lock; no exporter is)
-    "DO_NOT_TRACK": "1", "HF_HUB_DISABLE_TELEMETRY": "1",  # the common opt-outs of tools Hermes may run
-}
+
+
+def load_guard():
+    """sandbox/hermes_guard.py: the guard Hermes' own Python loads at every start in a sandbox (guard_files)."""
+    spec = importlib.util.spec_from_file_location("sandbox_ai_hermes_guard_launcher", HERE / GUARD_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Hermes' telemetry cannot be turned on from inside the sandbox either: Hermes v0.22.5 reads its shared-metrics
+# switches only from the profile's own, writable ~/.hermes/config.yaml (see TELEMETRY_ANSWER), so `hermes setup
+# telemetry`, the TUI's or the dashboard's consent switch or an editor turned local counting on for the session, and
+# HERMES_MANAGED_DIR or PYTEST_CURRENT_TEST took the managed configuration away. The guard (sandbox/hermes_guard.py)
+# and a .pth that loads it are written into the session directory and mounted read-only into the site-packages of
+# Hermes' venv (guard_files, guard_mounts) in every sandbox of Hermes' image, a shell with --binary too: every
+# process of Hermes' Python refuses those commands and variables with its MESSAGE, pins the variables again and sees
+# every telemetry switch off in every read of the configuration. The image's install is read-only (--read-only).
+GUARD_SOURCE = "hermes_guard.py"  # beside this file
+GUARD_MODULE = "sandbox_ai_hermes_guard"
+GUARD_PTH = "sandbox-ai-telemetry-off.pth"
+GUARD_DIR = "hermes-guard"  # in the session directory
+# Hermes' venv (Containerfile.hermes: uv's CPython 3.14 in /opt/hermes/venv, its hermes-agent.pth beside the guard's).
+SITE_PACKAGES = "/opt/hermes/venv/lib/python3.14/site-packages"
+GUARD = load_guard()
+# The opt-out variables, set by the launcher and pinned again by the guard in every Hermes process
+# (hermes_guard.PINNED_ENV): CUA_DRIVER_RS_TELEMETRY_ENABLED=0 (the computer-use driver's PostHog events),
+# OTEL_SDK_DISABLED=true (OpenTelemetry: opentelemetry-api is in the lock, no exporter is), DO_NOT_TRACK=1 and
+# HF_HUB_DISABLE_TELEMETRY=1 (the common opt-outs of tools Hermes may run).
+TELEMETRY_ENV = dict(GUARD.PINNED_ENV)
+# Shared metrics: only .enabled is pinned here. Hermes reads the answer to its consent question - and its collection
+# and sending gates read their switches - from the profile's own ~/.hermes/config.yaml, never from the managed scope
+# (TELEMETRY_ANSWER), and every save of that file drops the leaves the managed scope pins: with .send pinned as well,
+# any save (a model switch, an "always allow") erased the answer and the next start asked again ("Help improve
+# Hermes?"). The pin of .enabled keeps `hermes config set` from turning collection on; .send alone sends nothing. The
+# file itself the agent can still write: the guard (GUARD) makes every read of it see both switches off.
 TELEMETRY_PINNED = {
-    "telemetry": {"shared_metrics": {"enabled": False, "send": False}},
+    "telemetry": {"shared_metrics": {"enabled": False}},
     "monitoring": {"gateway_health_export": {"enabled": False}, "export": {"otlp": {"enabled": False}}},
     "computer_use": {"cua_telemetry": False},
 }
@@ -138,6 +173,90 @@ TELEMETRY_CONFIG = {
     "plugins": {"auto_update_check_hours": 0, "auto_apply": False},
     "model_catalog": {"enabled": False},
 }
+
+# Hermes' first-run question about shared metrics ("Help improve Hermes?", then "Shared metrics off. Change it any
+# time with `hermes setup telemetry`."): Hermes v0.22.5 asks it before an interactive chat (and at the end of
+# `hermes setup`) while the profile's own config.yaml holds no answer of its current offer version
+# (hermes_cli/observability/shared_metrics_consent.py: consent_state reads the raw user file; the managed scope is not
+# consulted there). So before every start the launcher's command (start_command) answers it "No thanks" in each
+# profile of the sandbox's HOME, with Hermes' own reader and writer, and takes back an opt-in an earlier run made:
+# telemetry.shared_metrics {enabled: false, send: false, offer_version: 2}. Hermes never asks; its collection and
+# sending gates (relay_shared_metrics.enabled and _resolved_send_config read that same file) stay off.
+HERMES_PYTHON = "/opt/hermes/venv/bin/python"  # Hermes' own Python (Containerfile.hermes)
+TELEMETRY_ANSWER = "sandbox-ai-telemetry-answer.py"  # in the session directory: MANAGED_DIR/TELEMETRY_ANSWER
+TELEMETRY_ANSWER_SCRIPT = r'''"""sandbox-ai (sandbox/hermes.py, TELEMETRY_ANSWER): Hermes' shared-metrics question
+answered "No thanks" in every profile of this HOME before Hermes starts, so Hermes never asks it; an opt-in of an
+earlier run is taken back. Run with Hermes' own Python (python -I); it never keeps Hermes from starting."""
+import os
+import sys
+from pathlib import Path
+
+
+def homes():
+    root = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    if root.parent.name == "profiles":
+        root = root.parent.parent
+    profiles = root / "profiles"
+    found = [root]
+    if profiles.is_dir() and not profiles.is_symlink():
+        found += sorted(path for path in profiles.iterdir()
+                        if path.is_dir() and not path.is_symlink() and not path.name.startswith("."))
+    return found
+
+
+def settled(section, version):
+    return (section.get("send") is False and section.get("enabled") is not True
+            and section.get("offer_version") == version)
+
+
+def answer(home):
+    from hermes_cli.config import _write_user_config, get_config_path, require_readable_config_before_write
+    from hermes_cli.observability.shared_metrics_consent import OFFER_VERSION, save_consent, set_answer
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(home))
+    try:
+        path = get_config_path()
+        config = require_readable_config_before_write(path)
+        telemetry = config.get("telemetry")
+        section = telemetry.get("shared_metrics") if isinstance(telemetry, dict) else None
+        section = section if isinstance(section, dict) else {}
+        if settled(section, OFFER_VERSION):
+            return
+        if section.get("enabled") is True or section.get("send") is True:
+            save_consent(False, False)  # also closes the consent window and drops what waited to be sent
+        else:
+            set_answer(config, False, False)
+            _write_user_config(path, config)
+    finally:
+        reset_hermes_home_override(token)
+
+
+def main():
+    for home in homes():
+        try:
+            answer(home)
+        except Exception as exc:  # never in the way of the start: Hermes then asks, and nothing is sent anyway
+            print(f"sandbox-ai: could not answer Hermes' shared-metrics question in {home}/config.yaml "
+                  f"({type(exc).__name__}: {exc}); if Hermes asks, answer No thanks (nothing is sent either way: "
+                  "the proxy refuses its telemetry hosts)", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def start_command(binary, args, python=HERMES_PYTHON, managed_dir=MANAGED_DIR):
+    """The command line of a Hermes start (the agent, a helper's server, every mode): first the shared-metrics answer
+    (TELEMETRY_ANSWER_SCRIPT), then the program itself (exec: the session's program is still Hermes)."""
+    script = f"{managed_dir}/{TELEMETRY_ANSWER}"
+    return ["/bin/sh", "-c", f"{shell_quote(python)} -I {shell_quote(script)}\nexec \"$0\" \"$@\"", binary, *args]
+
+
+def shell_quote(value):
+    """VALUE as one word for /bin/sh."""
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
 def merge(base, over):
@@ -222,9 +341,21 @@ def check(a, hooks_active=False, companions=()):
         raise ValueError("rules for the agent's own tools (a ruleset's \"tool\" rules, the security mode "
                          "paranoid's) are not enforced for Hermes yet; start without them, in the mode high or "
                          "laxer (the network, MCP and device rules hold as for every agent)")
+    refused = refused_arg(getattr(a, "agent_args", None) or [])
+    if refused:
+        raise ValueError(f"{refused[0]} in Hermes' arguments: {refused[1]}; drop it")
     check_telemetry(a)
     if names and getattr(a, "offline", False):
         raise ValueError(f"--hermes-enable {','.join(names)} needs the network; drop --offline")
+
+
+def refused_arg(args):
+    """(argument, why) of the agent's arguments that would switch telemetry on (hermes setup telemetry, hermes config
+    set|unset of a telemetry key: hermes_guard.refused, which refuses them inside the sandbox as well), or None."""
+    found = GUARD.refused(args)
+    if found is None:
+        return None
+    return found[0][len("hermes "):], GUARD.MESSAGE[len("sandbox-ai: "):]
 
 
 def host_matches_any(host, pattern):
@@ -306,6 +437,7 @@ def mcp_servers(names, bridge_args, timeouts=None):
 MCP_TOOL_SEARCH = {"tools": {"tool_search": {"enabled": "off"}}}
 
 LOOP_SKILL = "sandbox-ai-loop-guard"
+NOTE_SKILL = "sandbox-ai-network"  # the run's network note (agent_sandbox.network_note), loaded in every session
 
 
 def loop_skill(text):
@@ -314,7 +446,19 @@ def loop_skill(text):
             "loop guard); loaded in every session.\n---\n\n" + text)
 
 
-def managed_config(a, telemetry="off", mcp=None, llm=None):
+def note_skill(text):
+    """SKILL.md of the run's network note (how this run reaches the network through its Tor or VPN) for Hermes."""
+    return ("---\nname: " + NOTE_SKILL + "\ndescription: How this run reaches the network (sandbox-ai: its Tor or "
+            "VPN); loaded in every session.\n---\n\n" + text)
+
+
+def thinking(a):
+    """--show-thinking of this start: True (on), False (off), None (Hermes' own default: shown)."""
+    value = getattr(a, "show_thinking", None)
+    return None if value is None or getattr(a, "helper_of", None) else value == "on"
+
+
+def managed_config(a, telemetry="off", mcp=None, llm=None, note=False):
     """Hermes' /etc/hermes/config.yaml for this start: the sandbox's defaults, the telemetry switches (at every
     level: telemetry is always off), what the features turn on again, the --mcp servers (MCP: their mcp_servers) and --llm's model
     (LLM: llm.hermes_config, with the loop guard's skill among the external skills). Later layers win."""
@@ -325,23 +469,49 @@ def managed_config(a, telemetry="off", mcp=None, llm=None):
     if mcp:
         config = merge(merge(config, {"mcp_servers": mcp}), MCP_TOOL_SEARCH)
     config = merge(config, TELEMETRY_PINNED)  # after the features: never turned on
+    shown = thinking(a)
+    if shown is not None:
+        # --show-thinking: display.show_reasoning (Hermes' default true) and the CLI's own key, which /reasoning
+        # show|hide saves and which wins over it (hermes_cli/cli_init_mixin.py: local_display_config).
+        config = merge(config, {"display": {"show_reasoning": shown,
+                                            "platforms": {"cli": {"show_reasoning": shown}}}})
     if llm:
         skills = llm.get("skills", {}).get("auto_load")
         config = merge(config, {key: value for key, value in llm.items() if key != "skills"})
         if skills:
             config["skills"] = {**config["skills"], "auto_load": skills,
                                 "external_dirs": [*config["skills"]["external_dirs"], SKILLS_DIR]}
+    if note:  # NOTE: the run has a network note (files writes its skill)
+        skills = config["skills"]
+        config["skills"] = {**skills, "auto_load": [*skills.get("auto_load", []), NOTE_SKILL],
+                            "external_dirs": list(dict.fromkeys([*skills["external_dirs"], SKILLS_DIR]))}
     return config
 
 
-def files(a, config, loop_text=None):
+def files(a, config, loop_text=None, note=None):
     """{path in the session directory: content}: the managed configuration (JSON, which YAML reads), its .env (the
-    terminal backend once more), the loop guard's skill when it is on."""
+    terminal backend once more), the shared-metrics answer of every start (TELEMETRY_ANSWER), the loop guard's skill
+    when it is on, the run's network note (NOTE) as a skill of its own."""
     found = {f"{SESSION_DIR}/config.yaml": json.dumps(config, indent=2) + "\n",
-             f"{SESSION_DIR}/.env": "TERMINAL_ENV=local\n"}
+             f"{SESSION_DIR}/.env": "TERMINAL_ENV=local\n",
+             f"{SESSION_DIR}/{TELEMETRY_ANSWER}": TELEMETRY_ANSWER_SCRIPT}
     if loop_text and LOOP_SKILL in config.get("skills", {}).get("auto_load", []):
         found[f"{SESSION_DIR}/skills/{LOOP_SKILL}/SKILL.md"] = loop_skill(loop_text)
+    if note and NOTE_SKILL in config.get("skills", {}).get("auto_load", []):
+        found[f"{SESSION_DIR}/skills/{NOTE_SKILL}/SKILL.md"] = note_skill(note)
     return found
+
+
+def guard_files():
+    """{path in the session directory: content}: the guard (sandbox/hermes_guard.py) and the .pth that loads it at
+    the start of every process of Hermes' Python (guard_mounts)."""
+    return {f"{GUARD_DIR}/{GUARD_MODULE}.py": (HERE / GUARD_SOURCE).read_text(),
+            f"{GUARD_DIR}/{GUARD_PTH}": f"import {GUARD_MODULE}; {GUARD_MODULE}.install()\n"}
+
+
+def guard_mounts(session):
+    """[(file in SESSION, target)]: guard_files, each mounted read-only into the site-packages of Hermes' venv."""
+    return [(Path(session) / name, f"{SITE_PACKAGES}/{Path(name).name}") for name in guard_files()]
 
 
 def environment(a, placeholder=None):
@@ -363,7 +533,14 @@ def plan(a):
             "terminal_backend": "local", "gateway": gateway(a),
             # Never switchable: pinned off, opt-out variables set, these hosts never opened and refused by the proxy.
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),
-                          "environment": sorted(TELEMETRY_ENV), "pinned": sorted(TELEMETRY_PINNED)},
+                          "environment": sorted(TELEMETRY_ENV), "pinned": sorted(TELEMETRY_PINNED),
+                          # Its first-run question: answered "No thanks" before every start, never asked.
+                          "question": "answered no before every start",
+                          # Inside the sandbox too (hermes_guard.py, read-only in Hermes' site-packages).
+                          "guard": f"{SITE_PACKAGES}/{GUARD_PTH}",
+                          "refused_arguments": ["setup telemetry",
+                                                *(f"config set|unset {key}" for key in GUARD.CONFIG_KEYS)],
+                          "refused_environment": [*GUARD.PINNED_ENV, *GUARD.SCOPE_ENV]},
             "enabled": [{"feature": name, "hosts": FEATURES[name]["hosts"],
                          "secrets": sorted(FEATURES[name].get("secrets", {}).values())} for name in names],
             "off": [name for name in FEATURES if name not in names]}

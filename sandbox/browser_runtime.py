@@ -6,8 +6,11 @@ rebuild of the image.
 It runs as the pod's root without capabilities. It trusts the run's CA (the connection proxy's, when there is one:
 MOUNT/ca.pem) in Chromium's NSS database (Firefox takes it from the policies the image carries), starts the display
 with runtime.start_gui - Xvfb without TCP and without the abstract socket, x11vnc on MOUNT/vnc/vnc.sock only - and
-then the browser, again when it is closed (at most RESTARTS times in RESTART_WINDOW seconds). SIGTERM (the run ends)
-stops them all. Before each start of the browser its settings are written into its profile (Chromium's Local State:
+then the browser, again when it is closed - and the display, with the browser, when its Xvfb or x11vnc ended (at
+most RESTARTS times in RESTART_WINDOW seconds together). SIGTERM (the run ends) stops them all. A URL the launcher
+hands over (MOUNT/vnc/OPEN_REQUEST, browser.request_open: DeepSeek Harness' web UI) is opened: Chromium's second start
+hands it to the running one (a new tab), Firefox (--no-remote) is started again on it. Before each start of the
+browser its settings are written into its profile (Chromium's Local State:
 no DNS over HTTPS; Firefox's user.js: FIREFOX_PREFS), and behind Tor (config "tor") WebRTC gathers no address and
 Firefox looks .onion names up.
 
@@ -17,6 +20,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -26,6 +30,8 @@ MOUNT = Path("/sandbox-browser")
 HOME = Path("/tmp/home")
 RESTARTS = 20
 RESTART_WINDOW = 600
+OPEN_REQUEST = "open.url"  # browser.OPEN_REQUEST: in MOUNT/vnc, written by the launcher only
+OPEN_URL = re.compile(r"https?://[!-~]{1,4000}")
 # A profile kept from an earlier run (session, a folder) carries the lock of that run's browser, whose host name (the
 # pod's) differs: the browser would refuse it as "in use on another computer".
 LOCKS = {"chromium": ("SingletonLock", "SingletonSocket", "SingletonCookie"),
@@ -84,6 +90,15 @@ FIREFOX_PREFS = {
     "browser.newtabpage.activity-stream.feeds.section.topstories": False,
     "browser.newtabpage.activity-stream.feeds.topsites": False, "browser.newtabpage.activity-stream.telemetry": False,
     "browser.startup.homepage": "about:blank", "browser.startup.page": 0, "browser.aboutwelcome.enabled": False,
+    # Remote Settings (firefox.settings.services.mozilla.com and its attachments' CDN: blocklists, certificate
+    # intermediates and CRLite, query stripping lists, translation and other models) pointed nowhere, as Mozilla's
+    # own test profiles do; the features that live on it are off. The MITM check after a certificate error
+    # (mitm-detection.services.mozilla.com), the private attribution reports (Firefox 128), the captive portal URL
+    # and the sponsored top sites, which call out by themselves, too.
+    "services.settings.server": "data:,#remote-settings-dummy/v1", "browser.translations.enable": False,
+    "browser.ml.enable": False, "security.certerrors.mitm.priming.enabled": False,
+    "dom.private-attribution.submission.enabled": False, "captivedetect.canonicalURL": "",
+    "browser.topsites.contile.enabled": False, "browser.discovery.enabled": False,
 }
 # Behind Tor (and the opposite, Firefox's own defaults, without: a profile kept from a Tor run gets them back).
 # .onion names: Firefox refuses to look them up at all (network.dns.blockDotOnion) - behind Tor the pod's resolver
@@ -98,7 +113,24 @@ FIREFOX_TOR = {True: {"network.dns.blockDotOnion": False, "media.peerconnection.
                        "media.peerconnection.ice.proxy_only_if_behind_proxy": False, "geo.enabled": True}}
 
 
-def chromium_command(cfg, profile):
+def take_open_request(folder):
+    """The URL the launcher left in FOLDER (OPEN_REQUEST), taken (removed), or None: none there, or not an http(s)
+    URL of printable ASCII."""
+    path = Path(folder) / OPEN_REQUEST
+    try:
+        if path.is_symlink():
+            path.unlink()
+            return None
+        with open(path, "rb") as stream:
+            data = stream.read(8192)
+        path.unlink()
+    except OSError:
+        return None
+    url = data.decode("ascii", "replace").strip()
+    return url if OPEN_URL.fullmatch(url) else None
+
+
+def chromium_command(cfg, profile, url=None):
     width, height = screen_size(cfg["screen"])
     argv = ["chromium", f"--user-data-dir={profile}",
             # As root Chromium refuses its own sandbox; the container (no capabilities, no new privileges, a
@@ -115,7 +147,7 @@ def chromium_command(cfg, profile):
         argv += list(CHROMIUM_TOR)
     if cfg.get("cdp_port"):
         argv += [f"--remote-debugging-port={int(cfg['cdp_port'])}", "--remote-debugging-address=127.0.0.1"]
-    return argv + ["about:blank"]
+    return argv + [url or "about:blank"]
 
 
 def write_profile_file(path, text):
@@ -160,14 +192,14 @@ def settings(cfg, profile):
     (chromium_settings(profile) if cfg["kind"] == "chromium" else firefox_settings(cfg, profile))
 
 
-def firefox_command(cfg, profile):
+def firefox_command(cfg, profile, url=None):
     width, height = screen_size(cfg["screen"])
     return ["firefox-esr", "--profile", str(profile), "--no-remote", "--new-instance", "-width", str(width),
-            "-height", str(height), "about:blank"]
+            "-height", str(height), url or "about:blank"]
 
 
-def command(cfg, profile):
-    return chromium_command(cfg, profile) if cfg["kind"] == "chromium" else firefox_command(cfg, profile)
+def command(cfg, profile, url=None):
+    return chromium_command(cfg, profile, url) if cfg["kind"] == "chromium" else firefox_command(cfg, profile, url)
 
 
 def trust_ca(cfg, home, ca, run=subprocess.run):
@@ -224,22 +256,49 @@ def main(mount=MOUNT, home=HOME, runtime=None, popen=subprocess.Popen, sleep=tim
     stopping = []
     signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
     signal.signal(signal.SIGINT, lambda *_: stopping.append(True))
-    display = runtime.start_gui({"display": cfg["display"], "screen": cfg["screen"], "vnc": True, "private": True,
-                                 "selection": True})
-    restarts, browser = Restarts(), None
+    gui = {"display": cfg["display"], "screen": cfg["screen"], "vnc": True, "private": True, "selection": True}
+    display = runtime.start_gui(gui)
+    restarts, browser, start_url, handing, stopped = Restarts(), None, None, [], False
     try:
         while not stopping:
+            gone = [name for name, process in zip(("Xvfb", "x11vnc"), display) if process.poll() is not None]
+            if gone:
+                # Its display ended (a crash, the out-of-memory killer): started again, the browser with it -
+                # else the container ran on without one, for the rest of the run.
+                if not restarts.allowed():
+                    print("sandbox-ai browser: its display ended too often; not started again", file=sys.stderr)
+                    return 1
+                print(f"sandbox-ai browser: its display ended ({', '.join(gone)}); started again", file=sys.stderr)
+                for process in ([browser] if browser is not None else []) + list(reversed(display)):
+                    runtime.stop_process(process)
+                browser, display, stopped = None, [], True
+                for stale in (runtime.x_socket(cfg["display"]), Path(f"/tmp/.X{cfg['display'][1:]}-lock"),
+                              runtime.VNC_DIR / "vnc.sock"):
+                    if stale.is_symlink() or stale.exists():
+                        stale.unlink()
+                display = runtime.start_gui(gui)
+            url = take_open_request(Path(mount) / "vnc")
+            if url and cfg["kind"] == "chromium" and browser is not None and browser.poll() is None:
+                # Chromium's own singleton hands the URL to the running browser (a new tab) and ends.
+                handing.append(popen(command(cfg, profile, url), stdin=subprocess.DEVNULL))
+            elif url:
+                start_url = url  # its next start opens it: Firefox (--no-remote) is started again for it
+                if browser is not None and browser.poll() is None:
+                    runtime.stop_process(browser)
+                    stopped = True
+            handing = [process for process in handing if process.poll() is None]
             if browser is None or browser.poll() is not None:
-                if browser is not None and not restarts.allowed():
+                if browser is not None and not stopped and not restarts.allowed():
                     print("sandbox-ai browser: it ended too often; not started again", file=sys.stderr)
                     return 1
                 clear_locks(cfg["kind"], profile)
                 settings(cfg, profile)  # at every start of it: what it changed meanwhile does not stay
-                browser = popen(command(cfg, profile), stdin=subprocess.DEVNULL)
+                browser = popen(command(cfg, profile, start_url), stdin=subprocess.DEVNULL)
+                start_url, stopped = None, False
             sleep(0.5)
         return 0
     finally:
-        for process in ([browser] if browser is not None else []) + list(reversed(display)):
+        for process in ([browser] if browser is not None else []) + handing + list(reversed(display)):
             runtime.stop_process(process)
 
 

@@ -19,6 +19,7 @@ Needs Podman, the claude image (sandbox-ai build claude) and the network for Doc
 can be given: SANDBOX_AI_LIVE_IMAGE, SANDBOX_AI_SERVICE_REF (default docker.io/library/redis:7-alpine),
 SANDBOX_AI_BASE_REF (default docker.io/library/python:3.12-slim-bookworm; SANDBOX_AI_SKIP_BASE_BUILD=1 leaves the
 variant out). Run: python -m pytest -v --agent-live tests/test_services_live.py (CI: the job "services")."""
+import contextlib
 import importlib.util
 import json
 import os
@@ -31,6 +32,8 @@ import time
 import urllib.request
 
 import pytest
+
+import ci_annotations
 
 ROOT = Path(__file__).resolve().parents[1]
 PODMAN = shutil.which("podman")
@@ -113,15 +116,50 @@ def results(stdout):
     return found
 
 
-def wait_for_container(label, timeout=180):
+def wait_for_container(label, timeout=180, process=None):
+    """The name of the running container with LABEL, or None when none appeared within TIMEOUT seconds - at once
+    when PROCESS (the start) has ended: a start that failed starts no container, and waiting says nothing more."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         names = subprocess.run([PODMAN, "ps", "--filter", f"label={label}", "--format", "{{.Names}}"],
                                capture_output=True, text=True).stdout.split()
         if names:
             return names[0]
+        if process is not None and process.poll() is not None:
+            return None
         time.sleep(1)
     return None
+
+
+def podman_output(arguments):
+    try:
+        done = subprocess.run([PODMAN, *arguments], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"podman did not answer: {exc}"
+    return done.stdout + done.stderr
+
+
+def never_ran(process, label, wait=60, podman=podman_output):
+    """What to say when no container with LABEL appeared: whether the start (PROCESS) had ended, what it printed -
+    the reason is there, and CI's job said "the service's container never ran" without it for three releases - and
+    the containers Podman has. The start is ended for it (its process group, as the test ends it anyway)."""
+    state = f"had ended with status {process.returncode}" if process.poll() is not None else \
+        "was still running (ended now)"
+    listing = podman(["ps", "--all", "--format", "{{.ID}}  {{.Image}}  {{.Status}}  {{.Names}}  {{.Labels}}"])
+    stdout = stderr = ""
+    for stop in (signal.SIGTERM, signal.SIGKILL):
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                os.killpg(process.pid, stop)
+        try:
+            stdout, stderr = process.communicate(timeout=wait)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    said = (f"no container with the label {label} appeared; the start {state}\nSTDERR:\n{(stderr or '')[-6000:]}\n"
+            f"STDOUT:\n{(stdout or '')[-2000:]}\nPODMAN PS --ALL:\n{listing}")
+    ci_annotations.report(f"services-{label.rpartition('=')[2]}-never-ran", said)
+    return said
 
 
 def test_a_service_is_reached_by_the_agent_and_stays_behind_the_firewall(tmp_path, own_config):
@@ -148,8 +186,9 @@ def test_a_service_is_reached_by_the_agent_and_stays_behind_the_firewall(tmp_pat
         process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True, env=own_config)
         try:
-            container = wait_for_container("sandbox-ai.service=cache")
-            assert container, "the service's container never ran"
+            container = wait_for_container("sandbox-ai.service=cache", process=process)
+            if not container:
+                pytest.fail("the service's container never ran: " + never_ran(process, "sandbox-ai.service=cache"))
             inspect = json_of(subprocess.run([PODMAN, "inspect", container], capture_output=True, text=True),
                               f"podman inspect {container}")[0]
             looks = {}
@@ -172,6 +211,7 @@ def test_a_service_is_reached_by_the_agent_and_stays_behind_the_firewall(tmp_pat
     finally:
         server["stop"]()
     report = f"exit {process.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}\nLOOKS:\n{json.dumps(looks, indent=1)}"
+    ci_annotations.report("services-cache", report)
     found = results(stdout)
     assert process.returncode == 0, report
     assert found.get("ping") == "+PONG", report
@@ -287,7 +327,7 @@ def test_the_full_stack_showcases_services(tmp_path, own_config):
                                start_new_session=True, env=own_config)
     status = ""
     try:
-        container = wait_for_container("sandbox-ai.service=web")
+        container = wait_for_container("sandbox-ai.service=web", process=process)
         if container:
             status = subprocess.run([PODMAN, "exec", container, "cat", "/proc/1/status"], capture_output=True,
                                     text=True, timeout=60).stdout
@@ -301,6 +341,7 @@ def test_the_full_stack_showcases_services(tmp_path, own_config):
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=60)
     report = f"exit {process.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}\nSTATUS:\n{status}"
+    ci_annotations.report("services-showcase", report)
     found = results(stdout)
     assert process.returncode == 0, report
     assert found.get("postgres") in ("N", "S"), report

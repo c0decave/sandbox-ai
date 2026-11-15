@@ -14,6 +14,7 @@ import contextlib
 import errno
 import ctypes
 import fcntl
+import functools
 import hashlib
 import heapq
 import ipaddress
@@ -1730,6 +1731,10 @@ def inner_bootstrap():
         except ValueError as exc:  # never a failing start: this run has no kill switch then, and says so
             print(f"agent-sandbox: this run has no kill switch (sandbox-ai net cut): {exc}", file=sys.stderr)
         network.vpn_mark = cfg["killswitch"].get("vpn_mark") or None
+        try:
+            network.lend_mark = cut_lend_mark(cfg["killswitch"])
+        except ValueError as exc:  # (never loaded as a rule; the cut then rejects such a packet as any other)
+            print(f"agent-sandbox: the kill switch does not know the lent tunnel's mark: {exc}", file=sys.stderr)
         network.start_relays = host_relays
         for relay in host_relays:
             relay.allowed = network.relay_allowed
@@ -1844,17 +1849,25 @@ def start_gui(cfg):
                 raise RuntimeError("Timed out waiting for Xvfb")
             time.sleep(0.1)
         if cfg["vnc"]:
-            # -rfbport 0: no TCP listener; only the private Unix socket. Started only once it accepts
-            # connections; otherwise the run stops with x11vnc's own message.
+            # No TCP listener; only the private Unix socket. -rfbport 0 ends only x11vnc's IPv4 listener: its
+            # IPv6 one stays on [::]:5900 without a password (in a pod, the agent's and the services' to reach) unless
+            # -rfbportv6 -1 and -noipv6 end it too. Started only once it accepts connections, and proven to listen
+            # nowhere else (inet_listeners); otherwise the run stops with what was found.
             errors = tempfile.TemporaryFile()
             processes.append(subprocess.Popen(DROP_ALL + ["x11vnc", "-display", cfg["display"], "-unixsock",
-                                                          str(VNC_DIR / "vnc.sock"), "-rfbport", "0", "-forever",
+                                                          str(VNC_DIR / "vnc.sock"), "-rfbport", "0",
+                                                          "-rfbportv6", "-1", "-noipv6", "-forever",
                                                           "-shared", "-nopw", "-quiet",
                                                           *([] if cfg.get("selection") else ["-nosel"]),
                                                           *(["-noshm"] if cfg.get("private") or cfg.get("no_shm")
                                                             else [])],
                                               stdout=subprocess.DEVNULL, stderr=errors))
             wait_for_unix_listener(VNC_DIR / "vnc.sock", processes[-1], errors, "x11vnc")
+        for name, process in zip(("Xvfb", "x11vnc"), processes):
+            listening = inet_listeners(process.pid) if isinstance(getattr(process, "pid", None), int) else []
+            if listening:
+                raise RuntimeError(f"{name} listens on the network ({', '.join(listening)}): the display would be "
+                                   "open to every process of the sandbox's network")
     except BaseException:
         for process in processes:
             stop_process(process)
@@ -1902,6 +1915,35 @@ def start_audio(cfg, which=shutil.which, popen=subprocess.Popen, directory=AUDIO
         print(f"agent-sandbox: --audio: {exc}", file=sys.stderr)
         return []
     return [process]
+
+
+def inet_listeners(pid, proc="/proc"):
+    """["tcp6 [::]:5900", ...]: the TCP listeners and bound UDP sockets of process PID in this network namespace
+    (its sockets' inodes in PROC/net's tables). Its sockets that cannot be read count as a listener ("unknown")."""
+    inodes = set()
+    try:
+        for entry in os.listdir(f"{proc}/{pid}/fd"):
+            with contextlib.suppress(OSError):
+                target = os.readlink(f"{proc}/{pid}/fd/{entry}")
+                if target.startswith("socket:["):
+                    inodes.add(target[8:-1])
+    except OSError as exc:
+        return [f"unknown ({exc.strerror or exc})"]
+    found = []
+    for table in ("tcp", "tcp6", "udp", "udp6"):
+        try:
+            lines = Path(f"{proc}/net/{table}").read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) > 9 and fields[9] in inodes and (table.startswith("udp") or fields[3] == "0A"):
+                address, _, port = fields[1].rpartition(":")
+                shown = str(ipaddress.ip_address(bytes.fromhex(address)[::-1] if len(address) == 8 else b"".join(
+                    bytes.fromhex(address[i:i + 8])[::-1] for i in range(0, 32, 8)))) if len(address) in (8, 32) \
+                    else address
+                found.append(f"{table} {'[' + shown + ']' if ':' in shown else shown}:{int(port, 16)}")
+    return found
 
 
 def wait_for_unix_listener(path, process, errors, name, timeout=15.0):
@@ -2974,7 +3016,9 @@ SECRET_TEXT = [
     (re.compile(r"(--?[a-z0-9_-]*(?:token|secret|password|passwd|api-?key|apikey|credential)[a-z0-9_-]*(?:=|\s+))"
                 r"[^\s\"'-][^\s\"']*", re.I), r"\1[redacted]"),
     (re.compile(r"((?:^|\s)(?:-u|--user)\s+[^\s:]{1,200}:)\S+"), r"\1[redacted]"),
-    (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    # (the token forms the privacy check of pushes blocks: privacy.BUILTIN)
+    (re.compile(r"\b(?:hf_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|pypi-AgE[A-Za-z0-9_-]{50,}|[rs]k_live_[0-9A-Za-z]{20,}|"
+                r"sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
                 r"|glpat-[A-Za-z0-9_-]{16,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
                 r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+)"), "[redacted]"),
 ]
@@ -2992,7 +3036,8 @@ SECRET_TEXT_NEEDS = (
     lambda text: "-" in text,
     lambda text: "-u" in text,
     lambda text: "sk-" in text or "gh" in text or "github_pat_" in text or "glpat-" in text or "xox" in text
-    or "AKIA" in text or "eyJ" in text,
+    or "AKIA" in text or "eyJ" in text or "hf_" in text or "AIza" in text or "npm_" in text or "pypi-AgE" in text
+    or "k_live_" in text,
 )
 
 
@@ -3340,7 +3385,8 @@ SECRET_TEXT_STARTS = (
     window_starts("://", 21, 1),  # [a-z][a-z0-9+.-]{0,20} before it
     None,
     window_starts("-u", 2),  # (?:^|\s) and the first "-" of --user before it
-    lambda text: found_at(text, "sk-", "gh", "github_pat_", "glpat-", "xox", "AKIA", "eyJ"),
+    lambda text: found_at(text, "sk-", "gh", "github_pat_", "glpat-", "xox", "AKIA", "eyJ", "hf_", "AIza", "npm_",
+                          "pypi-AgE", "sk_live_", "rk_live_"),
 )
 
 
@@ -3977,10 +4023,18 @@ LLM_TEXT_SPAN = 4096             # a repeated block counts once it covers at lea
 LLM_TEXT_PERIOD = (8, 4096)      # the block's length: shorter runs (=====, "0, 0, ") are no loop
 LLM_TEXT_STEP = 512              # characters between two looks
 LLM_NOTE = "[sandbox-ai loop guard]"
+# What changes from call to call in a tool result that is otherwise the same (llm_result_key): dates, times,
+# durations, UUIDs and long hex ids, epoch timestamps (all digits: the hex pattern), Codex's "Chunk ID: 8818fc" (6
+# hex digits, random per exec_command call: without it the guard never saw a loop of Codex) and "session ID 3" of a
+# process still running, the ids harnesses put into results (call_..., toolu_..., OpenCode's tool_... output files;
+# with a digit in them: tool_output is a word), process ids, temporary paths.
 LLM_VOLATILE = re.compile(
     r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:?\d\d)?|\b\d\d:\d\d:\d\d(?:\.\d+)?\b|"
-    r"\b\d+(?:\.\d+)?\s?(?:ms|µs|us|ns|s|sec|secs|seconds?|minutes?|m)\b|\b[0-9a-f]{8,}\b|"
-    r"\bpid[ =:]?\d+\b|/tmp/[\w.-]+", re.I)
+    r"\b\d+(?:\.\d+)?\s?(?:ms|µs|us|ns|s|sec|secs|seconds?|minutes?|m)\b|"
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\b[0-9a-f]{8,}\b|"
+    r"\bchunk id:\s*[0-9a-z]+|\bsession id:?\s*\d+|"
+    r"\b(?:call|toolu|tool|fc|item|msg|resp|chatcmpl|proc)_(?=[0-9a-z]*\d)[0-9a-z]{6,}|"
+    r"\bpid[ =:]*\d+\b|/tmp/[\w.-]+", re.I)
 LLM_POLLING = re.compile(r"\bsleep\s+([0-9]{1,5})|--watch\b|\bwatch\s|\bwait(?:ing)?\b|\buntil\b", re.I)
 
 
@@ -3993,10 +4047,44 @@ def llm_api(path):
     return None
 
 
+@functools.lru_cache(maxsize=64)
+def llm_family(pattern):
+    try:
+        return re.compile(pattern, re.I)
+    except (re.error, TypeError):
+        return None
+
+
+def llm_preset(entry, model):
+    """The sampling preset of MODEL's family: the one the start worked out for a model the server listed, else the
+    entry's "families" ([[pattern, values]], llm.FAMILY_PRESETS) for any other model of that server."""
+    presets = entry.get("presets") or {}
+    if model in presets:
+        return dict(presets[model] or {})
+    for pattern, values in entry.get("families") or []:
+        found = llm_family(pattern) if isinstance(pattern, str) else None
+        if found is not None and found.search(model or "") and isinstance(values, dict):
+            return dict(values)
+    return {}
+
+
+def llm_model_refusal(entry, document):
+    """Why the request DOCUMENT may not go to the --llm endpoint ENTRY, or None: with a list of models ("models":
+    --llm-models, --llm NAME:MODEL,...) a request for another model of that server; any model of it without one. A
+    request that names no model goes as it came (a server of one model)."""
+    allowed = entry.get("models")
+    model = document.get("model")
+    if not isinstance(allowed, list) or not isinstance(model, str) or model in allowed:
+        return None
+    shown = ", ".join(allowed[:10]) + (f" and {len(allowed) - 10} more" if len(allowed) > 10 else "")
+    return (f"the model {printable_text(model, 200)} is not among the models this start offers of --llm "
+            f"{entry.get('name')} ({shown}); start with --llm-models all (or name it in --llm-models) to use it")
+
+
 def llm_values(entry, model):
     """({key: value}, {forced keys}) of the endpoint ENTRY for MODEL: its model family's preset (when the loop
     guard's sampling layer is on), every model's values, the model's own, the start's (forced) over them."""
-    values, forced = dict((entry.get("presets") or {}).get(model) or {}), set()
+    values, forced = llm_preset(entry, model), set()
     params, strong = entry.get("params") or {}, entry.get("forced") or {}
     for scope in ("*", model):
         for key, value in (params.get(scope) or {}).items():
@@ -4079,10 +4167,51 @@ def llm_result_key(text):
     return hashlib.sha256(LLM_VOLATILE.sub("~", text).strip().encode("utf-8", "replace")).hexdigest()[:24]
 
 
+# Notes a harness puts into the conversation as a user message of its own, right after a tool result: DSH's ("You are
+# repeating the exact same tool call ...", "Repeated tool call detected ...", "Current runtime context ..."), and this
+# guard's own (appended where a request had no tool result to carry it).
+LLM_HARNESS_NOTE = re.compile(
+    r"\s*(?:<[^<>\n]{1,40}>\s*)?(?:You are repeating the exact same tool call|Repeated tool call detected|"
+    r"Current runtime context|" + re.escape(LLM_NOTE) + ")", re.I)
+
+
+def llm_human_turns(items, api):
+    """The indexes of the human's messages in ITEMS (a request's messages, or the Responses API's input), oldest
+    first. Not the human's: a user message carrying a tool result (Claude Code puts reminders beside its results), and
+    a harness's own note - a user message right after a tool result (or after another such note) whose text starts as
+    LLM_HARNESS_NOTE does (DSH's "Repeated tool call detected ..."). Any other user message is the human's, one right
+    after a tool result too (typed while the agent worked), and so is a note-like text anywhere else."""
+    found, after_result = [], False
+    for index, item in enumerate(items if isinstance(items, list) else []):
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if api == "responses":
+            kind = item.get("type", "message")
+            result = kind in ("function_call_output", "custom_tool_call_output")
+            user = kind == "message" and item.get("role") == "user"
+        elif api == "messages":
+            result = item.get("role") == "user" and isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+            user = item.get("role") == "user" and not result
+        else:
+            result, user = item.get("role") == "tool", item.get("role") == "user"
+        if result:
+            after_result = True
+        elif user and after_result and LLM_HARNESS_NOTE.match(llm_text(content, 512)):
+            continue  # a harness's note: the turn goes on
+        elif user:
+            found.append(index)
+            after_result = False
+        else:
+            after_result = False
+    return found
+
+
 def llm_tool_history(document, api):
-    """[(signature, result key, name, polling, holder)] of the tool calls since the human's last message, oldest
-    first; HOLDER is (container, key) where the call's result text sits (for a note), or None. A message of the human
-    is one with no tool result in it (Claude Code puts reminders beside its tool results)."""
+    """[(signature, result key, name, polling, holder)] of the tool calls since the human's last message
+    (llm_human_turns), oldest first; HOLDER is (container, key) where the call's result text sits (for a note), or
+    None."""
     calls, pending = [], {}
 
     def add_call(ident, name, arguments):
@@ -4095,10 +4224,7 @@ def llm_tool_history(document, api):
             calls[index][2] = holder
     if api == "chat":
         messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-        start = 0
-        for index, message in enumerate(messages):
-            if isinstance(message, dict) and message.get("role") == "user":
-                start = index + 1
+        start = ([-1] + llm_human_turns(messages, api))[-1] + 1
         for message in messages[start:]:
             if not isinstance(message, dict):
                 continue
@@ -4111,10 +4237,7 @@ def llm_tool_history(document, api):
                 add_result(str(message.get("tool_call_id")), (message, "content"))
     elif api == "responses":
         items = document.get("input") if isinstance(document.get("input"), list) else []
-        start = 0
-        for index, item in enumerate(items):
-            if isinstance(item, dict) and item.get("role") == "user" and item.get("type", "message") == "message":
-                start = index + 1
+        start = ([-1] + llm_human_turns(items, api))[-1] + 1
         for item in items[start:]:
             if not isinstance(item, dict):
                 continue
@@ -4125,13 +4248,7 @@ def llm_tool_history(document, api):
                 add_result(str(item.get("call_id")), (item, "output"))
     elif api == "messages":
         messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-        start = 0
-        for index, message in enumerate(messages):
-            content = message.get("content") if isinstance(message, dict) else None
-            if isinstance(message, dict) and message.get("role") == "user" and not (
-                    isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
-                                                      for b in content)):
-                start = index + 1
+        start = ([-1] + llm_human_turns(messages, api))[-1] + 1
         for message in messages[start:]:
             content = message.get("content") if isinstance(message, dict) else None
             for block in content if isinstance(content, list) else []:
@@ -4192,13 +4309,86 @@ def llm_add_note(holder, text):
         container[key] = (value if isinstance(value, str) else llm_text(value)) + "\n\n" + text
 
 
-def llm_pause_tools(document, api, kind):
-    """No tool call in the answer to DOCUMENT: tool_choice none (Ollama, which takes none, without its tools)."""
-    if kind == "ollama":
-        document.pop("tools", None)
-        document.pop("tool_choice", None)
-        return
-    document["tool_choice"] = {"type": "none"} if api == "messages" else "none"
+def llm_stop_answer(api, model, text, stream):
+    """A complete answer of API ("chat", "responses" or "messages") with TEXT as the assistant's whole message and the
+    turn's end as its finish (stop, completed, end_turn), streamed (server-sent events) or one JSON document: what
+    the relay answers in the model's place when the loop guard ends a turn (llm_held_answer)."""
+    ident = "sandbox-ai-loop-guard-" + secrets.token_hex(4)
+    now = int(time.time())
+
+    def events(items):
+        return b"".join((f"event: {name}\n" if name else "").encode() + b"data: " +
+                        (data if isinstance(data, bytes) else json.dumps(data, separators=(",", ":")).encode()) +
+                        b"\n\n" for name, data in items)
+    if api == "chat":
+        if not stream:
+            return json.dumps({"id": ident, "object": "chat.completion", "created": now, "model": model, "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}).encode()
+        base = {"id": ident, "object": "chat.completion.chunk", "created": now, "model": model}
+        return events([(None, {**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                                                    "finish_reason": None}]}),
+                       (None, {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                               "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}),
+                       (None, b"[DONE]")])
+    if api == "messages":
+        message = {"id": "msg_" + ident, "type": "message", "role": "assistant", "model": model,
+                   "content": [{"type": "text", "text": text}], "stop_reason": "end_turn", "stop_sequence": None,
+                   "usage": {"input_tokens": 0, "output_tokens": 0}}
+        if not stream:
+            return json.dumps(message).encode()
+        return events([("message_start", {"type": "message_start", "message": {**message, "content": [],
+                                                                               "stop_reason": None}}),
+                       ("content_block_start", {"type": "content_block_start", "index": 0,
+                                                "content_block": {"type": "text", "text": ""}}),
+                       ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                                "delta": {"type": "text_delta", "text": text}}),
+                       ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                       ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn",
+                                                                             "stop_sequence": None},
+                                          "usage": {"output_tokens": 0}}),
+                       ("message_stop", {"type": "message_stop"})])
+    item = {"type": "message", "id": "msg_" + ident, "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]}
+    response = {"id": "resp_" + ident, "object": "response", "created_at": now, "status": "completed",
+                "model": model, "output": [item],
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                          "input_tokens_details": {"cached_tokens": 0},
+                          "output_tokens_details": {"reasoning_tokens": 0}}}
+    if not stream:
+        return json.dumps(response).encode()
+    where = {"item_id": item["id"], "output_index": 0, "content_index": 0}
+    return events([
+        ("response.created", {"type": "response.created", "sequence_number": 0,
+                              "response": {**response, "status": "in_progress", "output": [], "usage": None}}),
+        ("response.output_item.added", {"type": "response.output_item.added", "sequence_number": 1,
+                                        "output_index": 0, "item": {**item, "status": "in_progress",
+                                                                    "content": []}}),
+        ("response.content_part.added", {"type": "response.content_part.added", "sequence_number": 2, **where,
+                                         "part": {"type": "output_text", "text": "", "annotations": []}}),
+        ("response.output_text.delta", {"type": "response.output_text.delta", "sequence_number": 3, **where,
+                                        "delta": text}),
+        ("response.output_text.done", {"type": "response.output_text.done", "sequence_number": 4, **where,
+                                       "text": text}),
+        ("response.content_part.done", {"type": "response.content_part.done", "sequence_number": 5, **where,
+                                        "part": item["content"][0]}),
+        ("response.output_item.done", {"type": "response.output_item.done", "sequence_number": 6,
+                                       "output_index": 0, "item": item}),
+        ("response.completed", {"type": "response.completed", "sequence_number": 7, "response": response})])
+
+
+def llm_held_answer(api, data, encoding, stream, model, text):
+    """The loop guard's last step: DATA, the model's whole answer (in ENCODING) to a request that told it to stop
+    calling tools (the note; the request otherwise as the agent sent it - tool_choice none would make servers such as
+    LM Studio render the prompt anew without the tools, a full prefill). An answer that calls a tool again is replaced
+    by llm_stop_answer with TEXT, so that the agent's turn ends; returns those bytes, or None: DATA passes as it came
+    (a text answer, an unreadable one)."""
+    answer = LlmAnswer(api, 1 << 20, encoding)
+    answer.feed(data)
+    result = answer.result()
+    if not result.get("tool_calls"):
+        return None
+    return llm_stop_answer(api, result.get("model") or model or "", text, stream)
 
 
 class LlmTurns:
@@ -4211,14 +4401,8 @@ class LlmTurns:
 
     @staticmethod
     def key(document, api):
-        if api == "responses":
-            items = document.get("input") if isinstance(document.get("input"), list) else []
-            human = [i for i in items if isinstance(i, dict) and i.get("role") == "user"]
-        else:
-            items = document.get("messages") if isinstance(document.get("messages"), list) else []
-            human = [m for m in items if isinstance(m, dict) and m.get("role") == "user" and not (
-                isinstance(m.get("content"), list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
-                                                           for b in m["content"]))]
+        items = document.get("input" if api == "responses" else "messages")
+        human = [items[index] for index in llm_human_turns(items, api)]
         last = json.dumps(human[-1], sort_keys=True, default=str)[:65536] if human else ""
         return hashlib.sha256(f"{len(human)}\0{last}".encode("utf-8", "replace")).hexdigest()[:24]
 
@@ -4301,7 +4485,14 @@ def llm_request(entry, api, document, turns=None, now=None):
                                           "content": [{"type": "input_text", "text": text}]})
                 done["note"] = {"text": text, "appended": True}
             if level == "block":
-                llm_pause_tools(document, api, entry.get("kind"))
+                # The request goes as it is (with the note): the answer is held, and one that calls a tool again is
+                # answered in the model's place with this text (llm_held_answer).
+                done["stop"] = (
+                    f"{LLM_NOTE} This turn has gone on for {watchdog}, " if watchdog else
+                    f"{LLM_NOTE} The model called {name} with the same arguments {count} times and got the same "
+                    "result each time, ") + \
+                    "and after being told to stop it called a tool again: sandbox-ai ended this turn here. Say " \
+                    "what you need, or what to try differently."
             done["loop"] = {"action": "paused tools" if level == "block" else "note", "kind": kind,
                             "tool": name, "count": count, **({"watchdog": watchdog} if watchdog else {})}
     done["params"] = llm_apply_params(document, entry, api, extra)
@@ -4333,8 +4524,14 @@ def llm_body(head, parts, headers, entry, api, turns=None, keep=False):
         return head, iter(raw), {"skipped": "not valid JSON"}
     if not isinstance(document, dict):
         return head, iter(raw), {"skipped": "not a JSON object"}
+    model = document.get("model")[:200] if isinstance(document.get("model"), str) else None
+    refusal = llm_model_refusal(entry, document)
+    if refusal:
+        return head, iter(raw), {"refused": refusal, "params": {}, "loop": None, "model": model}
     before = llm_snapshot(document) if keep else None
     done = llm_request(entry, api, document, turns)
+    if model:
+        done["model"] = model
     if keep:
         done = {**done, "document": document, "before": before, "size": total}
     if not done["params"] and not done["loop"] and not done.get("boost"):
@@ -6466,7 +6663,7 @@ class ProxyServer:
                 llm_target = llm_endpoint(self.config.get("llm"), scheme, origin, port, path, target) \
                     if method.upper() == "POST" else None
                 llm_kind = llm_api(path) if llm_target is not None else None
-                stream_guard = None
+                stream_guard, hold = None, None
                 # The LLM traffic log (--llm-traffic): this request and its answer, recorded once it ends.
                 wanted = self.traffic.wants(llm_kind is not None, method, path) if self.traffic is not None else None
                 done = {}
@@ -6474,6 +6671,20 @@ class ProxyServer:
                     turns = self.__dict__.setdefault("llm_turns", LlmTurns())
                     head, parts, done = llm_body(head, parts, headers, llm_target, llm_kind, turns,
                                                  keep=wanted is not None)
+                    if done.get("model"):
+                        entry["llm_model"] = done["model"]  # which model of the server (the agent may switch)
+                    if done.get("refused"):
+                        # A model the start does not offer (--llm-models): an error in the APIs' own shape (OpenAI's
+                        # and Anthropic's clients both read error.message), nothing goes to the server.
+                        message = json.dumps({"type": "error", "error": {
+                            "type": "invalid_request_error", "code": "model_not_offered",
+                            "message": f"sandbox-ai: {done['refused']}"}}).encode()
+                        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+                                 b"Connection: close\r\n" + b"Content-Length: %d\r\n\r\n" % len(message) + message)
+                        self.log({**entry, "event": "denied", "reason": done["refused"], "rule": "(llm-models)",
+                                  "request": {"headers": redact_headers(headers)}})
+                        current.pop("entry", None)
+                        return
                     if done.get("params"):
                         entry["llm_params"] = done["params"]
                     if done.get("boost"):
@@ -6483,7 +6694,10 @@ class ProxyServer:
                     if done.get("loop"):
                         entry["llm_loop"] = {**done["loop"], "endpoint": llm_target.get("name")}
                     loop = llm_target.get("loop") or {}
-                    if loop.get("enabled", True) and loop.get("text"):
+                    hold = done.get("stop") if llm_kind in ("chat", "responses", "messages") else None
+                    if hold:
+                        head = identity_head(head)  # the whole answer is read before it goes on (llm_held_answer)
+                    elif loop.get("enabled", True) and loop.get("text"):
                         stream_guard = LlmStreamGuard(llm_kind, loop["text"])
                         head = identity_head(head)  # the guard reads the answer as it comes
                 if wanted:
@@ -6558,6 +6772,8 @@ class ProxyServer:
                         self.observe(facts)  # before the agent sees a byte of the answer
                     if added:  # a server that echoes what the proxy added gives the agent stars
                         reply = Scrubber(s.encode("latin-1", "replace") for s in self.own_secrets()).mask(reply)
+                    if hold and status == 200:
+                        break  # the head waits for the whole answer (below)
                     send_all(client, reply)
                     if 100 <= status < 200 and status != 101:
                         continue
@@ -6591,9 +6807,31 @@ class ProxyServer:
                     stream_guard = None
                 if stream_guard is not None and chunked and not added:
                     pieces = whole_chunks(pieces)  # a cut comes between two chunks, never inside one
-                cut = None
+                cut, replaced = None, None
+                if hold and status == 200:
+                    # The loop guard's block step: the model was told to stop calling tools (the note). Its whole
+                    # answer is read; one that calls a tool again goes no further - the relay answers in the model's
+                    # place and the agent's turn ends. Any other answer passes as it came (a larger one unread).
+                    held, size, whole = [], 0, True
+                    for raw, payload in pieces:
+                        held.append((raw, payload))
+                        size += len(raw)
+                        if size > LLM_BODY_LIMIT:
+                            whole = False
+                            break
+                    sse = "text/event-stream" in (header(reply_headers, "content-type") or "").lower()
+                    if whole:
+                        replaced = llm_held_answer(llm_kind, b"".join(payload for _, payload in held),
+                                                   header(reply_headers, "content-encoding"), sse,
+                                                   done.get("model") or "", hold)
+                    if replaced is None:
+                        send_all(client, reply)
+                        pieces = itertools.chain(held, pieces)
+                    else:
+                        pieces = iter(held)  # read for the records, never passed on
                 for raw, payload in pieces:
-                    send_all(client, raw)
+                    if replaced is None:
+                        send_all(client, raw)
                     received += len(raw)
                     answer.add(payload)
                     if answer_read is not None:
@@ -6616,6 +6854,15 @@ class ProxyServer:
                                 usage.feed(inflate.decompress(payload, 1 << 20))
                         elif not encoding or encoding == "identity":
                             usage.feed(payload)
+                if replaced is not None:
+                    closes = any((header(h, "connection") or "").lower() == "close" for h in (headers, reply_headers)) \
+                        or (closing and closing[0] == "close") or line.endswith("HTTP/1.0")
+                    send_all(client, b"HTTP/1.1 200 OK\r\nContent-Type: " +
+                             (b"text/event-stream\r\nCache-Control: no-cache" if sse else b"application/json") +
+                             b"\r\nContent-Length: %d\r\n" % len(replaced) +
+                             (b"Connection: close\r\n" if closes else b"") + b"\r\n" + replaced)
+                    entry["llm_loop"] = {**entry.get("llm_loop", {}), "ended": "the model called a tool again: "
+                                         "sandbox-ai answered in its place and the turn ended"}
                 if advert and status == 200:
                     with self.lock:
                         self.adverts[key] = advertised_refs(self.decoded(answer.data, reply_headers))
@@ -9116,6 +9363,8 @@ class RuntimeNetwork:
         # an MCP server, holds each one's, the strictest together), the VPN's own packets (they pass the cut) and the
         # relays of the host's ports made at the start (macOS), whose connections a cut closes too.
         self.cut_settings, self.cuts, self.vpn_mark, self.start_relays = None, {}, None, []
+        # A start that lends its tunnel to its own MCP servers: the mark of those connections (cut_lend_mark).
+        self.lend_mark = None
 
     @property
     def cut_mode(self):
@@ -9140,7 +9389,7 @@ class RuntimeNetwork:
         cuts = dict(cuts or {}) if cutting else dict(self.cuts)
         script = runtime_rules(effective) + (relay_rules(self.relays) if self.proxied else "")
         if self.cut_settings is not None:  # the cut chain anew: the host ports it tells apart may have changed
-            script += cut_rules(self.cut_view(cuts, current=False), self.vpn_mark)
+            script += cut_rules(self.cut_view(cuts, current=False), self.vpn_mark, self.lend_mark)
         self.apply_rules(script)
         self.state, self.once, self.cuts = state, once, cuts
         if self.allow_file is not None:
@@ -9359,6 +9608,9 @@ CUT_BY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # who asked for a cut:
 # on its way out; the rejection ends it at once (EHOSTUNREACH), as Tor's kill switch does. UDP: the send fails.
 CUT_REJECT = "reject with icmpx type admin-prohibited"
 TOR_SOCKS_ADDRESS = "127.0.0.1"  # where Tor's SocksPort listens in the sandbox (vpn_runtime.tor_config)
+# Tor's resolver address in the sandbox (vpn_runtime.TOR_DNS): port 53 there is the resolver in front of tor's DNSPort
+# (TorDnsFront), another port tor's DNSPort itself (TOR_DNS_PORT) - a lookup through Tor whatever the port.
+TOR_DNS_ADDRESS = "127.0.53.1"
 CUT_BY_LIMIT = 256      # names in one cut request (sandbox-ai net cut --all-runs: a run and every run it acts for)
 
 
@@ -9431,10 +9683,14 @@ def cut_class(cut, address, port, protocol="tcp"):
     sandbox's own loopback: its services, the DNS stub), "host" (the host's ports: the loopback ports forwarded or
     relayed, the Mac's address in podman machine), "dns" (a nameserver other than the stub: a lookup leaves for the
     internet, whatever the nameserver's address), "local" or "remote" (the internet). Tor's SocksPort on loopback
-    is "remote": tor, whose own connections pass the cut, carries what the agent sends there to the internet."""
+    is "remote": tor, whose own connections pass the cut, carries what the agent sends there to the internet. Tor's
+    resolver address (TOR_DNS_ADDRESS) is "dns" on every port: tor's DNSPort listens beside the resolver in front of
+    it, and a question there leaves through Tor as one on port 53 does."""
     ip = ipaddress.ip_address(str(address))
     port = int(port)
     if ip.is_loopback:
+        if cut.get("tor") and str(ip) == TOR_DNS_ADDRESS:
+            return "dns"
         if protocol == "tcp" and str(ip) == TOR_SOCKS_ADDRESS and cut.get("tor_socks") == port:
             return "remote"
         if protocol == "tcp" and str(ip) in HOST_LOOPBACK and port in cut.get("host_ports", ()):
@@ -9700,7 +9956,7 @@ def nft_set(values):
     return "{ " + ", ".join(str(value) for value in values) + " }"
 
 
-def cut_rules(cut, vpn_mark=None):
+def cut_rules(cut, vpn_mark=None, lend_mark=None):
     """nft commands that replace the firewall's cut chain with the kill switch CUT (None or no mode: empty). The
     output chain jumps to it before anything else (after the VPN container's own checks); it jumps to the chain of
     each mode that holds (cut_<mode>, made here), and a packet one of them forbids is rejected (CUT_REJECT), also one
@@ -9708,7 +9964,14 @@ def cut_rules(cut, vpn_mark=None):
     the agent's connections redirected to the proxy or to Tor count by where they were meant to go. VPN_MARK (the
     VPN's own packets: its tunnel, which carries only what passed here), IPv6 neighbour discovery and the rejection's
     own ICMP error pass; so does a reset, which carries nothing and lets the agent see a closed connection end at
-    once."""
+    once.
+
+    LEND_MARK (a start that lends its tunnel to its own MCP servers, cut_lend_mark): the packets of those connections
+    come here like the agent's own - the output chain accepts their mark only after this chain - and are judged by the
+    same rules. Where a rule rejects, a TCP packet with that mark is answered with a reset instead (lent_reject): the
+    agent's open connections are closed by the connection proxy, which a lent connection never passes, so the reset
+    is what ends one that was open before the cut - at the VPN container's socket, and with it at the server's - where
+    the ICMP error alone would leave it waiting for minutes. Its lookups (UDP) are rejected as any other."""
     lines = ["flush chain inet agent_sandbox cut"]
     for mode in CUT_MODES:  # every mode's chain, emptied (a chain no longer jumped to keeps nothing)
         lines += [f"add chain inet agent_sandbox cut_{mode}", f"flush chain inet agent_sandbox cut_{mode}"]
@@ -9729,10 +9992,41 @@ def cut_rules(cut, vpn_mark=None):
     # original destination is the forbidden one: it must pass, or connect() waits after all. (Only the kernel sends
     # such errors here: the agent has no raw sockets.)
     lines.append("add rule inet agent_sandbox cut meta l4proto { icmp, ipv6-icmp } ct state related return")
+    lent = cut_lend_mark({"lend_mark": lend_mark})
     for mode in modes:
         lines.append(f"add rule inet agent_sandbox cut jump cut_{mode}")
-        lines += [f"add rule inet agent_sandbox cut_{mode} {rule}" for rule in cut_mode_rules(cut, mode)]
+        lines += [f"add rule inet agent_sandbox cut_{mode} {rule}"
+                  for rule in lent_reject(cut_mode_rules(cut, mode), lent)]
     return "\n".join(lines) + "\n"
+
+
+LEND_RESET = "meta l4proto tcp reject with tcp reset"
+
+
+def cut_lend_mark(config):
+    """The mark of a start's lent connections (config.json "killswitch" "lend_mark": the launcher writes
+    vpn_runtime.LEND_MARK for a start that lends its tunnel to its own MCP servers), or None when it lends none.
+    ValueError for anything but a positive 32-bit number: it becomes part of a firewall rule."""
+    mark = config.get("lend_mark") if isinstance(config, dict) else None
+    if mark is None:
+        return None
+    if not isinstance(mark, int) or isinstance(mark, bool) or not 0 < mark <= 0xffffffff:
+        raise ValueError(f"killswitch: bad mark of the lent tunnel {str(mark)[:40]!r}")
+    return mark
+
+
+def lent_reject(rules, mark):
+    """RULES (cut_mode_rules) for a start whose lent connections carry MARK (None: as they are): before each rule that
+    rejects, the same match for a TCP packet with MARK, answered with a reset (LEND_RESET) - see cut_rules. A lent
+    packet is thus judged by exactly the rules that judge the agent's own; only how it is refused differs."""
+    if mark is None:
+        return list(rules)
+    found = []
+    for rule in rules:
+        if rule == CUT_REJECT or rule.endswith(" " + CUT_REJECT):
+            found.append(f"{rule[:-len(CUT_REJECT)]}meta mark {int(mark):#x} {LEND_RESET}")
+        found.append(rule)
+    return found
 
 
 def cut_mode_rules(cut, mode):
@@ -9765,6 +10059,12 @@ def cut_mode_rules(cut, mode):
     if mode != "local":  # lookups: only the DNS stub, which forwards nothing while the cut holds (nameservers())
         add(f"ct original ip daddr != {DNS_STUB} meta l4proto {{ tcp, udp }} ct original proto-dst 53 drop")
         add("meta nfproto ipv6 meta l4proto { tcp, udp } ct original proto-dst 53 drop")
+        if cut.get("tor"):
+            # Tor's resolver address, whole: tor's DNSPort listens there on a port of its own (behind the resolver
+            # on port 53), and tor, whose own packets pass the cut, would carry a question asked there directly out -
+            # every name a message, every answer one back. (The resolver's own questions to tor carry the checks'
+            # mark, which the output chain accepts before this chain.)
+            add(f"ct original ip daddr {TOR_DNS_ADDRESS} drop")
     add("ct original ip daddr 127.0.0.0/8 return")  # the sandbox's own loopback (the host's ports were dropped above)
     add("ct original ip6 daddr ::1 return")
     v4 = [net for net in LOCAL_NETWORKS if ":" not in net]

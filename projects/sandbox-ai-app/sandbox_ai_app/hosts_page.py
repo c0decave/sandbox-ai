@@ -674,6 +674,7 @@ class HostsPage(QWidget):
         self.pane_title = plain_label(role="section")
         right_layout.addWidget(self.pane_title)
         self.tabs = QTabWidget()
+        widgets.arrow_tabs(self.tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         right_layout.addWidget(self.tabs, 1)
         # doctor
         from .doctor_view import DoctorView

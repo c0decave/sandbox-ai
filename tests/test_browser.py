@@ -348,11 +348,14 @@ def test_the_browsers_display_has_no_abstract_socket_and_no_shared_memory(monkey
     started = []
 
     class Process:
+        pid = 0
+
         def poll(self):
             return None
     monkeypatch.setattr(s.RUNTIME.subprocess, "Popen", lambda argv, **kwargs: started.append(argv) or Process())
     monkeypatch.setattr(s.RUNTIME, "x_socket", lambda display: tmp_path)
     monkeypatch.setattr(s.RUNTIME, "wait_for_unix_listener", lambda *args: None)
+    monkeypatch.setattr(s.RUNTIME, "inet_listeners", lambda pid: [])
     monkeypatch.setattr(s.RUNTIME, "VNC_DIR", tmp_path / "vnc")
     s.RUNTIME.start_gui({"display": ":42", "screen": "1280x800x24", "vnc": True, "private": True,
                          "selection": True})
@@ -360,6 +363,7 @@ def test_the_browsers_display_has_no_abstract_socket_and_no_shared_memory(monkey
     assert xvfb[xvfb.index("Xvfb"):][:4] == ["Xvfb", ":42", "-screen", "0"]
     assert "-nolisten" in xvfb and "local" in xvfb and "tcp" in xvfb and "MIT-SHM" in xvfb
     assert "-noshm" in vnc and "-nosel" not in vnc and "-rfbport" in vnc and vnc[vnc.index("-rfbport") + 1] == "0"
+    assert vnc[vnc.index("-rfbportv6") + 1] == "-1" and "-noipv6" in vnc  # (no IPv6 listener either)
     assert str(tmp_path / "vnc" / "vnc.sock") in vnc
     started.clear()
     s.RUNTIME.start_gui({"display": ":99", "screen": "1920x1080x24", "vnc": True})  # the agent's: as before

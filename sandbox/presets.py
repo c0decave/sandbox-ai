@@ -135,6 +135,8 @@ TRANSLATED_KEYS = ("title", "description")
 REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentials", "--git-token-file",
            "--workspace", "--config", "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name",
            "--mcp-socket-dir", "--mcp-approvals-dir", "--helper-of", "--start-id", "--name", "--rules", "--preset",
+           # (the launcher's own word to an MCP server's sandbox: the run whose tunnel it borrows - vpn.validate_lent)
+           "--vpn-lent-by",
            "--preset-value", "--")
 # Your own presets (~/.config/sandbox-ai/presets, outside every workspace) are yours alone and never passed on: in them
 # you may also name the folders a start gets. Built-in presets and those of an extra directory may not.
@@ -462,8 +464,15 @@ LOADED = None  # the file of the preset load() gave last (the launcher checks it
 
 def load(name):
     global LOADED
-    presets = catalog()
+    skipped = []
+    presets = catalog(skipped)
     if name not in presets:
+        # A file of that name that was skipped (refused in an extra directory, damaged): its reason, not only "no
+        # preset" - `presets list` does not show it either (hotfix round 1).
+        why = [problem for problem in skipped if f"/{name}.json:" in problem or problem.startswith(f"{name}.json:")]
+        if why:
+            raise ValueError(f"no preset {name!r} to start with: its file was skipped: "
+                             + "; ".join(dict.fromkeys(why)))
         raise ValueError(f"no preset {name!r}; see: sandbox-ai presets list")
     LOADED = presets[name]
     return presets[name]
@@ -830,11 +839,41 @@ def copied_logins(options, credential):
     return found
 
 
-def apply(argv, canonical=None, with_mode=False, notes=None, credential=None):
+def host_sources(options):
+    """[(flag, host path)] of the --copy SRC:DEST and --mount SRC:DEST[:MODE] values among OPTIONS (canonical)."""
+    found = []
+    for index, token in enumerate(options):
+        name, equals, value = token.partition("=")
+        if name not in ("--copy", "--mount"):
+            continue
+        value = value if equals else (options[index + 1] if index + 1 < len(options) else "")
+        parts = 2 if name == "--mount" and value.count(":") >= 2 else 1
+        if ":" in value:
+            found.append((name, value.rsplit(":", parts)[0]))
+    return found
+
+
+def vpn_bypasses(options, given=()):
+    """["--vpn-bypass-host-ports", "--vpn-bypass-tcp ADDRESS:PORT"]: what among OPTIONS (canonical) lets a run past
+    its VPN, but a --vpn-bypass-tcp whose value is one the user GIVE (--preset-value)."""
+    given, found = {str(value).strip() for value in given if value}, []
+    for index, token in enumerate(options):
+        name, equals, value = token.partition("=")
+        if name == "--vpn-bypass-host-ports":
+            found.append(name)
+        elif name == "--vpn-bypass-tcp":
+            value = value if equals else (options[index + 1] if index + 1 < len(options) else "")
+            if value.strip() not in given:
+                found.append(f"{name} {value}")
+    return found
+
+
+def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, private=None):
     """ARGV (the launcher's: AGENT options... [-- agent args]) with --preset NAME and --preset-value KEY=VALUE
     replaced by the preset's options, placed right after the agent so that the command line wins; and its first
     task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset. What
-    the preset leaves out (a default folder that is not there) goes to NOTES."""
+    the preset leaves out (a default folder that is not there) goes to NOTES. PRIVATE(flag, path): why a host path
+    a --copy or --mount names is private (the launcher's private_source), else None."""
     if not argv or not any(token == "--preset" or token.startswith("--preset=") for token in argv):
         return (argv, None) if with_mode else argv
     head, tail = list(argv), []
@@ -882,6 +921,25 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None):
     if copied:
         raise ValueError(f"preset {name}: --copy {copied[0]} copies a login in, which is not allowed in a preset "
                          "(as --copy-auth)")
+    # PRIVATE (the launcher's private_source): keys and credentials are logins too. A preset passed on may not give
+    # the agent a private location of its own choosing; a folder you give it (--preset-value) is your choice.
+    if private and preset.get("_origin") != "yours":
+        chosen = {os.path.normpath(os.path.expanduser(value)) for value in given.values() if value}
+        for flag, source in host_sources(options):
+            if os.path.normpath(os.path.expanduser(source)) in chosen:
+                continue
+            why = private(flag, source)
+            if why:
+                raise ValueError(f"preset {name}: {flag} {source} is not allowed in a preset that is not yours: {why}. "
+                                 "Give it yourself if you mean it (on the command line, or as the folder a "
+                                 "--preset-value asks for)")
+    # What lets the run past its VPN or Tor (the host's ports, an address of your network) reaches the internet from
+    # your own address: only you choose that, by a value you give (--preset-value), never by the preset's own text.
+    if preset.get("_origin") != "yours":
+        past = vpn_bypasses(options, given.values())
+        if past:
+            raise ValueError(f"preset {name}: {', '.join(past)} is not allowed in a preset that is not yours: it lets "
+                             "the run past its VPN or Tor, from your own address; give it yourself if you mean it")
     # The preset's --mode is taken out: the launcher applies it only where it is stricter than what the command
     # line, the project file and your defaults choose (it never lowers a stricter one).
     options, mode = split_mode(options)
@@ -894,11 +952,21 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None):
     return (result, mode) if with_mode else result
 
 
+def printable(text):
+    """TEXT safe for a terminal (the launcher's printable): control, bidi and other non-printable characters escaped.
+    A preset passed on is someone else's text: its title, notes and labels must not drive the user's terminal (an
+    escape sequence that clears it, sets its title or - OSC 52 - writes the clipboard the user pastes from next)."""
+    return "".join(c if c in "\n\t" or c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256
+                   else f"\\u{ord(c):04x}" for c in str(text))
+
+
 def origin_text(preset):
     return f"from {preset['_dir']}" if preset["_origin"] == "extra" else preset["_origin"]
 
 
 def describe(preset, out=print):
+    say = out
+    out = lambda line: say(printable(line))  # noqa: E731 - every line of it holds the preset's own texts
     out(f"{preset['id']}: {preset['title']}  ({category_text(category_of(preset))}, {origin_text(preset)})")
     out(f"  {preset['description']}")
     badge = experimental(preset)
@@ -1086,10 +1154,10 @@ def main(argv, out=print):
                             mine = ("  (yours)" if preset["_origin"] == "yours" else
                                     f"  (from {preset['_dir']})" if preset["_origin"] == "extra" else "")
                             badge = experimental(preset)
-                            out(f"  {preset['id']:<{width}} {preset['title']}{mine}"
-                                + ("  [not live-tested yet]" if badge else ""))
+                            out(printable(f"  {preset['id']:<{width}} {preset['title']}{mine}"
+                                          + ("  [not live-tested yet]" if badge else "")))
             for problem in damaged:
-                print(f"sandbox-ai presets: skipped {problem}", file=sys.stderr)
+                print(f"sandbox-ai presets: skipped {printable(problem)}", file=sys.stderr)
             return 0
         preset = load(args.name)
         if args.command == "show":
@@ -1101,16 +1169,16 @@ def main(argv, out=print):
         notes = []
         found = missing(preset, parse_values(args.value), args.agent, notes=notes)
         for line in notes:
-            out(f"note: {line}")
+            out(printable(f"note: {line}"))
         if found:
             for line in found:
-                out(f"missing: {line}")
+                out(printable(f"missing: {line}"))
             return 1
         out(f"{preset['id']}: ready; start with: sandbox-ai {args.agent or preset.get('agents', AGENTS)[0]} --preset "
             f"{preset['id']}" + "".join(f" --preset-value {shlex.quote(v)}" for v in args.value))
         return 0
     except ValueError as exc:
-        print(f"sandbox-ai presets: {exc}", file=sys.stderr)
+        print(f"sandbox-ai presets: {printable(exc)}", file=sys.stderr)
         return 1
 
 

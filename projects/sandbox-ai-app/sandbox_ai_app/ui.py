@@ -12,11 +12,11 @@ import sys
 import textwrap
 import time
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QProcess, QRect, QSize, Qt, QTimer, Signal, qVersion
+from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QProcess, QRect, QSize, QStringListModel, Qt, QTimer, Signal, qVersion
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (
     QStyleOptionComboBox, QStylePainter,
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QApplication, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit, QProgressBar,
     QPushButton,
@@ -189,8 +189,10 @@ class RulesField(QWidget):
 
 class ListField(QWidget):
     """One value per line; for path options with a button that adds a folder; with CHOICES a button that adds one of
-    the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit)."""
+    the names the chosen host has (set_choices: its MCP servers for --mcp, its kits for --kit, your images for
+    --service: a service of that image); its menu opened asks for them again (opening)."""
     changed = Signal()
+    opening = Signal()
 
     def __init__(self, path=False, choices=False, option=None):
         super().__init__()
@@ -213,6 +215,7 @@ class ListField(QWidget):
             self.pick.setText("+")
             self.pick.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             self.pick.setMenu(QMenu(self.pick))
+            self.pick.menu().aboutToShow.connect(self.opening)
             layout.addWidget(self.pick, alignment=Qt.AlignmentFlag.AlignTop)
             self.set_choices(None)
 
@@ -225,15 +228,21 @@ class ListField(QWidget):
         for name in names or []:
             menu.addAction(name, lambda n=name: self.add(n))
         if not names:
+            hint = OptionsForm.NONE_YET.get(self.option)
             text = (tr("Could not be read: {error}", error=problem) if problem else
-                    tr("Reading…") if names is None else tr("None on {host}", host=where))
+                    tr("Reading…") if names is None else
+                    f"{tr('None on {host}', host=where)} - {tr(hint)}" if hint else tr("None on {host}", host=where))
             menu.addAction(text).setEnabled(False)
-        self.pick.setToolTip(safe_tooltip(tr("Add one that {host} has", host=where) if where else tr("Add one")))
+        self.pick.setToolTip(safe_tooltip(
+            tr("Add a service of one of your images on {host}", host=where) if self.option == "--service" and where else
+            tr("Add one that {host} has", host=where) if where else tr("Add one")))
 
     def add(self, value):
         if self.option in OptionsForm.SECRET_CHOICES:  # a secret's name: HOST=NAME, URL=NAME or NAME (name_fields)
             from .name_fields import add_line
             self.edit.setPlainText(add_line(self.edit.toPlainText(), value, self.option))
+        elif self.option == "--service":  # a service of your image VALUE: named after it, its image given
+            self.edit.appendPlainText(service_line(value, self.value()))
         elif value not in self.value():
             self.edit.appendPlainText(value)
 
@@ -252,6 +261,16 @@ class ListField(QWidget):
 
     def set_value(self, values):
         self.edit.setPlainText("\n".join(values or []))
+
+
+def service_line(image, lines=()):
+    """The --service value of a service of your image IMAGE: named after it (a service's name: lower-case letters,
+    digits and '-', up to 24; a name LINES use already gets a number), image= given (never left to the name)."""
+    base = re.sub(r"[^a-z0-9-]+", "-", str(image).lower()).strip("-")[:20].strip("-") or "service"
+    taken = {str(line).partition(":")[0].strip() for line in lines}
+    name = next(candidate for candidate in (base if i == 0 else f"{base}-{i}" for i in range(100))
+                if candidate not in taken)
+    return f"{name}:image={image}"
 
 
 class MultiChoice(QWidget):
@@ -329,9 +348,11 @@ class OptionLabel(QWidget):
 class OptionsForm(QTabWidget):
     """Every launcher option, grouped; built from the launcher's own parser (its help texts are sandbox-ai's)."""
     changed = Signal()
+    choices_wanted = Signal()  # a chooser of what the host has was opened: its lists are read again
 
     def __init__(self, options):
         super().__init__()
+        widgets.arrow_tabs(self)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.options, self.widgets, self.labels = options, {}, {}
         self.changed.connect(self.mark_dangerous)
         groups = {}
@@ -385,8 +406,14 @@ class OptionsForm(QTabWidget):
 
     # The options whose values the chosen host lists (backend.host_start_choices): a chooser filled from its lists,
     # the value still typed in where it has none (or the list could not be read).
-    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
-                    "--git-token-secret")
+    HOST_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--image", "--service", "--secret-env",
+                    "--api-key", "--git-token-secret")
+    # Where one is added, for a chooser whose host has none yet.
+    NONE_YET = {"--service": N_("the Images page, Your images, adds one"),
+                "--image-variant": N_("the Images page, New variant, makes one"),
+                "--image": N_("the Images page builds the agents' images"),
+                "--vpn": N_("the VPN page adds one"), "--mcp": N_("the MCP servers page adds one"),
+                "--kit": N_("the Kits & plugins page adds one"), "--identity": N_("the Identities page adds one")}
     SECRET_CHOICES = ("--secret-env", "--api-key", "--git-token-secret")  # their values name a secret of that host
 
     def widget_for(self, option):
@@ -410,13 +437,26 @@ class OptionsForm(QTabWidget):
         if option.long in self.HOST_CHOICES and option.kind == "list":
             widget = ListField(choices=True, option=option.long)
             widget.changed.connect(self.changed)
+            widget.opening.connect(self.choices_wanted)
+            if option.long == "--service":  # a service of your image: the "+" names it and gives its image
+                widget.edit.setPlaceholderText(tr("NAME:image=IMAGE,port=PORT per line - \"+\" adds one of your images"))
             return widget
         if option.long in self.HOST_CHOICES and option.kind == "value":
-            widget = QComboBox()
+            from .board_view import OpeningCombo
+            widget = OpeningCombo()
             widget.setEditable(True)
+            widget.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
             widget.addItem("")
             widget.lineEdit().setPlaceholderText(option.metavar or "")
+            # what is typed completes to the host's names alone (never to the greyed "None on ..." entry)
+            widget.completions = QStringListModel(widget)
+            found = QCompleter(widget.completions, widget)
+            found.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            found.setFilterMode(Qt.MatchFlag.MatchContains)
+            found.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            widget.setCompleter(found)
             widget.currentTextChanged.connect(self.changed)
+            widget.opening.connect(self.choices_wanted)
             return widget
         if option.kind == "flag":
             # What the box does in the language chosen (its row is labelled with the same words; the help's first
@@ -521,6 +561,11 @@ class OptionsForm(QTabWidget):
                     widget.addItem("")
                     for name in names or []:
                         widget.addItem(name)
+                    if hasattr(widget, "completions"):
+                        widget.completions.setStringList(list(names or []))
+                    if names == [] and long in self.NONE_YET:  # none there: where one is added (greyed)
+                        widget.addItem(f"{tr('None on {host}', host=where)} - {tr(self.NONE_YET[long])}")
+                        widget.model().item(widget.count() - 1).setEnabled(False)
                     widget.setCurrentText(current)  # what was typed or chosen stays, also a name it lacks
                 finally:
                     widget.blockSignals(False)
@@ -631,6 +676,7 @@ def without_file_values(options, values, file_values):
 class LaunchPage(Prerequisites, QWidget):
     """Choose the agent and every option, see the command, start."""
     opened = Signal(str)  # a project folder was reviewed and trusted here
+    images_wanted = Signal()  # a start refused for a service's image: the Images page, Your images
 
     def __init__(self, sai, terminal):
         super().__init__()
@@ -707,6 +753,7 @@ class LaunchPage(Prerequisites, QWidget):
         from .name_fields import hub
         hub().changed.connect(self.names_changed)
         self.form = OptionsForm(self.options)
+        self.form.choices_wanted.connect(self.choices_opened)
         try:
             self.form.apply_policy(sai.forbidden())
         except Exception as _exc:  # noqa: BLE001 - a broken policy is shown on the System page
@@ -749,8 +796,10 @@ class LaunchPage(Prerequisites, QWidget):
         self.agent_args.textChanged.connect(self.update_preview)
         self.form.changed.connect(self.show_model)
         self.agent.currentTextChanged.connect(lambda _text: self.show_model(force=True))
+        self.agent.currentTextChanged.connect(lambda _text: self.apply_agent_options())
         self.model_choice.activated.connect(lambda _index: self.model_chosen())
         self.model_only.toggled.connect(lambda _on: self.model_chosen())
+        self.apply_agent_options()
         self.refresh_profiles()
         self.update_preview()
         self.show_model(force=True)
@@ -970,20 +1019,32 @@ class LaunchPage(Prerequisites, QWidget):
 
     # -- what the chosen host has, for the choosers (--vpn, --kit, --identity, --mcp, --image-variant) --
 
-    def read_host_choices(self):
-        """The chosen host's VPN profiles, kits, identities, MCP servers and image variants (backend.host_start_choices),
-        read in the background; a late answer for another host is dropped (a token per read)."""
+    def read_host_choices(self, keep=False):
+        """The chosen host's VPN profiles, kits, identities, MCP servers, image variants, agents' images and your images
+        (backend.host_start_choices), read in the background; a late answer for another host is dropped (a token per
+        read). KEEP (a chooser opened): what it offers stays until the answer."""
         host = self.host()
         self.choices_token += 1
         token = self.choices_token
+        keep = keep and self.choices_host == host
         self.choices_host = host
-        self.form.set_choices(host, None, {})
+        if not keep:
+            self.form.set_choices(host, None, {})
         background(self.sai.host_start_choices, host, timeout=180,
                    done=lambda result, error: alive(self) and self.host_choices_read(token, host, result, error))
 
     def names_changed(self, _kind, host):
         if host == self.choices_host:
             self.choices_read_at = 0.0
+
+    def choices_opened(self):
+        """A chooser opened: what the host has, read again unless read a moment ago (or being read)."""
+        now = time.monotonic()
+        if self.choices_host == self.host() and (now - self.choices_read_at < 3.0
+                                                 or now - getattr(self, "choices_asked_at", 0.0) < 3.0):
+            return
+        self.choices_asked_at = now
+        self.read_host_choices(keep=True)
 
     def host_choices_read(self, token, host, result, error):
         if token != self.choices_token or host != self.host():
@@ -1063,6 +1124,25 @@ class LaunchPage(Prerequisites, QWidget):
                 self.show_host_note(str(error))
             self.apply_host_options()
             self.update_preview()
+
+    def apply_agent_options(self):
+        """The options that depend on the agent: Show thinking (--show-thinking) is greyed out, with the reason and
+        nothing chosen, for an agent without such a switch (Qwen Code); for the others its tooltip names the agent's
+        own switch and default."""
+        from . import thinking
+        widget = self.form.widgets.get(thinking.OPTION)
+        if widget is None:
+            return
+        agent = self.agent.currentText()
+        if not thinking.available(agent):
+            if isinstance(widget, QComboBox) and widget.currentText():
+                widget.setCurrentText("")
+            widget.setEnabled(False)
+        elif thinking.OPTION not in self.host_greyed:
+            widget.setEnabled(True)
+        widget.setToolTip(safe_tooltip(thinking.tooltip(agent) + (
+            "" if not thinking.available(agent) else "\n" + tr("Empty: the agent's default ({value})",
+                                                              value=thinking.AGENT_DEFAULTS[agent]))))
 
     def apply_host_options(self):
         """Grey out the options the chosen host's launcher does not know; the others are as they were (what the
@@ -1358,6 +1438,69 @@ class LaunchPage(Prerequisites, QWidget):
                              list=", ".join(dropped)))
         return True
 
+    def preset_images(self):
+        """[(label, image)] of the sandbox-ai preset the start names (--preset): its values that stand as a service's
+        image (presets: names "image"), as --preset-value gives them, else their defaults."""
+        name = str(self.form.values().get("--preset") or "").strip()
+        key = self.preset_choice.currentData() if hasattr(self, "preset_choice") else None
+        try:
+            preset = self.preset_catalogue.find(key) if key else None
+        except ValueError:
+            preset = None
+        if not name or preset is None or preset.source != "sandbox-ai" or preset.name != name:
+            return []
+        given = dict(str(pair).partition("=")[::2] for pair in self.form.values().get("--preset-value") or [])
+        names = dict(preset.value_names)
+        found = []
+        for placeholder in preset.placeholders:
+            if getattr(placeholder, "names", "") != "image":
+                continue
+            value = str(given.get(names.get(placeholder.marker, ""), "") or placeholder.default or "").strip()
+            if value:
+                found.append((preset.text(placeholder.label), value))
+        return found
+
+    def services_unchecked(self, title, then):
+        """True when the start must not go on now: its services (--service, the images a sandbox-ai preset's values
+        name) are checked against your images on the chosen host first - read in the background, then THEN runs - or
+        one names an image that is none of yours (said, naming the service, with the Images page offered)."""
+        from . import board as B
+        form = getattr(self, "form", None)  # (a page made without its form, as tests do: nothing to check)
+        specs = list(form.values().get("--service") or []) if form is not None else []
+        images = self.preset_images() if form is not None else []
+        if not specs and not images:
+            return False
+        host, wanted = self.host(), (self.host(), tuple(specs), tuple(images))
+        if getattr(self, "services_checked", None) == wanted:
+            self.services_checked = None  # (once: the next start reads them again)
+            return False
+
+        def read(rows, error):
+            if not alive(self) or host != self.host():
+                return
+            if error is not None or not isinstance(rows, list):
+                warn(self, title, tr("Your images on {host} could not be read (sandbox-ai images list), so the "
+                                     "services' images are not checked: {error}",
+                                     host=tr("this computer") if host == LOCAL else printable(host),
+                                     error=printable_text(error)[-300:] if error is not None else "?"))
+                return
+            mine = {str(row.get("name")) for row in rows if isinstance(row, dict)}
+            problems = B.service_image_problems(self.sai, specs, mine)
+            problems += [tr("The preset's value \u201c{label}\u201d is {image}, none of your images (your images: "
+                            "{mine}): choose one of yours, or add it (Images page, Your images).", label=label,
+                            image=printable(image), mine=B.your_images_text(mine))
+                         for label, image in images if image not in mine]
+            if problems:
+                applog.log("INFO", "start", "not started: a service's image is none of yours: "
+                           + "; ".join(applog.redact(text)[:200] for text in problems))
+                if confirm(self, title, "\n".join(problems), tr("Open the Images page"), reject=tr("Close")):
+                    self.images_wanted.emit()
+                return
+            self.services_checked = wanted
+            then()
+        background(self.sai.user_images, host, owner=self, timeout=120, done=read)
+        return True
+
     def require_workspace(self, title):
         """True when the start names its workspace. An empty field would make the launcher take the directory the
         app (or, on another host, the SSH login) runs in - often HOME - as the writable /work: on this machine the
@@ -1606,6 +1749,10 @@ class LaunchPage(Prerequisites, QWidget):
         self.log_start(session, embedded)
         if self.refused_options(tr("Not started")) or not self.require_workspace(tr("Not started")):
             applog.log("INFO", "start", "not started: the options or the workspace are refused (the message says why)")
+            return False
+        if self.services_unchecked(tr("Not started"), lambda: self.start(session, embedded)):
+            applog.log("INFO", "start", "the start waits: its services' images are checked against your images first "
+                                        "(or one is none of yours: said)")
             return False
         if not self.folder_made(lambda: self.start(session, embedded)):
             applog.log("INFO", "start", "the start waits: its workspace is made first (or was not)")
@@ -6864,9 +7011,9 @@ def tab_entry(value):
     return None
 
 
-class ProjectTabs(QTabBar):
+class ProjectTabs(widgets.ArrowTabBar):
     """The open projects, sessions and sandboxes. Closable, movable, closed with a middle click too; the
-    entry of a tab (its tab data) says what it stands for."""
+    entry of a tab (its tab data) says what it stands for. The app's tab row: ← → at its end when they do not fit."""
     middle_clicked = Signal(int)
 
     def __init__(self):
@@ -6875,8 +7022,6 @@ class ProjectTabs(QTabBar):
         self.setMovable(True)
         self.setExpanding(False)
         self.setDocumentMode(True)
-        self.setUsesScrollButtons(True)
-        self.setElideMode(Qt.TextElideMode.ElideMiddle)
         self.setIconSize(QSize(14, 14))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
@@ -7590,6 +7735,7 @@ class MainWindow(QMainWindow):
             page.section_shown.connect(self.help_section_shown)
         elif key == "launch":
             page.opened.connect(self.project_opened)
+            page.images_wanted.connect(self.show_your_images)
         elif key == "sandboxes":
             page.open_log.connect(self.show_log)
             page.open_remote_log.connect(self.show_remote_log)
@@ -7626,6 +7772,7 @@ class MainWindow(QMainWindow):
                 action=(tr("Show the log"), lambda: self.set_panel("log", True)) if level != "success" else None))
         elif key == "board":
             page.opened.connect(self.project_opened)
+            page.images_wanted.connect(self.show_your_images)  # a start refused for a service's image
             # An MCP part's "The server's defaults…" (its menu): the server's Properties on the MCP page; "Save as the
             # server's defaults…" (its properties): the same with the board's values filled in
             page.server_properties.connect(lambda name, host: (self.show_page("mcp"),
@@ -7704,6 +7851,13 @@ class MainWindow(QMainWindow):
     def current_page(self):
         widget = self.pages.currentWidget()
         return next((key for key in self.keys if self.built(key) is widget and widget is not None), None)
+
+    def show_your_images(self):
+        """The Images page's Your images (a start was refused for a service's image that is none of yours)."""
+        self.show_page("images")
+        page = self.built("images") or getattr(self, "images", None)
+        if page is not None and hasattr(page, "show_your_images"):
+            page.show_your_images()
 
     def show_page(self, key, raise_window=True, unfold=True):
         section = self.section_of(key)
@@ -8452,6 +8606,8 @@ class MainWindow(QMainWindow):
         kept = [(name, getattr(page, attribute)) for name, attribute in tables.get(key, ())]
         if key == "statistics":
             kept += [(f"statistics-{name}", widget) for name, widget in page.tables.items()]
+        if key == "images":  # the results of the package search under each list of the extension (per kind)
+            kept += [(f"images-found-{kind}", plist.browser.results) for kind, plist in page.lists.items()]
         for name, widget in kept:
             s.table(name, widget)
         from . import tables as fitted
@@ -9404,7 +9560,8 @@ class MainWindow(QMainWindow):
             self.update_activity()
         self.show_asking()
         if new and backend.setting("notify"):
-            from .pages import describe
+            from . import rich_notice
+            from .pages import describe_rich, why_asked
             entries = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in new]
             # One notification per new question, each leading to its own question; a canary that went off first (an
             # alarm: an error toast stays until it is closed), anything else waits for an answer (a warning). A flood
@@ -9415,7 +9572,10 @@ class MainWindow(QMainWindow):
                 # A tool call whose arguments the notification cannot show whole is allowed only where they are
                 # seen whole (the Approvals page, the Questions window), as sandbox-ai's own notification does.
                 whole = not isinstance(question, dict) or backend.question_details(question)[1]
-                toast = self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), describe(question),
+                # At a glance: the start in bold, what it asks for (the address in the accent colour), why.
+                asks = rich_notice.lines(describe_rich(question), rich_notice.recognise(why_asked(question), "why"))
+                toast = self.notify(rich_notice.fmt(tr("sandbox-ai asks: {sandbox}"), sandbox=rich_notice.session(run)),
+                                    asks,
                                     level="error" if canary else "warning",
                                     action=self.question_actions(key, canary, whole=whole))
                 if toast is not None and key is not None:

@@ -364,7 +364,10 @@ def from_loop(entry, run, redact):
               "arguments and the same result"
     fix = (f"nothing to allow: the model goes on with the note; to change it: sandbox-ai llm set {endpoint} "
            "--loop-guard LAYER=VALUE (warn, block, text, watchdog_requests ...) or --loop-guard off")
-    return record("loop", f"{LOOP_WHAT.get(action, action)} ({endpoint})", why, fix, run, entry.get("process"),
+    what = LOOP_WHAT.get(action, action)
+    if loop.get("ended"):  # the model called a tool again after the note: the relay answered in its place
+        what += "; the model called a tool again, so sandbox-ai ended the turn"
+    return record("loop", f"{what} ({endpoint})", why, fix, run, entry.get("process"),
                   endpoint, source="proxy", when=entry.get("time"), redact=redact)
 
 

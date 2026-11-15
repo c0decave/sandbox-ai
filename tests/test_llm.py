@@ -766,7 +766,7 @@ def test_several_models_and_the_opencode_allow_list(team):
     # The loop guard's OpenCode layers (on by default for --llm): steps, compaction, the instruction file.
     config = written[llm.OPENCODE_CONFIG]
     assert config["agent"]["build"]["steps"] == 40 and config["agent"]["plan"]["steps"] == 18
-    assert config["compaction"]["auto"] is True and config["tool_output"] == {"max_lines": 1000, "max_bytes": 50000}
+    assert config["compaction"]["auto"] is True and config["tool_output"] == {"max_lines": 1000, "max_bytes": 131072}
     assert config["instructions"] == ["/root/" + llm.LOOP_INSTRUCTIONS]
     assert "[sandbox-ai loop guard]" in written[llm.LOOP_INSTRUCTIONS]
 

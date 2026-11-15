@@ -469,6 +469,7 @@ class CredentialsPage(QWidget):
         self.summary = widgets.ElidedLabel(about=120, role="secondary")
         layout.addWidget(self.summary)
         self.tabs = QTabWidget()
+        widgets.arrow_tabs(self.tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.tabs.currentChanged.connect(lambda _index: self.even_out())
         layout.addWidget(self.tabs, 1)
 

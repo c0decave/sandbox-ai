@@ -427,6 +427,7 @@ class KitsPage(QWidget):
         self.message.setAccessibleName(tr("Message"))
         layout.addWidget(self.message)
         self.tabs = QTabWidget()
+        widgets.arrow_tabs(self.tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.tabs.setAccessibleName(tr("Kits & plugins"))
         self.tabs.addTab(self.kits_tab(), tr("Kits"))
         self.tabs.addTab(self.market_tab(), tr("Marketplaces"))

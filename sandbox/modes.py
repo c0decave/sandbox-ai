@@ -234,6 +234,9 @@ def _number(value):
 # (modes that refuse it, what was given in A or None, why it widens). Checked on the parsed options, so a profile,
 # a short form, a project file or a Git token (which opens its server) counts as what it sets.
 RULES = [
+    # First: --llm opens its server's address itself (--allow-host-port for a server on this host's loopback,
+    # --allow-tcp, --allow-host: llm.network_options), so the refusal names what the user gave, not those.
+    (STRICT, lambda a, l: f"--llm {a.llm}" if a.llm else None, "it opens the LLM server's address"),
     (STRICT, lambda a, l: _given([p for p in a.profile if p != "offline"], "--profile"),
      "a network profile opens more than the agent's provider"),
     (STRICT, lambda a, l: "--egress-all-allow" if a.egress_all_allow else None, "it opens every destination"),
@@ -257,7 +260,6 @@ RULES = [
      "it opens ports on the host (so does a Git token for a server on this host)"),
     (STRICT, lambda a, l: ("--nameserver " + " ".join(a.nameserver)) if a.nameserver else "--dns" if a.dns
      else None, "DNS lookups leave the sandbox"),
-    (STRICT, lambda a, l: f"--llm {a.llm}" if a.llm else None, "it opens the LLM server's address"),
     (STRICT, lambda a, l: "--no-proxy" if a.no_proxy else None,
      "without the proxy, connections are neither logged nor asked about, and pushes are not checked"),
     (STRICT, lambda a, l: _given(a.no_inspect, "--no-inspect"), "TLS to these hosts passes unchecked"),

@@ -57,7 +57,13 @@ RUN case "$(dpkg --print-architecture)" in amd64) arch=x86_64 ;; arm64) arch=aar
     && cd / && rm -rf /tmp/goose-dl \
     && test "$(HOME=/tmp/goose-check /usr/local/bin/goose --version | tr -d ' ')" = "${GOOSE_VERSION}" \
     && rm -rf /tmp/goose-check
+# sandbox-ai's telemetry guard (telemetry_guard.py): `goose` is a shim that checks, then becomes Goose (its binary
+# moves to /usr/local/lib/sandbox-ai/real). Whatever starts the agent in the sandbox - the launcher, a shell, another
+# agent - it refuses what would turn its telemetry on and pins the opt-out variables first; the launcher mounts its
+# current copy read-only over this one.
+COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py
+RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install goose
 # Its system configuration is mounted here by the launcher (read-only, sandbox/goose.py).
-RUN mkdir -p -m 755 /etc/goose
+RUN mkdir -p -m 755 /etc/goose && HOME=/tmp/goose-check goose --version && rm -rf /tmp/goose-check
 ENV HOME=/root
 WORKDIR /work

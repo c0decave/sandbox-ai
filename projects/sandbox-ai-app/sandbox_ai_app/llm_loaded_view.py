@@ -62,7 +62,7 @@ class LoadDialog(QDialog):
         form.addRow(tr("Model"), self.model)
         self.context = QLineEdit()
         self.context.setAccessibleName(tr("Context"))
-        self.context.setToolTip(tr("Tokens the model is loaded with; empty: num_ctx of its parameters (Parameters…), "
+        self.context.setToolTip(tr("Tokens the model is loaded with; empty: num_ctx of its parameters (Advanced settings…), "
                                    "else the server's own"))
         self.context.textChanged.connect(lambda *_: self.validate())
         self.context.setEnabled(kind in LL.CONTEXT_KINDS)

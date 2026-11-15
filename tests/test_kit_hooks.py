@@ -353,8 +353,12 @@ def test_unapproved_hooks_install_nothing(m, tmp_path):  # noqa: F811
         kit_with_hook(tmp_path, agents=(m.agent,))
     run, files = staged_run(m, "--kit", "mine")
     assert not s.managed_hooks(run.a) and "not approved" in run.err and run.config["hook_agent"] is None
-    assert not any(name.startswith(("claude-code", "codex/")) for name in files)
-    assert "/etc/claude-code" not in run.joined and "/etc/codex" not in run.joined
+    # The managed configuration holds no hook - only the telemetry pins (telemetry_guard_files), mounted as ever.
+    managed = {name: text for name, text in files.items() if name.startswith(("claude-code", "codex/"))}
+    assert set(managed) <= {"claude-code/managed-settings.json", "codex/managed_config.toml"}
+    assert all("hook" not in text.lower() for text in managed.values()), managed
+    if "claude-code/managed-settings.json" in managed:
+        assert set(json.loads(managed["claude-code/managed-settings.json"])) == {"env"}
     assert set(json.loads((run.env).get("OPENCODE_CONFIG_CONTENT", "{}"))) <= set(s.OPENCODE_TELEMETRY_CONFIG)  # only --telemetry off's settings
     plan = m.plan("--kit", "mine")
     assert plan["kits"]["hooks"][0]["trusted"] is False and plan["kits"]["hooks"][0]["hooks"] == 1

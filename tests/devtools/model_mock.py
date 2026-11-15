@@ -18,6 +18,8 @@ one). For the tests that no listing loads a model, that a start loads one explic
 --ollama-ps answers Ollama's GET /api/ps (the loaded models with size, size_vram, context_length, expires_at), and
 /api/generate or /api/chat without a prompt (or messages) loads the model (done_reason "load"; keep_alive in seconds,
 negative: until unloaded; options.num_ctx its context), with keep_alive 0 unloads it ("unload").
+POST /v1/messages is Anthropic's Messages API as the four servers offer it to Claude Code (Handler.messages: scripted
+tool calls, streamed in Anthropic's events or not); /v1/messages/count_tokens answers only with count_tokens=True.
 """
 import argparse
 import http.server
@@ -51,6 +53,8 @@ class Options:
     ollama_ps = False
     running = None      # the Ollama-like loaded models: {model: {"context", "expires_at"}}
     size = 4 << 30      # what an Ollama-like loaded model takes in memory (all in VRAM)
+    thinking = None     # /v1/messages: a thinking block with this text before each answer
+    count_tokens = False  # /v1/messages/count_tokens answers (else 404: not every server's Messages API has it)
 
 
 def text_for(options, messages):
@@ -199,7 +203,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         created = int(time.time())
         if path == "/api/v1/models/load" and self.options.lmstudio:
             unknown = sorted(set(body) - {"model", "context_length", "eval_batch_size", "flash_attention",
-                                          "num_experts", "offload_kv_cache_to_gpu", "echo_load_config"})
+                                          "num_experts", "offload_kv_cache_to_gpu", "echo_load_config",
+                                          "parallel"})  # (parallel: LM Studio 0.4's load API takes it, measured)
             if unknown:  # as LM Studio 0.4 answers a key it does not know ("ttl" too)
                 self.send_json(400, {"error": {"message": f"Unrecognized key(s) in object: {', '.join(unknown)}",
                                                "type": "invalid_request", "code": "unrecognized_keys"}})
@@ -258,6 +263,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if chat else {"index": 0, "text": text, "finish_reason": "stop"}
                 self.send_json(200, {"id": "mock-1", "object": "chat.completion" if chat else "text_completion",
                                      "created": created, "model": model, "choices": [choice], "usage": usage})
+        elif path == "/v1/messages/count_tokens":
+            # Anthropic's token count, which the servers' Messages APIs do not all have (Claude Code then estimates).
+            if self.options.count_tokens:
+                self.send_json(200, {"input_tokens": len(json.dumps(body)) // 4})
+            else:
+                self.send_json(404, {"error": f"Unexpected endpoint or method. (POST {path})"})
+        elif path == "/v1/messages":
+            self.messages(body, model)
         elif path in ("/api/chat", "/api/generate"):
             chat = path == "/api/chat"
             text = text_for(self.options, body.get("messages") if chat else
@@ -278,6 +291,62 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": {"message": f"no {path}"}})
         self.finish_answer()
+
+    def messages(self, body, model):
+        """Anthropic's Messages API (as Ollama 0.14, LM Studio 0.4.1, llama.cpp and vLLM serve it), scripted: a last
+        user message with "run: COMMAND" in its text (and tools offered) is answered with a call of the first tool,
+        {"command": COMMAND}; a tool_result with "mock saw: RESULT"; anything else as text_for does. --thinking:
+        a thinking block first. Usage: input_tokens a quarter of the request's size."""
+        last = next((m for m in reversed(body.get("messages") or []) if isinstance(m, dict)), {})
+        blocks = last.get("content") if isinstance(last.get("content"), list) else \
+            [{"type": "text", "text": str(last.get("content") or "")}]
+        results = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+        said = " ".join(str(b.get("text") or "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+        tools = [t for t in body.get("tools") or [] if isinstance(t, dict) and t.get("name")]
+        content = [{"type": "thinking", "thinking": self.options.thinking, "signature": ""}] \
+            if self.options.thinking else []
+        if results:
+            seen = results[-1].get("content")
+            if isinstance(seen, list):
+                seen = " ".join(str(b.get("text") or "") for b in seen if isinstance(b, dict))
+            content.append({"type": "text", "text": f"mock saw: {seen}"})
+            stop = "end_turn"
+        elif "run: " in said and tools and (body.get("tool_choice") or {}).get("type") != "none":
+            content.append({"type": "tool_use", "id": f"toolu_mock_{len(body.get('messages') or [])}",
+                            "name": tools[0]["name"], "input": {"command": said.split("run: ", 1)[1].strip()}})
+            stop = "tool_use"
+        else:
+            content.append({"type": "text", "text": text_for(self.options, [{"role": "user", "content": said}])})
+            stop = "end_turn"
+        usage = {"input_tokens": len(json.dumps(body)) // 4, "output_tokens": 7}
+        message = {"id": "msg_mock", "type": "message", "role": "assistant", "model": model, "content": content,
+                   "stop_reason": stop, "stop_sequence": None, "usage": usage}
+        if not body.get("stream"):
+            return self.send_json(200, message)
+
+        def event(kind, data):
+            return f"event: {kind}\ndata: {json.dumps({'type': kind, **data})}\n\n".encode()
+        lines = [event("message_start", {"message": {**message, "content": [], "stop_reason": None,
+                                                     "usage": {**usage, "output_tokens": 1}}})]
+        for index, block in enumerate(content):
+            kind = block["type"]
+            empty = {"text": {"type": "text", "text": ""}, "thinking": {"type": "thinking", "thinking": ""},
+                     "tool_use": {**block, "input": {}}}[kind]
+            lines.append(event("content_block_start", {"index": index, "content_block": empty}))
+            if kind == "text":
+                deltas = [{"type": "text_delta", "text": p} for p in pieces(block["text"], self.options.chunks)]
+            elif kind == "thinking":
+                deltas = [{"type": "thinking_delta", "thinking": block["thinking"]},
+                          {"type": "signature_delta", "signature": "mock"}]
+            else:
+                deltas = [{"type": "input_json_delta", "partial_json": p}
+                          for p in pieces(json.dumps(block["input"]), self.options.chunks)]
+            lines += [event("content_block_delta", {"index": index, "delta": d}) for d in deltas]
+            lines.append(event("content_block_stop", {"index": index}))
+        lines.append(event("message_delta", {"delta": {"stop_reason": stop, "stop_sequence": None},
+                                             "usage": {"output_tokens": 7}}))
+        lines.append(event("message_stop", {}))
+        self.stream("text/event-stream", lines)
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):

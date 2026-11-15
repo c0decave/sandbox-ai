@@ -114,7 +114,7 @@ def test_managed_config_pins_the_reviewed_defaults():
     assert config["terminal"] == {"backend": "local"} and config["auth"] == {"adopt_external_logins": False}
     assert config["nous"] == {"guest": False} and config["security"] == {"allow_lazy_installs": False}
     assert config["web"] == {"keyless_fallback": False, "keyless_rescue": False}
-    assert config["telemetry"]["shared_metrics"] == {"enabled": False, "send": False}
+    assert config["telemetry"]["shared_metrics"] == {"enabled": False}
     assert config["updates"] == {"check": False} and config["model_catalog"] == {"enabled": False}
     assert config["plugins"] == {"auto_update_check_hours": 0, "auto_apply": False}
     assert config["kanban"] == {"dispatch_in_gateway": False} and config["lsp"] == {"install_strategy": "manual"}
@@ -131,7 +131,7 @@ def test_features_turn_their_switches_on_and_telemetry_on_leaves_hermes_its_own(
     assert config["kanban"] == {"dispatch_in_gateway": True}
     own = hermes.managed_config(ns(), telemetry="on")  # (gone since 0.1.95: as off)
     assert own["updates"] == {"check": False} and own["terminal"] == {"backend": "local"}
-    assert own["telemetry"]["shared_metrics"]["send"] is False  # telemetry: never Hermes' own choice
+    assert own["telemetry"]["shared_metrics"]["enabled"] is False  # telemetry: never Hermes' own choice
     # Never undone by a feature: the local terminal, the borrowed logins, Hermes' own proxy.
     every = hermes.managed_config(ns("hermes", ",".join(hermes.FEATURES)))
     assert every["terminal"] == {"backend": "local"} and every["auth"] == {"adopt_external_logins": False}
@@ -144,7 +144,7 @@ def test_telemetry_is_pinned_off_whatever_is_enabled():
         config = hermes.managed_config(ns("hermes", ",".join(hermes.FEATURES)), telemetry=telemetry)
         for key, value in hermes.TELEMETRY_PINNED.items():
             assert config[key] == hermes.merge(config[key], value), (telemetry, key)
-        assert config["telemetry"]["shared_metrics"] == {"enabled": False, "send": False}
+        assert config["telemetry"]["shared_metrics"] == {"enabled": False}
     assert not hermes.telemetry_hosts_in(hermes.hosts(list(hermes.FEATURES)))
     env = hermes.environment(ns("hermes", "lazy-installs"))
     assert env["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "0" and env["DO_NOT_TRACK"] == "1"
@@ -411,3 +411,216 @@ def test_the_docs_say_telemetry_is_never_switchable():
         assert "CUA_DRIVER_RS_TELEMETRY_ENABLED=0" in text
     assert all(host in review for host in hermes.TELEMETRY_HOSTS)
     assert all(name in review for name in hermes.TELEMETRY_ENV)
+
+
+# --- regression from live use (2026-11-14): Hermes asked about telemetry at its start ---------------------------------
+#
+# The user's start of Hermes (v0.22.5) printed, after its question "Help improve Hermes?":
+#
+#     ✓ Shared metrics off. Change it any time with `hermes setup telemetry`.
+#
+# User: "wurde nochmal abgefragt, ich dachte das ist deaktiviert??"
+#
+# Why: the managed configuration pinned telemetry.shared_metrics.enabled and .send, but Hermes reads the answer to its
+# consent question only from the profile's own ~/.hermes/config.yaml (shared_metrics_consent.consent_state, the raw
+# user file; its collection and sending gates read that file too). A fresh HOME had no answer: asked at every start.
+# A kept HOME lost it again: every save of config.yaml drops the leaves the managed scope pins (both of them), and
+# with them the answer - the next start asked once more. Now the launcher's command answers it "No thanks" before
+# every start (hermes.start_command, TELEMETRY_ANSWER_SCRIPT, with Hermes' own reader and writer; an opt-in of an
+# earlier run is taken back), only .enabled stays pinned (so a save keeps .send and the offer version: still
+# answered), and `hermes setup telemetry` in the agent's arguments is refused.
+
+STUB_HERMES = {
+    # A stand-in of the three Hermes modules the answer uses, with v0.22.5's semantics (JSON for YAML).
+    "hermes_constants.py": '''
+import contextvars, os
+from pathlib import Path
+_override = contextvars.ContextVar("o", default=None)
+def set_hermes_home_override(path): return _override.set(str(path))
+def reset_hermes_home_override(token): _override.reset(token)
+def get_hermes_home(): return Path(_override.get() or os.environ["HERMES_HOME"])
+''',
+    "hermes_cli/__init__.py": "",
+    "hermes_cli/observability/__init__.py": "",
+    "hermes_cli/config.py": '''
+import json
+from hermes_constants import get_hermes_home
+def get_config_path(): return get_hermes_home() / "config.yaml"
+def require_readable_config_before_write(path):
+    if not path.exists(): return {}
+    try: loaded = json.loads(path.read_text() or "null")
+    except ValueError as exc: raise RuntimeError(f"{path} has a formatting error") from exc
+    return loaded or {}
+def _write_user_config(path, config):
+    path.parent.mkdir(parents=True, exist_ok=True); path.write_text(json.dumps(config))
+''',
+    "hermes_cli/observability/shared_metrics_consent.py": '''
+from hermes_cli.config import _write_user_config, get_config_path, require_readable_config_before_write
+from hermes_constants import get_hermes_home
+OFFER_VERSION = 2
+def set_answer(target, enabled, send):
+    section = target.setdefault("telemetry", {}).setdefault("shared_metrics", {})
+    section["enabled"], section["send"], section["offer_version"] = enabled, enabled and send, OFFER_VERSION
+def save_consent(enabled, send, config=None):
+    path = get_config_path(); user = require_readable_config_before_write(path)
+    set_answer(user, enabled, send); _write_user_config(path, user)
+    (get_hermes_home() / "consent-withdrawn").write_text("yes")
+''',
+}
+
+
+def stub_hermes(directory):
+    """A Python that runs the answer like Hermes' own (python -I SCRIPT), with STUB_HERMES as Hermes."""
+    for name, text in STUB_HERMES.items():
+        (directory / name).parent.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(text)
+    python = directory / "python"
+    python.write_text(f'#!/bin/sh\n[ "$1" = -I ] && shift\nexec {sys.executable} -c "import runpy, sys; '
+                      f'sys.path.insert(0, \'{directory}\'); sys.argv = sys.argv[1:]; '
+                      f'runpy.run_path(sys.argv[0], run_name=\'__main__\')" "$@"\n')
+    python.chmod(0o755)
+    return python
+
+
+def answered(home):
+    return json.loads((home / "config.yaml").read_text())["telemetry"]["shared_metrics"]
+
+
+def run_answer(tmp_path, home, python, binary="/bin/echo", args=("started",)):
+    managed = tmp_path / "etc-hermes"
+    managed.mkdir(exist_ok=True)
+    (managed / hermes.TELEMETRY_ANSWER).write_text(hermes.TELEMETRY_ANSWER_SCRIPT)
+    command = hermes.start_command(binary, list(args), python=str(python), managed_dir=str(managed))
+    return subprocess.run(command, env={"PATH": os.environ["PATH"], "HOME": str(home.parent),
+                                        "HERMES_HOME": str(home)}, capture_output=True, text=True, timeout=120)
+
+
+def test_hermes_never_asks_about_telemetry_at_its_start(tmp_path):
+    """The user's "✓ Shared metrics off. Change it any time with `hermes setup telemetry`." - "wurde nochmal
+    abgefragt, ich dachte das ist deaktiviert??": before every start the question is answered "No thanks" in the
+    sandbox's HOME (a fresh one, a kept one, every profile), then Hermes starts (exec, its arguments as given)."""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    python = stub_hermes(stubs)
+    home = tmp_path / "root/.hermes"
+    done = run_answer(tmp_path, home, python, args=("--resume", "it's mine"))
+    assert done.returncode == 0 and done.stdout == "--resume it's mine\n" and done.stderr == ""
+    assert answered(home) == {"enabled": False, "send": False, "offer_version": 2}
+    # A kept HOME whose answer a save of config.yaml cut down to what the managed scope does not pin: still answered,
+    # left as it is; a profile of it gets its answer too.
+    kept = {"model": {"default": "x"}, "telemetry": {"shared_metrics": {"send": False, "offer_version": 2}}}
+    (home / "config.yaml").write_text(json.dumps(kept))
+    (home / "profiles/work").mkdir(parents=True)
+    assert run_answer(tmp_path, home, python).returncode == 0
+    assert answered(home) == {"send": False, "offer_version": 2}
+    assert answered(home / "profiles/work") == {"enabled": False, "send": False, "offer_version": 2}
+    # An opt-in of an earlier run ("Share with Nous", hermes setup telemetry) is taken back, Hermes' own way.
+    (home / "config.yaml").write_text(json.dumps({"telemetry": {"shared_metrics": {"enabled": True, "send": True}}}))
+    assert run_answer(tmp_path, home, python).returncode == 0
+    assert answered(home) == {"enabled": False, "send": False, "offer_version": 2}
+    assert (home / "consent-withdrawn").read_text() == "yes"
+    # A config.yaml Hermes cannot read is left alone, said so, and Hermes still starts.
+    (home / "config.yaml").write_text("model: [unclosed")
+    done = run_answer(tmp_path, home, python)
+    assert done.returncode == 0 and done.stdout == "started\n"
+    assert "could not answer Hermes' shared-metrics question" in done.stderr and "answer No thanks" in done.stderr
+    assert (home / "config.yaml").read_text() == "model: [unclosed"
+    # No Hermes Python at all: the start goes on.
+    assert run_answer(tmp_path, home, tmp_path / "missing-python").stdout == "started\n"
+
+
+def test_only_collection_is_pinned_so_a_save_keeps_the_answer():
+    """Hermes drops every leaf the managed scope pins when it saves config.yaml: pinned, .send and .enabled both
+    went and the answer with them. .enabled (the collection gate; `hermes config set` cannot turn it on) stays
+    pinned, .send and offer_version stay in the user's file: answered."""
+    config = hermes.managed_config(ns())
+    assert config["telemetry"] == {"shared_metrics": {"enabled": False}}
+    assert hermes.TELEMETRY_PINNED["telemetry"] == {"shared_metrics": {"enabled": False}}
+    assert hermes.files(ns(), config)[f"hermes/{hermes.TELEMETRY_ANSWER}"] == hermes.TELEMETRY_ANSWER_SCRIPT
+    compile(hermes.TELEMETRY_ANSWER_SCRIPT, hermes.TELEMETRY_ANSWER, "exec")
+    plan = hermes.plan(ns())["telemetry"]
+    assert plan["question"] == "answered no before every start" and plan["refused_arguments"][0] == "setup telemetry"
+
+
+def test_hermes_setup_telemetry_is_refused():
+    assert hermes.refused_arg(["setup", "telemetry"])[0] == "setup telemetry"
+    assert hermes.refused_arg(["-p", "work", "setup", "telemetry"])[0] == "setup telemetry"
+    assert hermes.refused_arg(["setup", "model"]) is None and hermes.refused_arg(["--", "setup", "telemetry"]) is None
+    assert hermes.refused_arg(["-z", "setup telemetry"]) is None  # a prompt
+    with pytest.raises(ValueError, match="setup telemetry in Hermes' arguments: Hermes' telemetry is always off"):
+        hermes.check(ns(agent_args=["setup", "telemetry"]))
+
+
+def test_the_launcher_starts_hermes_after_the_answer_in_every_mode():
+    a = s.parse_args(["hermes", "--model", "m", "--", "--resume", "x"])
+    command = s.agent_command(a, "hermes")
+    assert command[:2] == ["/bin/sh", "-c"] and command[3:] == ["hermes", "--model", "m", "--resume", "x"]
+    assert command[2] == f"'{hermes.HERMES_PYTHON}' -I '/etc/hermes/{hermes.TELEMETRY_ANSWER}'\nexec \"$0\" \"$@\""
+    # A binary of your own is no Hermes the launcher manages: run as given.
+    assert s.agent_command(s.parse_args(["hermes", "--binary", "/bin/true"]), "/bin/true") == ["/bin/true"]
+
+
+HERMES_PYTHON_FOR_TESTS = os.environ.get("SANDBOX_AI_TEST_HERMES_PYTHON")
+
+
+@pytest.mark.skipif(not HERMES_PYTHON_FOR_TESTS, reason="SANDBOX_AI_TEST_HERMES_PYTHON: a Python with Hermes v0.22.5")
+def test_the_answer_with_the_pinned_hermes(tmp_path):
+    """With the pinned Hermes itself (its venv: SANDBOX_AI_TEST_HERMES_PYTHON): before the answer its consent offer is
+    undecided (asked); after it decided, also after Hermes saved config.yaml under the managed configuration - and with
+    the old pin of .send as well that save erased the answer (the cause)."""
+    home = tmp_path / "root/.hermes"
+    probe = ("import json, sys\nfrom hermes_cli.config import load_config, save_config, read_raw_config\n"
+             "from hermes_cli.observability.shared_metrics_consent import consent_state\n"
+             "if sys.argv[1] == 'save':\n    c = load_config(); c.setdefault('display', {})['compact'] = True; "
+             "save_config(c)\nprint(json.dumps(consent_state(read_raw_config())))\n")
+
+    def state(managed, action="read"):
+        done = subprocess.run([HERMES_PYTHON_FOR_TESTS, "-I", "-c", probe, action], capture_output=True, text=True,
+                              env={"PATH": os.environ["PATH"], "HOME": str(home.parent), "HERMES_HOME": str(home),
+                                   "HERMES_MANAGED_DIR": str(managed)}, timeout=120)
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout.splitlines()[-1])
+
+    managed = tmp_path / "etc-hermes-managed"
+    managed.mkdir()
+    (managed / "config.yaml").write_text(json.dumps(hermes.managed_config(ns())))
+    home.mkdir(parents=True)
+    assert state(managed)["decided"] is False  # the bug: asked
+    assert run_answer(tmp_path, home, HERMES_PYTHON_FOR_TESTS).returncode == 0
+    assert state(managed)["decided"] is True and state(managed, "save")["decided"] is True
+    assert state(managed)["enabled"] is False
+    old = tmp_path / "old-etc-hermes"
+    old.mkdir()
+    (old / "config.yaml").write_text(json.dumps(hermes.merge(
+        hermes.managed_config(ns()), {"telemetry": {"shared_metrics": {"enabled": False, "send": False}}})))
+    assert state(old, "save")["decided"] is False  # the old pins: a save erased the answer, the next start asked
+
+
+def test_e2e_a_hermes_start_answers_the_question_first(tmp_path):
+    """End to end: the real ./sandbox-ai starts Hermes (only Podman stood in for, live_fakes.py); the session
+    directory the sandbox gets holds the answer at /etc/hermes, and the agent's command runs it before Hermes."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from live_fakes import Host
+    host = Host(tmp_path / "host")
+    host.add_image("localhost/hermes-sandbox:latest")
+    done = host.run("hermes", "--no-tmux", "--no-auth", "--", "--resume", "x",
+                    env={"FAKE_PODMAN_RUN": "0:0", "FAKE_PODMAN_KEEP": str(tmp_path / "kept")})
+    assert done.returncode == 0, done.stderr
+    session = tmp_path / "kept/session"
+    command = json.loads((session / "config.json").read_text())["command"]
+    assert command[:2] == ["/bin/sh", "-c"] and command[3].endswith("hermes") and command[-2:] == ["--resume", "x"]
+    assert f"/etc/hermes/{hermes.TELEMETRY_ANSWER}" in command[2]
+    assert (session / "hermes" / hermes.TELEMETRY_ANSWER).read_text() == hermes.TELEMETRY_ANSWER_SCRIPT
+    # The command as the sandbox runs it, with the session's answer and a stand-in Hermes: answered, then Hermes.
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    home = tmp_path / "root/.hermes"
+    script = command[2].replace(f"'{hermes.HERMES_PYTHON}'", f"'{stub_hermes(stubs)}'").replace(
+        "/etc/hermes/", f"{session}/hermes/")
+    ran = subprocess.run(["/bin/sh", "-c", script, "/bin/echo", *command[4:]], capture_output=True, text=True,
+                         env={"PATH": os.environ["PATH"], "HOME": str(home.parent), "HERMES_HOME": str(home)})
+    assert ran.returncode == 0 and ran.stdout.endswith("--resume x\n"), ran.stderr
+    assert answered(home) == {"enabled": False, "send": False, "offer_version": 2}
+    refused = host.run("hermes", "--no-tmux", "--no-auth", "--", "setup", "telemetry",
+                       env={"FAKE_PODMAN_RUN": "0:0"})
+    assert refused.returncode != 0 and "setup telemetry in Hermes' arguments" in refused.stderr

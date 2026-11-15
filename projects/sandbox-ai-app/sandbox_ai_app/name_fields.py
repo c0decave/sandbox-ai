@@ -1,6 +1,9 @@
-"""Fields that take the NAME of a stored secret (sandbox-ai secrets) or of a VPN profile (sandbox-ai vpn): an editable
-combo box that offers the names the chosen host has, a name typed that it lacks still taken (the human decides; a
-secret named before it is kept can be added afterwards).
+"""Fields that take the NAME of something the chosen host has - a stored secret (sandbox-ai secrets), a VPN profile
+(sandbox-ai vpn), one of your images (sandbox-ai images list: a service's image), an image variant (--image-variant),
+an agent's image (--image) or a model server (sandbox-ai llm): an editable combo box that offers the names the chosen
+host has, a name typed that it lacks still taken (the human decides; a secret named before it is kept can be added
+afterwards). Opened, the list is read again (unless read a moment ago); with none there, its one greyed entry says
+where to add one.
 
 The names are read in the background, never on the GUI thread: a host's secrets with `sandbox-ai secrets list` there
 (its table: names and where each is kept - a value is never read, asked for or shown), its VPN profiles with `vpn list
@@ -14,7 +17,7 @@ import re
 import time
 import weakref
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QStringListModel, Qt, Signal
 from PySide6.QtWidgets import QComboBox, QCompleter, QMenu, QToolButton
 
 from .files import printable, printable_text
@@ -22,13 +25,31 @@ from .i18n import tr
 from .widgets import background, safe_tooltip
 
 LOCAL = "local"
-KINDS = ("secret", "vpn")
+KINDS = ("secret", "vpn", "image", "variant", "agent_image", "llm")
 KEEP_SECONDS = 30.0  # a list read this recently is offered again without asking the host again
+OPEN_SECONDS = 3.0  # a list opened: read again when it is older than this
 READ_SECONDS = 120  # a host that does not answer within this: the field stays typed in
 
 
 # What a name can be (secret_store.NAME; vpn.py's profile names, which llm and mcp take too): nothing else is offered.
-NAMES = {"secret": re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}"), "vpn": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")}
+# Your images and the variants: images.NAME / services.NAME (one list of names for both); an agent's image: a Podman
+# image name (localhost/claude-sandbox:latest); a model server: llm.py's names (--llm NAME[:MODEL]).
+NAMES = {"secret": re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}"), "vpn": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}"),
+         "image": re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}"), "variant": re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"),
+         "agent_image": re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}"),
+         "llm": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")}
+# What a field takes at most (a model server's NAME:MODEL is longer than its name).
+LENGTHS = {"secret": 64, "vpn": 64, "image": 30, "variant": 64, "agent_image": 255, "llm": 300}
+
+
+def none_yet(kind):
+    """The greyed entry of a list of KIND that has none yet: where one is added."""
+    return {"image": tr("None yet - the Images page, Your images, adds one"),
+            "variant": tr("None yet - the Images page, New variant, makes one"),
+            "agent_image": tr("None yet - the Images page builds the agents' images"),
+            "llm": tr("None yet - the LLM servers page adds one"),
+            "secret": tr("None yet - the Credentials page keeps one"),
+            "vpn": tr("None yet - the VPN page adds one")}.get(kind, tr("None yet"))
 
 
 def valid(kind, names):
@@ -42,6 +63,14 @@ def read_names(sai, kind, host):
         return valid(kind, [name for name, _ in sai.host_secrets(host)[1]])
     if kind == "vpn":
         return valid(kind, [entry.get("profile") for entry in sai.host_vpn_profiles(host) if isinstance(entry, dict)])
+    if kind == "image":  # your images (sandbox-ai images list; this machine: their record, no Podman call)
+        return valid(kind, [row.get("name") for row in sai.user_images(host) if isinstance(row, dict)])
+    if kind == "variant":
+        return valid(kind, sai.host_image_variants(host))
+    if kind == "agent_image":
+        return valid(kind, sai.host_agent_images(host))
+    if kind == "llm":
+        return valid(kind, [entry.get("name") for entry in sai.host_llm_endpoints(host) if isinstance(entry, dict)])
     raise ValueError(f"unknown kind {kind}")
 
 
@@ -79,12 +108,13 @@ def publish(sai, kind, host, names):
     hub().changed.emit(kind, host)
 
 
-def names_of(sai, kind, host, done):
-    """DONE(names, problem) on the GUI thread: HOST's names of KIND (kept ones if read just now), or None and why not."""
+def names_of(sai, kind, host, done, keep=KEEP_SECONDS):
+    """DONE(names, problem) on the GUI thread: HOST's names of KIND (kept ones if read less than KEEP seconds ago), or
+    None and why not."""
     key = (id(sai), kind, host)
     generation = _generation.get((kind, host), 0)
     kept = _kept.get(key)
-    if kept is not None and kept[0]() is sai and kept[1] == generation and time.monotonic() - kept[2] < KEEP_SECONDS:
+    if kept is not None and kept[0]() is sai and kept[1] == generation and time.monotonic() - kept[2] < keep:
         done(kept[3], kept[4])
         return
     waiting = key + (generation,)
@@ -145,7 +175,7 @@ class _Source:
         if self.sai is not None and (host or LOCAL) != self.host:
             self.set_source(self.sai, host)
 
-    def reload(self):
+    def reload(self, keep=KEEP_SECONDS):
         if self.sai is None:
             return
         self.token += 1
@@ -157,7 +187,7 @@ class _Source:
         self.reading = True
         self.show_names(None, None)
         names_of(self.sai, self.kind, host, lambda names, problem: alive(self) and self._read(token, host, names,
-                                                                                              problem))
+                                                                                              problem), keep)
 
     def _read(self, token, host, names, problem):
         if token != self.token or host != self.host:
@@ -181,10 +211,12 @@ class _Source:
 
 
 class NameField(_Source, QComboBox):
-    """An editable combo box for the name of a secret (KIND "secret") or of a VPN profile ("vpn"): the chosen host's
-    names in its list and as you type (a completer that finds a part anywhere in a name), any other name typed is
-    kept. It reads like a QLineEdit (text, setText, textChanged, editingFinished, setPlaceholderText), so a form
-    that had one keeps working. NAMES: a list known already (offered until set_source reads the host's)."""
+    """An editable combo box for the name of a secret (KIND "secret"), a VPN profile ("vpn"), one of your images
+    ("image"), an image variant ("variant"), an agent's image ("agent_image") or a model server ("llm"): the chosen
+    host's names in its list and as you type (a completer that finds a part anywhere in a name), any other name typed
+    is kept; opened, the list is read again; none there: a greyed entry says where one is added. It reads like a
+    QLineEdit (text, setText, textChanged, editingFinished, setPlaceholderText), so a form that had one keeps working.
+    NAMES: a list known already (offered until set_source reads the host's)."""
     textChanged = Signal(str)
     editingFinished = Signal()
 
@@ -196,8 +228,10 @@ class NameField(_Source, QComboBox):
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)  # a name typed is not added to the list
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.setMinimumContentsLength(16)
-        self.lineEdit().setMaxLength(64)  # a secret's name: up to 64 characters; a profile's: 32
-        found = QCompleter(self.model(), self)
+        self.lineEdit().setMaxLength(LENGTHS.get(kind, 64))  # a secret's name: up to 64 characters; a profile's: 32
+        # (the completer's own list: the names alone, never the greyed "None yet" entry)
+        self.completions = QStringListModel(self)
+        found = QCompleter(self.completions, self)
         found.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         found.setFilterMode(Qt.MatchFlag.MatchContains)
         found.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
@@ -242,6 +276,11 @@ class NameField(_Source, QComboBox):
         super().setAccessibleName(name)
         self.lineEdit().setAccessibleName(name)
 
+    def showPopup(self):  # noqa: N802
+        """Opened: what the host has now (read again unless read a moment ago; the list follows once read)."""
+        self.reload(OPEN_SECONDS)
+        super().showPopup()
+
     # -- the names --
 
     def show_names(self, names, problem):
@@ -258,6 +297,10 @@ class NameField(_Source, QComboBox):
                 for name in names:
                     self.addItem(name)
                     self.setItemData(self.count() - 1, safe_tooltip(name), Qt.ItemDataRole.ToolTipRole)
+                if not names:  # none there: where one is added (greyed, never chosen)
+                    self.addItem(none_yet(self.kind))
+                    self.model().item(self.count() - 1).setEnabled(False)
+                self.completions.setStringList(list(names))
                 self.setEditText(current)
             finally:
                 self.blockSignals(False)
@@ -268,8 +311,9 @@ class NameField(_Source, QComboBox):
         super().setToolTip(safe_tooltip(f"{self.tip}\n{note}" if self.tip and note else self.tip or note))
 
     def offered(self):
-        """The names in the list (what the host has, as read)."""
-        return [self.itemText(index) for index in range(1, self.count())]
+        """The names in the list (what the host has, as read; not the greyed "None yet")."""
+        return [self.itemText(index) for index in range(1, self.count()) if self.model().item(index) is None
+                or self.model().item(index).isEnabled()]
 
 
 def add_line(text, name, option=None):

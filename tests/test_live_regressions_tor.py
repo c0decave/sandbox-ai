@@ -28,6 +28,7 @@ vpn_runtime.py with a fake tor whose bootstrap is slow, stalls or progresses (li
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 import time
 import types
@@ -432,3 +433,178 @@ def test_e2e_mcp_servers_set_up_behind_tor_as_the_app_does(host):
     assert "MCP server nmap cannot work behind the Tor profile tor-test" in started.stderr
     log = (Path(host.env["XDG_STATE_HOME"]) / "sandbox-ai" / "launcher.log").read_text()
     assert "refused: MCP server nmap cannot work behind the Tor profile tor-test" in log
+
+
+# --- regression from live use (2026-11-14): "no answer from 127.0.53.1" right after the bootstrap -------------------
+#
+# The user's start through Tor, right after "bootstrapped 100% (Done)":
+#
+#     the VPN did not come up: 127.0.53.1: no answer from 127.0.53.1
+#
+# Which check said it: "SERVER: no answer from SERVER" is resolver_for's error around dns_lookup's timeout, raised -
+# not recorded as a check - only by resolve_hosts, the lookups of the agent's names before the container says
+# "ready". Before a5cf6273 those asked tor's DNSPort once, raw: tor gave no answer within 4 s right after its
+# bootstrap and the start ended with exactly this message (shown below with that release's vpn_runtime.py). Since
+# a5cf6273 they go through TorDns, which takes "no answer" as "not yet" like SERVFAIL; the current code cannot say
+# this message for the start any more - the user's install was older. Left raw until now: the two .onion probes of
+# the checks (a "no answer" there failed the start's checks) and the lookups of the launcher's requests while the
+# tunnel serves (handle_request: sandbox-ai llm check through Tor). Both ask patiently now, within their budgets; a
+# wrong answer is still a failure; the final failure says what was asked how often. The kill switch is untouched.
+
+OLD_RUNTIME_COMMIT = "a5cf6273^"  # the last vpn_runtime.py before lookups through Tor became patient
+
+
+def old_runtime(directory):
+    """vpn_runtime.py as it was before a5cf6273, from git; None without that history (a shallow clone)."""
+    import subprocess
+    done = subprocess.run(["git", "-C", str(ROOT), "show", f"{OLD_RUNTIME_COMMIT}:sandbox/vpn_runtime.py"],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        return None
+    path = directory / "old_vpn_runtime.py"
+    path.write_text(done.stdout)
+    return path
+
+
+def start_through_tor(host, dns, runtime=None, timeout=240):
+    host.add_image("localhost/claude-sandbox:latest")
+    return host.run("claude", "--vpn", "tor-test", timeout=timeout, env={
+        "FAKE_PODMAN_RUN": "0:0", "FAKE_TOR_SCHEDULE": json.dumps([[[1, 50, "Loading relay descriptors"],
+                                                                    [3, 100, "Done"]]]),
+        "FAKE_TOR_SPEED": "20", "FAKE_TOR_DNS": json.dumps(dns),
+        **({"FAKE_TOR_RUNTIME": str(runtime)} if runtime else {})})
+
+
+def test_e2e_before_the_fix_tor_without_an_answer_was_the_users_message(host, tmp_path):
+    """The user's message, reproduced with the vpn_runtime.py from before a5cf6273: tor's DNSPort gives no answer
+    after "bootstrapped 100% (Done)" - one raw try per name, and the start ended so."""
+    runtime = old_runtime(tmp_path)
+    if runtime is None:
+        pytest.skip(f"no git history for {OLD_RUNTIME_COMMIT}")
+    result = start_through_tor(host, {"silent_for": 100000}, runtime)
+    err = result.stderr
+    assert result.returncode != 0
+    assert "vpn: tor: bootstrapped 100% (Done)" in err
+    assert "the VPN did not come up: 127.0.53.1: no answer from 127.0.53.1" in err
+
+
+def test_e2e_tor_without_an_answer_at_first_is_waited_for_and_the_start_goes_on(host):
+    """Now: tor's DNSPort silent for 20 s after the bootstrap (the .onion probes' lookups too) - asked again, said
+    as progress, and the sandbox runs."""
+    result = start_through_tor(host, {"silent_for": 20})
+    err = result.stderr
+    assert result.returncode == 0, err
+    assert "no answer from 127.0.53.1" not in err
+    assert "Tor: waiting for its first circuit (DNS through Tor: no answer, try 1)" in err
+    assert "fake podman: the sandbox runs" in err
+    asked = [e for e in tor_events(host) if "dns" in e]
+    assert any(e["answer"] == "none" for e in asked) and asked[-1]["answer"] == "ok"
+    # Every lookup went to tor's DNSPort (the .onion probe's outside resolver is redirected there by the rules).
+    assert {e["server"] for e in asked if not e["dns"].endswith(".onion")} == {rt.TOR_DNS}
+
+
+def test_e2e_tor_that_never_answers_says_what_was_asked_how_often(host):
+    result = start_through_tor(host, {"silent_for": 100000})
+    err = result.stderr
+    assert result.returncode != 0 and "fake podman: the sandbox runs" not in err
+    assert "the VPN did not come up: 127.0.53.1: no answer from 127.0.53.1" not in err
+    assert "tor has bootstrapped, but its DNSPort 127.0.53.1 answered no lookup of" in err
+    # What was asked how often: the agent's name, and every unanswered lookup since the first.
+    assert re.search(r"\(\d+ tr(y|ies) in \d+ s: no answer \d+x; \d+ lookups of any name in \d+ s since the first "
+                     r"unanswered one: no answer \d+x\)", err), err
+
+
+class SilentPort:
+    """tor's DNSPort right after its bootstrap: no answer for the first SILENT lookups (dns_lookup's timeout), then
+    ANSWER for .onion names (its own mapping) and 192.0.2.1 for others."""
+
+    def __init__(self, clock, silent, answer=("10.192.0.7",)):
+        self.clock, self.silent, self.answer, self.asked = clock, silent, list(answer), []
+
+    def __call__(self, name, server, qtype, timeout=4.0, port=53):
+        self.asked.append((name, server))
+        self.clock.now += timeout
+        if len(self.asked) <= self.silent:
+            raise TimeoutError(f"no answer from {server}")
+        return list(self.answer) if name.endswith(".onion") else ["192.0.2.1"]
+
+
+class FakeClock:
+    def __init__(self):
+        self.now, self.slept = 0.0, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+TOR_TUNNEL = {"interface": f"TransPort 127.0.0.1:{rt.TOR_TRANS_PORT}", "implementation": "tor", "ipv4": True,
+              "ipv6": False, "dns": [rt.TOR_DNS], "tor": {"uid": rt.TOR_UID, "bridges": 0}}
+
+
+def onion_checks(monkeypatch, port, clock):
+    monkeypatch.setattr(rt, "dns_lookup", port)
+    monkeypatch.setattr(rt, "probe_ipv6", lambda timeout: {"error": "Operation not permitted", "kind": "blocked"})
+    dns = rt.TorDns(clock=clock, sleep=clock.sleep)
+    return rt.gather_checks({"checks": {"ip": False, "timeout": 2}}, TOR_TUNNEL, None, dns=dns), dns
+
+
+def test_the_onion_probes_wait_for_an_answer_too(monkeypatch):
+    """The .onion probes asked tor's DNSPort once, raw: right after the bootstrap "no answer from 127.0.53.1" failed
+    the start's checks. They are asked again now, as every lookup through tor; an answer maps them as before."""
+    clock = FakeClock()
+    port = SilentPort(clock, silent=3)
+    result, dns = onion_checks(monkeypatch, port, clock)
+    assert result["dns"]["onion"] == {"tor": ["10.192.0.7"], "outside": ["10.192.0.7"]}
+    assert result["dns"]["answers"] == {rt.TOR_DNS: True}
+    assert clock.slept and all(server in (rt.TOR_DNS, rt.OUTSIDE_RESOLVER) for _, server in port.asked)
+    vpn = load("sandbox_vpn_tor_regression", "sandbox/vpn.py")
+    assert vpn.tor_dns_failures(result["dns"]) == []
+    # An .onion answer proves no circuit to an exit: the wait for the first circuit keeps its own patience.
+    clock = FakeClock()
+    alone = rt.TorDns(clock=clock, sleep=clock.sleep, ask=SilentPort(clock, silent=0))
+    alone.lookup(rt.ONION_PROBE, rt.TOR_DNS, 1)
+    assert alone.circuit is False
+
+
+def test_a_wrong_onion_answer_is_still_a_failure_and_no_answer_says_how_often(monkeypatch):
+    clock = FakeClock()
+    result, _ = onion_checks(monkeypatch, SilentPort(clock, silent=0, answer=("192.0.2.66",)), clock)
+    vpn = load("sandbox_vpn_tor_regression_wrong", "sandbox/vpn.py")
+    failures = vpn.tor_dns_failures(result["dns"])
+    assert any("did not map" in failure and "192.0.2.66" in failure for failure in failures), failures
+    clock = FakeClock()
+    result, _ = onion_checks(monkeypatch, SilentPort(clock, silent=10 ** 6), clock)
+    onion = result["dns"]["onion"]["tor"]
+    assert isinstance(onion, str) and onion != "no answer from 127.0.53.1"
+    assert f"tor's DNSPort {rt.TOR_DNS} did not map {rt.ONION_PROBE}" in onion
+    assert re.search(r"\(\d+ tr(y|ies) in \d+ s: no answer \d+x; \d+ lookups of any name in \d+ s", onion), onion
+    assert "kill switch held" in onion
+    assert "redirected there" in result["dns"]["onion"]["outside"]
+
+
+def test_the_launchers_requests_through_tor_wait_within_their_budget(monkeypatch):
+    """handle_request's lookups (sandbox-ai llm check through Tor) asked tor's DNSPort once, raw; now patiently,
+    within TOR_DNS_REQUEST_BUDGET (the launcher waits 15 s beyond the request's own timeout)."""
+    clock = FakeClock()
+    monkeypatch.setattr(rt, "time", types.SimpleNamespace(monotonic=clock, sleep=clock.sleep))
+    port = SilentPort(clock, silent=1)
+    monkeypatch.setattr(rt, "dns_lookup", port)
+    answer = rt.handle_request(json.dumps({"op": "resolve", "id": 1, "names": ["api.example.org"]}), TOR_TUNNEL,
+                               False)
+    assert answer == {"event": "answer", "id": 1, "hosts": {"api.example.org": ["192.0.2.1"]}}
+    assert len(port.asked) == 2
+    clock = FakeClock()
+    monkeypatch.setattr(rt, "time", types.SimpleNamespace(monotonic=clock, sleep=clock.sleep))
+    monkeypatch.setattr(rt, "dns_lookup", SilentPort(clock, silent=10 ** 6))
+    answer = rt.handle_request(json.dumps({"op": "resolve", "id": 2, "names": ["api.example.org"]}), TOR_TUNNEL,
+                               False)
+    assert "tor resolves other names, but not api.example.org" in answer["error"]
+    assert "no answer" in answer["error"] and clock.now <= rt.TOR_DNS_REQUEST_BUDGET + 4
+    # Without Tor nothing changes: one try, its error as it is.
+    plain = {**TOR_TUNNEL, "tor": None, "dns": ["10.64.0.1"]}
+    answer = rt.handle_request(json.dumps({"op": "resolve", "id": 3, "names": ["a.example"]}), plain, False)
+    assert answer["error"] == "10.64.0.1: no answer from 10.64.0.1"
