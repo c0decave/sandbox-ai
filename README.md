@@ -799,7 +799,9 @@ run's `"hermes"` lists what is on and what stays off:
 Its model: the Nous Portal (`portal.nousresearch.com`, `inference-api.nousresearch.com`,
 open by default as Hermes' provider), an API key that stays out of the sandbox
 (`--api-key HOST=NAME`), or `--llm NAME` (Hermes gets the server, the context
-window and the loop guard's layers in its managed configuration; see
+window and the loop guard's layers in its managed configuration; Hermes needs a
+window of at least 64,000 tokens, so a start that would tell it less is refused
+with the fix: load the model with more, e.g. `--llm-param num_ctx=65536`; see
 [OpenRouter](#openrouter)). `--model` and `--effort` (`none` to `max`, Hermes'
 `--reasoning`) work as for the others, `-D` sets `HERMES_YOLO_MODE=1`. Its kits'
 skills are in `~/.agents/skills` (read-only), its own in `~/.hermes/skills`;
@@ -2600,7 +2602,8 @@ GeoIP files; no VPN software), in the place of the VPN container. There is no tu
 namespace is redirected to tor's TransPort (`127.0.0.1:9040`; the agent's own
 reach the connection proxy first, as always, so the allow-list, approvals, TLS
 inspection and the connection log apply), every lookup on port 53 to its
-DNSPort (`127.0.53.1`). The kill switch lets only tor's own user out
+DNSPort (`127.0.53.1`), which answers with IPv4 addresses only (an AAAA question gets
+no address: nothing here reaches IPv6). The kill switch lets only tor's own user out
 (`debian-tor`, uid 950, fixed in the image; only a process with `CAP_SETUID`
 could take it on; an MCP server behind a tor profile whose image runs as uid 950,
 a tor user name, or a name its own `/etc/passwd` gives uid 950 is refused,
@@ -2784,7 +2787,7 @@ the run's relay, which refuses its requests.
 <a id="mcp-behind-tor"></a>**MCP servers behind Tor.** Tor is transparent
 there: every TCP connection goes to tor's TransPort, which accepts it at once
 and only then has an exit try the destination, every lookup on port 53 to its
-DNSPort, which answers A, AAAA and PTR questions only, and nothing else gets
+DNSPort, which answers A, AAAA (never with an address) and PTR questions only, and nothing else gets
 out (no UDP, ICMP or raw sockets). Every server of the two catalogs is held to
 this (tests/test_mcp_tor_matrix.py): those that only speak TCP work behind Tor
 - bluesky, brave-search, duckduckgo, gowitness, playwright, signal, telegram,
@@ -2897,7 +2900,7 @@ with `allow_within`/`allow_hosts` like any other destination.
 |---|---|---|---|
 | OpenCode | Chat Completions (`/v1/chat/completions`) | `~/.config/opencode/sandbox-ai-llm.json` (provider `llm-NAME` through `@ai-sdk/openai-compatible`, every model the server listed) and `OPENCODE_CONFIG` | all of them |
 | Codex | Responses (`/v1/responses`; Codex dropped `wire_api = "chat"` in 0.95.0) | `~/.codex/sandbox-ai-llm.config.toml` (provider `llm-NAME`, `wire_api = "responses"`, `env_key` with the placeholder; update check, analytics, metrics, plugin sync and the hosted web search off), started with `--profile sandbox-ai-llm` (Codex 0.134 or later) | Ollama 0.13.3, LM Studio 0.3.29, llama.cpp b7793 (b9161 for Codex's tool types), vLLM 0.10.0 (streamed tool calls 0.18.0) |
-| Claude Code | Anthropic Messages (`/v1/messages`) | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (the placeholder), `ANTHROPIC_MODEL` and the Opus/Sonnet/Haiku/subagent model variables, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, the context window as `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (when known); `skipWebFetchPreflight` in its settings | Ollama 0.14.0, LM Studio 0.4.1, llama.cpp b7187, vLLM 0.11.1 (and later); another server only with `llm add --anthropic` |
+| Claude Code | Anthropic Messages (`/v1/messages`) | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (the placeholder), `ANTHROPIC_MODEL` and the Opus/Sonnet/Haiku/subagent model variables, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, the context window as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (when known), `ENABLE_TOOL_SEARCH=false` (the MCP servers' tools offered as they are, not behind its ToolSearch tool, which local models rarely use); `skipWebFetchPreflight` in its settings | Ollama 0.14.0, LM Studio 0.4.1, llama.cpp b7187, vLLM 0.11.1 (and later); another server only with `llm add --anthropic` |
 
 **Context window.** Local models are in neither Codex's nor OpenCode's
 catalog, so the start tells them the model's context window as the server
@@ -2917,13 +2920,15 @@ it warns `Model "M" isn't recognized · context assumed to be 1m tokens` and
 would compact the conversation only at that window, long after a local
 model's window has overflowed (the server then refuses the request or cuts the
 conversation). The start tells it the real window as
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` and the longest answer as
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (told
+no window, Claude Code 2.1.322 compacted at about 164k tokens of a model loaded
+with 131,072; with them at about 88k) and the longest answer as
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (a quarter of the window, at most 32768, or the
 `max_tokens` parameter), so the warning goes away and Claude Code compacts in
 time. Without a known window the start says so and how to set it (`sandbox-ai
 llm set NAME --model MODEL --param num_ctx=TOKENS`); a window under 50k tokens
 gets a warning, since Claude Code's own instructions and tools take about 25k.
-Your own `--env` of either variable wins.
+Your own `--env` of any of these variables wins.
 
 Claude Code speaks only the Anthropic Messages API: a start of Claude with a
 generic `openai-compatible` server is refused and names the alternatives
@@ -3064,9 +3069,14 @@ compaction and tool output limits (`compaction`), instructions against loops
 sampling, never greedy for Qwen3 and DeepSeek-R1 (`sampling`), a warning when
 the agent would be told a larger context window than the server loaded
 (`context`), and in the connection proxy: the same tool call with the same
-result 3 times since your last message adds a note to that result (`warn`),
-6 times pauses tool use for one answer, so that the model summarises
-(`block`), one block of text repeated 10 times in a streamed answer ends it
+result 3 times since your last message adds a note to that result (`warn`;
+volatile parts such as times, durations, ids and Codex's `Chunk ID` do not
+count, nor do a harness's own notes such as DSH's "Repeated tool call
+detected" count as your message), 6 times tells the model to stop calling
+tools and summarise; if it calls one again, sandbox-ai answers in its place
+and the turn ends (`block`; the request itself goes out unchanged, since
+`tool_choice: none` would make servers such as LM Studio read the whole
+conversation again), one block of text repeated 10 times in a streamed answer ends it
 cleanly with a note (`text`), and a watchdog for unattended runs
 (`watchdog_requests`, `watchdog_minutes`, off). The model goes on after each;
 waiting with `sleep`, `--watch` or `wait` counts against three times the
@@ -3083,8 +3093,8 @@ request to the `--llm` server the connection proxy writes a record into
 `llm-traffic-TIME-RUN.jsonl` beside the run's connection log: the request as
 it went to the server (messages, system part, tools, tool calls and their
 results, every parameter) and what the relay changed of it (sampling
-parameters, `max_tokens` as a ceiling, the loop guard's note and
-`tool_choice: none`, each with its old value and why), the answer put
+parameters, `max_tokens` as a ceiling, the loop guard's note, each with
+its old value and why), the answer put
 together from its stream (text, reasoning, tool calls with their arguments,
 finish reason, tokens; OpenAI chat completions, the Responses API and
 Anthropic Messages, streamed or not, gzip too), status, time to the first

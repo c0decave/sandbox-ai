@@ -4,7 +4,8 @@ containers' connections meet the sandbox's own firewall and connection proxy.
 A destination that answers whenever it is reachable - tests/devtools/fake_internet.py on this host's own address, one
 port per attempt - must stay unreached for the agent itself, a container on the agent's network, a container as user
 1 (the proxy's ID outside), a container behind slirp4netns and one behind pasta; each attempt's port must appear in the
-proxy's connection log (the connection went to the proxy, not past it) and no request may arrive at its server. This
+proxy's connection log (the connection went to the proxy, not past it) and no request may arrive at its server. Only
+the client's own "no" counts as refused: one that crashed, hung or was not found is "broken" and fails the test. This
 test reaches each server itself first: they do answer. slirp4netns must work (the dev image has it); pasta only where
 the Podman inside supports it as root (4.4 and later: Debian bookworm's 4.3 has no pasta mode), else the test fails.
 The agent's loopback is the containers' (they share its network namespace: a server of the agent's on 127.0.0.1,
@@ -65,12 +66,17 @@ def host_address():
 # placeholders are filled in by the test.
 SCRIPT = r"""
 result() { echo "RESULT $1 $2"; }
-attempt() {  # NAME, then the command that fetches the page: reached, or refused (NAME_said: its own last words)
+attempt() {  # NAME, then the command that fetches the page: reached, refused (wget's own "no": exit status 1,
+  # NAME_said its words), or broken:STATUS - no answer at all: a client that crashed (139) or was not found, one
+  # that ran into its timeout (143), a Podman that failed (125). Only "refused" says anything of the firewall.
   name=$1; shift
-  if "$@" >/tmp/$name.out 2>/tmp/$name.err && grep -q '"method": "GET"' /tmp/$name.out; then
+  "$@" >/tmp/$name.out 2>/tmp/$name.err; status=$?
+  if [ $status -eq 0 ] && grep -q '"method": "GET"' /tmp/$name.out; then
     result "$name" reached
-  else
+  elif [ $status -le 1 ]; then
     result "$name" refused
+  else
+    result "$name" "broken:$status"
   fi
   result "${name}_said" "$(tail -c 200 /tmp/$name.err | tr '\n' ' ')"
 }
@@ -96,7 +102,11 @@ mkdir -p /tmp/rootfs/bin /tmp/rootfs/tmp && cp /bin/busybox /tmp/rootfs/bin/busy
 IMG=localhost/nested-probe:latest
 podman run --rm $IMG /bin/busybox echo hello >/tmp/run.out 2>/tmp/run.err \
   && result run "$(cat /tmp/run.out)" || result run "failed:$(tail -c 400 /tmp/run.err | tr '\n' ' ')"
-WGET="/bin/busybox wget -q -T 10 -O -"
+# The client of every request, the agent's and the containers': the image's static busybox. Not its wget's -T:
+# Debian's busybox-static is built without wget's timeout, and its option parser writes -T's number through a null
+# pointer - the client died of it before it connected, in the agent and in every container (CI: "Segmentation
+# fault", and "refused" for all of them). busybox's own timeout ends a client that hangs.
+WGET="/bin/busybox timeout 20 /bin/busybox wget -q -O -"
 # The agent's loopback is the containers' (they share its network namespace): a server of the agent's own there,
 # asked by the agent itself first (the control: until it answers, 20 s at most - what is not there, no container
 # reaches), then from a container. What each says when it fails is kept (CI's first run this far said "failed",
@@ -105,12 +115,15 @@ python3 -I -m http.server 8765 --bind 127.0.0.1 --directory /tmp/rootfs >/tmp/ht
 HTTP=$!
 tries=0
 until $WGET http://127.0.0.1:8765/bin/ >/dev/null 2>/tmp/loopback_agent.err; do
+  status=$?
+  [ $status -ne 1 ] && { tries=20; break; }  # not wget's "no": the client itself failed - waiting changes nothing
   tries=$((tries + 1)); [ $tries -ge 20 ] && break; sleep 1
 done
 [ $tries -lt 20 ] && result loopback_agent ok \
-  || result loopback_agent "failed:$(tail -c 300 /tmp/loopback_agent.err | tr '\n' ' ') server: $(tail -c 300 /tmp/http.log | tr '\n' ' ')"
-podman run --rm $IMG $WGET http://127.0.0.1:8765/bin/ >/tmp/loopback.out 2>/tmp/loopback.err \
-  && result loopback ok || result loopback "failed:$(tail -c 400 /tmp/loopback.err | tr '\n' ' ')"
+  || result loopback_agent "failed:exit $status: $(tail -c 300 /tmp/loopback_agent.err | tr '\n' ' ') server: $(tail -c 300 /tmp/http.log | tr '\n' ' ')"
+podman run --rm $IMG $WGET http://127.0.0.1:8765/bin/ >/tmp/loopback.out 2>/tmp/loopback.err; status=$?
+[ $status -eq 0 ] && result loopback ok \
+  || result loopback "failed:exit $status: $(tail -c 400 /tmp/loopback.err | tr '\n' ' ')"
 result netns "$(readlink /proc/self/ns/net) $(podman run --rm $IMG /bin/busybox readlink /proc/self/ns/net 2>&1 | tail -n 1 | cut -c1-200)"
 result listening "$(podman run --rm $IMG /bin/busybox netstat -ltn 2>&1 | tr '\n' ';' | cut -c1-500)"
 result addresses "$(podman run --rm $IMG /bin/busybox ip -o addr 2>&1 | cut -c1-90 | tr '\n' ';' | cut -c1-500)"
@@ -172,6 +185,9 @@ def loopback_problem(found):
     netns = "host" was not taken: they are not behind the sandbox's firewall and proxy as the agent is, whatever
     else passes); or they share it and the connection still failed (what the container's wget said)."""
     agent, container = found.get("loopback_agent"), found.get("loopback")
+    if agent != "ok" and str(agent).startswith("failed:exit ") and not str(agent).startswith("failed:exit 1:"):
+        return (f"the test's own client crashed or could not run (the agent's own request at its own server: "
+                f"{agent!r}; a container's: {container!r}): nothing is known of the server or the containers")
     if agent != "ok":
         return (f"the test's own server on the agent's loopback did not answer the agent itself ({agent!r}): "
                 f"nothing is known of the containers (a container's attempt: {container!r})")
@@ -188,6 +204,12 @@ def loopback_problem(found):
                 f"saw: {found.get('served')!r} and is {found.get('server')!r}; listening for the container: "
                 f"{found.get('listening')!r}")
     return None
+
+
+def broken_attempts(found):
+    """{attempt: its result} of the attempts at the outside that gave no answer at all ("broken:STATUS": the client
+    crashed or was not found, ran into its timeout, or Podman failed) - they say nothing of the firewall."""
+    return {name: found[name] for name in ATTEMPTS if str(found.get(name, "")).startswith("broken:")}
 
 
 def account(code, found, stderr, lines=50):
@@ -290,8 +312,10 @@ def test_podman_inside_the_sandbox_stays_behind_its_firewall_and_proxy(tmp_path)
     elif not found.get("pasta", "").startswith("unavailable"):
         required.append("pasta")  # it ran after all: then it must be refused like the others
     for name in required:
-        if found.get(name) != "refused":  # "unavailable" fails here too
-            pytest.fail(f"{name}: {found.get(name)!r}, not refused\n{report}")
+        if found.get(name) != "refused":  # "unavailable" and "broken:STATUS" fail here too
+            why = " - the client or Podman failed, the firewall was not asked" if name in broken_attempts(found) else ""
+            pytest.fail(f"{name}: {found.get(name)!r}, not refused{why} (it said: {found.get(name + '_said')!r})\n"
+                        f"{report}")
     for name in required:
         port = servers[name]["http"]
         if f"{address}:{port}" not in logged:

@@ -2967,6 +2967,13 @@ def proxy_entry(a, get=None):
              **proxy_params(a, found, model)}]
 
 
+# OpenCode's cut of a tool's output (the loop guard's compaction layer): what is longer reaches the model as a
+# preview and the path of a file in OpenCode's home. 128 KiB: a whole part of the files MCP server's read_file (60,000
+# characters, as JSON: ~62 KB for ASCII text, more for UTF-8) - at 50,000 bytes the model saw 860 bytes of it (the
+# local-model research's evidence/tool_output_limits.txt). 1000 lines: a shell command's long output stays cut.
+OPENCODE_TOOL_OUTPUT = {"max_lines": 1000, "max_bytes": 128 << 10}
+
+
 def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, outputs=None, loop=None, wait=None):
     """OpenCode's configuration (the v1 shape, which OpenCode 2 reads too): an OpenAI-compatible provider
     (@ai-sdk/openai-compatible, Chat Completions) with the endpoint's models, or exactly ALLOWED (the models
@@ -3005,16 +3012,24 @@ def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, ou
         context = context_value((contexts or {}).get(model))
         config["compaction"] = {"auto": True, "prune": True,
                                 **({"reserved": max(2048, context // 5)} if context else {})}
-        config["tool_output"] = {"max_lines": 1000, "max_bytes": 50000}
+        config["tool_output"] = dict(OPENCODE_TOOL_OUTPUT)
     if loop.get("instructions"):
         config["instructions"] = ["/root/" + LOOP_INSTRUCTIONS]
     return config
 
 
-def claude_environment(endpoint, model):
+# Claude Code puts the MCP servers' tools behind its ToolSearch tool (deferred: the model sees their names only once
+# it searched); the local-model research's scripted model was offered 12 tools, none of the MCP servers'
+# (runs/mock_claude), and a local model rarely thinks of searching. ENABLE_TOOL_SEARCH=false (2.1.322: its "standard"
+# mode) sends every tool with each request. Yours (--env) wins.
+CLAUDE_TOOL_SEARCH = "ENABLE_TOOL_SEARCH"
+
+
+def claude_environment(endpoint, model, given=()):
     """Claude Code against an Anthropic-compatible server: the placeholder as ANTHROPIC_AUTH_TOKEN (a Bearer token,
-    which all four servers accept; vLLM accepts no other), every model slot on MODEL, and no traffic to Anthropic
-    beyond what the network options allow anyway."""
+    which all four servers accept; vLLM accepts no other), every model slot on MODEL, no traffic to Anthropic
+    beyond what the network options allow anyway, and the MCP servers' tools offered as they are (no tool search,
+    unless GIVEN, the names of your --env and --secret-env, has its variable)."""
     return {"ANTHROPIC_BASE_URL": agent_url(endpoint, "anthropic"), "ANTHROPIC_AUTH_TOKEN": PLACEHOLDER,
             # Empty: a key here would make Claude ask whether to use it (and send x-api-key).
             "ANTHROPIC_API_KEY": "",
@@ -3022,7 +3037,8 @@ def claude_environment(endpoint, model):
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": model, "CLAUDE_CODE_SUBAGENT_MODEL": model,
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             # The attribution block changes per request and defeats the servers' prompt caching.
-            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"}
+            "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+            **({} if CLAUDE_TOOL_SEARCH in given else {CLAUDE_TOOL_SEARCH: "false"})}
 
 
 # Claude Code knows the context window of Anthropic's models only. For any other model ID it warns ('Model "M" isn't
@@ -3032,7 +3048,12 @@ def claude_environment(endpoint, model):
 # custom model ID"): CLAUDE_CODE_MAX_CONTEXT_TOKENS, taken on its own for an ID that does not start with claude- (one
 # Claude Code knows keeps its own window, the variable is ignored there). CLAUDE_CODE_MAX_OUTPUT_TOKENS: the most
 # tokens of one answer, reserved out of the window before compaction (an unknown ID's default is 32000).
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW: the window its auto-compaction works against (2.1.322 reads it, "such as 200k or
+# 200000"); told no window, the local-model research's Claude Code 2.1.322 compacted at ~164k tokens of a model
+# loaded with 131,072 (runs/growc_default), with either variable at ~88k (runs/growc_maxctx, growc_window). Both
+# are set: the one window, whichever of them a Claude Code version reads.
 CLAUDE_WINDOW = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+CLAUDE_COMPACT = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 CLAUDE_OUTPUT = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 CLAUDE_OWN = 25000   # tokens of the window Claude Code's own instructions and tool definitions take, about
 
@@ -3069,6 +3090,8 @@ def claude_window_environment(a, found, model):
     values = effective_params(found, model, start_params(a, found)[0])[0]
     output = max(256, min(values["max_tokens"], context // 2)) if values.get("max_tokens") else output_limit(context)
     env = {CLAUDE_WINDOW: str(context)}
+    if CLAUDE_COMPACT not in given:
+        env[CLAUDE_COMPACT] = str(context)
     if CLAUDE_OUTPUT not in given:
         env[CLAUDE_OUTPUT] = str(output)
     return env
@@ -3159,6 +3182,9 @@ def placeholder_for(a, endpoint):
 HERMES_OPENROUTER_HOST = "openrouter.ai"
 HERMES_OPENROUTER_PLACEHOLDER = "sk-or-v1-sandbox-ai-placeholder"
 HERMES_CONFIG = "/etc/hermes/config.yaml"
+# Hermes refuses a smaller context window (agent_init._enforce_minimum_context: "below the minimum 64,000 required by
+# Hermes Agent"), and its user sees only "Something went wrong and I couldn't finish this reply".
+HERMES_MIN_CONTEXT = 64000
 
 
 def hermes_config(a):
@@ -3179,6 +3205,15 @@ def hermes_config(a):
         section["api_key"] = PLACEHOLDER
     if context_value(context):
         section["context_length"] = context_value(context)
+        if section["context_length"] < HERMES_MIN_CONTEXT:
+            problem = (f"--llm {found['name']}: Hermes needs a context window of at least 64,000 tokens and refuses "
+                       f"to work with less (it says only 'Something went wrong'); {model} would be told "
+                       f"{section['context_length']}. Load the model with 64k tokens or more: --llm-param "
+                       "num_ctx=65536 (LM Studio loads it so; or its Context Length), Ollama: OLLAMA_CONTEXT_LENGTH, "
+                       "llama.cpp: --ctx-size, vLLM: --max-model-len")
+            if a.agent == "hermes":
+                raise ValueError(problem)
+            print(printable(f"agent-sandbox: WARNING: {problem}"), file=sys.stderr)  # Hermes as a helper
     config = {"model": section, "fallback_providers": []}
     if loop["enabled"]:
         config["tool_loop_guardrails"] = {"warnings_enabled": True, "hard_stop_enabled": True,
@@ -3313,7 +3348,9 @@ def agent_environment(a, windows=True):
     Code's window variables (which ask the server; yours of them win, so they are never refused)."""
     found, model = selection(a)
     if a.agent == "claude":
-        return {**claude_environment(found, model), **claude_wait_environment(a, found, model),
+        given = set(getattr(a, "env", None) or []) | {value.partition("=")[0]
+                                                       for value in getattr(a, "secret_env", None) or []}
+        return {**claude_environment(found, model, given), **claude_wait_environment(a, found, model),
                 **(claude_window_environment(a, found, model) if windows else {})}
     if a.agent == "goose":
         return goose_environment(a, found, model)

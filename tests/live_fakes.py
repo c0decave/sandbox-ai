@@ -284,6 +284,8 @@ def container(args):
     rt.TOR_DATA.mkdir(parents=True, exist_ok=True)
     rt.tor_uid = lambda name=None: rt.TOR_UID
     rt.own_data_directory = lambda uid, path=None: None
+    if hasattr(rt, "TorDnsFront"):  # (its port 53 needs root; tests/test_tor_dns_ipv4_only.py runs the real one)
+        rt.TorDnsFront.start = lambda self: self
     os.chown = lambda path, uid, gid, follow_symlinks=True: None  # (fresh_guard: root's CHOWN in the container)
     table = DIRECTORY / "nft-table"
 

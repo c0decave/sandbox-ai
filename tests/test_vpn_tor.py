@@ -196,7 +196,7 @@ def test_torrc_without_bridges():
     lines = text.splitlines()
     for line in (f"User {rt.TOR_USER}", "DataDirectory /var/lib/tor", "Log notice stdout", "SafeLogging 1",
                  "ClientOnly 1", "ClientUseIPv6 0", "ClientPreferIPv6ORPort 0",
-                 f"TransPort 127.0.0.1:{rt.TOR_TRANS_PORT} IsolateDestAddr", f"DNSPort {rt.TOR_DNS}:53",
+                 f"TransPort 127.0.0.1:{rt.TOR_TRANS_PORT} IsolateDestAddr", f"DNSPort {rt.TOR_DNS}:{rt.TOR_DNS_PORT}",
                  "AutomapHostsOnResolve 1", "AutomapHostsSuffixes .onion",
                  f"VirtualAddrNetworkIPv4 {rt.TOR_VIRTUAL_NET}", "SocksPort 0", "ControlPort 0"):
         assert line in lines, line
@@ -208,7 +208,8 @@ def test_torrc_with_socks_exit_countries_and_bridges():
     bridges = rt.parse_bridges(BRIDGES)
     text = rt.tor_config(tor_profile(socks=True, exit_country=["de", "nl"], bridges=2)["tor"], bridges)
     lines = text.splitlines()
-    assert f"SocksPort 127.0.0.1:{rt.TOR_SOCKS_PORT} IsolateDestAddr" in lines and "SocksPort 0" not in lines
+    assert f"SocksPort 127.0.0.1:{rt.TOR_SOCKS_PORT} IsolateDestAddr NoPreferIPv6Automap" in lines
+    assert "SocksPort 0" not in lines
     assert "ExitNodes {de},{nl}" in lines and "StrictNodes 1" in lines
     assert "UseBridges 1" in lines and "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy" in lines
     assert f"Bridge obfs4 192.0.2.10:443 {FP_A} cert={CERT_A} iat-mode=0" in lines
@@ -553,13 +554,16 @@ def test_tor_comes_up_behind_the_kill_switch(tmp_path, monkeypatch):
     runner = FakeRunner()
     stored = "\n".join(rt.bridge_line(b) for b in rt.parse_bridges(BRIDGES)) + "\n"
     payload = {"profile": tor_profile(socks=True, bridges=2, exit_country=["de"]), "secrets": {"tor_bridges": stored}}
-    tunnel = rt.up_tor(payload, runner, uid_of=lambda: rt.TOR_UID)
+    fronted = []  # (the resolver in front of tor's DNSPort: tests/test_tor_dns_ipv4_only.py)
+    tunnel = rt.up_tor(payload, runner, uid_of=lambda: rt.TOR_UID,
+                       front=types.SimpleNamespace(start=lambda: fronted.append(len(runner.commands))))
     commands = [c for c, _ in runner.commands]
     # The kill switch is in place before tor starts.
     assert commands.index(["nft", "-f", "-"]) < next(i for i, c in enumerate(commands) if c[0] == "tor")
     rules = dict((tuple(c), d) for c, d in runner.commands)[("nft", "-f", "-")]
     assert f"meta skuid {rt.TOR_UID} ip daddr 192.0.2.10 tcp dport 443 accept" in rules
     tor = next(c for c in commands if c[0] == "tor")
+    assert commands.index(["nft", "-f", "-"]) < fronted[0] <= commands.index(tor)  # the kill switch, the resolver, tor
     assert given == [rt.TOR_UID]  # the data directory is debian-tor's before tor starts
     assert tor == ["tor", "-f", str(tmp_path / "vpn" / "torrc"), "--defaults-torrc", str(tmp_path / "vpn" / "torrc-defaults")]
     torrc = tmp_path / "vpn" / "torrc"

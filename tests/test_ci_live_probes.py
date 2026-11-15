@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -42,11 +43,13 @@ def nested():
 # Stand-ins, as shell functions before the script: podman runs a container's command right here ("shared": the
 # agent's network namespace), or as a container in a namespace of its own would see it ("private"), or in the agent's
 # namespace with its connection refused ("refused"); busybox's applets by the host's tools, its wget by Python.
-STAND_INS = r"""
+BUSYBOX_STAND_IN = r"""
 busybox() {
   applet=$1; shift
   case $applet in
-    wget) for last in "$@"; do :; done
+    timeout) shift; "$@" ;;
+    wget) [ "$FAKE" = crash ] && { sh -c 'kill -SEGV $$'; return; }
+          for last in "$@"; do :; done
           python3 -I -c 'import sys, urllib.request
 try:
     sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())
@@ -61,6 +64,8 @@ except OSError as exc:
     *) echo "$applet: applet not found" >&2; return 127 ;;
   esac
 }
+"""
+PODMAN_STAND_IN = r"""
 podman() {
   case $1 in
     version) echo 4.3.1; return 0 ;;
@@ -80,9 +85,13 @@ podman() {
       *) echo "podman stand-in: $1?" >&2; return 125 ;;
     esac
   done
-  if [ "$FAKE" != shared ] && [ "$2" = wget ]; then
-    echo "wget: can't connect to remote host (127.0.0.1): Connection refused" >&2; return 1
-  fi
+  case " $* " in
+    *" wget "*) case $FAKE in
+                  shared) ;;
+                  crash) return 139 ;;  # (as Podman returns a container's end by SIGSEGV: without a word)
+                  *) echo "wget: can't connect to remote host (127.0.0.1): Connection refused" >&2; return 1 ;;
+                esac ;;
+  esac
   if [ "$FAKE" = private ]; then
     case $2 in
       readlink) echo "net:[4026539999]"; return 0 ;;
@@ -104,18 +113,38 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def run_script(nested, folder, fake, port, held=None):
-    """The live test's script as the sandbox's sh would run it, with the stand-ins: its results."""
+def run_script(nested, folder, fake, port, busybox=None):
+    """The live test's script as the sandbox's sh would run it, with the stand-ins: its results. BUSYBOX: a real
+    busybox in place of the image's /bin/busybox (then only podman is stood in for)."""
     script = nested.SCRIPT.replace("HOST", "127.0.0.1")
     for name in nested.ATTEMPTS:
         script = script.replace(f"PORT_{name}", str(free_port()))  # nothing listens there: refused
-    script = script.replace("/tmp/", f"{folder}/").replace("/bin/busybox", "busybox").replace("8765", str(port))
+    script = script.replace("/tmp/", f"{folder}/")
+    script = re.sub(r"(?<![\w/])/bin/busybox", busybox or "busybox", script)  # (not the copy in the image's root)
+    script = script.replace("8765", str(port))
     script = script.replace(" 20 ]", " 3 ]")  # (the wait for the agent's own server: 3 s here)
     assert "8765" not in script and " 20 ]" not in script
-    done = subprocess.run(["sh", "-c", STAND_INS.replace("PORT", str(port)) + script], capture_output=True, text=True,
+    stand_ins = PODMAN_STAND_IN + ("" if busybox else BUSYBOX_STAND_IN.replace("PORT", str(port)))
+    done = subprocess.run(["sh", "-c", stand_ins + script], capture_output=True, text=True,
                           timeout=300, cwd=folder, env={**os.environ, "FAKE": fake})
     assert done.returncode == 0, done.stderr
     return nested.results(done.stdout), done
+
+
+def real_busybox():
+    """A real busybox with the applets the script uses - the one $SANDBOX_AI_TEST_BUSYBOX names, else the one on
+    PATH (Debian's and Ubuntu's busybox-static: what the dev image gives the probe) - or None."""
+    path = os.environ.get("SANDBOX_AI_TEST_BUSYBOX") or shutil.which("busybox")
+    if not path:
+        return None
+    try:
+        applets = subprocess.run([path, "--list"], capture_output=True, text=True, timeout=30).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return path if {"wget", "timeout", "sh", "echo", "true", "readlink", "netstat", "ip"} <= set(applets) else None
+
+
+BUSYBOX = real_busybox()
 
 
 needs_sh = pytest.mark.skipif(not shutil.which("sh") or not shutil.which("python3"), reason="needs sh and python3")
@@ -141,12 +170,60 @@ def test_the_script_finds_the_agents_loopback_from_a_container(nested, tmp_path)
 
 
 @needs_sh
+@pytest.mark.skipif(not BUSYBOX, reason="needs a busybox with wget and timeout (busybox-static), or "
+                                         "SANDBOX_AI_TEST_BUSYBOX naming one")
+def test_the_scripts_client_works_with_a_real_busybox(nested, tmp_path):
+    """CI's nested job, the first run that said why: "loopback_agent failed:Segmentation fault (core dumped)". The
+    probe's client was `/bin/busybox wget -q -T 10 -O -`, and Debian's busybox-static is built without wget's
+    timeout: its option parser still takes -T and writes the number through a null pointer (busybox 1.35
+    networking/wget.c: "T:+" with IF_NOT_FEATURE_WGET_TIMEOUT(NULL)). Every attempt of every run before - the agent's,
+    the containers' (the image is the same binary; a container dies of it without a word) - had "refused" for a
+    client that crashed before it connected: the test had never tested the firewall. Here the script's own client,
+    with a real busybox and only podman stood in for: it reaches the script's server, and is refused where nothing
+    listens with wget's own words."""
+    found, done = run_script(nested, tmp_path, "shared", free_port(), busybox=BUSYBOX)
+    assert found["loopback_agent"] == "ok" and found["loopback"] == "ok", done.stdout + done.stderr
+    assert found["run"] == "hello" and found["devnull"] == "ok", found
+    assert int(found["served"].split(" ", 1)[0]) >= 2
+    for name in ("agent", "shared", "user1", "slirp4netns"):
+        assert found[name] == "refused" and "Segmentation fault" not in found[f"{name}_said"], found
+        assert "wget: can't connect to remote host (127.0.0.1): Connection refused" in found[f"{name}_said"], found
+
+
+@needs_sh
+def test_a_client_that_crashes_is_not_taken_for_a_refusal(nested, tmp_path):
+    """What hid the crash for so long: whatever was not "reached" was "refused". Now only wget's own "no" (exit
+    status 1) is a refusal; a client that dies, is not found, runs into its timeout, or a Podman that fails, is
+    "broken" with its status - and the server on the agent's loopback is not asked twenty times by a client that
+    crashes."""
+    found, done = run_script(nested, tmp_path, "crash", free_port())
+    assert found["loopback_agent"].startswith("failed:exit 139: "), done.stdout + done.stderr
+    assert "egmentation fault" in found["loopback_agent"] or "SEGV" in found["loopback_agent"], found
+    assert found["loopback"].startswith("failed:exit 139: ")
+    assert [found[name] for name in ("agent", "shared", "user1", "slirp4netns")] == ["broken:139"] * 4
+    problem = nested.loopback_problem(found)
+    assert problem.startswith("the test's own client crashed or could not run (the agent's own request at its own "
+                              "server: 'failed:exit 139: "), problem
+    assert nested.broken_attempts(found) == {name: "broken:139" for name in ("agent", "shared", "user1", "slirp4netns")}
+    assert nested.broken_attempts({"agent": "refused", "shared": "reached", "pasta": "unavailable:x"}) == {}
+
+
+def test_the_scripts_client_has_no_option_a_busybox_may_lack(nested):
+    """busybox-static's wget has no timeout of its own (-T crashed it): busybox's timeout applet ends a client that
+    hangs."""
+    clients = [line for line in nested.SCRIPT.splitlines() if line.startswith("WGET=")]
+    assert clients == ['WGET="/bin/busybox timeout 20 /bin/busybox wget -q -O -"']
+    assert " -T " not in nested.SCRIPT
+    assert "busybox wget" not in nested.SCRIPT.replace(clients[0], ""), "every request goes through $WGET"
+
+
+@needs_sh
 def test_the_script_says_when_a_container_is_in_another_network_namespace(nested, tmp_path):
     """What CI's first run this far could not tell: "loopback failed" - of a container that did not share the
     agent's network namespace, or of one that did?"""
     found, done = run_script(nested, tmp_path, "private", free_port())
     assert found["loopback_agent"] == "ok", done.stdout + done.stderr
-    assert found["loopback"] == "failed:wget: can't connect to remote host (127.0.0.1): Connection refused "
+    assert found["loopback"] == "failed:exit 1: wget: can't connect to remote host (127.0.0.1): Connection refused "
     problem = nested.loopback_problem(found)
     assert problem.startswith("the containers do not share the agent's network namespace (the agent net:[")
     assert 'a container net:[4026539999]) although sandbox-ai\'s containers.conf says netns = "host": Podman 4.3.1 ' \
@@ -157,10 +234,10 @@ def test_the_script_says_when_a_container_is_in_another_network_namespace(nested
 @needs_sh
 def test_the_script_says_when_a_container_that_shares_the_namespace_is_refused(nested, tmp_path):
     found, _ = run_script(nested, tmp_path, "refused", free_port())
-    assert found["loopback_agent"] == "ok" and found["loopback"].startswith("failed:wget: can't connect")
+    assert found["loopback_agent"] == "ok" and found["loopback"].startswith("failed:exit 1: wget: can't connect")
     problem = nested.loopback_problem(found)
     assert problem.startswith("a container in the agent's network namespace did not reach the agent's server on "
-                              "127.0.0.1: \"failed:wget: can't connect to remote host (127.0.0.1): Connection refused")
+                              "127.0.0.1: \"failed:exit 1: wget: can't connect to remote host (127.0.0.1): Connection ")
     assert "the server saw: '1 " in problem, "the agent's own request only"
     assert "listening for the container: 'tcp 0 0 127.0.0.1:" in problem
 
@@ -172,7 +249,7 @@ def test_the_script_says_when_its_own_server_never_answered(nested, tmp_path):
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
         found, _ = run_script(nested, tmp_path, "shared", held.getsockname()[1])
-    assert found["loopback_agent"].startswith("failed:wget: cannot connect to remote host")
+    assert found["loopback_agent"].startswith("failed:exit 1: wget: cannot connect to remote host")
     assert "Address already in use" in found["loopback_agent"], "what the server itself said"
     problem = nested.loopback_problem(found)
     assert problem.startswith("the test's own server on the agent's loopback did not answer the agent itself")

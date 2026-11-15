@@ -13589,6 +13589,17 @@ def test_llm_result_key(scenario):
         assert rt.llm_result_key("") == rt.llm_result_key("   ")
 
 
+def test_llm_human_turns(scenario):
+    if scenario == "happy":  # a harness's note right after a tool result is not the human's (DSH)
+        messages = llm_chat(2)["messages"] + [{"role": "user", "content": "Repeated tool call detected: bash"}]
+        assert rt.llm_human_turns(messages, "chat") == [0]
+    elif scenario == "sad":
+        assert rt.llm_human_turns("x", "chat") == [] and rt.llm_human_turns([None, 3], "responses") == []
+    else:  # any other text after a tool result is the human's (typed while the agent worked)
+        messages = llm_chat(2)["messages"] + [{"role": "user", "content": "use the other file"}]
+        assert rt.llm_human_turns(messages, "chat") == [0, len(messages) - 1]
+
+
 def test_llm_tool_history(scenario):
     if scenario == "happy":
         history = rt.llm_tool_history(llm_chat(3), "chat")
@@ -13639,17 +13650,36 @@ def test_llm_add_note(scenario):
         assert holder["content"][-1] == {"type": "text", "text": "note"}
 
 
-def test_llm_pause_tools(scenario):
-    document = {"tools": [1], "tool_choice": "auto"}
-    if scenario == "happy":
-        rt.llm_pause_tools(document, "chat", "vllm")
-        assert document == {"tools": [1], "tool_choice": "none"}
-    elif scenario == "sad":
-        rt.llm_pause_tools(document, "chat", "ollama")
-        assert document == {}
-    else:
-        rt.llm_pause_tools(document, "messages", "llamacpp")
-        assert document["tool_choice"] == {"type": "none"}
+def test_llm_stop_answer(scenario):
+    def read(api, data):
+        answer = rt.LlmAnswer(api)
+        answer.feed(data)
+        return answer.result()
+    if scenario == "happy":  # streamed: the API's own events, ended
+        result = read("messages", rt.llm_stop_answer("messages", "m", "ended", True))
+        assert result["text"] == "ended" and result["finish_reason"] == "end_turn" and result["streamed"]
+    elif scenario == "sad":  # no model name known: still a complete answer
+        result = read("chat", rt.llm_stop_answer("chat", "", "ended", False))
+        assert result["text"] == "ended" and result["finish_reason"] == "stop" and not result.get("tool_calls")
+    else:  # the Responses API, streamed: ends with response.completed
+        made = rt.llm_stop_answer("responses", "m", "ended", True)
+        assert made.rstrip().splitlines()[-2] == b"event: response.completed"
+        assert read("responses", made)["text"] == "ended"
+
+
+def test_llm_held_answer(scenario):
+    call = json.dumps({"choices": [{"message": {"tool_calls": [{"id": "c", "function": {
+        "name": "bash", "arguments": "{}"}}]}, "finish_reason": "tool_calls"}]}).encode()
+    if scenario == "happy":  # a tool call after the note: the relay's text in its place
+        made = rt.llm_held_answer("chat", call, None, False, "m", "ended")
+        assert json.loads(made)["choices"][0]["message"]["content"] == "ended"
+    elif scenario == "sad":  # unreadable, or a text answer: passes as it came
+        assert rt.llm_held_answer("chat", b"\x00not json", None, False, "m", "ended") is None
+        text = rt.llm_stop_answer("chat", "m", "a summary", False)
+        assert rt.llm_held_answer("chat", text, None, False, "m", "ended") is None
+    else:  # gzip as the server sent it
+        made = rt.llm_held_answer("chat", gzip.compress(call), "gzip", True, "m", "ended")
+        assert made.endswith(b"data: [DONE]\n\n")
 
 
 def test_llm_request(scenario):

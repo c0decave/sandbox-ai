@@ -1465,7 +1465,9 @@ class LaunchPage(Prerequisites, QWidget):
         name) are checked against your images on the chosen host first - read in the background, then THEN runs - or
         one names an image that is none of yours (said, naming the service, with the Images page offered)."""
         from . import board as B
-        specs, images = list(self.form.values().get("--service") or []), self.preset_images()
+        form = getattr(self, "form", None)  # (a page made without its form, as tests do: nothing to check)
+        specs = list(form.values().get("--service") or []) if form is not None else []
+        images = self.preset_images() if form is not None else []
         if not specs and not images:
             return False
         host, wanted = self.host(), (self.host(), tuple(specs), tuple(images))

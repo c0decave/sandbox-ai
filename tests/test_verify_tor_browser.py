@@ -455,8 +455,8 @@ def test_e2e_the_tor_container_of_a_start_loads_its_kill_switch_first_and_only_l
     assert f"udp dport 53 dnat ip to {rt.TOR_DNS}:53" in divert and "meta l4proto tcp redirect to :9040" in divert
     assert "udp" not in divert.replace("udp dport 53", "")  # no other UDP is redirected: it meets the drop
     torrc = (host.directory / "tor-container" / "run" / "torrc").read_text()
-    for line in ("TransPort 127.0.0.1:9040 IsolateDestAddr", f"DNSPort {rt.TOR_DNS}:53",
-                 "SocksPort 127.0.0.1:9050 IsolateDestAddr", "AutomapHostsSuffixes .onion",
+    for line in ("TransPort 127.0.0.1:9040 IsolateDestAddr", f"DNSPort {rt.TOR_DNS}:{rt.TOR_DNS_PORT}",
+                 "SocksPort 127.0.0.1:9050 IsolateDestAddr NoPreferIPv6Automap", "AutomapHostsSuffixes .onion",
                  "VirtualAddrNetworkIPv4 10.192.0.0/10", "ClientUseIPv6 0", "ControlPort 0", "ClientOnly 1"):
         assert line in torrc.splitlines(), line
     events = tor_events(host)

@@ -66,8 +66,11 @@ TOR_UID = 950
 TOR_USER = "debian-tor"
 TOR_TRANS_PORT = 9040
 TOR_SOCKS_PORT = 9050
-# tor's DNSPort, on a loopback address of its own: the agent's DNS stub has 127.0.0.1:53.
+# The resolver behind Tor, on a loopback address of its own (the agent's DNS stub has 127.0.0.1:53): port 53 there is
+# TorDnsFront's, which answers with IPv4 only and hands every question to tor's own DNSPort on TOR_DNS_PORT (asked by
+# nothing else; tor answers an AAAA question with an IPv6 address whatever its flags say: see TorDnsFront).
 TOR_DNS = "127.0.53.1"
+TOR_DNS_PORT = 9053
 TOR_VIRTUAL_NET = "10.192.0.0/10"  # where AutomapHostsOnResolve maps .onion names
 TOR_CHECK = "https://check.torproject.org/api/ip"  # {"IsTor": true, "IP": ...}
 # The Tor Project's own onion service: tor maps it at once (no network), an outside resolver has no answer.
@@ -789,14 +792,18 @@ def exit_countries(values):
 
 
 def tor_config(tor, bridges=()):
-    """The torrc: a client only, TransPort and DNSPort for the whole namespace, .onion names mapped into
-    TOR_VIRTUAL_NET, a SocksPort only when the profile asks for one, IPv4 only, the exit countries, the bridges."""
+    """The torrc: a client only, TransPort and DNSPort (behind TorDnsFront) for the whole namespace, .onion names
+    mapped into TOR_VIRTUAL_NET, a SocksPort only when the profile asks for one, IPv4 only, the exit countries, the
+    bridges."""
     lines = ["# sandbox-ai: written for this start from the profile; nothing else is read",
              f"User {TOR_USER}", "DataDirectory /var/lib/tor", "RunAsDaemon 0", "Log notice stdout", "SafeLogging 1",
              "AvoidDiskWrites 1", "ClientOnly 1", "ControlPort 0", "ClientUseIPv4 1", "ClientUseIPv6 0",
              "ClientPreferIPv6ORPort 0",
-             f"SocksPort 127.0.0.1:{TOR_SOCKS_PORT} IsolateDestAddr" if tor.get("socks") else "SocksPort 0",
-             f"TransPort 127.0.0.1:{TOR_TRANS_PORT} IsolateDestAddr", f"DNSPort {TOR_DNS}:53",
+             # (NoPreferIPv6Automap: a SOCKS RESOLVE of an .onion name is mapped into TOR_VIRTUAL_NET, not IPv6.)
+             f"SocksPort 127.0.0.1:{TOR_SOCKS_PORT} IsolateDestAddr NoPreferIPv6Automap" if tor.get("socks")
+             else "SocksPort 0",
+             # Only TorDnsFront asks it (on TOR_DNS:53, where every lookup of the namespace goes).
+             f"TransPort 127.0.0.1:{TOR_TRANS_PORT} IsolateDestAddr", f"DNSPort {TOR_DNS}:{TOR_DNS_PORT}",
              "AutomapHostsOnResolve 1", "AutomapHostsSuffixes .onion", f"VirtualAddrNetworkIPv4 {TOR_VIRTUAL_NET}"]
     countries = exit_countries(tor.get("exit_country"))
     if countries:
@@ -845,11 +852,12 @@ def bypass_target(value):
 
 def tor_rules(uid=TOR_UID, bridges=(), bypass=()):
     """The kill switch for tor: only tor's own TCP over IPv4 leaves (to its bridges alone when it has some); every
-    other TCP connection is redirected to its TransPort and every lookup on port 53 to its DNSPort, before the
-    filter sees them; other UDP (QUIC included) and all IPv6 are dropped. The redirect runs after the agent's own
-    to its connection proxy (priority -100): what that one redirects reaches tor through the proxy. BYPASS
-    (--vpn-bypass-tcp): TCP to exactly these addresses and ports of the local network leaves directly, neither
-    redirected nor dropped; the agent reaches them through its connection proxy only, as everything else."""
+    other TCP connection is redirected to its TransPort and every lookup on port 53 to TOR_DNS:53 (TorDnsFront, in
+    front of its DNSPort), before the filter sees them; other UDP (QUIC included) and all IPv6 are dropped. The
+    redirect runs after the agent's own to its connection proxy (priority -100): what that one redirects reaches tor
+    through the proxy. BYPASS (--vpn-bypass-tcp): TCP to exactly these addresses and ports of the local network
+    leaves directly, neither redirected nor dropped; the agent reaches them through its connection proxy only, as
+    everything else."""
     uid = int(uid)
     targets = [bypass_target(value) for value in bypass]
     lines = [f"table inet {TABLE} {{",
@@ -873,6 +881,125 @@ def tor_rules(uid=TOR_UID, bridges=(), bypass=()):
               f"  udp dport 53 dnat ip to {TOR_DNS}:53", f"  meta l4proto tcp redirect to :{TOR_TRANS_PORT}", " }",
               "}", ""]
     return "\n".join(lines)
+
+
+TOR_DNS_FRONT_LIMIT = 256  # questions TorDnsFront hands tor at once (beyond: dropped, the asker asks again)
+TOR_DNS_FRONT_WAIT = 30.0  # seconds it waits for tor's answer to one question (no answer: none for the asker either)
+DNS_AAAA, DNS_A, DNS_IN = 28, 1, 1
+
+
+def dns_question_end(query):
+    """The offset after the class of the DNS QUERY's only question (a query: QR 0, opcode 0, one question, an
+    uncompressed name), else None."""
+    if len(query) < 12:
+        return None
+    flags, qdcount = struct.unpack("!HH", query[2:6])
+    if flags & 0xF800 or qdcount != 1:
+        return None
+    offset = 12
+    while offset < len(query):
+        length = query[offset]
+        if length == 0:
+            return offset + 5 if offset + 5 <= len(query) else None
+        if length & 0xC0:
+            return None
+        offset += 1 + length
+    return None
+
+
+class TorDnsFront:
+    """The resolver behind Tor (TOR_DNS:53, where the kill switch hands every lookup of the namespace, and the
+    agent's resolver): every question goes to tor's DNSPort (TOR_DNS:TOR_DNS_PORT), an AAAA question asked as A and
+    answered with tor's answer code (NXDOMAIN, SERVFAIL while tor has no circuit) and no address - nothing here
+    reaches IPv6. tor itself cannot be told so: its DNSPort takes an AAAA question for "IPv6 only, IPv6 preferred"
+    whatever the port's flags (NoIPv6Traffic, NoPreferIPv6Automap; dnsserv.c sets them per question), maps an .onion
+    name to an address of its link-local VirtualAddrNetworkIPv6 (which cannot be switched off), and hands on the exits'
+    IPv6 addresses of other names - a fetcher refused the .onion name (outside the announced network) or tried IPv6
+    first. Every other question goes to tor as it is, and tor's answer back as it is; no answer from tor is no answer
+    here either (the asker - TorDns too - asks again). UDP only, as tor's DNSPort. Its sockets carry CHECK_MARK
+    (check_socket): the agent's firewall in this namespace (and a `sandbox-ai net cut`) judged the asker's question
+    already, at TOR_DNS - what follows of it (the question to tor, the answer) passes it, as tor's own packets (its
+    uid) did when tor answered there itself: the container's own checks, which pass a cut, get their answers."""
+
+    def __init__(self, address=TOR_DNS, port=53, tor=(TOR_DNS, TOR_DNS_PORT), wait=TOR_DNS_FRONT_WAIT,
+                 limit=TOR_DNS_FRONT_LIMIT, ask=None):
+        self.address, self.port, self.tor, self.wait = str(address), int(port), tuple(tor), float(wait)
+        self.ask = ask or self.ask_tor
+        self.sockets = []
+        self.slots = threading.BoundedSemaphore(limit)
+
+    def ask_tor(self, query):
+        """tor's answer to QUERY (bytes), None when it gives none within WAIT seconds."""
+        deadline = time.monotonic() + self.wait
+        with check_socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(self.tor)
+            sock.send(query)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0 or not select.select([sock], [], [], left)[0]:
+                    return None
+                try:
+                    answer = sock.recv(65535)
+                except ConnectionRefusedError:  # (tor not listening yet, or restarting: no answer)
+                    return None
+                if len(answer) >= 12 and answer[:2] == query[:2]:
+                    return answer
+
+    def answer(self, query):
+        """The answer to the DNS QUERY (bytes), None for none."""
+        if len(query) < 12:
+            return None
+        end = dns_question_end(query)
+        if end is None or struct.unpack("!HH", query[end - 4:end]) != (DNS_AAAA, DNS_IN):
+            return self.ask(query)
+        answer = self.ask(query[:end - 4] + struct.pack("!H", DNS_A) + query[end - 2:])
+        if not answer or len(answer) < 12 or not answer[2] & 0x80:
+            return None
+        flags = struct.unpack("!H", answer[2:4])[0] & ~0x0200  # (no TC: there is nothing more to ask for)
+        return query[:2] + struct.pack("!HHHHH", flags, 1, 0, 0, 0) + query[12:end]
+
+    def start(self):
+        sock = check_socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sockets = [sock]
+        try:
+            sock.bind((self.address, self.port))
+        except BaseException:
+            self.close()
+            raise
+        threading.Thread(target=self.serve, args=(sock,), daemon=True).start()
+        return self
+
+    def close(self):
+        for sock in self.sockets:
+            with contextlib.suppress(OSError):
+                sock.close()
+
+    def serve(self, sock):
+        """Each question in a thread of its own while a slot is left (beyond: dropped, as a resolver under load
+        drops). Ends with the socket (close), never on an error that passes."""
+        while True:
+            try:
+                query, peer = sock.recvfrom(4096)
+            except OSError:
+                if accepting_ended(sock):
+                    return
+                time.sleep(ACCEPT_PAUSE)
+                continue
+            if not self.slots.acquire(blocking=False):
+                continue
+
+            def reply(query=query, peer=peer):
+                try:
+                    with contextlib.suppress(OSError, ValueError, struct.error):
+                        answer = self.answer(query)
+                        if answer:
+                            sock.sendto(answer, peer)
+                finally:
+                    self.slots.release()
+            try:
+                threading.Thread(target=reply, daemon=True).start()
+            except RuntimeError:  # (no thread to be had now)
+                self.slots.release()
 
 
 BOOTSTRAPPED = re.compile(r"Bootstrapped (\d{1,3})%(?: \(([a-z0-9_]+)\))?:? ?(.*)")
@@ -1072,10 +1199,11 @@ def own_data_directory(uid, path=None):
     os.chown(path, uid, uid, follow_symlinks=False)
 
 
-def up_tor(payload, runner, out=None, uid_of=None, clock=time.monotonic, sleep=time.sleep):
-    """tor behind its kill switch: the rules first, then the torrc (private, with the bridges), then tor, which
-    binds its ports as root and becomes debian-tor; ready once it has bootstrapped (bootstrap: an attempt that
-    stalls is tried again, with the kill switch in place all the while)."""
+def up_tor(payload, runner, out=None, uid_of=None, clock=time.monotonic, sleep=time.sleep, front=None):
+    """tor behind its kill switch: the rules first, then the resolver in front of tor's DNSPort (FRONT: a
+    TorDnsFront's, IPv4 only), the torrc (private, with the bridges), then tor, which binds its ports as root and
+    becomes debian-tor; ready once it has bootstrapped (bootstrap: an attempt that stalls is tried again, with the
+    kill switch in place all the while)."""
     tor = payload["profile"]["tor"]
     settings = bootstrap_settings(tor)
     bridges = parse_bridges((payload.get("secrets") or {}).get("tor_bridges") or "")
@@ -1086,6 +1214,7 @@ def up_tor(payload, runner, out=None, uid_of=None, clock=time.monotonic, sleep=t
         raise RuntimeError(f"{TOR_USER} has the uid {uid} in the Tor image, not {TOR_UID}: rebuild it with "
                            "sandbox-ai build tor")
     load_killswitch(runner, tor_rules(uid, bridges, payload.get("bypass") or ()))
+    (front or TorDnsFront()).start()
     own_data_directory(uid)
     RUN.mkdir(mode=0o700, exist_ok=True)
     config, defaults = RUN / "torrc", RUN / "torrc-defaults"

@@ -91,6 +91,25 @@ def test_regression_claude_code_is_told_the_real_window(studio, capsys):
     assert env["ANTHROPIC_MODEL"] == MODEL and "1m tokens" not in capsys.readouterr().err
 
 
+def test_regression_claude_code_compacts_within_the_models_window(studio):
+    """Local-model research (runs/growc_default, growc_window): told no window, Claude Code 2.1.322 assumed 200,000
+    and compacted at ~164k tokens - above a model loaded with 131,072. CLAUDE_CODE_AUTO_COMPACT_WINDOW (the window
+    its auto-compaction works against) is the model's window too: it compacted at ~88k."""
+    studio(131072)
+    env = llm.agent_environment(start())
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "131072" == env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]
+    env = llm.agent_environment(start(llm_param=["num_ctx=65536"]))
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "65536"
+    # Yours wins (and is not refused); a model Claude Code knows keeps its own.
+    a = start(env=["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
+    env = llm.agent_environment(a)
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env and env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "131072"
+    a.offline, a.no_inspect, a.agent_args, a.local_config = False, [], [], False
+    llm.validate(a, True, True, lambda **kw: True)
+    run("set", NAME, "--model", "claude-sonnet-4-5", "--param", "num_ctx=65536")
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in llm.agent_environment(start(llm=f"{NAME}:claude-sonnet-4-5"))
+
+
 def test_the_output_limit_follows_the_window_and_the_max_tokens_ceiling(studio):
     studio(262144)
     env = llm.agent_environment(start())
@@ -163,6 +182,8 @@ def test_e2e_a_claude_start_with_lm_studio_passes_the_window(tmp_path):
         given = json.loads((tmp_path / "kept/session/config.json").read_text())["env"]
         assert given["ANTHROPIC_MODEL"] == MODEL and given["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
         assert given["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536" and given["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16384"
+        assert given["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "65536"
+        assert given["ENABLE_TOOL_SEARCH"] == "false"  # the MCP servers' tools offered as they are (no ToolSearch)
     finally:
         server.shutdown()
 

@@ -834,7 +834,10 @@ Sein Modell: das Nous Portal (`portal.nousresearch.com`, `inference-api.nousrese
 als Anbieter von Hermes standardmäßig offen), ein API-Schlüssel, der außerhalb
 der Sandbox bleibt (`--api-key HOST=NAME`), oder `--llm NAME` (Hermes bekommt
 den Server, das Kontextfenster und die Ebenen des Schleifenschutzes in seiner
-verwalteten Konfiguration; siehe [OpenRouter](#openrouter)). `--model` und
+verwalteten Konfiguration; Hermes braucht ein Fenster von mindestens 64.000
+Tokens, ein Start, der ihm weniger nennen würde, wird mit der Abhilfe
+abgelehnt: das Modell mit mehr laden, z. B. `--llm-param num_ctx=65536`; siehe
+[OpenRouter](#openrouter)). `--model` und
 `--effort` (`none` bis `max`, das `--reasoning` von Hermes) wirken wie bei den
 anderen, `-D` setzt `HERMES_YOLO_MODE=1`. Die Skills seiner Kits liegen in
 `~/.agents/skills` (nur lesbar), seine eigenen in `~/.hermes/skills`; sein
@@ -2766,7 +2769,8 @@ GeoIP-Dateien; keine VPN-Software), an der Stelle des VPN-Containers. Eine Tunne
 des Namespace wird auf Tors TransPort umgeleitet (`127.0.0.1:9040`; die des
 Agenten erreichen wie immer zuerst den Verbindungs-Proxy, Freigabeliste,
 Rückfragen, TLS-Prüfung und Verbindungsprotokoll gelten also), jede Abfrage
-auf Port 53 auf seinen DNSPort (`127.0.53.1`). Der Kill-Switch lässt nur Tors
+auf Port 53 auf seinen DNSPort (`127.0.53.1`), der nur IPv4-Adressen nennt (eine
+AAAA-Frage bekommt keine Adresse: IPv6 erreicht hier nichts). Der Kill-Switch lässt nur Tors
 eigenen Benutzer hinaus (`debian-tor`, UID 950, im Image fest; nur ein
 Prozess mit `CAP_SETUID` könnte sie annehmen; ein MCP-Server hinter einem
 Tor-Profil, dessen Image als UID 950, ein Tor-Benutzername oder ein Name läuft,
@@ -2869,7 +2873,7 @@ beim Holen von Images.
 <a id="mcp-hinter-tor"></a>**MCP-Server hinter Tor.** Tor ist dort transparent: jede
 TCP-Verbindung geht an Tors TransPort, der sie sofort annimmt und erst dann
 einen Exit das Ziel versuchen lässt, jede Abfrage auf Port 53 an seinen
-DNSPort, der nur A-, AAAA- und PTR-Fragen beantwortet, und sonst kommt nichts
+DNSPort, der nur A-, AAAA- (nie mit einer Adresse) und PTR-Fragen beantwortet, und sonst kommt nichts
 hinaus (kein UDP, ICMP oder Raw-Sockets). Jeder Server der beiden Kataloge ist
 daran gemessen (tests/test_mcp_tor_matrix.py): die nur TCP sprechen,
 funktionieren hinter Tor - bluesky, brave-search, duckduckgo, gowitness,
@@ -3092,7 +3096,7 @@ begrenzen.
 |---|---|---|---|
 | OpenCode | Chat Completions (`/v1/chat/completions`) | `~/.config/opencode/sandbox-ai-llm.json` (Provider `llm-NAME` über `@ai-sdk/openai-compatible`, alle Modelle, die der Server gelistet hat) und `OPENCODE_CONFIG` | alle |
 | Codex | Responses (`/v1/responses`; Codex hat `wire_api = "chat"` in 0.95.0 entfernt) | `~/.codex/sandbox-ai-llm.config.toml` (Provider `llm-NAME`, `wire_api = "responses"`, `env_key` mit dem Platzhalter; Update-Prüfung, Analytics, Metriken, Plugin-Abgleich und die gehostete Websuche aus), gestartet mit `--profile sandbox-ai-llm` (Codex 0.134 oder neuer) | Ollama 0.13.3, LM Studio 0.3.29, llama.cpp b7793 (b9161 für Codex' Werkzeugtypen), vLLM 0.10.0 (gestreamte Werkzeugaufrufe 0.18.0) |
-| Claude Code | Anthropic Messages (`/v1/messages`) | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (der Platzhalter), `ANTHROPIC_MODEL` und die Modellvariablen für Opus, Sonnet, Haiku und Subagenten, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, das Kontextfenster als `CLAUDE_CODE_MAX_CONTEXT_TOKENS` und `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (wenn bekannt); `skipWebFetchPreflight` in seinen Einstellungen | Ollama 0.14.0, LM Studio 0.4.1, llama.cpp b7187, vLLM 0.11.1 (und neuer); ein anderer Server nur mit `llm add --anthropic` |
+| Claude Code | Anthropic Messages (`/v1/messages`) | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` (der Platzhalter), `ANTHROPIC_MODEL` und die Modellvariablen für Opus, Sonnet, Haiku und Subagenten, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, das Kontextfenster als `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` und `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (wenn bekannt), `ENABLE_TOOL_SEARCH=false` (die Werkzeuge der MCP-Server werden direkt angeboten, nicht hinter seinem Werkzeug ToolSearch, das lokale Modelle selten nutzen); `skipWebFetchPreflight` in seinen Einstellungen | Ollama 0.14.0, LM Studio 0.4.1, llama.cpp b7187, vLLM 0.11.1 (und neuer); ein anderer Server nur mit `llm add --anthropic` |
 
 **Kontextfenster.** Lokale Modelle stehen weder in Codex' noch in OpenCodes
 Katalog; der Start nennt ihnen deshalb das Kontextfenster des Modells, wie der
@@ -3112,14 +3116,16 @@ Modell warnt es `Model "M" isn't recognized · context assumed to be 1m tokens`
 und würde das Gespräch erst bei diesem Fenster zusammenfassen, lange nachdem
 das Fenster eines lokalen Modells übergelaufen ist (der Server lehnt den
 Request dann ab oder kürzt das Gespräch). Der Start nennt ihm das echte Fenster
-als `CLAUDE_CODE_MAX_CONTEXT_TOKENS` und die längste Antwort als
+als `CLAUDE_CODE_MAX_CONTEXT_TOKENS` und `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (ohne
+Fenster fasste Claude Code 2.1.322 bei etwa 164k Tokens eines mit 131.072
+geladenen Modells zusammen, mit ihnen bei etwa 88k) und die längste Antwort als
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (ein Viertel des Fensters, höchstens 32768,
 oder der Parameter `max_tokens`): Die Warnung verschwindet, und Claude Code
 fasst rechtzeitig zusammen. Ist kein Fenster bekannt, sagt der Start das und
 wie man es setzt (`sandbox-ai llm set NAME --model MODEL --param
 num_ctx=TOKENS`); ein Fenster unter 50k Tokens bekommt eine Warnung, denn
 Claude Codes eigene Anweisungen und Werkzeuge belegen etwa 25k. Ein eigenes
-`--env` einer der beiden Variablen gilt.
+`--env` einer dieser Variablen gilt.
 
 Claude Code spricht nur die Anthropic-Messages-API: Ein Start von Claude mit
 einem allgemeinen `openai-compatible`-Server wird abgelehnt, und die Meldung
@@ -3270,8 +3276,14 @@ greedy für Qwen3 und DeepSeek-R1 (`sampling`), eine Warnung, wenn dem Agenten
 ein größeres Kontextfenster genannt würde, als der Server geladen hat
 (`context`), und im Verbindungs-Proxy: derselbe Tool-Aufruf mit demselben
 Ergebnis 3-mal seit Ihrer letzten Nachricht hängt diesem Ergebnis einen
-Hinweis an (`warn`), 6-mal pausiert die Tools für eine Antwort, damit das
-Modell zusammenfasst (`block`), ein Textblock, der sich in einer gestreamten
+Hinweis an (`warn`; wechselnde Teile wie Zeiten, Dauern, IDs und Codex'
+`Chunk ID` zählen nicht, die eigenen Hinweise eines Harness wie DSHs
+"Repeated tool call detected" zählen nicht als Ihre Nachricht), 6-mal wird
+das Modell aufgefordert, keine Tools mehr aufzurufen und zusammenzufassen;
+ruft es doch eines auf, antwortet sandbox-ai an seiner Stelle und der Zug
+endet (`block`; die Anfrage selbst geht unverändert hinaus, denn
+`tool_choice: none` ließe Server wie LM Studio das ganze Gespräch neu lesen),
+ein Textblock, der sich in einer gestreamten
 Antwort 10-mal wiederholt, beendet sie sauber mit einem Hinweis (`text`), und
 ein Watchdog für unbeaufsichtigte Läufe (`watchdog_requests`,
 `watchdog_minutes`, aus). Das Modell arbeitet danach jeweils weiter; Warten
@@ -3290,7 +3302,7 @@ Anfrage an den `--llm`-Server schreibt der Verbindungs-Proxy einen Eintrag in
 Anfrage, wie sie an den Server ging (Nachrichten, Systemteil, Werkzeuge,
 Werkzeugaufrufe und ihre Ergebnisse, jeder Parameter), und was das Relay daran
 änderte (Sampling-Parameter, `max_tokens` als Obergrenze, die Notiz des
-Schleifenschutzes und `tool_choice: none`, jeweils mit altem Wert und Grund),
+Schleifenschutzes, jeweils mit altem Wert und Grund),
 die aus ihrem Stream zusammengesetzte Antwort (Text, Reasoning, Werkzeugaufrufe
 mit ihren Argumenten, Abschlussgrund, Tokens; OpenAI Chat Completions, die
 Responses-API und Anthropic Messages, gestreamt oder nicht, auch gzip), Status,

@@ -4023,10 +4023,18 @@ LLM_TEXT_SPAN = 4096             # a repeated block counts once it covers at lea
 LLM_TEXT_PERIOD = (8, 4096)      # the block's length: shorter runs (=====, "0, 0, ") are no loop
 LLM_TEXT_STEP = 512              # characters between two looks
 LLM_NOTE = "[sandbox-ai loop guard]"
+# What changes from call to call in a tool result that is otherwise the same (llm_result_key): dates, times,
+# durations, UUIDs and long hex ids, epoch timestamps (all digits: the hex pattern), Codex's "Chunk ID: 8818fc" (6
+# hex digits, random per exec_command call: without it the guard never saw a loop of Codex) and "session ID 3" of a
+# process still running, the ids harnesses put into results (call_..., toolu_..., OpenCode's tool_... output files;
+# with a digit in them: tool_output is a word), process ids, temporary paths.
 LLM_VOLATILE = re.compile(
     r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:?\d\d)?|\b\d\d:\d\d:\d\d(?:\.\d+)?\b|"
-    r"\b\d+(?:\.\d+)?\s?(?:ms|µs|us|ns|s|sec|secs|seconds?|minutes?|m)\b|\b[0-9a-f]{8,}\b|"
-    r"\bpid[ =:]?\d+\b|/tmp/[\w.-]+", re.I)
+    r"\b\d+(?:\.\d+)?\s?(?:ms|µs|us|ns|s|sec|secs|seconds?|minutes?|m)\b|"
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\b[0-9a-f]{8,}\b|"
+    r"\bchunk id:\s*[0-9a-z]+|\bsession id:?\s*\d+|"
+    r"\b(?:call|toolu|tool|fc|item|msg|resp|chatcmpl|proc)_(?=[0-9a-z]*\d)[0-9a-z]{6,}|"
+    r"\bpid[ =:]*\d+\b|/tmp/[\w.-]+", re.I)
 LLM_POLLING = re.compile(r"\bsleep\s+([0-9]{1,5})|--watch\b|\bwatch\s|\bwait(?:ing)?\b|\buntil\b", re.I)
 
 
@@ -4159,10 +4167,51 @@ def llm_result_key(text):
     return hashlib.sha256(LLM_VOLATILE.sub("~", text).strip().encode("utf-8", "replace")).hexdigest()[:24]
 
 
+# Notes a harness puts into the conversation as a user message of its own, right after a tool result: DSH's ("You are
+# repeating the exact same tool call ...", "Repeated tool call detected ...", "Current runtime context ..."), and this
+# guard's own (appended where a request had no tool result to carry it).
+LLM_HARNESS_NOTE = re.compile(
+    r"\s*(?:<[^<>\n]{1,40}>\s*)?(?:You are repeating the exact same tool call|Repeated tool call detected|"
+    r"Current runtime context|" + re.escape(LLM_NOTE) + ")", re.I)
+
+
+def llm_human_turns(items, api):
+    """The indexes of the human's messages in ITEMS (a request's messages, or the Responses API's input), oldest
+    first. Not the human's: a user message carrying a tool result (Claude Code puts reminders beside its results), and
+    a harness's own note - a user message right after a tool result (or after another such note) whose text starts as
+    LLM_HARNESS_NOTE does (DSH's "Repeated tool call detected ..."). Any other user message is the human's, one right
+    after a tool result too (typed while the agent worked), and so is a note-like text anywhere else."""
+    found, after_result = [], False
+    for index, item in enumerate(items if isinstance(items, list) else []):
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if api == "responses":
+            kind = item.get("type", "message")
+            result = kind in ("function_call_output", "custom_tool_call_output")
+            user = kind == "message" and item.get("role") == "user"
+        elif api == "messages":
+            result = item.get("role") == "user" and isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+            user = item.get("role") == "user" and not result
+        else:
+            result, user = item.get("role") == "tool", item.get("role") == "user"
+        if result:
+            after_result = True
+        elif user and after_result and LLM_HARNESS_NOTE.match(llm_text(content, 512)):
+            continue  # a harness's note: the turn goes on
+        elif user:
+            found.append(index)
+            after_result = False
+        else:
+            after_result = False
+    return found
+
+
 def llm_tool_history(document, api):
-    """[(signature, result key, name, polling, holder)] of the tool calls since the human's last message, oldest
-    first; HOLDER is (container, key) where the call's result text sits (for a note), or None. A message of the human
-    is one with no tool result in it (Claude Code puts reminders beside its tool results)."""
+    """[(signature, result key, name, polling, holder)] of the tool calls since the human's last message
+    (llm_human_turns), oldest first; HOLDER is (container, key) where the call's result text sits (for a note), or
+    None."""
     calls, pending = [], {}
 
     def add_call(ident, name, arguments):
@@ -4175,10 +4224,7 @@ def llm_tool_history(document, api):
             calls[index][2] = holder
     if api == "chat":
         messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-        start = 0
-        for index, message in enumerate(messages):
-            if isinstance(message, dict) and message.get("role") == "user":
-                start = index + 1
+        start = ([-1] + llm_human_turns(messages, api))[-1] + 1
         for message in messages[start:]:
             if not isinstance(message, dict):
                 continue
@@ -4191,10 +4237,7 @@ def llm_tool_history(document, api):
                 add_result(str(message.get("tool_call_id")), (message, "content"))
     elif api == "responses":
         items = document.get("input") if isinstance(document.get("input"), list) else []
-        start = 0
-        for index, item in enumerate(items):
-            if isinstance(item, dict) and item.get("role") == "user" and item.get("type", "message") == "message":
-                start = index + 1
+        start = ([-1] + llm_human_turns(items, api))[-1] + 1
         for item in items[start:]:
             if not isinstance(item, dict):
                 continue
@@ -4205,13 +4248,7 @@ def llm_tool_history(document, api):
                 add_result(str(item.get("call_id")), (item, "output"))
     elif api == "messages":
         messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-        start = 0
-        for index, message in enumerate(messages):
-            content = message.get("content") if isinstance(message, dict) else None
-            if isinstance(message, dict) and message.get("role") == "user" and not (
-                    isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
-                                                      for b in content)):
-                start = index + 1
+        start = ([-1] + llm_human_turns(messages, api))[-1] + 1
         for message in messages[start:]:
             content = message.get("content") if isinstance(message, dict) else None
             for block in content if isinstance(content, list) else []:
@@ -4272,13 +4309,86 @@ def llm_add_note(holder, text):
         container[key] = (value if isinstance(value, str) else llm_text(value)) + "\n\n" + text
 
 
-def llm_pause_tools(document, api, kind):
-    """No tool call in the answer to DOCUMENT: tool_choice none (Ollama, which takes none, without its tools)."""
-    if kind == "ollama":
-        document.pop("tools", None)
-        document.pop("tool_choice", None)
-        return
-    document["tool_choice"] = {"type": "none"} if api == "messages" else "none"
+def llm_stop_answer(api, model, text, stream):
+    """A complete answer of API ("chat", "responses" or "messages") with TEXT as the assistant's whole message and the
+    turn's end as its finish (stop, completed, end_turn), streamed (server-sent events) or one JSON document: what
+    the relay answers in the model's place when the loop guard ends a turn (llm_held_answer)."""
+    ident = "sandbox-ai-loop-guard-" + secrets.token_hex(4)
+    now = int(time.time())
+
+    def events(items):
+        return b"".join((f"event: {name}\n" if name else "").encode() + b"data: " +
+                        (data if isinstance(data, bytes) else json.dumps(data, separators=(",", ":")).encode()) +
+                        b"\n\n" for name, data in items)
+    if api == "chat":
+        if not stream:
+            return json.dumps({"id": ident, "object": "chat.completion", "created": now, "model": model, "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}).encode()
+        base = {"id": ident, "object": "chat.completion.chunk", "created": now, "model": model}
+        return events([(None, {**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": text},
+                                                    "finish_reason": None}]}),
+                       (None, {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                               "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}),
+                       (None, b"[DONE]")])
+    if api == "messages":
+        message = {"id": "msg_" + ident, "type": "message", "role": "assistant", "model": model,
+                   "content": [{"type": "text", "text": text}], "stop_reason": "end_turn", "stop_sequence": None,
+                   "usage": {"input_tokens": 0, "output_tokens": 0}}
+        if not stream:
+            return json.dumps(message).encode()
+        return events([("message_start", {"type": "message_start", "message": {**message, "content": [],
+                                                                               "stop_reason": None}}),
+                       ("content_block_start", {"type": "content_block_start", "index": 0,
+                                                "content_block": {"type": "text", "text": ""}}),
+                       ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                                "delta": {"type": "text_delta", "text": text}}),
+                       ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                       ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn",
+                                                                             "stop_sequence": None},
+                                          "usage": {"output_tokens": 0}}),
+                       ("message_stop", {"type": "message_stop"})])
+    item = {"type": "message", "id": "msg_" + ident, "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}]}
+    response = {"id": "resp_" + ident, "object": "response", "created_at": now, "status": "completed",
+                "model": model, "output": [item],
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                          "input_tokens_details": {"cached_tokens": 0},
+                          "output_tokens_details": {"reasoning_tokens": 0}}}
+    if not stream:
+        return json.dumps(response).encode()
+    where = {"item_id": item["id"], "output_index": 0, "content_index": 0}
+    return events([
+        ("response.created", {"type": "response.created", "sequence_number": 0,
+                              "response": {**response, "status": "in_progress", "output": [], "usage": None}}),
+        ("response.output_item.added", {"type": "response.output_item.added", "sequence_number": 1,
+                                        "output_index": 0, "item": {**item, "status": "in_progress",
+                                                                    "content": []}}),
+        ("response.content_part.added", {"type": "response.content_part.added", "sequence_number": 2, **where,
+                                         "part": {"type": "output_text", "text": "", "annotations": []}}),
+        ("response.output_text.delta", {"type": "response.output_text.delta", "sequence_number": 3, **where,
+                                        "delta": text}),
+        ("response.output_text.done", {"type": "response.output_text.done", "sequence_number": 4, **where,
+                                       "text": text}),
+        ("response.content_part.done", {"type": "response.content_part.done", "sequence_number": 5, **where,
+                                        "part": item["content"][0]}),
+        ("response.output_item.done", {"type": "response.output_item.done", "sequence_number": 6,
+                                       "output_index": 0, "item": item}),
+        ("response.completed", {"type": "response.completed", "sequence_number": 7, "response": response})])
+
+
+def llm_held_answer(api, data, encoding, stream, model, text):
+    """The loop guard's last step: DATA, the model's whole answer (in ENCODING) to a request that told it to stop
+    calling tools (the note; the request otherwise as the agent sent it - tool_choice none would make servers such as
+    LM Studio render the prompt anew without the tools, a full prefill). An answer that calls a tool again is replaced
+    by llm_stop_answer with TEXT, so that the agent's turn ends; returns those bytes, or None: DATA passes as it came
+    (a text answer, an unreadable one)."""
+    answer = LlmAnswer(api, 1 << 20, encoding)
+    answer.feed(data)
+    result = answer.result()
+    if not result.get("tool_calls"):
+        return None
+    return llm_stop_answer(api, result.get("model") or model or "", text, stream)
 
 
 class LlmTurns:
@@ -4291,14 +4401,8 @@ class LlmTurns:
 
     @staticmethod
     def key(document, api):
-        if api == "responses":
-            items = document.get("input") if isinstance(document.get("input"), list) else []
-            human = [i for i in items if isinstance(i, dict) and i.get("role") == "user"]
-        else:
-            items = document.get("messages") if isinstance(document.get("messages"), list) else []
-            human = [m for m in items if isinstance(m, dict) and m.get("role") == "user" and not (
-                isinstance(m.get("content"), list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
-                                                           for b in m["content"]))]
+        items = document.get("input" if api == "responses" else "messages")
+        human = [items[index] for index in llm_human_turns(items, api)]
         last = json.dumps(human[-1], sort_keys=True, default=str)[:65536] if human else ""
         return hashlib.sha256(f"{len(human)}\0{last}".encode("utf-8", "replace")).hexdigest()[:24]
 
@@ -4381,7 +4485,14 @@ def llm_request(entry, api, document, turns=None, now=None):
                                           "content": [{"type": "input_text", "text": text}]})
                 done["note"] = {"text": text, "appended": True}
             if level == "block":
-                llm_pause_tools(document, api, entry.get("kind"))
+                # The request goes as it is (with the note): the answer is held, and one that calls a tool again is
+                # answered in the model's place with this text (llm_held_answer).
+                done["stop"] = (
+                    f"{LLM_NOTE} This turn has gone on for {watchdog}, " if watchdog else
+                    f"{LLM_NOTE} The model called {name} with the same arguments {count} times and got the same "
+                    "result each time, ") + \
+                    "and after being told to stop it called a tool again: sandbox-ai ended this turn here. Say " \
+                    "what you need, or what to try differently."
             done["loop"] = {"action": "paused tools" if level == "block" else "note", "kind": kind,
                             "tool": name, "count": count, **({"watchdog": watchdog} if watchdog else {})}
     done["params"] = llm_apply_params(document, entry, api, extra)
@@ -6552,7 +6663,7 @@ class ProxyServer:
                 llm_target = llm_endpoint(self.config.get("llm"), scheme, origin, port, path, target) \
                     if method.upper() == "POST" else None
                 llm_kind = llm_api(path) if llm_target is not None else None
-                stream_guard = None
+                stream_guard, hold = None, None
                 # The LLM traffic log (--llm-traffic): this request and its answer, recorded once it ends.
                 wanted = self.traffic.wants(llm_kind is not None, method, path) if self.traffic is not None else None
                 done = {}
@@ -6583,7 +6694,10 @@ class ProxyServer:
                     if done.get("loop"):
                         entry["llm_loop"] = {**done["loop"], "endpoint": llm_target.get("name")}
                     loop = llm_target.get("loop") or {}
-                    if loop.get("enabled", True) and loop.get("text"):
+                    hold = done.get("stop") if llm_kind in ("chat", "responses", "messages") else None
+                    if hold:
+                        head = identity_head(head)  # the whole answer is read before it goes on (llm_held_answer)
+                    elif loop.get("enabled", True) and loop.get("text"):
                         stream_guard = LlmStreamGuard(llm_kind, loop["text"])
                         head = identity_head(head)  # the guard reads the answer as it comes
                 if wanted:
@@ -6658,6 +6772,8 @@ class ProxyServer:
                         self.observe(facts)  # before the agent sees a byte of the answer
                     if added:  # a server that echoes what the proxy added gives the agent stars
                         reply = Scrubber(s.encode("latin-1", "replace") for s in self.own_secrets()).mask(reply)
+                    if hold and status == 200:
+                        break  # the head waits for the whole answer (below)
                     send_all(client, reply)
                     if 100 <= status < 200 and status != 101:
                         continue
@@ -6691,9 +6807,31 @@ class ProxyServer:
                     stream_guard = None
                 if stream_guard is not None and chunked and not added:
                     pieces = whole_chunks(pieces)  # a cut comes between two chunks, never inside one
-                cut = None
+                cut, replaced = None, None
+                if hold and status == 200:
+                    # The loop guard's block step: the model was told to stop calling tools (the note). Its whole
+                    # answer is read; one that calls a tool again goes no further - the relay answers in the model's
+                    # place and the agent's turn ends. Any other answer passes as it came (a larger one unread).
+                    held, size, whole = [], 0, True
+                    for raw, payload in pieces:
+                        held.append((raw, payload))
+                        size += len(raw)
+                        if size > LLM_BODY_LIMIT:
+                            whole = False
+                            break
+                    sse = "text/event-stream" in (header(reply_headers, "content-type") or "").lower()
+                    if whole:
+                        replaced = llm_held_answer(llm_kind, b"".join(payload for _, payload in held),
+                                                   header(reply_headers, "content-encoding"), sse,
+                                                   done.get("model") or "", hold)
+                    if replaced is None:
+                        send_all(client, reply)
+                        pieces = itertools.chain(held, pieces)
+                    else:
+                        pieces = iter(held)  # read for the records, never passed on
                 for raw, payload in pieces:
-                    send_all(client, raw)
+                    if replaced is None:
+                        send_all(client, raw)
                     received += len(raw)
                     answer.add(payload)
                     if answer_read is not None:
@@ -6716,6 +6854,15 @@ class ProxyServer:
                                 usage.feed(inflate.decompress(payload, 1 << 20))
                         elif not encoding or encoding == "identity":
                             usage.feed(payload)
+                if replaced is not None:
+                    closes = any((header(h, "connection") or "").lower() == "close" for h in (headers, reply_headers)) \
+                        or (closing and closing[0] == "close") or line.endswith("HTTP/1.0")
+                    send_all(client, b"HTTP/1.1 200 OK\r\nContent-Type: " +
+                             (b"text/event-stream\r\nCache-Control: no-cache" if sse else b"application/json") +
+                             b"\r\nContent-Length: %d\r\n" % len(replaced) +
+                             (b"Connection: close\r\n" if closes else b"") + b"\r\n" + replaced)
+                    entry["llm_loop"] = {**entry.get("llm_loop", {}), "ended": "the model called a tool again: "
+                                         "sandbox-ai answered in its place and the turn ended"}
                 if advert and status == 200:
                     with self.lock:
                         self.adverts[key] = advertised_refs(self.decoded(answer.data, reply_headers))

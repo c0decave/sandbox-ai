@@ -289,17 +289,20 @@ def test_the_note_and_the_pause_go_into_the_request():
     assert "tool_choice" not in document  # a note only: the model may still call tools
     document = chat_history([same] * 6)
     done = rt.llm_request(entry(), "chat", document)
-    assert done["loop"]["action"] == "paused tools" and document["tool_choice"] == "none" and document["tools"]
+    # The block step: the note, the request otherwise as it came (tool_choice none would make LM Studio render the
+    # prompt anew without the tools); the answer is held and one with a tool call replaced (done["stop"]).
+    assert done["loop"]["action"] == "paused tools" and "tool_choice" not in document and document["tools"]
+    assert done["stop"].startswith("[sandbox-ai loop guard]")
     document = chat_history([same] * 6)
     rt.llm_request(entry("ollama"), "chat", document)
-    assert "tools" not in document  # Ollama takes no tool_choice: its tools are left out for that answer
+    assert document["tools"]  # Ollama too: its tools stay
     messages = {"messages": [{"role": "user", "content": "go"}] + [
         m for i in range(6) for m in ({"role": "assistant", "content": [
             {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"c": 1}}]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": [
                 {"type": "text", "text": "same"}]}]})]}
-    rt.llm_request(entry("vllm"), "messages", messages)
-    assert messages["tool_choice"] == {"type": "none"}
+    assert rt.llm_request(entry("vllm"), "messages", messages)["stop"]
+    assert "tool_choice" not in messages
     assert messages["messages"][-1]["content"][0]["content"][-1]["text"].startswith("[sandbox-ai loop guard]")
     # The guard off: the request stays as it came.
     document = chat_history([same] * 6)
@@ -314,7 +317,7 @@ def test_the_watchdog_and_the_boost():
     for count in range(1, 7):
         document = chat_history([("read", {"path": f"f{count}"}, str(count))])
         done = rt.llm_request(found, "chat", document, turns, now=float(count))
-    assert done["loop"]["kind"] == "watchdog" and document["tool_choice"] == "none"
+    assert done["loop"]["kind"] == "watchdog" and done["stop"] and "tool_choice" not in document
     other = chat_history([("read", {"path": "x"}, "y")], human_after=0)  # a new turn
     assert rt.llm_request(found, "chat", other, turns, now=7.0)["loop"] is None
     minutes = entry(loop={**llm.LOOP_DEFAULTS, "watchdog_minutes": 1})
@@ -562,8 +565,9 @@ def test_end_to_end_through_the_relay(tmp_path):
         assert b"mock reply" in answer
         sent = requests_of(log)[-1]["body"]
         assert "[sandbox-ai loop guard]" in sent["messages"][-1]["content"] and "tool_choice" not in sent
-        relay.post("/v1/chat/completions", chat_history([same] * 6) | {"model": "qwen3-8b"})
-        assert requests_of(log)[-1]["body"]["tool_choice"] == "none"
+        answer = relay.post("/v1/chat/completions", chat_history([same] * 6) | {"model": "qwen3-8b"})
+        assert "tool_choice" not in requests_of(log)[-1]["body"]  # the note only; the model answers in text here
+        assert b"mock reply" in answer
         relay.close()
         # 3. A repeating stream is ended cleanly; the next request works and gets the boost.
         server.shutdown()
