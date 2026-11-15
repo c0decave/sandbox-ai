@@ -134,7 +134,7 @@ def test_load_explicitly_with_a_context_and_only_keys_lm_studio_knows(studio):
     status, out = run("load", "studio", "qwen3-8b", "--context", "16384")
     assert status == 0 and "loaded qwen3-8b explicitly as qwen3-8b, context 16384" in out
     loads = [r for r in requests_of(log) if r["path"] == "/api/v1/models/load"]
-    assert loads[-1]["body"] == {"model": "qwen3-8b", "context_length": 16384}
+    assert loads[-1]["body"] == {"model": "qwen3-8b", "context_length": 16384, "parallel": 1}
     rows = {i["instance"]: i for i in loaded("studio")["instances"]}
     assert rows["qwen3-8b"] == {**rows["qwen3-8b"], "kept": "explicit", "context": 16384}
     # Loaded explicitly already: nothing loaded again (a second load would be a second instance, qwen3-8b:2).
@@ -155,7 +155,7 @@ def test_the_context_defaults_to_num_ctx_of_the_models_parameters(studio):
     run("set", "studio", "--model", "big-70b", "--param", "num_ctx=24576")
     assert run("load", "studio", "big-70b")[0] == 0
     assert [r for r in requests_of(log) if r["path"] == "/api/v1/models/load"][-1]["body"] == \
-        {"model": "big-70b", "context_length": 24576}
+        {"model": "big-70b", "context_length": 24576, "parallel": 1}
 
 
 def test_a_jit_instance_is_replaced_never_held_twice(studio):

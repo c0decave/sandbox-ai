@@ -203,7 +203,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         created = int(time.time())
         if path == "/api/v1/models/load" and self.options.lmstudio:
             unknown = sorted(set(body) - {"model", "context_length", "eval_batch_size", "flash_attention",
-                                          "num_experts", "offload_kv_cache_to_gpu", "echo_load_config"})
+                                          "num_experts", "offload_kv_cache_to_gpu", "echo_load_config",
+                                          "parallel"})  # (parallel: LM Studio 0.4's load API takes it, measured)
             if unknown:  # as LM Studio 0.4 answers a key it does not know ("ttl" too)
                 self.send_json(400, {"error": {"message": f"Unrecognized key(s) in object: {', '.join(unknown)}",
                                                "type": "invalid_request", "code": "unrecognized_keys"}})

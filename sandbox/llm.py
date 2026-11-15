@@ -2100,9 +2100,12 @@ def forever(expires):
 
 
 def lmstudio_load_body(model, context=None, values=None):
-    """POST /api/v1/models/load's body: only keys LM Studio knows (it refuses others): the context window and, of
-    VALUES (the effective parameters), flash_attention and offload_kv_cache_to_gpu."""
-    return {"model": model, **({"context_length": context} if context else {}),
+    """POST /api/v1/models/load's body: only keys LM Studio knows (it refuses others): the context window, parallel
+    1 and, of VALUES (the effective parameters), flash_attention and offload_kv_cache_to_gpu. parallel: LM Studio's
+    default 4 keeps no prompt cache for several models (gpt-oss, Nemotron MLX: every agent step read the whole
+    conversation again, 22-32 s at 12k tokens instead of 0.3-0.5 s, research 2026-11-15); an agent sends one request
+    at a time, so 1 costs it nothing (a second agent on the same model waits its turn)."""
+    return {"model": model, **({"context_length": context} if context else {}), "parallel": 1,
             **{key: values[key] for key in ("flash_attention", "offload_kv_cache_to_gpu")
                if isinstance((values or {}).get(key), bool)}}
 

@@ -229,7 +229,8 @@ def test_lm_studio_ttl_is_sent_and_its_load_settings_never_are():
     request = {"model": "m", "messages": []}
     assert rt.llm_apply_params(request, entry, "chat") == {"ttl": 600}
     assert llm.lmstudio_load_body("m", 32768, {"flash_attention": True, "offload_kv_cache_to_gpu": False}) == {
-        "model": "m", "context_length": 32768, "flash_attention": True, "offload_kv_cache_to_gpu": False}
+        "model": "m", "context_length": 32768, "parallel": 1, "flash_attention": True,
+        "offload_kv_cache_to_gpu": False}
 
 
 def run(*argv):
@@ -255,7 +256,7 @@ def test_a_start_loads_lm_studio_s_model_with_its_load_settings(tmp_path, monkey
         a = argparse.Namespace(llm_param=["num_ctx=16384", "offload_kv_cache_to_gpu=false"], run_id="r1")
         note = llm.keep_loaded(llm.endpoint("lms"), "m", a, runs={})
         assert note and "loaded m for this start" in note, note
-        assert bodies(log, "/api/v1/models/load") == [{"model": "m", "context_length": 16384,
+        assert bodies(log, "/api/v1/models/load") == [{"model": "m", "context_length": 16384, "parallel": 1,
                                                         "flash_attention": True, "offload_kv_cache_to_gpu": False}]
     finally:
         server.shutdown()

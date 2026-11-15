@@ -642,6 +642,22 @@ def test_the_guard_creates_the_server_in_the_checked_vpn_containers_namespace_by
     assert order[-1] == "rm" and said == []
 
 
+def test_a_vpn_container_that_ends_once_the_server_runs_stops_it_and_says_so():
+    """The VPN container killed right after the server's start (CI's Tor live test): the server is stopped, and the
+    guard says it as the wrapper does ("...: MCP server stopped"), not "refused" - it had run."""
+    world = {}
+
+    def end_the_vpn():
+        world["podman"].containers[VPN_ID].update(running=False)
+    podman, processes, popen = guard_world(on_start=end_the_vpn)
+    world["podman"] = podman
+    said = []
+    with pytest.raises(ValueError, match="does not run"):
+        v.mcp_guard("sandbox-ai-vpn-mcp-srv", run_line(), {v.MCP_VPN_ID: VPN_ID}, podman, popen, said.append)
+    assert processes[0].killed and len(said) == 1
+    assert said[0].endswith(": MCP server stopped") and "refused" not in said[0], said
+
+
 @pytest.mark.parametrize("network", ["pasta", f"container:{OTHER_ID}", "host", "", "slirp4netns", "none",
                                      f"container:{VPN_ID[:12]}", f"container:{VPN_ID}0", f"container:{INFRA_ID}"])
 def test_a_server_container_in_another_network_is_removed_unstarted(network):

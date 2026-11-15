@@ -468,7 +468,7 @@ def test_a_start_loads_its_model_explicitly_unless_evict_allow(lmstudio):
     run("set", "studio", "--model", "qwen3-8b", "--param", "num_ctx=16384")
     note = llm.keep_loaded(llm.endpoint("studio"), "qwen3-8b")
     loads = [r for r in requests_of(log) if r["path"] == "/api/v1/models/load"]
-    assert "loaded qwen3-8b" in note and loads[-1]["body"] == {"model": "qwen3-8b", "context_length": 16384}
+    assert "loaded qwen3-8b" in note and loads[-1]["body"] == {"model": "qwen3-8b", "context_length": 16384, "parallel": 1}
     assert llm.loaded_context(llm.endpoint("studio"), "qwen3-8b") == 16384
     assert llm.keep_loaded(llm.endpoint("studio"), "gemma-3-12b") is None  # loaded already: left as it is
     run("set", "studio", "--evict", "allow")

@@ -2628,7 +2628,7 @@ def guarded_start(podman, options, image, at, vpn_id, run, popen, say):
     server = ((created.stdout or "").strip().splitlines() or [""])[-1]
     if created.returncode != 0 or not CONTAINER_ID.fullmatch(server):
         raise ValueError(f"podman create failed: {(created.stderr or '').strip()[-300:] or server or 'no answer'}")
-    process = None
+    process, started = None, [False]
 
     def remove():
         run([*podman, "rm", "--force", "--time", "0", server], capture_output=True, timeout=60)
@@ -2647,6 +2647,7 @@ def guarded_start(podman, options, image, at, vpn_id, run, popen, say):
         while process.poll() is None and time.monotonic() < deadline:
             with contextlib.suppress(ValueError):
                 if inspect_fields(podman, [server], {"running": ".State.Running"}, run)[0]["running"] == "true":
+                    started[0] = True
                     break
             time.sleep(0.1)
         after = check_vpn_container(podman, vpn_id, run=run)
@@ -2660,7 +2661,8 @@ def guarded_start(podman, options, image, at, vpn_id, run, popen, say):
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=10)
         if isinstance(exc, ValueError):
-            say(f"MCP server refused: {exc}")
+            # Once it ran, a VPN container gone meanwhile ended it (said as the wrapper says it); before, refused.
+            say(f"{exc}: MCP server stopped" if started[0] else f"MCP server refused: {exc}")
         raise
     finally:
         remove()
