@@ -600,7 +600,7 @@ BUILD_NETWORK_NOTE = ("its RUN steps reach the network from this host directly -
 
 
 def build(name, file, context=None, replace=False, podman=None, run=None, out=print, trust_agent_written=False,
-          network=False, builtin=None):
+          network=False, builtin=None, derived=None):
     """Build your Containerfile FILE (in CONTEXT, default its folder) as your image NAME: each image it takes from
     outside pulled once and pinned by digest in the Containerfile that is built (podman build --pull=never), the
     result recorded by its image ID. A Containerfile or context where a sandbox can write (an agent could have
@@ -675,10 +675,13 @@ def build(name, file, context=None, replace=False, podman=None, run=None, out=pr
     data = inspect_image(tag, podman, run)
     if data is None:
         raise ValueError(f"{tag} was built but cannot be inspected")
-    entry = {"kind": "built", "image": tag, "containerfile": str(path), "context": str(folder),
+    # derived (images derive): its Containerfile was generated in a folder of its own, gone after the build
+    entry = {"kind": "built", "image": tag,
+             "containerfile": f"{derived['from']} + {' '.join(derived['packages'])}" if derived else str(path),
+             "context": None if derived else str(folder),
              "containerfile_sha256": hashlib.sha256(text.encode()).hexdigest(), "from": sources, "reviewed": False,
              "build_network": bool(network), "agent_written": agent_written,
-             **({"builtin": builtin} if builtin else {}),
+             **({"builtin": builtin} if builtin else {}), **({"derived": derived} if derived else {}),
              "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
              **describe_image(data, podman, str(data.get("Id") or tag), run)}
     record_entry(name, entry, replace)

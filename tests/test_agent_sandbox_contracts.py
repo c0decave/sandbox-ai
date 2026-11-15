@@ -1955,6 +1955,7 @@ def test_start_gui(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(s.time, "sleep", lambda _: None)
     waited = []
     monkeypatch.setattr(rt, "wait_for_unix_listener", lambda path, process, errors, name: waited.append((str(path), name)))
+    monkeypatch.setattr(rt, "inet_listeners", lambda pid: [])
     config = {"display": ":99", "screen": "1920x1080x24", "vnc": scenario == "edge"}
     if scenario == "sad":
         with pytest.raises(RuntimeError, match="Xvfb exited"):
@@ -1967,8 +1968,31 @@ def test_start_gui(scenario, tmp_path, monkeypatch):
     assert started[0] == drop + ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"]
     if scenario == "edge":
         assert started[1] == drop + ["x11vnc", "-display", ":99", "-unixsock", "/sandbox/vnc/vnc.sock",
-                                     "-rfbport", "0", "-forever", "-shared", "-nopw", "-quiet", "-nosel"]
+                                     "-rfbport", "0", "-rfbportv6", "-1", "-noipv6", "-forever", "-shared", "-nopw",
+                                     "-quiet", "-nosel"]
         assert waited == [("/sandbox/vnc/vnc.sock", "x11vnc")]  # started only once it listens
+
+
+def test_inet_listeners(scenario, tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+
+    def row(local, state, inode):
+        return f"   0: {local} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000     0        0 {inode} 1\n"
+    (proc / "net" / "tcp").write_text(head + row("0100007F:170C", "0A", 11) + row("0100007F:9C40", "01", 12))
+    (proc / "net" / "tcp6").write_text(head + row("00000000000000000000000000000000:170C", "0A", 13))
+    (proc / "net" / "udp").write_text(head + row("00000000:0035", "07", 14))
+    if scenario == "sad":
+        assert rt.inet_listeners(7, proc)[0].startswith("unknown")  # no such process: not trusted
+        return
+    (proc / "7" / "fd").mkdir(parents=True)
+    inodes = [11, 12, 13, 14] if scenario == "happy" else [12, 99]
+    for number, inode in enumerate(inodes):
+        (proc / "7" / "fd" / str(number)).symlink_to(f"socket:[{inode}]")
+    (proc / "7" / "fd" / "9").symlink_to("/dev/null")
+    expected = ["tcp 127.0.0.1:5900", "tcp6 [::]:5900", "udp 0.0.0.0:53"] if scenario == "happy" else []
+    assert rt.inet_listeners(7, proc) == expected  # (an established connection is no listener)
 
 
 def test_x_socket(scenario):
@@ -2752,6 +2776,45 @@ def test_copies_credential(scenario, tmp_path):
         (tmp_path / "link").symlink_to(Path.home() / ".codex/auth.json")
         assert s.copies_credential(f"{tmp_path}/link:token")
         assert s.copies_credential("/x:./.codex/../.codex/auth.json")
+
+
+def test_check_copy_source(scenario, tmp_path):
+    (Path.home() / ".ssh").mkdir()
+    (Path.home() / ".ssh/id_ed25519").write_text("key")
+    if scenario == "happy":
+        plain = tmp_path / "notes.txt"
+        plain.write_text("x")
+        assert s.check_copy_source(f"{plain}:notes.txt", warn=lambda _text: None) is None
+        assert s.check_copy_source("no-separator") is None
+    elif scenario == "sad":
+        secret = Path.home() / ".local/share/sandbox-ai/secrets/TOKEN"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("x")
+        with pytest.raises(ValueError, match="sandbox-ai's own folder"):
+            s.check_copy_source(f"{secret}:t")
+        with pytest.raises(ValueError, match="file system of the kernel's own"):
+            s.check_copy_source("/proc/self/environ:env")
+    else:  # a private location is copied with a warning; a login copied in on purpose is the auth choice's
+        warned = []
+        text = s.check_copy_source("~/.ssh/id_ed25519:k", warn=warned.append)
+        assert warned == [text] and ".ssh" in text
+        (Path.home() / ".claude").mkdir()
+        (Path.home() / ".claude/.credentials.json").write_text("{}")
+        assert s.check_copy_source("~/.claude/.credentials.json:.claude/.credentials.json", warn=warned.append) is None
+        assert len(warned) == 1
+
+
+def test_private_source(scenario, tmp_path):
+    (Path.home() / ".aws").mkdir()
+    if scenario == "happy":
+        (tmp_path / "data").mkdir()
+        assert s.private_source("--mount", str(tmp_path / "data")) is None
+    elif scenario == "sad":
+        assert ".aws" in s.private_source("--mount", "~/.aws")
+        assert "sandbox-ai's own folder" in s.private_source("--copy", "~/.config/sandbox-ai/defaults.json")
+        assert "kernel" in s.private_source("--copy", "/proc/self/environ")
+    else:  # what cannot be resolved is for the start to say
+        assert s.private_source("--copy", "\0") is None
 
 
 def test_auth_choices(scenario):
@@ -10951,7 +11014,9 @@ def test_telemetry_plan(scenario):
     else:
         plan = s.telemetry_plan(s.parse_args(["claude", "--telemetry", "on"]))  # an old on: ignored
         assert plan == {"level": "off", "origin": "default", "environment": sorted(s.TELEMETRY_ENV["claude"]["off"]),
-                        "opencode_config": None, "codex_config": []}
+                        "opencode_config": None, "codex_config": [],
+                        "guarded": {"claude": {"command": "/usr/local/bin/claude",
+                                               "managed": "/etc/claude-code/managed-settings.json"}}}
 
 
 def test_telemetry_rules(scenario):
@@ -11479,6 +11544,72 @@ def test_model_effort_args(scenario):
         assert s.model_effort_args(s.parse_args(["opencode", "--model", "ollama/qwen3"])) == ["--model", "ollama/qwen3"]
     else:
         assert s.model_effort_args(s.parse_args(["claude"])) == []
+
+
+def test_check_show_thinking(scenario):
+    if scenario == "happy":
+        for argv in (["claude", "--show-thinking", "on"], ["codex", "--show-thinking", "off"], ["qwen"]):
+            s.check_show_thinking(s.parse_args(argv))
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="Qwen Code 0.26.4 has no setting for it"):
+            s.check_show_thinking(s.parse_args(["qwen", "--show-thinking", "on"]))
+    else:
+        with pytest.raises(ValueError, match="given twice"):
+            s.check_show_thinking(s.parse_args(["codex", "--show-thinking", "on", "--", "-c",
+                                                "hide_agent_reasoning=true"]))
+
+
+def test_thinking_shown(scenario):
+    if scenario == "happy":
+        assert s.thinking_shown(s.parse_args(["hermes", "--show-thinking", "on"])) is True
+    elif scenario == "sad":
+        assert s.thinking_shown(s.parse_args(["qwen", "--show-thinking", "on"])) is None  # (refused before)
+    else:
+        a = s.parse_args(["goose", "--show-thinking", "off"])
+        assert s.thinking_shown(a) is False
+        a.helper_of = "lead"
+        assert s.thinking_shown(a) is None, "a helper keeps its own default"
+
+
+def test_thinking_args(scenario):
+    if scenario == "happy":
+        assert s.thinking_args(s.parse_args(["claude", "--show-thinking", "on"])) == [
+            "--settings", '{"showThinkingSummaries": true}']
+        assert s.thinking_args(s.parse_args(["codex", "--show-thinking", "on"])) == [
+            "-c", "hide_agent_reasoning=false", "-c", "show_raw_agent_reasoning=true"]
+    elif scenario == "sad":
+        assert s.thinking_args(s.parse_args(["opencode", "--show-thinking", "on"])) == []  # its kv.json instead
+    else:
+        assert s.thinking_args(s.parse_args(["claude"])) == []
+
+
+def test_thinking_plan(scenario):
+    if scenario == "happy":
+        plan = s.thinking_plan(s.parse_args(["goose", "--show-thinking", "on"]))
+        assert plan["value"] == "on" and plan["agent_default"] == "off" and "GOOSE_CLI_SHOW_THINKING" in plan["switch"]
+    elif scenario == "sad":
+        plan = s.thinking_plan(s.parse_args(["qwen"]))
+        assert plan["switch"] is None and "Ctrl+O" in plan["none"]
+    else:
+        assert s.thinking_plan(s.parse_args(["codex"]))["value"] is None
+
+
+def test_opencode_thinking(scenario, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    if scenario == "happy":
+        s.opencode_thinking(home, True)
+        assert json.loads((home / s.OPENCODE_KV).read_text()) == {"thinking_mode": "show"}
+    elif scenario == "sad":
+        (home / s.OPENCODE_KV).parent.mkdir(parents=True)
+        (home / s.OPENCODE_KV).write_text("not json")
+        s.opencode_thinking(home, False)  # a file it cannot read is left as it is
+        assert (home / s.OPENCODE_KV).read_text() == "not json"
+    else:
+        (home / s.OPENCODE_KV).parent.mkdir(parents=True)
+        (home / s.OPENCODE_KV).write_text(json.dumps({"theme": "x", "thinking_mode": "hide"}))
+        s.opencode_thinking(home, False)
+        assert json.loads((home / s.OPENCODE_KV).read_text()) == {"theme": "x", "thinking_mode": "hide"}
 
 
 def test_a_refresh_written_while_the_login_is_synced_is_not_missed(tmp_path, monkeypatch):
@@ -12947,6 +13078,40 @@ def test_cut_mode_rules(scenario):
             rt.cut_mode_rules(cut_view("api"), "api")
 
 
+def test_cut_lend_mark(scenario):
+    """The mark of a start's lent connections (its tunnel, lent to its own MCP servers), as the supervisor takes it
+    from its config: the kill switch holds those connections too, and ends their TCP with a reset."""
+    if scenario == "happy":
+        assert rt.cut_lend_mark({"lend_mark": 0xca6e}) == 0xca6e
+        assert s.killswitch_config(s.parse_args(["claude"]), {})["lend_mark"] is None  # a start that lends nothing
+    elif scenario == "sad":  # it becomes part of a firewall rule: only a number
+        for bad in ("0xca6e", "51822 accept", 0, -1, 1 << 32, True, 1.0, [1]):
+            with pytest.raises(ValueError, match="bad mark"):
+                rt.cut_lend_mark({"lend_mark": bad})
+    else:  # none given, no config at all: a run that lends nothing
+        assert rt.cut_lend_mark({}) is None and rt.cut_lend_mark(None) is None and rt.cut_lend_mark({"x": 1}) is None
+        assert rt.cut_lend_mark({"lend_mark": 0xffffffff}) == 0xffffffff
+
+
+def test_lent_reject(scenario):
+    """Before each rule of a kill switch mode that rejects: the same match for a lent TCP packet, answered with a
+    reset (a lent connection open before the cut ends; the agent's are closed by its proxy)."""
+    reset = "meta mark 0xca6e meta l4proto tcp reject with tcp reset"
+    if scenario == "happy":
+        rules = rt.lent_reject(rt.cut_mode_rules(cut_view("all"), "all"), 0xca6e)
+        assert rules[-2:] == [reset, rt.CUT_REJECT]
+        assert [rule for rule in rules if "tcp reset" not in rule] == rt.cut_mode_rules(cut_view("all"), "all")
+        assert f"add rule inet agent_sandbox cut_all {reset}" in rt.cut_rules(cut_view("all"), None, 0xca6e)
+    elif scenario == "sad":  # a run that lends nothing: the rules as they are, and none with a reset
+        plain = rt.cut_mode_rules(cut_view("api"), "api")
+        assert rt.lent_reject(plain, None) == plain and "tcp reset" not in rt.cut_rules(cut_view("api"))
+    else:  # a rule that only passes on gets no twin; one that rejects a match keeps the match
+        assert rt.lent_reject(["ct original ip daddr 127.0.0.0/8 return"], 0xca6e) == [
+            "ct original ip daddr 127.0.0.0/8 return"]
+        assert rt.lent_reject([f"ct original ip daddr {{ 10.0.0.0/8 }} {rt.CUT_REJECT}"], 0xca6e) == [
+            f"ct original ip daddr {{ 10.0.0.0/8 }} {reset}", f"ct original ip daddr {{ 10.0.0.0/8 }} {rt.CUT_REJECT}"]
+
+
 def test_start_cuts(scenario):
     network = rt.RuntimeNetwork({"loopback": []}, None, lambda script: None)
     network.cut_settings = rt.cut_settings(CUT_SETTINGS)
@@ -13339,6 +13504,37 @@ def test_llm_api(scenario):
         assert rt.llm_api("/v1/models") is None and rt.llm_api("") is None and rt.llm_api(None) is None
     else:
         assert rt.llm_api("/gw/v1/responses/?x=1") == "responses"
+
+
+def test_llm_family(scenario):
+    if scenario == "happy":
+        assert rt.llm_family(r"qwen-?3").search("Qwen3-Coder")
+    elif scenario == "sad":
+        assert rt.llm_family("(") is None and rt.llm_family(None) is None
+    else:  # compiled once
+        assert rt.llm_family("gpt-oss") is rt.llm_family("gpt-oss")
+
+
+def test_llm_preset(scenario):
+    families = [["qwen-?3", {"top_k": 20}]]
+    if scenario == "happy":  # a model the start listed: its own preset first
+        assert rt.llm_preset({"presets": {"m": {"top_k": 5}}, "families": families}, "m") == {"top_k": 5}
+    elif scenario == "sad":
+        assert rt.llm_preset({}, "m") == {} and rt.llm_preset({"families": [[1, {}], ["(", {}]]}, "m") == {}
+    else:  # a model of the server not listed at the start: its family's preset
+        assert rt.llm_preset({"presets": {}, "families": families}, "qwen3-8b") == {"top_k": 20}
+
+
+def test_llm_model_refusal(scenario):
+    entry = {"name": "s", "models": ["a", "b"]}
+    if scenario == "happy":
+        assert rt.llm_model_refusal(entry, {"model": "a"}) is None
+        assert rt.llm_model_refusal({"name": "s", "models": None}, {"model": "z"}) is None  # any model of it
+    elif scenario == "sad":
+        assert "not among the models" in rt.llm_model_refusal(entry, {"model": "z"})
+    else:  # a request without a model name goes as it came
+        assert rt.llm_model_refusal(entry, {"messages": []}) is None and rt.llm_model_refusal(entry, {"model": 5}) \
+            is None
 
 
 def test_llm_values(scenario):
@@ -13756,6 +13952,82 @@ def test_hermes_managed(scenario):
         assert not s.hermes_managed(s.parse_args(["hermes", "--binary", "/bin/true"]))
 
 
+def test_load_telemetry_guard(scenario):
+    """telemetry_guard.py, loaded by path: the guard of the agents' commands and the opt-outs it pins."""
+    guard = s.load_telemetry_guard()
+    if scenario == "happy":
+        assert guard.AGENTS == ("claude", "codex", "opencode", "qwen", "goose", "dsh")
+        assert s.TELEMETRY_TOOLS == guard.TOOLS and guard.pinned("claude")["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0"
+    elif scenario == "sad":
+        assert guard.refused("qwen", ["--telemetry"], {})[0] == "--telemetry"
+        assert guard.refused("goose", [], {"GOOSE_TELEMETRY_ENABLED": "true"})[0] == "GOOSE_TELEMETRY_ENABLED=true"
+    else:  # a module of its own each time, the launcher's own copy untouched
+        assert guard is not s.TELEMETRY_GUARD and guard.MESSAGE == s.TELEMETRY_GUARD.MESSAGE
+        assert guard.refused("claude", [], {"CLAUDE_CODE_ENTRYPOINT": "cli"}) is None
+
+
+def test_telemetry_guarded(scenario):
+    """The agents whose own command the sandbox has: guarded, their managed configuration pinned."""
+    if scenario == "happy":
+        assert s.telemetry_guarded(s.parse_args(["opencode"])) == ["opencode"]
+        assert s.telemetry_guarded(s.parse_args(["qwen", "--binary", "/bin/bash"])) == ["qwen"]  # its shell
+    elif scenario == "sad":
+        assert s.telemetry_guarded(s.parse_args(["hermes"])) == []  # its own guard (hermes_guard.py)
+        assert s.telemetry_guarded(s.parse_args(["claude", "--probe"])) == []
+    else:  # the team image has all three, whichever lead the start; bwrap only the start's own (the host's)
+        assert s.telemetry_guarded(s.parse_args(["opencode", "--with", "codex"])) == ["opencode", "codex", "claude"]
+        assert s.telemetry_guarded(s.parse_args(["claude", "--backend", "bwrap"])) == ["claude"]
+
+
+def test_telemetry_guard_files(scenario):
+    if scenario == "happy":
+        files = s.telemetry_guard_files(s.parse_args(["codex"]), {})
+        assert set(files) == {"telemetry-guard/telemetry_guard.py", "telemetry-guard/telemetry-guard.mjs",
+                              "codex/managed_config.toml"}
+        assert tomllib.loads(files["codex/managed_config.toml"])["analytics"] == {"enabled": False}
+    elif scenario == "sad":
+        assert s.telemetry_guard_files(s.parse_args(["hermes"]), {}) == {}
+        assert s.telemetry_guard_files(s.parse_args(["goose", "--probe"]), {}) == {}
+    else:  # Claude Code's hooks keep their place in its managed settings; bwrap: no guard files (the host's agent)
+        hooks = {"claude-code/managed-settings.json": json.dumps({"allowManagedHooksOnly": True, "env": {"X": "1"}})}
+        files = s.telemetry_guard_files(s.parse_args(["claude", "--backend", "bwrap"]), hooks)
+        settings = json.loads(files["claude-code/managed-settings.json"])
+        assert set(files) == {"claude-code/managed-settings.json"} and settings["allowManagedHooksOnly"] is True
+        assert settings["env"]["X"] == "1" and settings["env"]["DISABLE_TELEMETRY"] == "1"
+
+
+def test_telemetry_guard_mounts(scenario, monkeypatch):
+    if scenario == "happy":
+        mounts = s.telemetry_guard_mounts(s.parse_args(["opencode"]), "/S")
+        assert mounts == [(Path("/S/telemetry-guard/telemetry_guard.py"), "/usr/local/lib/sandbox-ai/telemetry_guard.py"),
+                          (Path("/S/telemetry-guard/telemetry-guard.mjs"),
+                           "/usr/local/lib/sandbox-ai/telemetry-guard.mjs"),
+                          (Path("/S/opencode"), "/etc/opencode")]
+    elif scenario == "sad":
+        assert s.telemetry_guard_mounts(s.parse_args(["hermes"]), "/S") == []
+    else:  # a managed directory the hooks mount already is not mounted twice
+        monkeypatch.setattr(s, "hook_mount", lambda a, session: (Path(session) / "codex", "/etc/codex"))
+        targets = [target for _, target in s.telemetry_guard_mounts(s.parse_args(["codex"]), "/S")]
+        assert "/etc/codex" not in targets and len(targets) == 2
+
+
+def test_hermes_guarded(scenario, tmp_path, capsys):
+    """Hermes' telemetry guard: in every sandbox of its image where `hermes` can be typed, mounted read-only."""
+    if scenario == "happy":
+        a = s.parse_args(["hermes"])
+        assert s.hermes_guarded(a)
+        hermes = s.load_hermes_module()
+        mounts = hermes.guard_mounts(tmp_path)
+        assert [target for _, target in mounts] == [
+            f"{hermes.SITE_PACKAGES}/sandbox_ai_hermes_guard.py", f"{hermes.SITE_PACKAGES}/sandbox-ai-telemetry-off.pth"]
+    elif scenario == "sad":
+        assert not s.hermes_guarded(s.parse_args(["claude"]))
+        assert not s.hermes_guarded(s.parse_args(["hermes", "--probe"]))
+    else:  # a shell in Hermes' image: no managed Hermes start, but `hermes` can be typed there - guarded
+        a = s.parse_args(["hermes", "--binary", "/bin/bash"])
+        assert s.hermes_guarded(a) and not s.hermes_managed(a)
+
+
 def test_hermes_files(scenario):
     if scenario == "happy":
         files = s.hermes_files(s.parse_args(["hermes", "--mcp", "demo", "--hermes-enable", "kanban"]))
@@ -13766,7 +14038,7 @@ def test_hermes_files(scenario):
     elif scenario == "sad":  # an old --telemetry on: ignored - no update checks, never telemetry or another terminal
         config = json.loads(s.hermes_files(s.parse_args(["hermes", "--telemetry", "on"]))["hermes/config.yaml"])
         assert config["updates"] == {"check": False} and config["terminal"] == {"backend": "local"}
-        assert config["telemetry"] == {"shared_metrics": {"enabled": False, "send": False}}
+        assert config["telemetry"] == {"shared_metrics": {"enabled": False}}
     else:  # a helper's long tasks get the long timeout
         a = s.parse_args(["hermes", "--mcp", "helper-claude-x"])
         config = json.loads(s.hermes_files(a)["hermes/config.yaml"])
@@ -13796,8 +14068,9 @@ def test_load_dsh_module(scenario):
     module = s.load_dsh_module()
     if scenario == "happy":
         assert module is s.load_dsh_module() and module.VERSION == "0.2.1-rc.5"
-        assert module.command_args([]) == ["web", "--patch", module.PATCH, "--no-open", "--host", "127.0.0.1",
-                                           "--port", "3080"]
+        assert module.command_args([]) == ["chat"], "the chat in the terminal (dsh.command builds its command line)"
+        assert module.command_args(["web"]) == ["web", "--patch", module.PATCH, "--no-open", "--host", "127.0.0.1",
+                                                "--port", "3080"]
     elif scenario == "sad":
         with pytest.raises(ValueError, match="not in a sandbox"):
             module.check(argparse.Namespace(agent="dsh", agent_args=["desktop"], allow_host=[], no_inspect=[]))
@@ -13856,7 +14129,8 @@ def test_agent_files(scenario):
     if scenario == "happy":
         files = s.agent_files(s.parse_args(["qwen", "--qwen-enable", "updates", "--effort", "low"]))
         settings = json.loads(files["qwen/settings.json"])
-        assert settings["general"] == {"enableAutoUpdate": True} and settings["model"] == {"reasoningEffort": "low"}
+        assert settings["general"] == {"enableAutoUpdate": True}
+        assert settings["model"] == {"reasoningEffort": "low", "maxSessionTurns": 120}
         assert settings["privacy"] == {"usageStatisticsEnabled": False} and settings["$version"] == 4
         rows = json.loads(s.agent_files(s.parse_args(["dsh", "--mcp", "demo"]))["dsh/sandbox-ai.patch.yml"])
         assert rows[0]["insert"][0]["config"]["args"] == s.mcp_bridge_args("demo")
@@ -14312,3 +14586,115 @@ def test_current_run_name(scenario, tmp_path):
             (tmp_path / "run.json").write_text(json.dumps(document))
             assert s.current_run_name(a) == "brave-otter"
         assert s.current_run_name(SimpleNamespace(control_dir=None, start_name="x")) == "x"
+
+
+def test_browser_requests(scenario, monkeypatch):
+    """The browser socket is served for your browser (host_browser) or DSH's web UI in the session browser."""
+    if scenario == "happy":
+        assert s.browser_requests(s.parse_args(["codex"]))
+    elif scenario == "sad":  # nothing to serve: behind Tor no URL goes to your browser, and no DSH web UI
+        a = s.parse_args(["codex", "--vpn", "anon"])
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert not s.browser_requests(a)
+    else:  # Tor and no host browser, but DSH's web UI for the session browser
+        a = s.parse_args(["dsh", "--vpn", "anon"])
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        monkeypatch.setattr(s, "dsh_session_browser", lambda a: True)
+        assert s.browser_requests(a)
+
+
+def test_dsh_session_browser(scenario, monkeypatch):
+    """DSH's web UI goes to the session browser only for a DSH web start with a browser the human sees."""
+    a = s.parse_args(["dsh", "--browser"])
+    a.browser_container = "agent-x-service-browser"
+    monkeypatch.setattr(s, "load_browser_module", lambda: types.SimpleNamespace(human_sees=lambda a: True))
+    if scenario == "happy":
+        assert s.dsh_session_browser(a)
+    elif scenario == "sad":  # another agent, or no browser
+        b = s.parse_args(["codex", "--browser"])
+        b.browser_container = "agent-x-service-browser"
+        assert not s.dsh_session_browser(b)
+        c = s.parse_args(["dsh"])
+        assert not s.dsh_session_browser(c)
+    else:  # a headless task has no web UI
+        d = s.parse_args(["dsh", "--browser", "--", "headless", "do it"])
+        d.browser_container = "agent-x-service-browser"
+        assert not s.dsh_session_browser(d)
+
+
+def test_session_browser_opener(scenario, monkeypatch):
+    if scenario == "happy":
+        monkeypatch.setattr(s, "dsh_session_browser", lambda a: False)
+        assert s.session_browser_opener(s.parse_args(["dsh"])) is None
+    else:
+        assert callable(getattr(s, "session_browser_opener"))
+
+
+def test_dsh_web_port(scenario, monkeypatch):
+    """DSH's web UI never takes a port the host forwards into the sandbox or a service's."""
+    monkeypatch.setattr(s, "load_dsh_module",
+                        lambda: types.SimpleNamespace(web_port=lambda taken: next(p for p in range(3080, 3100)
+                                                                                  if p not in taken)))
+    if scenario == "happy":
+        assert s.dsh_web_port(s.parse_args(["dsh"])) == 3080
+    elif scenario == "sad":  # the host's 3080 forwarded: the UI moves
+        assert s.dsh_web_port(s.parse_args(["dsh", "--allow-host-port", "3080"])) == 3081
+    else:  # a service's port too
+        a = s.parse_args(["dsh", "--allow-host-port", "3080"])
+        a.services = [{"ports": [3081]}]
+        assert s.dsh_web_port(a) == 3082
+
+
+def test_start_vpn_images(scenario, monkeypatch):
+    """The images of the VPN profiles a start runs: its own and its MCP servers' - {} without, and a profile that
+    cannot be read leaves out what it cannot say (the start refuses it where it is used)."""
+    vpn = types.SimpleNamespace(image=lambda profile: f"localhost/sandbox-ai-{profile['type']}:latest",
+                                load_profile=lambda name: {"name": name, "type": "tor"})
+    monkeypatch.setattr(s, "load_vpn_module", lambda: vpn)
+    if scenario == "happy":
+        a = s.parse_args(["claude", "--vpn", "anon"])
+        assert s.start_vpn_images(a) == {"anon": "localhost/sandbox-ai-tor:latest"}
+    elif scenario == "sad":
+        def broken(name):
+            raise ValueError("damaged")
+        vpn.load_profile = broken
+        assert s.start_vpn_images(s.parse_args(["claude", "--vpn", "anon"])) == {}
+    else:
+        assert s.start_vpn_images(s.parse_args(["claude"])) == {}
+
+
+def test_joined_text(scenario):
+    if scenario == "happy":
+        assert s.joined_text("guard\n", "note") == "guard\n\nnote"
+    elif scenario == "sad":
+        assert s.joined_text(None, "") is None
+    else:
+        assert s.joined_text(None, "note\n") == "note\n"
+
+
+def test_network_note(scenario, monkeypatch):
+    monkeypatch.setattr(s, "load_vpn_module", lambda: types.SimpleNamespace(agent_note=lambda a: "through Tor"))
+    a = s.parse_args(["codex", "--vpn", "anon"])
+    a.vpn_profile = {"name": "anon", "type": "tor"}
+    if scenario == "happy":
+        assert s.network_note(a) == "through Tor"
+    elif scenario == "sad":  # no VPN, no note
+        assert s.network_note(s.parse_args(["codex"])) is None
+    else:  # a probe runs no agent
+        a.probe = True
+        assert s.network_note(a) is None
+
+
+def test_note_files(scenario, monkeypatch):
+    monkeypatch.setattr(s, "load_vpn_module",
+                        lambda: types.SimpleNamespace(agent_note=lambda a: "through Tor", NOTE_FILE="network.md"))
+    if scenario == "happy":  # Claude Code also gets it as its managed instructions
+        a = s.parse_args(["claude", "--vpn", "anon"])
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert s.note_files(a) == {"network.md": "through Tor", "claude-code/CLAUDE.md": "through Tor"}
+    elif scenario == "sad":
+        assert s.note_files(s.parse_args(["codex"])) == {}
+    else:
+        a = s.parse_args(["codex", "--vpn", "anon"])
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert s.note_files(a) == {"network.md": "through Tor"}

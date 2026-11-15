@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import applog
-from . import theme, widgets
+from . import package_search, registry_browser, theme, widgets
 from .files import printable, printable_text
 from .host_choice import on_host
 from .i18n import tr
@@ -337,6 +337,13 @@ class PackageList(QWidget):
         self.problem.hide()
         layout.addWidget(self.problem)
         self.add_button.setEnabled(False)
+        self.browser = package_search.browser_for(self)  # find packages: search, results, Add (package_search.py)
+        layout.addWidget(self.browser, 1)
+
+    def add_value(self, value):
+        """VALUE (a name the search found) added as typed in, checked the same way."""
+        self.entry.setText(value)
+        self.add()
 
     def values(self):
         return [self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())]
@@ -826,9 +833,29 @@ class ImagesPage(QWidget):
         images_layout.addWidget(self.status)
         splitter.addWidget(images)
 
+        # Below: what the image selected above has (its packages) and gets (its extension) - the header names it, so
+        # that the two parts read as one; the first row is selected when nothing is (show_images).
+        lower = QWidget()
+        lower_layout = QVBoxLayout(lower)
+        lower_layout.setContentsMargins(0, 0, 0, 0)
+        lower_layout.setSpacing(4)
+        self.shown_for = plain_label(selectable=True)
+        self.shown_for.setObjectName("imagesShownFor")
+        bold = QFont(self.shown_for.font())
+        bold.setBold(True)
+        self.shown_for.setFont(bold)
+        lower_layout.addWidget(self.shown_for)
         self.tabs = QTabWidget()
+        widgets.arrow_tabs(self.tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         packages = QWidget()
         packages_layout = QVBoxLayout(packages)
+        # What each tab is for, one line at its top (user: what are they for?).
+        self.tab_notes = [plain_label(tr("What the selected image has installed: its Debian, npm and Python packages "
+                                         "with their versions, read from the built image."), role="secondary"),
+                          plain_label(tr("What sandbox-ai adds to the selected image when it builds it: your packages, "
+                                         "files and Containerfile lines, a layer on top (Save, then Build)."),
+                                      role="secondary")]
+        packages_layout.addWidget(self.tab_notes[0])
         self.filter = QLineEdit()
         self.filter.setPlaceholderText(tr("filter (name or version)"))
         self.filter.setAccessibleName(tr("Filter"))
@@ -840,7 +867,9 @@ class ImagesPage(QWidget):
         self.tabs.addTab(packages, tr("Installed packages"))
         self.tabs.addTab(self.build_editor(), tr("Extension"))
         self.tabs.addTab(self.build_user_images(), tr("Your images"))
-        splitter.addWidget(self.tabs)
+        self.tabs.currentChanged.connect(lambda _index: self.show_shown_for())
+        lower_layout.addWidget(self.tabs, 1)
+        splitter.addWidget(lower)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 3)
         self.images.setMinimumHeight(150)
@@ -854,13 +883,16 @@ class ImagesPage(QWidget):
         self.show_command.finished.connect(self.extension_shown)
         self.check_timer.timeout.connect(self.revalidate)
         self.set_editing(False)
+        self.show_shown_for()
 
     def build_editor(self):
         box = QWidget()
         layout = QVBoxLayout(box)
+        layout.addWidget(self.tab_notes[1])
         self.editor_title = plain_label(tr("Select an image or a variant to edit its extension."), role="secondary")
         layout.addWidget(self.editor_title)
         self.editor_tabs = QTabWidget()
+        widgets.arrow_tabs(self.editor_tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.lists = {}
         for kind, label in (("apt", tr("Debian packages")), ("npm", tr("npm packages")), ("pip", tr("Python tools"))):
             self.lists[kind] = PackageList(kind, self)
@@ -965,6 +997,7 @@ class ImagesPage(QWidget):
         self.entries, self.rows, self.package_list, self.packages_for, self.document = [], [], [], None, None
         self.description, self.target = None, None
         fill(self.images, [])
+        self.show_shown_for()
         self.show_packages()
         self.set_editing(False, tr("Select an image or a variant to edit its extension."))
         self.update_buttons()
@@ -1005,10 +1038,16 @@ class ImagesPage(QWidget):
                                for e in self.entries],
                  ["bad" if e.get("base_image") else status_color(e) if e["present"] else "warn" for e in self.entries],
                  keys=[e["target"] for e in self.entries])
+            # Nothing selected (the page's first look, a refresh after the row selected was removed, another host):
+            # the top row, so that the packages and the extension below show something and belong to it at once.
+            # Never over an extension being edited (its question would come from a refresh).
+            if not selected_keys(self.images) and self.images.rowCount() and not self.dirty():
+                self.images.selectRow(0)
         finally:
             self.images.blockSignals(False)
         if self.agent() != before:
             self.selection_changed()
+        self.show_shown_for()
         built = sum(1 for e in self.entries if e["present"])
         stale = sum(1 for e in self.entries if e["present"] and e["status"] in ("outdated", "base-changed"))
         text = tr("{count} of {total} images built", count=built, total=len(self.entries))
@@ -1039,7 +1078,23 @@ class ImagesPage(QWidget):
                             tr("Acts on one row: {count} are selected.", count=len(chosen)) if several else None)
         self.delete_button.setEnabled(any(e["variant"] for e in chosen) if several else bool(entry and entry["variant"]))
 
+    def show_shown_for(self):
+        """The header above the tabs: which image the packages and the extension below are of (hidden on Your
+        images, which is about the images you added, not the row selected)."""
+        entry = self.entry()
+        if entry is None:
+            text = tr("Select an image or a variant above: its installed packages and its extension show here.")
+        elif entry["image"] and entry["image"] != entry["target"]:
+            text = tr("Installed packages and extension of {name} (image {image})", name=entry["target"],
+                      image=entry["image"])
+        else:
+            text = tr("Installed packages and extension of {name}", name=entry["target"])
+        if self.shown_for.text() != text:
+            self.shown_for.setText(text)
+        self.shown_for.setVisible(self.tabs.currentIndex() != 2)
+
     def selection_changed(self):
+        self.show_shown_for()
         if self.asking:  # the question below is open: its answer decides where the selection goes
             return
         self.update_buttons()
@@ -1382,10 +1437,18 @@ class ImagesPage(QWidget):
                                                             "sandbox-ai images remove"), self.remove_user_image,
                                           role="danger")
         user_refresh = button(tr("Refresh"), tr("Read your images again"), self.refresh_user_images)
-        for widget in (self.pull_button, self.build_image_button, self.remove_image_button, user_refresh):
+        self.browse_button = button(tr("Browse registries…"), tr("Docker Hub, GitHub, Quay, Google, Amazon, "
+                                                                 "Microsoft, GitLab, Red Hat and your own: search, "
+                                                                 "tags, then the pinned pull"), self.browse_registries)
+        self.derive_button = button(tr("Add OS packages…"), tr("A new image of yours: the selected one with packages "
+                                                               "of its own distribution (apk, dnf, apt-get …): "
+                                                               "sandbox-ai images derive"), self.derive_image)
+        for widget in (self.pull_button, self.browse_button, self.build_image_button, self.derive_button,
+                       self.remove_image_button, user_refresh):
             row.addWidget(widget)
-        widgets.list_menu(self.user_table, lambda: [self.remove_image_button, None, self.pull_button,
-                                                    self.build_image_button, None, user_refresh])
+        widgets.list_menu(self.user_table, lambda: [self.remove_image_button, self.derive_button, None,
+                                                    self.pull_button, self.browse_button, self.build_image_button,
+                                                    None, user_refresh])
         row.addStretch()
         layout.addLayout(row)
         self.user_status = plain_label(selectable=True)
@@ -1440,10 +1503,31 @@ class ImagesPage(QWidget):
     def update_user_buttons(self):
         entry = self.user_entry() if hasattr(self, "user_entries") else None
         self.remove_image_button.setEnabled(entry is not None)
+        self.derive_button.setEnabled(entry is not None and entry["present"] is not False)
 
-    def pull_image(self):
+    def browse_registries(self):
+        """The registry picker (registry_browser.py); its choice goes to the pull below, prefilled."""
+        browser = registry_browser.RegistryBrowser(self)
+        if widgets.exec_dropped(browser) and browser.reference():
+            self.pull_image(browser.reference())
+
+    def derive_image(self):
+        entry, host = self.user_entry(), self.host()
+        if entry is None:
+            return
+        dialog = package_search.DeriveDialog(self, self, entry["name"], entry["system"],
+                                             [e["name"] for e in self.user_entries])
+        if widgets.exec_dropped(dialog):
+            name, argv = dialog.name.text().strip(), dialog.argv()
+            self.task.run(self.run_argv(*argv, host=host),
+                          lambda status, out, err: self.user_image_added(status, out, err, name, host, argv),
+                          tr("Building {name} (every FROM pulled once and pinned)…", name=name), self.derive_button,
+                          timeout=7200)
+
+    def pull_image(self, reference=""):
         host = self.host()
         dialog = PullDialog(self, [e["name"] for e in self.user_entries])
+        dialog.reference.setText(reference or "")
         if widgets.exec_dropped(dialog):
             name = dialog.chosen_name()
             self.task.run(self.run_argv(*dialog.argv(), host=host),

@@ -91,7 +91,7 @@ KINDS = {kind.key: kind for kind in (
          help=N_("A container of one of your images (a database, a cache, a search engine, a test target) beside the "
                  "agent, in the sandbox's pod: reached at localhost:PORT, behind the same firewall and proxy. Its image "
                  "is unchecked: nobody reviewed it")),
-    Kind("llm", N_("LLM server"), ("--llm",), column=2,
+    Kind("llm", N_("LLM server"), ("--llm", "--llm-models"), column=2,
          help=N_("A model on your own server (sandbox-ai llm): only its address is opened, its key stays with "
                  "the proxy")),
     Kind("network", N_("Network"), ("--profile", *PRESET_OPTIONS, "--frontier", "--no-provider-defaults",
@@ -185,6 +185,9 @@ class Badge:
     cost: int = 0  # points off the score of 100
 
 
+BOARD_SERIALS = itertools.count(1)
+
+
 class Board:
     """The nodes and edges of one sandbox, plus what no node owns (EXTRA, kept as launcher tokens) and the
     keys of a project file the board does not edit (DOCUMENT_EXTRA: description, mcp_servers)."""
@@ -193,6 +196,9 @@ class Board:
         self.nodes, self.edges, self.extra, self.document_extra = [], set(), [], {}
         self.labels = {}  # {placeholder: [what it is, where to get it]} of the preset the board came from
         self._ids = itertools.count(1)
+        # A number no other board of this process has had (id() is handed to the next board once one is gone): what
+        # a start being prepared is about (BoardPage.prerequisite_context).
+        self.serial = next(BOARD_SERIALS)
 
     # -- nodes and edges --
 
@@ -396,8 +402,10 @@ def from_argv(sai, agent, argv, agent_args=(), workspaces=()):
     model, arguments = _split_agent_args(agent_args)
     model = str(values.pop("--model", "") or "") or model  # the launcher's option, else the agent's own
     effort = str(values.pop("--effort", "") or "")
+    thinking = str(values.pop("--show-thinking", "") or "")
     board.add("agent", agent=str(agent), model=model, arguments=arguments,
-              **({"effort": effort} if effort else {}))  # an unknown agent is a problem
+              **({"effort": effort} if effort else {}),
+              **({"thinking": thinking} if thinking else {}))  # an unknown agent is a problem
     paths = [w.strip() for value in list(workspaces) + list(values.pop("--workspace", []) or [])
              for w in str(value).split(",") if w.strip()]
     readonly = bool(values.pop("--workspace-ro", False))
@@ -459,18 +467,62 @@ AGENT_ONLY = {"--hermes-enable": "hermes", "--qwen-enable": "qwen", "--goose-ena
               "--local-config": "opencode"}
 
 
+def task_args(agent, text):
+    """AGENT's arguments that give it TEXT as its first task, as sandbox-ai's presets.prompt_args forms them (a start
+    with --preset): Claude Code and Codex take it as an argument, OpenCode --prompt, Qwen Code --prompt-interactive=,
+    Goose run --interactive --text=, Hermes chat --query=, DSH headless (a text that starts with "-" after a space)."""
+    if agent == "opencode":
+        return ["--prompt", text]
+    if agent == "qwen":
+        return ["--prompt-interactive=" + text]
+    if agent == "goose":
+        return ["run", "--interactive", "--text=" + text]
+    if agent == "hermes":
+        return ["chat", "--query=" + text]
+    if agent == "dsh":
+        return ["headless", " " + text if text.startswith("-") else text]
+    return [text]
+
+
+def task_of(agent, args):
+    """The first task ARGS (AGENT's arguments, a list) hold in AGENT's form (task_args), else None: only arguments
+    that are exactly such a task count, anything else is the human's own."""
+    prefixes = {"qwen": ([], "--prompt-interactive="), "goose": (["run", "--interactive"], "--text="),
+                "hermes": (["chat"], "--query=")}
+    if agent in prefixes:
+        lead, option = prefixes[agent]
+        if len(args) == len(lead) + 1 and args[:len(lead)] == lead and args[-1].startswith(option):
+            return args[-1][len(option):] or None
+        return None
+    if agent == "opencode":
+        return args[1] if len(args) == 2 and args[0] == "--prompt" and args[1] else None
+    if agent == "dsh":
+        return (args[1][1:] if args[1].startswith(" -") else args[1]) or None \
+            if len(args) == 2 and args[0] == "headless" else None
+    return args[0] if len(args) == 1 and args[0] and not args[0].startswith("-") else None
+
+
 def switch_agent(props, agent):
     """The agent part's PROPS changed in place to AGENT: what only the agent before took goes (its own options, an
     effort AGENT does not know, a model alias only the one before has, such as Claude's opus); the rest stays (a
-    model typed in, e.g. a server's, and what every agent takes)."""
+    model typed in, e.g. a server's, and what every agent takes). A first task (a preset's) takes AGENT's form:
+    OpenCode's --prompt TEXT is Qwen Code's run-and-end option, a bare text an unknown command of Hermes or Goose."""
     from .guide import AGENT_EFFORTS, AGENT_MODELS
     before = props.get("agent", "claude")
     props["agent"] = agent
+    try:
+        task = task_of(before, shlex.split(str(props.get("arguments") or ""))) if before != agent else None
+    except ValueError:
+        task = None
+    if task is not None:
+        props["arguments"] = shlex.join(task_args(agent, task))
     for option, owner in AGENT_ONLY.items():
         if owner != agent:
             props.pop(option, None)
     if props.get("effort") and props["effort"] not in AGENT_EFFORTS.get(agent, ()):
         props.pop("effort")
+    from . import thinking
+    thinking.keep(props, agent)  # (Qwen Code has no switch for showing thinking)
     model = str(props.get("model") or "")
     if model and model in AGENT_MODELS.get(before, ()) and model not in AGENT_MODELS.get(agent, ()):
         props["model"] = ""
@@ -738,6 +790,10 @@ def values(board, sai=None):
                 agent_args += ["--model", str(agent.props["model"])]
         if agent.props.get("effort") and launcher_knows(sai, "--effort"):
             found["--effort"] = str(agent.props["effort"])
+        from . import thinking
+        if agent.props.get("thinking") in thinking.VALUES and thinking.available(agent.props.get("agent", "claude")) \
+                and launcher_knows(sai, thinking.OPTION):
+            found[thinking.OPTION] = str(agent.props["thinking"])
         try:
             agent_args += shlex.split(agent.props.get("arguments") or "")
         except ValueError:
@@ -976,8 +1032,10 @@ def placeholders(board):
     return list(found.items())
 
 
-def fill(board, values):
-    """Put VALUES ({placeholder: value}) in place of the placeholders (empty values leave them)."""
+def fill(board, values, sai=None):
+    """Put VALUES ({placeholder: value}) in place of the placeholders (empty values leave them). SAI: a service read
+    while it held a placeholder (refused then: "raw") is read again once none is left in it (its image a value of a
+    preset, database-services)."""
     values = {k: str(v).strip() for k, v in (values or {}).items() if PLACEHOLDER.fullmatch(k) and str(v).strip()}
     if not values:
         return board
@@ -1001,6 +1059,9 @@ def fill(board, values):
                 node.props = {**rest, "arguments": filled}
                 continue
         node.props = _replace(node.props, put)
+        if node.kind == "service" and sai is not None and isinstance(node.props.get("raw"), str) and \
+                not PLACEHOLDER.search(node.props["raw"]):
+            node.props = service_props(sai, node.props["raw"])
     board.extra = [put(str(t)) for t in board.extra]
     return board
 

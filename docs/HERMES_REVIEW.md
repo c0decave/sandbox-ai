@@ -90,9 +90,34 @@ in the lock, no exporter is.
 What sandbox-ai does in every Hermes run, whatever else is enabled (sandbox/hermes.py: `TELEMETRY_PINNED`,
 `TELEMETRY_ENV`, `TELEMETRY_HOSTS`):
 
-- the managed configuration pins `telemetry.shared_metrics.enabled` and `.send` to false, both OTLP exports
+- the managed configuration pins `telemetry.shared_metrics.enabled` to false, both OTLP exports
   (`monitoring.gateway_health_export`, `monitoring.export.otlp`) off and `computer_use.cua_telemetry` false - laid
   over everything else, every feature included;
+- Hermes' first-run question about shared metrics ("Help improve Hermes?") is never asked: Hermes reads its answer -
+  and its collection and sending switches - only from the profile's own `~/.hermes/config.yaml`
+  (`hermes_cli/observability/shared_metrics_consent.py`, `relay_shared_metrics.py`), never from the managed scope.
+  So before every start (the agent, a resumed session, a helper, one-shot) the launcher's command first answers it
+  "No thanks" in each profile of the sandbox's HOME with Hermes' own reader and writer
+  (`telemetry.shared_metrics: {enabled: false, send: false, offer_version: 2}`; an opt-in of an earlier run is taken
+  back) and then becomes Hermes (sandbox/hermes.py: `TELEMETRY_ANSWER`, `start_command`). `.send` is not pinned on
+  purpose: Hermes drops every pinned leaf from that file when it saves it, and with both pinned a save (a model
+  switch, an "always allow") erased the answer - the next start asked again. `hermes setup telemetry` in the agent's
+  arguments is refused;
+- not even from inside the sandbox: that file is the agent's to write (`hermes setup telemetry`, the full setup's
+  tools menu, the TUI's `shared_metrics.set` and the dashboard's consent route, `hermes config edit`, any editor), and
+  `HERMES_MANAGED_DIR` or `PYTEST_CURRENT_TEST` make `managed_scope.get_managed_dir` drop `/etc/hermes`. So a guard
+  (sandbox/hermes_guard.py) and a `.pth` that loads it are mounted read-only into the venv's site-packages in every
+  sandbox of Hermes' image (a `--binary` shell too) and run in every process of Hermes' Python: a Hermes command line
+  (`python -m hermes_cli.main`, which the image's `hermes` runs) with `setup telemetry`, `config set|unset` of a
+  `telemetry`, `monitoring` or `computer_use.cua_telemetry` key, an opt-out variable set to another value or one of
+  those two variables is refused with "sandbox-ai: Hermes' telemetry is always off in sandbox-ai and cannot be turned
+  on"; the variables are pinned again; `hermes_cli.config`'s raw and merged reads see every telemetry switch off,
+  `consent_state` is always answered and off, `set_answer`/`save_consent` write "No thanks", the collection gate
+  (`relay_shared_metrics.enabled`) and the sending policy (`resolve_send_config`) are off, the Shared Metrics setup
+  section only says the message, and the managed scope is always `/etc/hermes`. Checked against Hermes v0.22.5
+  itself (tests/test_hermes_telemetry_guard.py with `SANDBOX_AI_TEST_HERMES_PYTHON`). Left: a Python started without
+  its site initialization (`python -S`) and a hand-built path to Hermes' packages skips the guard - nothing it counts
+  leaves the sandbox (the proxy), and the next start's answer turns it off again;
 - the opt-out variables are set: `CUA_DRIVER_RS_TELEMETRY_ENABLED=0` (the one Hermes documents), `OTEL_SDK_DISABLED=true`,
   `DO_NOT_TRACK=1`, `HF_HUB_DISABLE_TELEMETRY=1` (plus the launcher's own list for the tools an agent runs);
 - `telemetry.nousresearch.com`, `*.posthog.com` and `*.sentry.io` are never opened: no feature names them, and a start

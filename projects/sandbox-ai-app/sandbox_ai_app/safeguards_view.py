@@ -84,28 +84,35 @@ def detail_text(record):
 
 def popup(notification):
     """(level, title, text) of a Notifier notification, in the app's language: the title says the run and what
-    happened (grouped: how often in the last minute), the text what, why and what to do."""
-    run = printable(notification.get("run") or "sandbox-ai")
+    happened (grouped: how often in the last minute), the text what, why and what to do. Title and text are
+    rich_notice.Rich: the run in bold, the address, the decision ("dropped", "refused") and the command that allows
+    it marked; as strings, the plain text."""
+    from . import rich_notice as R
+    run = R.session(notification.get("run") or "sandbox-ai")
     kind, count = notification.get("kind"), notification.get("count") or 1
     if kind == "summary":
-        return ("warning", tr("{run}: {count} more safeguard events", run=run, count=count),
-                tr("Kinds: {kinds}. All of them: Activity > Safeguards", kinds=", ".join(notification.get("kinds") or [])))
+        return ("warning", R.fmt(tr("{run}: {count} more safeguard events"), run=run, count=str(count)),
+                R.fmt(tr("Kinds: {kinds}. All of them: Activity > Safeguards"),
+                      kinds=R.code(", ".join(notification.get("kinds") or []))))
     entry = notification.get("entry") or {}
     if count > 1:
         if kind in GROUPED:
-            what = tr(GROUPED[kind], count=count, target=printable(entry.get("target") or "?"))
+            what = R.fmt(tr(GROUPED[kind]), count=str(count), target=R.address(entry.get("target") or "?"))
         else:
-            what = tr("{title} ({count} times in the last minute)", title=kind_title(kind), count=count)
-        title = f"{run}: {what}"
+            what = R.fmt(tr("{title} ({count} times in the last minute)"), title=kind_title(kind), count=str(count))
+        title = R.fmt("{run}: {what}", run=run, what=what)
     else:
-        title = f"{run}: {kind_title(kind)}"
+        title = R.fmt("{run}: {what}", run=run, what=kind_title(kind))
     lines = [] if count > 1 else [printable(entry.get("what") or "")]
     if entry.get("why"):
-        lines.append(tr("Why: {why}", why=printable(entry["why"])))
+        lines.append(R.fmt(tr("Why: {why}"), base="why", why=printable(entry["why"])))
     if entry.get("fix"):
-        lines.append(f"{fix_label(entry)}: {printable(entry['fix'])}")
+        fix = printable(entry["fix"])
+        command = fix.startswith("sandbox-ai ") and not entry.get("stays")
+        lines.append(R.lines([("label", f"{fix_label(entry)}:"), ("text", " "),
+                              *([R.solution(fix)] if command else R.recognise(fix).lines[0])]))
     level = notification.get("level") if notification.get("level") in ("warning", "error") else "warning"
-    return level, title, "\n".join(line for line in lines if line)
+    return level, title, R.lines(*lines)
 
 
 class SafeguardsView(QWidget):

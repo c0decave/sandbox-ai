@@ -325,7 +325,7 @@ class NodeGuide(QDialog):
             for value, label in choices:
                 widget.addItem(tr(label), value)
             widget.setCurrentIndex(max(0, widget.findData(current)))
-        elif question.form in ("model", "effort"):
+        elif question.form in ("model", "effort", "thinking"):
             widget = QComboBox()
             widget.setEditable(question.form == "model")
             self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current,
@@ -375,6 +375,17 @@ class NodeGuide(QDialog):
     def fill_agent_choices(question, widget, agent, current, page=None):
         """The model names or effort levels AGENT knows; the empty choice is its default. With a model server on the
         board of PAGE (--llm), the models are that server's (NAME:MODEL; the launcher refuses --model with --llm)."""
+        if question.form == "thinking":  # shown, hidden or the agent's default; none to choose without a switch
+            from . import thinking
+            widget.blockSignals(True)
+            widget.clear()
+            for value, label in thinking.choices(agent):
+                widget.addItem(label, value)
+            widget.setCurrentIndex(max(0, widget.findData(current or "")) if thinking.available(agent) else 0)
+            widget.setEnabled(thinking.available(agent))
+            widget.setToolTip(thinking.tooltip(agent))
+            widget.blockSignals(False)
+            return
         if question.form == "model":  # each model with its version (models.py says where the lists come from)
             server = server_models(page)
             widget.setProperty("server", server is not None)
@@ -401,7 +412,7 @@ class NodeGuide(QDialog):
         widget.blockSignals(False)
 
     def agent_changed(self, agent):
-        for key in ("model", "effort"):
+        for key in ("model", "effort", "thinking"):
             if key in self.inputs:
                 question, widget = self.inputs[key]
                 value = widget.currentData() if widget.currentText() == widget.itemText(widget.currentIndex()) \

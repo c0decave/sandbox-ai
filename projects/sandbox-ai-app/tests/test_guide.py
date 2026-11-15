@@ -38,7 +38,7 @@ def test_the_tour_walks_every_page_in_the_windows_order():
 
 
 OWN = {"workspace": {"path", "readonly"}, "mount": {"source", "dest", "mode"}, "mcp": {"name"}, "service": {"name", "image"},
-       "agent": {"agent", "model", "effort"}, "proxy": {"enabled"}, "home": {"login"}, "session": {"tmux"}}
+       "agent": {"agent", "model", "effort", "thinking"}, "proxy": {"enabled"}, "home": {"login"}, "session": {"tmux"}}
 
 
 def test_every_question_is_about_what_its_node_owns(sai):
@@ -62,7 +62,7 @@ def test_every_question_is_about_what_its_node_owns(sai):
 
 
 SAMPLES = {"path": "/home/u/src/app", "source": "/home/u/data", "dest": "/mnt/data", "--state-dir": "/home/u/sb",
-           "--kit": ["egm", "mine"], "model": "opus", "effort": "high", "--rules": ["/home/u/rules.json"],
+           "--kit": ["egm", "mine"], "model": "opus", "effort": "high", "thinking": "off", "--rules": ["/home/u/rules.json"],
            "--no-inspect": ["pinned.example.org"], "--git-token-env": ["https://github.com=GH_TOKEN"],
            "name": "demo", "--llm": "local", "--allow-host": ["api.example.org"],
            "--allow-domain": ["example.org"], "--vpn": "work",

@@ -192,6 +192,7 @@ def test_launcher_starts_missing_servers_before_the_sandbox(tmp_path, monkeypatc
         (lambda: order.append(("ready", name)))
     module.definitions.return_value = {"demo": {}, "fs": {}}
     module.vpn_for_servers.side_effect = lambda a, names: {name: None for name in names}
+    module.lent_of.side_effect = m.lent_of  # (none borrows a start's tunnel: no --vpn)
     module.start_problems.return_value = ([], {}, [])  # (checked before anything starts: tests/test_mcp_variables.py)
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
@@ -240,7 +241,7 @@ def test_servers_begun_are_each_waited_for_and_the_earliest_error_is_raised():
 def test_a_server_begun_keeps_its_lock_until_it_is_waited_for(tmp_path, monkeypatch):
     import fcntl
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setattr(m, "start_instance", lambda name, a, servers=None: (name, {}, "digest", None))
+    monkeypatch.setattr(m, "start_instance", lambda name, a, servers=None, lent_by=None: (name, {}, "digest", None))
     seen = []
     monkeypatch.setattr(m, "ensure_running_locked", lambda name, a, vpn=None, instance=None, wait=True:
                         seen.append(wait) or (lambda: "started"))
@@ -272,14 +273,15 @@ def test_dry_run_lists_mcp_without_starting(tmp_path, monkeypatch, capsys):
     module.ensure_running.side_effect = module.begin_running.side_effect = AssertionError("must not start")
     module.definitions.side_effect = m.definitions
     for name in ("start_limits", "start_mounts", "start_env", "with_limits", "with_mounts", "default_limits",
-                 "instance_for", "instance_of", "start_problems", "problems_text", "vpn_for_servers", "network_of"):
+                 "instance_for", "instance_of", "start_problems", "problems_text", "vpn_for_servers", "network_of",
+                 "lent_of"):
         getattr(module, name).side_effect = getattr(m, name)
     monkeypatch.setattr(s, "load_mcp_module", lambda: module)
     s.main(["codex", "--mcp", "demo", "--dry-run"])
     plan = json.loads(capsys.readouterr().out)
     assert plan["mcp"] == [{"name": "demo", "instance": "demo", "socket": str(s.mcp_socket_dir("demo") / "server.sock"),
                             "limits": {"memory": "8g", "cpus": m.host_cpus_default(), "pids": 4096, "tmp": "4096m"},
-                            "own_limits": False, "own_mounts": [], "vpn": None}]
+                            "own_limits": False, "own_mounts": [], "vpn": None, "vpn_lent": False}]
 
 
 def test_an_unknown_server_is_refused_before_anything_starts_a_dry_run_too(tmp_path, monkeypatch):
@@ -1771,7 +1773,12 @@ def test_what_a_server_behind_the_starts_vpn_could_not_start_with_is_refused_up_
             m.vpn_for_servers(tor, [name])
     with pytest.raises(ValueError, match="--nameserver"):
         m.vpn_for_servers(wireguard, ["ns"])
-    assert m.vpn_for_servers(wireguard, ["noproxy", "ports"]) == {"noproxy": "home", "ports": "home"}
+    # WireGuard runs once at a time: the server borrows the start's tunnel, whose relay takes what the connection
+    # proxy hands it - so --no-proxy is refused up front there too (tests/test_hotfix_mcp_lent_vpn.py).
+    with pytest.raises(ValueError, match="has --no-proxy.*lent to it"):
+        m.vpn_for_servers(wireguard, ["noproxy"])
+    assert m.vpn_for_servers(wireguard, ["ports"]) == {"ports": "home"}
+    assert m.lent_of(m.vpn_for_servers(wireguard, ["ports"])["ports"])[0]
 
 
 def test_a_server_running_without_the_starts_vpn_is_refused_before_a_restart(tmp_path, monkeypatch):

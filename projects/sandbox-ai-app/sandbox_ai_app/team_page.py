@@ -2,15 +2,19 @@
 together, with a task board between them - on this machine or on a host of `sandbox-ai hosts` (over SSH).
 
   - the list is `sandbox-ai team list`, a team's members and its board `sandbox-ai team show --json NAME`;
-  - Start runs `sandbox-ai team start --agents A,B[,C] --workspace DIR NAME [-- OPTIONS]` in a terminal tab on that host
-    (each member starts there, one after the other, and says so);
+  - Start runs `sandbox-ai team start --agents A,B[,...] --workspace DIR [--vpn PROFILE] [--member-vpn AGENT=PROFILE]
+    [--allow-shared-openvpn] NAME [-- OPTIONS]` in a terminal tab on that host (each member starts there, one after
+    the other, and says so). The dialog offers that host's VPN profiles (with their type) for every member and, under
+    "Per member (advanced)", another one for a member; one profile in several members is checked as team.py checks
+    it (vpn_sharing: Tor said, WireGuard/Mullvad and a persistent Tailscale node refused with the reason, OpenVPN only
+    with its box ticked);
   - Post a task is `sandbox-ai team post NAME AGENT TASK` (a task for a member, from you);
   - Talk to the lead opens `sandbox-ai attach NAME-LEAD` in a terminal tab;
   - Stop (`team stop`) and Delete (`team delete --yes`: with the members' HOMEs and the board) are asked first
     (start-stop, start-delete).
 
 What a team's board holds comes from its members: shown through printable(), never as markup. Names that go back as
-arguments are checked first (a team's name, an agent of the three), and passed after "--"."""
+arguments are checked first (a team's name, an agent of AGENTS), and passed after "--"."""
 from __future__ import annotations
 
 import re
@@ -22,6 +26,7 @@ from PySide6.QtWidgets import (
     QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
+from .backend import AGENTS
 from .files import printable, printable_text
 from .i18n import N_, tr
 from . import widgets
@@ -31,7 +36,6 @@ from .widgets import (
 )
 
 LOCAL = "local"
-AGENTS = ("claude", "codex", "opencode")
 TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.py's TEAM_NAME
 NAME_EXAMPLE = "review"  # the same in every language
 OPTIONS_EXAMPLE = "--allow-pypi --kit egm"
@@ -50,12 +54,71 @@ def member_name(team, agent):
     return f"{team}-{agent}"
 
 
-class StartDialog(QDialog):
-    """A new team: its name, its agents (the lead first), the shared workspace and the launcher options of every
-    member. REMOTE: the workspace is a path on that host."""
+def vpn_sharing(entry):
+    """"shared", "once" or "ask" for a profile ENTRY of `vpn list --json` (profile, type, provider, ephemeral): whether
+    it may run in several members at once - sandbox-ai's own rule (vpn.sharing): Tor and an ephemeral Tailscale node
+    each their own, WireGuard (Mullvad's too) and a persistent Tailscale node once, OpenVPN only when you confirm."""
+    kind = entry.get("type")
+    if kind == "tor" or kind == "tailscale" and entry.get("ephemeral"):
+        return "shared"
+    return "ask" if kind == "openvpn" else "once"
 
-    def __init__(self, parent, host_label, remote, folder=""):
+
+def vpn_label(entry):
+    """"NAME (TYPE)", Mullvad's as mullvad: what the picker and the checks name."""
+    provider = entry.get("provider")
+    kind = provider if provider not in (None, "", "generic", "?") else entry.get("type") or "?"
+    return f"{printable(entry.get('profile'))} ({printable(kind)})"
+
+
+def vpn_check(profiles, chosen, shared_openvpn):
+    """([note], problem or None) of the members' VPNs CHOSEN ({agent: profile or None}) with PROFILES ({name: entry}):
+    one profile in several members as vpn_sharing says (team.py checks the same again)."""
+    groups = {}
+    for agent, name in chosen.items():
+        if name:
+            groups.setdefault(name, []).append(agent)
+    notes = []
+    for name, members in groups.items():
+        entry = profiles.get(name) or {"profile": name, "type": "?"}
+        if len(members) < 2:
+            continue
+        values = {"profile": vpn_label(entry), "count": len(members), "members": ", ".join(members)}
+        kind = vpn_sharing(entry)
+        if entry.get("type") == "tor":
+            notes.append(tr("{profile}: each member gets a Tor of its own (its own circuits and its own exit).",
+                            **values))
+        elif kind == "shared":
+            notes.append(tr("{profile}: each member gets a new ephemeral Tailscale node.", **values))
+        elif entry.get("type") == "tailscale":
+            return notes, tr("{profile} would run in {count} members at once ({members}): a Tailscale node runs once "
+                             "at a time. Use an ephemeral profile (vpn add … --ephemeral) or one per member.", **values)
+        elif kind == "once":
+            return notes, tr("{profile} would run in {count} members at once ({members}): a WireGuard key works in one "
+                             "sandbox at a time - the same key twice gets the same tunnel address, and the server sends "
+                             "to whichever tunnel spoke last, so both break. Give each member a profile of its own "
+                             "(Mullvad allows several devices per account, each with its own key) or use Tor.",
+                             **values)
+        elif not shared_openvpn:
+            return notes, tr("{profile} would run in {count} members at once ({members}): many OpenVPN servers take "
+                             "one account or certificate once, and a second connection ends the first. Tick the box "
+                             "below if your server allows it (duplicate-cn), or give each member a profile of its own.",
+                             **values)
+        else:
+            notes.append(tr("{profile} runs in {count} members at once ({members}), as you confirmed: if a tunnel "
+                            "drops, give each member a profile of its own.", **values))
+    return notes, None
+
+
+class StartDialog(QDialog):
+    """A new team: its name, its agents (the lead first), the shared workspace, the VPN profile in front of every
+    member (PROFILES: `vpn list --json` of that host; one per member under "Per member (advanced)") and the launcher
+    options of every member. REMOTE: the workspace is a path on that host."""
+
+    def __init__(self, parent, host_label, remote, folder="", profiles=(), profiles_error=None):
         super().__init__(parent)
+        self.profiles = {e["profile"]: e for e in profiles if isinstance(e, dict) and isinstance(e.get("profile"), str)
+                         and e["profile"].isprintable()}
         self.setWindowTitle(tr("Start a team on {host}", host=host_label))
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr("One sandbox per agent on one workspace; the lead talks to you and hands the "
@@ -67,15 +130,12 @@ class StartDialog(QDialog):
         for agent in AGENTS:
             self.lead.addItem(agent, agent)
         self.members = {}
-        members = QWidget()
-        row = QHBoxLayout(members)
-        row.setContentsMargins(0, 0, 0, 0)
         for agent in AGENTS:
             box = QCheckBox(agent)
             box.setChecked(agent == "codex")
+            box.toggled.connect(lambda _on=False: self.members_changed())
             self.members[agent] = box
-            row.addWidget(box)
-        row.addStretch()
+        members = flow(*self.members.values())  # seven agents: the row wraps in a narrow dialog
         self.workspace = QLineEdit(folder)
         self.workspace.setPlaceholderText(tr("the shared workspace (an absolute path on that host)"))
         browse = QPushButton(tr("Folder…"))
@@ -86,6 +146,12 @@ class StartDialog(QDialog):
         where_row.addWidget(self.workspace, 1)
         where_row.addWidget(browse)
         browse.setVisible(not remote)  # (in its row first: else a window of its own for a moment)
+        self.vpn = self.vpn_box(tr("(none)"))
+        self.vpn.setAccessibleName(tr("VPN profile"))
+        self.vpn.setToolTip(safe_tooltip(tr("The VPN in front of every member: each member is a sandbox of its own "
+                                            "with its own VPN container (sandbox-ai team start --vpn). One profile in several "
+                                            "members: Tor is fine, WireGuard and Mullvad need one profile per "
+                                            "member, OpenVPN only when you confirm")))
         self.options = QLineEdit()
         self.options.setPlaceholderText(OPTIONS_EXAMPLE)
         self.options.setToolTip(tr("Launcher options for every member (as on the command line)"))
@@ -93,10 +159,39 @@ class StartDialog(QDialog):
         form.addRow(tr("Lead"), self.lead)
         form.addRow(tr("Members"), members)
         form.addRow(tr("Workspace"), where)
+        form.addRow(tr("VPN profile"), self.vpn)
         form.addRow(tr("Options"), self.options)
         layout.addLayout(form)
+        # Per member (advanced): another profile for one member (sandbox-ai team start --member-vpn AGENT=PROFILE).
+        self.per_member = QGroupBox(tr("Per member (advanced)"))
+        self.per_member.setCheckable(True)
+        self.per_member.setChecked(False)
+        self.per_member.setToolTip(safe_tooltip(tr("Another VPN profile for a member (sandbox-ai team start "
+                                                   "--member-vpn AGENT=PROFILE)")))
+        per_form = QFormLayout(self.per_member)
+        self.member_vpn = {}
+        for agent in AGENTS:
+            box = self.vpn_box(tr("(the team's)"))
+            box.setAccessibleName(tr("VPN profile of {agent}", agent=agent))
+            label = plain_label(agent, word_wrap=False)
+            per_form.addRow(label, box)
+            self.member_vpn[agent] = (label, box)
+        layout.addWidget(self.per_member)
+        self.shared_openvpn = QCheckBox(tr("Allow one OpenVPN profile in several members (your server must allow it: "
+                                           "duplicate-cn)"))
+        layout.addWidget(self.shared_openvpn)
+        self.vpn_notes = plain_label(role="secondary", selectable=True)
+        layout.addWidget(self.vpn_notes)
+        # (said above the checks' notes for as long as the dialog is open)
+        self.listing_note = tr("Could not list the VPN profiles: {error}",
+                               error=printable_text(profiles_error)[:300]) if profiles_error else ""
         self.problem = plain_label(role="notice-error", selectable=True)
         layout.addWidget(self.problem)
+        self.vpn.currentIndexChanged.connect(lambda _=0: self.vpn_changed())
+        self.per_member.toggled.connect(lambda _on=False: self.members_changed())
+        self.shared_openvpn.toggled.connect(lambda _on=False: self.vpn_changed())
+        for _label, box in self.member_vpn.values():
+            box.currentIndexChanged.connect(lambda _=0: self.vpn_changed())
         buttons = QDialogButtonBox()
         buttons.addButton(tr("Start"), QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
@@ -106,11 +201,49 @@ class StartDialog(QDialog):
         self.lead.currentIndexChanged.connect(lambda _=0: self.lead_changed())
         self.lead_changed()
 
+    def vpn_box(self, empty):
+        """A picker of the host's VPN profiles, "NAME (TYPE)" each; EMPTY first (no profile, or the team's)."""
+        box = QComboBox()
+        box.addItem(empty, None)
+        for name, entry in sorted(self.profiles.items()):
+            box.addItem(vpn_label(entry), name)
+        return box
+
     def lead_changed(self):
         for agent, box in self.members.items():
             box.setEnabled(agent != self.lead.currentData())
             if agent == self.lead.currentData():
                 box.setChecked(False)
+        self.members_changed()
+
+    def agents(self):
+        """The team's agents, the lead first."""
+        return [self.lead.currentData()] + [a for a, box in self.members.items()
+                                            if box.isChecked() and a != self.lead.currentData()]
+
+    def members_changed(self):
+        """Per member: a row for each agent of the team only."""
+        agents = self.agents()
+        for agent, (label, box) in self.member_vpn.items():
+            label.setVisible(agent in agents)
+            box.setVisible(agent in agents)
+        self.vpn_changed()
+
+    def chosen_vpns(self):
+        """({agent: profile or None} of every member, {agent: profile} of the overrides)."""
+        team = self.vpn.currentData()
+        own = {agent: self.member_vpn[agent][1].currentData() for agent in self.agents()
+               if self.per_member.isChecked() and self.member_vpn[agent][1].currentData()}
+        return {agent: own.get(agent) or team for agent in self.agents()}, own
+
+    def vpn_changed(self):
+        chosen, _own = self.chosen_vpns()
+        notes, problem = vpn_check(self.profiles, chosen, self.shared_openvpn.isChecked())
+        openvpn = [n for n in set(chosen.values()) if n and (self.profiles.get(n) or {}).get("type") == "openvpn"
+                   and list(chosen.values()).count(n) > 1]
+        self.shared_openvpn.setVisible(bool(openvpn))
+        self.vpn_notes.setText("\n".join([self.listing_note, *notes] if self.listing_note else notes))
+        self.problem.setText(problem or "")
 
     def choose(self):
         from .state import choose_folder
@@ -119,14 +252,14 @@ class StartDialog(QDialog):
             self.workspace.setText(path)
 
     def request(self):
-        """(name, [agents, the lead first], workspace, [options]); ValueError says what is wrong."""
+        """(name, [agents, the lead first], workspace, [options], vpn, {agent: vpn}, shared_openvpn); ValueError says
+        what is wrong."""
         name = self.name.text().strip()
         if valid_team(name) is None:
             raise ValueError(tr("A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit."))
-        agents = [self.lead.currentData()] + [a for a, box in self.members.items()
-                                              if box.isChecked() and a != self.lead.currentData()]
+        agents = self.agents()
         if len(agents) < 2:
-            raise ValueError(tr("A team has two or three agents: choose at least one member besides the lead."))
+            raise ValueError(tr("A team has two or more agents: choose at least one member besides the lead."))
         workspace = self.workspace.text().strip()
         if not workspace.startswith("/") or not workspace.isprintable():
             raise ValueError(tr("The workspace is an absolute path."))
@@ -134,7 +267,12 @@ class StartDialog(QDialog):
             options = shlex.split(self.options.text())
         except ValueError as exc:
             raise ValueError(tr("The options cannot be read: {error}", error=printable_text(exc))) from None
-        return name, agents, workspace, options
+        chosen, own = self.chosen_vpns()
+        shared = self.shared_openvpn.isChecked() and self.shared_openvpn.isVisibleTo(self)
+        _notes, problem = vpn_check(self.profiles, chosen, shared)
+        if problem:
+            raise ValueError(problem)
+        return name, agents, workspace, options, self.vpn.currentData(), own, shared
 
     def check_and_accept(self):
         try:
@@ -406,14 +544,24 @@ class TeamPage(QWidget):
     # -- actions --
 
     def start(self):
+        """The host's VPN profiles first (vpn list --json there), then the dialog."""
         host = self.host()
+        self.status.setText(tr("Asking {host}…", host=self.hosts.label(host)))
+        background(lambda: self.sai.host_vpn_profiles(host), owner=self, source=self.start_button, timeout=90,
+                   done=lambda result, error: self.start_with(host, result or [], error))
+
+    def start_with(self, host, profiles, error):
+        if host != self.host():
+            return
+        self.status.setText("")
         folder = self.project if host == LOCAL and self.project else ""
-        dialog = StartDialog(self, self.hosts.label(host), host != LOCAL, folder)
+        dialog = StartDialog(self, self.hosts.label(host), host != LOCAL, folder, profiles, error)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         try:
-            name, agents, workspace, options = dialog.request()
-            argv = self.sai.team_start_argv(host, name, agents, workspace, options)
+            name, agents, workspace, options, vpn, member_vpn, shared = dialog.request()
+            argv = self.sai.team_start_argv(host, name, agents, workspace, options, vpn=vpn, member_vpn=member_vpn,
+                                            shared_openvpn=shared)
         except ValueError as exc:
             warn(self, tr("Start a team"), printable_text(exc))
             return

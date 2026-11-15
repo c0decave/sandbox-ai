@@ -348,14 +348,11 @@ Open:
   `model_context_window` and OpenCode's `limit.context`/`limit.output` are set
   from what the server reports (done, README "Context window"), but not for a
   server behind its VPN (the host cannot ask it; same fix as `llm check`
-  above), and Claude Code has no such setting for a model it does not know.
+  above). Claude Code gets it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (0.1.96).
 - **Older and newer agents.** Codex before 0.134 has no profile files
   (`--profile` selected `[profiles.x]`); `-c` overrides would cover it.
   OpenCode 2's native `providers` shape is not written (it reads the v1 shape
   written now).
-- **Claude Code and model names with `/`** (vLLM serves `org/model` by
-  default) may be refused by Claude Code; the start says so, and vLLM's
-  `--served-model-name` avoids it.
 - **Not supported:** TLS client certificates (mTLS) to the server, rotating
   keys (an `apiKeyHelper`-like command); keys are static secrets.
 - **Live tests** against real servers: `tests/test_live_e2e.py` has
@@ -685,6 +682,11 @@ Three modes, built in this order:
    desktop app). One sandbox per agent on a shared workspace,
    started and stopped together (`sandbox-ai team`, a board preset), with a
    coordinator handing tasks between them.
+   - Later (noted 2026-11-15, hotfix 0.1.96): **Teams on the Board.** A team
+     as a part of the app's Board (its members, the lead, each member's VPN -
+     the same checks as `team start --vpn/--member-vpn` - and the board
+     server), started from there like any board, instead of only from the
+     Teams page's dialog.
 
 ## Process attribution in the logs (2026-11-04)
 

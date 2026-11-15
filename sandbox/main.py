@@ -42,7 +42,7 @@
   sandbox-ai publish-logins add|list|remove|check|kinds ...           package registry logins, used by the proxy
   sandbox-ai identities add|set|login|publish|list|show|check|remove ...  commit identities with their logins
   sandbox-ai demo-device start|serve|status|stop ...                  a virtual device to try the device rules
-  sandbox-ai images [packages|extend|check|new|remove|history|recipe|pull|build-image|list] ...  the agent images,
+  sandbox-ai images [packages|extend|check|new|remove|history|recipe|pull|build-image|list|search|derive] ...  the agent images,
                                                                       their extensions, your images (services, bases)
   sandbox-ai update [--check] [--version X.Y.Z] ...                  update an installation made by install.sh (signed)
   sandbox-ai version [--verbose]                                     version; --verbose: install place, release keys
@@ -74,6 +74,11 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
                    "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",),
                    "report": ("report.py",)}
+
+
+# The commands with a `list` that run it when given alone (approvals does it itself: also with --json alone).
+LISTED_ALONE = {"mcp", "vpn", "llm", "secrets", "identities", "hosts", "presets", "devices", "canaries", "net",
+                "git-logins", "publish-logins"}
 
 
 def version():
@@ -448,10 +453,20 @@ def main(argv):
         print(f"sandbox-ai: {command} was removed in 0.1.92; use {REMOVED[command]}", file=sys.stderr)
         return 2
     if command in ("version", "--version", "-V"):
-        if rest[:1] in (["--verbose"], ["-v"]):
+        if rest[:1] in (["-h"], ["--help"]):
+            print("usage: sandbox-ai version [--verbose]\n\n  the installed version; --verbose (-v): also where it is "
+                  "installed, the release keys its updates must be signed by and how it is updated")
+            return 0
+        if rest[:1] in (["--verbose"], ["-v"]) and len(rest) == 1:
             return verbose_version()
+        if rest:
+            print(f"sandbox-ai version: unknown argument {rest[0]!r}; usage: sandbox-ai version [--verbose]",
+                  file=sys.stderr)
+            return 2
         print(f"sandbox-ai {version()}")
         return 0
+    if command in LISTED_ALONE and not rest:
+        rest = ["list"]  # (alone it lists, as images, kits, plugins and defaults alone do)
     if command in PYTHON_COMMANDS:
         script, *prefix = PYTHON_COMMANDS[command]
         if script in EXECUTED:  # (the launcher logs its start itself)

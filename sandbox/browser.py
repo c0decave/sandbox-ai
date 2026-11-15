@@ -70,6 +70,10 @@ CONFIG_FILE = "browser.json"  # in the run's session folder, mounted at MOUNT/co
 CA_FILE = "browser-ca.pem"  # written by the supervisor into the run's directory (runtime.share_browser_ca)
 CA_LIMIT = 64 << 10
 VNC_SOCKET = "vnc.sock"
+# A URL the launcher hands to the browser (request_open), in the VNC folder: only you and the browser's container
+# reach it, never the agent. browser_runtime.py opens it (OPEN_REQUEST there).
+OPEN_REQUEST = "open.url"
+OPEN_URL = re.compile(r"https?://[!-~]{1,4000}")
 LIMITS = {"memory": "2g", "cpus": "2", "pids": 1024}
 READY_TIMEOUT = 90  # agent and both: the agent starts once the DevTools port answers
 TOR_NOTE = ("behind Tor this is {name}, not Tor Browser: sites can fingerprint it and link its visits to each other "
@@ -185,6 +189,8 @@ def check(a, l=None):
     if kind == "dir":
         if path.is_symlink() or (path.exists() and not path.is_dir()):
             raise ValueError(f"--browser-profile {path}: not a folder (or a symbolic link)")
+        if path.exists() and path.stat().st_uid != os.getuid():
+            raise ValueError(f"--browser-profile {path}: not your folder (its owner is another user)")
         l.check_private_dir(a, path, "--browser-profile")
         l.check_output_dir(path, "--browser-profile")
     if agent_drives(a):
@@ -213,7 +219,8 @@ def notes(a):
     found = [{"human": f"browser: {name} in its own container beside the agent, for you only (the app's Browser "
                        "button; no DevTools port, the agent cannot drive it)",
               "agent": f"browser: {name} in its own container beside the agent, driven by the agent through the "
-                       f"DevTools Protocol at {CDP_URL} (the app's Browser button shows it)",
+                       f"DevTools Protocol at {CDP_URL}; only the agent's: the app shows no display for you of it "
+                       "(--browser-control both to watch it too)",
               "both": f"browser: {name} in its own container beside the agent, for you and the agent (DevTools at "
                       f"{CDP_URL}): whatever you sign in to there, the agent can use"}[control]]
     if getattr(a, "offline", False):
@@ -232,6 +239,10 @@ def notes(a):
         found.append(f"browser: its profile (logins, cookies, history) is kept in {path}")
     elif kind == "session":
         found.append("browser: its profile (logins, cookies, history) is kept with the session, outside its HOME")
+    if kind != "fresh" and launcher_tor(a):
+        found.append("browser: behind Tor a kept profile brings the cookies, logins, history and cache of its "
+                     "earlier runs (with Tor or without, from your own address) into this one: a site links this "
+                     "run's visits to them at once; use --browser-profile fresh behind Tor")
     return found
 
 
@@ -265,14 +276,16 @@ def config(a):
 
 
 def prepare_folders(a, l=None):
-    """At a real start: the VNC folder (0700, removed with the run by the caller) and the profile's folder. Returns
-    the VNC folder."""
+    """At a real start: the VNC folder (0700, removed with the run by the caller) and the profile's folder, both
+    yours alone (a folder of yours made with a plain mkdir is 0755: Firefox's databases in it, 0644, would be every
+    user's to read). Returns the VNC folder."""
     folder = vnc_dir(a, l)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     folder.chmod(0o700)
     profile = profile_dir(a, l)
     if profile is not None:
         profile.mkdir(mode=0o700, parents=True, exist_ok=True)
+        profile.chmod(0o700)
     a.browser_vnc_dir = folder
     return folder
 
@@ -303,6 +316,16 @@ def prepare(a, l=None, run=None):
         return None
     found = image_id(a, l, run)
     if found is None:
+        l = l or launcher()
+        try:  # (there, but without sandbox-ai's label: another image holds the tag - said, not "not there")
+            there = (run or subprocess.run)(l.podman_command(a, "image", "exists", IMAGE), stdin=subprocess.DEVNULL,
+                                            capture_output=True, timeout=60).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            there = False
+        if there:
+            raise ValueError(f"--browser: the image {IMAGE} is not sandbox-ai's own browser image (its label "
+                             f"sandbox-ai.role is not {ROLE}: another build holds the tag); build sandbox-ai's, which "
+                             f"replaces it: {BUILD}")
         raise ValueError(f"--browser: sandbox-ai's browser image {IMAGE} is not there (nothing is pulled at a start); "
                          f"build it once: {BUILD}")
     container["record"]["id"] = found
@@ -450,6 +473,20 @@ def agent_environment(a):
     if agent_drives(a):
         env["SANDBOX_AI_BROWSER_CDP"] = CDP_URL
     return env
+
+
+def request_open(folder, url):
+    """URL to the browser of the run whose VNC folder is FOLDER: written into it (OPEN_REQUEST, 0600, replaced at
+    once), where its runtime takes it within a second - Chromium opens it in a new tab, Firefox is started again on
+    it. ValueError for anything but an http(s) URL of printable ASCII."""
+    if not isinstance(url, str) or not OPEN_URL.fullmatch(url):
+        raise ValueError("only an http(s) URL is opened in the session browser")
+    folder = Path(folder)
+    temporary = folder / f".{OPEN_REQUEST}.{os.getpid()}"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        stream.write(url + "\n")
+    os.replace(temporary, folder / OPEN_REQUEST)
 
 
 def remove_vnc_dir(folder):

@@ -18,6 +18,7 @@
   "notes": [
     "The model: DeepSeek's API and platform (a key: --api-key api.deepseek.com=DEEPSEEK_API_KEY, or the account in its web UI). Its hosts are open by default; nothing else of the provider's.",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-dsh (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "DeepSeek Harness talks in the terminal: sandbox-ai's chat (its release has none of its own), each message one run of its headless mode, one conversation kept by its session id (/help lists the commands, Ctrl+C cancels an answer). Approvals cannot be answered in the chat: an action it would ask about is refused (with -D it asks nothing). Add --browser (the app: the Board's Browser part; Podman) and its web UI opens as well, in the session browser beside the terminal, where it asks you; -- web: the web UI alone. One task: sandbox-ai dsh -- headless \"TASK\".",
     "Its telemetry is always off and cannot be turned on.",
     "DeepSeek Harness is not live-tested yet (a start says so); its image first: sandbox-ai build dsh (a start builds it when it is missing)."
   ]

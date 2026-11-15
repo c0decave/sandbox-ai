@@ -31,7 +31,7 @@ from .files import printable, printable_text
 from .i18n import tr
 from .short_notices import short_notice
 from .widgets import (
-    MONO, ask_first, background, outcome, plain_label, safe_tooltip, tame_combos, warn, shown_as_text,
+    MONO, arrow_tabs, ask_first, background, outcome, plain_label, safe_tooltip, tame_combos, warn, shown_as_text,
 )
 
 LOCAL = "local"
@@ -422,8 +422,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(tr("Settings"))
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
-        self.tabs.setUsesScrollButtons(True)  # a screen narrower than the titles: they scroll, whole
-        self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        arrow_tabs(self.tabs)  # a screen narrower than the titles: they scroll, whole, with ← → at the row's end
         layout.addWidget(self.tabs, 1)
         # A (?) beside the tabs explains the tab shown (help_texts.SETTINGS_TABS, in the tabs' order).
         self.tab_help = help_view.HelpButton(help_texts.SETTINGS_TABS[0])
@@ -680,7 +679,7 @@ class SettingsDialog(QDialog):
         form.addRow(tr("Loop guard for local models"), self.loop_guard)
         form.addRow(plain_label(tr("What sandbox-ai does against a model that repeats itself, for every LLM server "
                                    "(--llm): empty layers keep sandbox-ai's own default; a server's own layers (its "
-                                   "Parameters… on the LLM servers page) and a start's win (loop_guard in {path}).",
+                                   "Advanced settings… on the LLM servers page) and a start's win (loop_guard in {path}).",
                                    path=breakable(printable(str(self.sai.sandbox_defaults_file())))),
                                 role="secondary"))
 

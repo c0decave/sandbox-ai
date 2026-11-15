@@ -51,6 +51,12 @@ RUN printf '{"name":"sandbox-ai-dsh","private":true,"dependencies":{"@deepseek-a
     && npm cache clean --force \
     && test "$(node -p 'require("/opt/dsh/node_modules/@deepseek-ai/dsh/package.json").version')" = "${DSH_VERSION}" \
     && ln -s /opt/dsh/node_modules/.bin/dsh /usr/local/bin/dsh
+# sandbox-ai's telemetry guard (telemetry_guard.py): DSH's entry file (lib/bin.js) imports it first, and every profile
+# it boots gets sandbox-ai's patch as its last overlay. Whatever starts the agent in the sandbox - the launcher, a
+# shell, another agent - it refuses what would turn its telemetry on and pins the opt-out variables first; the
+# launcher mounts its current copy read-only over this one.
+COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py
+RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install dsh
 # Its patch is mounted here by the launcher (read-only, sandbox/dsh.py); its telemetry is off for every dsh.
 ENV DSH_TELEMETRY_DISABLED=1
 RUN mkdir -p -m 755 /etc/dsh && DSH_HOME=/tmp/dsh-check dsh --version && rm -rf /tmp/dsh-check

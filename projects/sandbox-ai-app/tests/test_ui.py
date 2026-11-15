@@ -743,6 +743,9 @@ def test_files_selection_does_not_follow_a_name_into_a_subfolder(window, env, wa
 
 def test_images_page(window):
     page = window.images
+    asked = []
+    page.package_command.start = lambda argv: asked.append(argv) or True
+    page.show_command.start = lambda argv: asked.append(argv) or True
     page.show_images([{"agent": "claude", "target": "claude", "present": True, "agent_version": "2.1.3",
                        "created": "2026-11-01T10:00:00", "size": 2_000_000_000, "image": "localhost/claude-sandbox:latest",
                        "extended": True, "status": "outdated"},
@@ -754,11 +757,8 @@ def test_images_page(window):
     assert [page.images.item(0, c).text() for c in (0, 1, 2, 3)] == ["claude", "claude", "yes", "changed: rebuild"]
     assert page.images.item(1, 2).text() == "not built" and page.images.item(1, 3).text() == "no extension"
     assert page.images.item(2, 3).text() == "current" and page.images.item(0, 6).text() == "2.00 GB"
-    assert "2 of 3 images built" in page.status.text() and "1 to rebuild" in page.status.text()
-    asked = []
-    page.package_command.start = lambda argv: asked.append(argv) or True
-    page.show_command.start = lambda argv: asked.append(argv) or True
-    page.images.selectRow(0)
+    # The top row is selected at once (user: the tables below have something and belong to it).
+    assert widgets.selected_keys(page.images) == ["claude"]
     assert ["images", "packages", "claude", "--json"] == asked[0][-4:]
     assert ["images", "extend", "claude", "--show", "--json"] == asked[1][-5:]
     assert not page.delete_button.isEnabled()
@@ -1716,11 +1716,12 @@ def test_notification_bodies_are_escaped(window):
     assert title == "sandbox-ai asks: <b>x</b>\\x1b", "the title is plain text: shortened and printable, not escaped"
     assert "<a" not in text and "&lt;a href=" in text and "&amp; more" in text
     assert icon == QSystemTrayIcon.MessageIcon.Warning, "a question is a warning"
-    # In the app's theme (the default): a popup with the text as plain text, nothing sent to the tray.
+    # In the app's theme (the default): a popup showing the text as it is (rich text made of escaped parts only),
+    # nothing sent to the tray.
     window.notify("t <b>bold</b>", "<img src=x>", level="error")
     toast = window.notifier.toasts[-1]
-    assert len(shown) == 1 and toast.level == "error" and toast.text.text() == "<img src=x>"
-    assert toast.text.textFormat() == toast.text.textFormat().PlainText
+    assert len(shown) == 1 and toast.level == "error" and toast.text.plain() == "<img src=x>"
+    assert "<img" not in toast.text.html() and "&lt;img src=x&gt;" in toast.text.html()
     window.notifier.close_all()
     assert window.notifier.toasts == []
 

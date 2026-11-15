@@ -23,6 +23,7 @@ import re
 from . import applog
 from . import backend
 from . import board as B
+from .files import printable
 from .i18n import N_, language as i18n_language, tr
 
 CATEGORIES = (("simple", N_("Simple")), ("development", N_("Development")), ("research", N_("Research")),
@@ -87,6 +88,9 @@ class Preset:
     # sandbox-ai's presets that start something not live-tested yet: {"names"} (its launcher's one list,
     # EXPERIMENTAL_PARTS, as `presets list --json` says it: "experimental"); empty for the rest. A badge only.
     experimental: dict = field(default_factory=dict)
+    # sandbox-ai's presets: (name, catalog entry) of the servers it names by their catalog (hub:binwalk): the Board adds
+    # the missing ones from exactly that entry (a name in two catalogs is refused by `mcp add NAME`).
+    mcp_entries: tuple = ()
 
     def __post_init__(self):
         if not self.name:
@@ -312,7 +316,8 @@ PRESETS = (
            N_("The GPU handed to the agent, generous limits, PyPI and Hugging Face for models."), "teams",
            "advanced",
            ("--gpu", "<gpu:kind>", "--memory", "32g", "--cpus", "8", "--allow-pypi", "--allow-host",
-            "huggingface.co", "--image-variant", "<text:variant>"),
+            "huggingface.co", "--allow-host", "cdn-lfs.hf.co", "--allow-host", "cas-bridge.xethub.hf.co",
+            "--image-variant", "<text:variant>"),
            placeholders=(Placeholder("<gpu:kind>", N_("GPU"), N_("nvidia (CDI), dri (Intel/AMD) or rocm")),
                          Placeholder("<text:variant>", N_("Image variant with the GPU libraries"),
                                      N_("sandbox-ai images new NAME --from AGENT"), optional=True)),
@@ -544,12 +549,16 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
     agent = preset.agent or agent or "claude"
     if preset.agents and agent not in preset.agents:
         agent = preset.agents[0]  # the preset is not for the agent of the settings: its first one
-    task = (["--prompt", preset.prompt] if agent == "opencode" else [preset.prompt]) if preset.prompt else []
+    task = B.task_args(agent, preset.prompt) if preset.prompt else []  # (in the agent's own form)
     board = B.from_argv(sai, agent, fitted_options(preset.options), list(preset.agent_args) + task,
                         [str(directory)] if directory and not names_workspaces(preset) else [])
     for name in preset.mcp:
         if not any(n.props.get("name") == name for n in board.of_kind("mcp")):
             board.add("mcp", name=name)
+    for name, entry in preset.mcp_entries:
+        for node in board.of_kind("mcp"):
+            if node.props.get("name") == name:
+                node.props["entry"] = entry
     for name, definition in preset.servers:
         node = next((n for n in board.of_kind("mcp") if n.props.get("name") == name), None) or \
             board.add("mcp", name=name)
@@ -557,7 +566,7 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
     if preset.rules is not None:
         (board.first("approvals") or board.add("approvals")).props["rules"] = json.loads(json.dumps(preset.rules))
     if values is not None:
-        B.fill(board, values)
+        B.fill(board, values, sai)
         left = {marker for marker, _ in B.placeholders(board)}
         B.drop(board, [p.marker for p in preset.placeholders if p.optional and p.marker in left])
     board.labels = {p.marker: [preset.text(p.label), preset.text(p.hint)] for p in preset.placeholders}
@@ -844,6 +853,9 @@ def floor_mode(options):
     return out
 
 
+MCP_ENTRY = re.compile(r"[a-z][a-z0-9-]{0,31}:[A-Za-z0-9_-]{1,32}")  # a catalog's entry: PREFIX:NAME
+
+
 def from_sandbox_ai(sai, document, host="local"):
     """sandbox-ai's own preset DOCUMENT (sandbox-ai presets list --json on HOST) as a Preset of the gallery: its
     {values} become the board's placeholders, its MCP servers registered ones by name, its ruleset file the approvals
@@ -890,11 +902,17 @@ def from_sandbox_ai(sai, document, host="local"):
                  + ([tr("From the preset directory {path}", path=str(folder)[:900])]
                     if origin == "extra" and isinstance(folder, str) else []) + rules_note}
     checked = from_document(sai, converted)  # the task is checked with the arguments, then kept apart
+    if origin != "yours":
+        # The board starts its options as typed, without `--preset`: what sandbox-ai's --preset refuses in a preset
+        # that is not yours (a key or login handed over, the run let past its VPN) is refused here.
+        passed_on_problems(sai, checked)
     import dataclasses
     return dataclasses.replace(checked, agent_args=(), prompt=checked.agent_args[0] if checked.agent_args else "",
                                agents=tuple(a for a in agents if a in tuple(getattr(sai, "agents", B.AGENTS))),
                                source="sandbox-ai", name=str(document.get("id", ""))[:60], host=host,
                                value_names=tuple((markers[name], name) for name in values),
+                               mcp_entries=tuple((server.split(":", 1)[1], server) for server in
+                                                 map(str, document.get("mcp") or []) if MCP_ENTRY.fullmatch(server)),
                                group=sai_group(document), translations=sai_translations(document),
                                experimental=experimental_of(document))
 
@@ -1038,7 +1056,81 @@ def export(sai, preset, path):
 # yours (sent to the URL the preset names), the internal options of a start, and the values only you choose
 # (backend.PROJECT_REFUSED_VALUES: the cloud provider's conversations recorded). A gone value (--telemetry on:
 # telemetry is always off) is dropped from an imported preset (backend.without_retired), never refused.
-NOT_PASSED_ON = ("--git-token-file", "--helper-of", "--start-id", "--preset", "--preset-value")
+NOT_PASSED_ON = ("--git-token-file", "--helper-of", "--start-id", "--preset", "--preset-value", "--rules")
+
+
+def _hidden_characters(document):
+    """Whether a text of the preset DOCUMENT holds control, direction or zero-width characters (a line break and a tab
+    excepted): a title with a right-to-left override shows as something else than it is."""
+    return any(not (c in "\n\t" or c.isprintable()) for text in B._strings(document) for c in text)
+
+
+def vpn_bypasses(sai, options):
+    """["--vpn-bypass-host-ports", "--vpn-bypass-tcp ADDRESS:PORT"]: what among a passed-on preset's OPTIONS lets the
+    run past its VPN or Tor, from the user's own address (sandbox-ai refuses it in a preset that is not yours); a value
+    to fill in at the use (a placeholder) is the user's choice."""
+    try:
+        tokens = list(backend.canonical_of(sai)(list(options)))
+    except (ValueError, SystemExit):
+        tokens = [str(option) for option in options]
+    found = []
+    for index, token in enumerate(tokens):
+        name, equals, value = str(token).partition("=")
+        if name == "--vpn-bypass-host-ports":
+            found.append(name)
+        elif name == "--vpn-bypass-tcp":
+            value = value if equals else (tokens[index + 1] if index + 1 < len(tokens) else "")
+            if not B.PLACEHOLDER.fullmatch(value.strip()):
+                found.append(f"{name} {value}")
+    return found
+
+
+def passed_on_problems(sai, preset):
+    """ValueError when the passed-on PRESET (an imported file, a sandbox-ai preset that is not the user's own) would
+    hand over a key or login (private_sources) or let the run past its VPN (vpn_bypasses)."""
+    private = private_sources(sai, preset)
+    _check(not private, N_("A preset from elsewhere may not give the agent or its MCP servers {what}: keys and "
+                           "logins are not yours to pass on - give such a folder yourself, at the use."),
+           what="; ".join(private))
+    past = vpn_bypasses(sai, preset.options)
+    _check(not past, N_("A preset from elsewhere may not carry {options}: it lets the run past its VPN or Tor, from "
+                        "your own address - only you choose that, at the use."), options=", ".join(past))
+
+
+def private_sources(sai, preset):
+    """[text]: what the passed-on PRESET would hand the agent or its MCP servers that only the user gives a sandbox,
+    as sandbox-ai refuses it in a preset that is not yours: a --copy of a login file (as --copy-auth), a --copy or
+    --mount of a private location (keys, credentials, sandbox-ai's own folders, a kernel file system), an MCP server's
+    folder there. A folder to fill in (a placeholder) is the user's choice at the use."""
+    launcher = sai.launcher
+    credential = getattr(launcher, "copies_credential", None)
+    private = getattr(launcher, "private_source", None)
+    try:
+        tokens = list(backend.canonical_of(sai)(list(preset.options)))
+    except (ValueError, SystemExit):
+        tokens = [str(option) for option in preset.options]
+    found = []
+    for index, token in enumerate(tokens):
+        name, equals, value = str(token).partition("=")
+        if name not in ("--copy", "--mount"):
+            continue
+        value = value if equals else (tokens[index + 1] if index + 1 < len(tokens) else "")
+        if ":" not in value:
+            continue
+        source = value.rsplit(":", 2 if name == "--mount" and value.count(":") >= 2 else 1)[0]
+        if B.PLACEHOLDER.fullmatch(source.strip()):
+            continue
+        if name == "--copy" and credential is not None and credential(value):
+            found.append(tr("--copy {source} copies a login in", source=source))
+        elif private is not None and private(name, source):
+            found.append(f"{name} {source}")
+    for server, definition in preset.servers:
+        for mount in (definition.get("mounts") or []) if isinstance(definition, dict) else []:
+            host = mount.get("host") if isinstance(mount, dict) else None
+            if isinstance(host, str) and private is not None and not B.PLACEHOLDER.fullmatch(host.strip()) \
+                    and private("--mount", host):
+                found.append(tr("the MCP server {name}'s folder {host}", name=server, host=host))
+    return found
 
 
 def not_passed_on(sai, options):
@@ -1059,6 +1151,74 @@ def not_passed_on(sai, options):
     return list(dict.fromkeys(found))
 
 
+PER_SERVER_OPTIONS = ("--mcp-limits", "--mcp-mount", "--mcp-env")  # NAME:... of one MCP server of the start
+
+
+def networked_servers(sai, preset):
+    """[(name, {"what", "network", "vpn"})] of PRESET's own MCP servers (mcp_servers) that reach the network - any
+    egress but none: what runs (its command or image, a helper's agent), what its sandbox opens (its options, an
+    image's network) and the VPN it leaves through (its own; else the start's, when it has one). A server whose
+    network cannot be read counts as one that reaches it. Imported presets ask for each of these (preset_gallery)."""
+    try:
+        network_of = sai.module("mcp").network_of
+    except Exception:  # noqa: BLE001 - no reading: every server is asked for
+        network_of = None
+    found = []
+    for name, definition in preset.servers:
+        definition = definition if isinstance(definition, dict) else {}
+        try:
+            reaches, own = network_of(definition) if network_of else (True, None)
+        except Exception:  # noqa: BLE001 - a definition it cannot read: asked for
+            reaches, own = True, definition.get("vpn")
+        if not reaches:
+            continue
+        if "image" in definition or "rootfs" in definition:
+            what = str(definition.get("image") or (definition.get("rootfs") or {}).get("path") or "?")
+            network = tr("the network of its container ({network})", network=str(definition.get("network") or "?"))
+        elif "helper" in definition:
+            what = tr("the agent {agent} as a helper", agent=str(definition.get("helper")))
+            network = tr("its model provider")
+        else:
+            command = definition.get("command") or []
+            what = " ".join(str(word) for word in command) if isinstance(command, list) else str(command)
+            options = [str(o) for o in definition.get("options") or [] if isinstance(o, str)]
+            network = " ".join(options) or tr("the network a sandbox has by default")
+        found.append((name, {"what": printable(what)[:300], "network": printable(network)[:300],
+                             "vpn": printable(own) if own else None}))
+    return found
+
+
+def without_servers(preset, names):
+    """PRESET without its own MCP servers NAMES: their definitions, --mcp NAME and the per-server options of them
+    (--mcp-limits, --mcp-mount, --mcp-env NAME:...), and the placeholders nothing else uses any more."""
+    names = set(names)
+    if not names:
+        return preset
+    options, tokens, index = [], list(preset.options), 0
+    while index < len(tokens):
+        name, equals, value = str(tokens[index]).partition("=")
+        if name in ("--mcp", *PER_SERVER_OPTIONS):
+            if not equals and index + 1 < len(tokens):
+                value, step = str(tokens[index + 1]), 2
+            else:
+                step = 1
+            server = value if name == "--mcp" else value.split(":", 1)[0]
+            if server in names:
+                index += step
+                continue
+            options += tokens[index:index + step]
+            index += step
+            continue
+        options.append(tokens[index])
+        index += 1
+    servers = tuple((n, d) for n, d in preset.servers if n not in names)
+    mcp = tuple(n for n in preset.mcp if n not in names)
+    left = json.dumps([options, list(preset.agent_args), list(mcp), {n: d for n, d in servers}, preset.rules,
+                       preset.prompt])
+    placeholders = tuple(p for p in preset.placeholders if p.marker in left)
+    return replace(preset, options=tuple(options), servers=servers, mcp=mcp, placeholders=placeholders)
+
+
 def import_file(sai, path):
     """The preset in the JSON file PATH (untrusted: size limited, every value checked), as one of the user's
     own (its id prefixed with my- when it would shadow a built-in one, numbered when one of yours has it: free_id)."""
@@ -1069,15 +1229,22 @@ def import_file(sai, path):
         document = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise ValueError(tr("Not a JSON file.")) from None
+    _check(not _hidden_characters(document), N_("The preset's texts hold control, direction or zero-width characters: "
+                                                "it would show as something else than it is."))
     preset = from_document(sai, document)
-    preset = replace(preset, options=tuple(backend.without_retired(preset.options)))  # no --telemetry on: always off
+    # No --telemetry on (always off); its --mode a floor, as sandbox-ai takes a preset's mode: it raises a laxer mode,
+    # never lowers the one your defaults chose.
+    preset = replace(preset, options=tuple(floor_mode(backend.without_retired(preset.options))))
     passed_on = not_passed_on(sai, preset.options)
     _check(not passed_on, N_("A preset from elsewhere may not carry {options}: it is not yours - only your command "
                              "line, your defaults or a preset you save yourself chooses that."),
            options=", ".join(passed_on))
+    passed_on_problems(sai, preset)
     # (never in place of a built-in one, nor of one of yours: one of the same id - yours, sent on and changed by
     # someone, or another's - is kept beside it)
     wanted = free_id(("my-" + preset.id)[:64] if preset.id in BUILTIN else preset.id)
     if wanted != preset.id:
-        preset = from_document(sai, {**document, "id": wanted})
+        # (the preset as checked and changed above - its mode a floor, no --telemetry on -, under its new id; read
+        # anew from the DOCUMENT it would have them back)
+        preset = replace(preset, id=wanted, name=wanted)
     return preset

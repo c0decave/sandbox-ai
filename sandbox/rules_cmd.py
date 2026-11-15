@@ -160,7 +160,7 @@ def start_rulesets(agent, options=(), directory=None):
     try:
         argv = l.canonical_options([agent, *options])
         argv, _ = l.load_presets_module().apply(argv, canonical=l.canonical_options, with_mode=True, notes=[],
-                                                  credential=l.copies_credential)
+                                                  credential=l.copies_credential, private=l.private_source)
         argv = l.canonical_options(argv)
         a = l.parse_args(argv)
         config_path, document = l.load_project_config(a)

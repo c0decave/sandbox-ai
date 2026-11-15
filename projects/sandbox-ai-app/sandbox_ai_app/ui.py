@@ -332,6 +332,7 @@ class OptionsForm(QTabWidget):
 
     def __init__(self, options):
         super().__init__()
+        widgets.arrow_tabs(self)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.options, self.widgets, self.labels = options, {}, {}
         self.changed.connect(self.mark_dangerous)
         groups = {}
@@ -749,8 +750,10 @@ class LaunchPage(Prerequisites, QWidget):
         self.agent_args.textChanged.connect(self.update_preview)
         self.form.changed.connect(self.show_model)
         self.agent.currentTextChanged.connect(lambda _text: self.show_model(force=True))
+        self.agent.currentTextChanged.connect(lambda _text: self.apply_agent_options())
         self.model_choice.activated.connect(lambda _index: self.model_chosen())
         self.model_only.toggled.connect(lambda _on: self.model_chosen())
+        self.apply_agent_options()
         self.refresh_profiles()
         self.update_preview()
         self.show_model(force=True)
@@ -1063,6 +1066,25 @@ class LaunchPage(Prerequisites, QWidget):
                 self.show_host_note(str(error))
             self.apply_host_options()
             self.update_preview()
+
+    def apply_agent_options(self):
+        """The options that depend on the agent: Show thinking (--show-thinking) is greyed out, with the reason and
+        nothing chosen, for an agent without such a switch (Qwen Code); for the others its tooltip names the agent's
+        own switch and default."""
+        from . import thinking
+        widget = self.form.widgets.get(thinking.OPTION)
+        if widget is None:
+            return
+        agent = self.agent.currentText()
+        if not thinking.available(agent):
+            if isinstance(widget, QComboBox) and widget.currentText():
+                widget.setCurrentText("")
+            widget.setEnabled(False)
+        elif thinking.OPTION not in self.host_greyed:
+            widget.setEnabled(True)
+        widget.setToolTip(safe_tooltip(thinking.tooltip(agent) + (
+            "" if not thinking.available(agent) else "\n" + tr("Empty: the agent's default ({value})",
+                                                              value=thinking.AGENT_DEFAULTS[agent]))))
 
     def apply_host_options(self):
         """Grey out the options the chosen host's launcher does not know; the others are as they were (what the
@@ -6864,9 +6886,9 @@ def tab_entry(value):
     return None
 
 
-class ProjectTabs(QTabBar):
+class ProjectTabs(widgets.ArrowTabBar):
     """The open projects, sessions and sandboxes. Closable, movable, closed with a middle click too; the
-    entry of a tab (its tab data) says what it stands for."""
+    entry of a tab (its tab data) says what it stands for. The app's tab row: ← → at its end when they do not fit."""
     middle_clicked = Signal(int)
 
     def __init__(self):
@@ -6875,8 +6897,6 @@ class ProjectTabs(QTabBar):
         self.setMovable(True)
         self.setExpanding(False)
         self.setDocumentMode(True)
-        self.setUsesScrollButtons(True)
-        self.setElideMode(Qt.TextElideMode.ElideMiddle)
         self.setIconSize(QSize(14, 14))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
@@ -9404,7 +9424,8 @@ class MainWindow(QMainWindow):
             self.update_activity()
         self.show_asking()
         if new and backend.setting("notify"):
-            from .pages import describe
+            from . import rich_notice
+            from .pages import describe_rich, why_asked
             entries = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None) for entry in new]
             # One notification per new question, each leading to its own question; a canary that went off first (an
             # alarm: an error toast stays until it is closed), anything else waits for an answer (a warning). A flood
@@ -9415,7 +9436,10 @@ class MainWindow(QMainWindow):
                 # A tool call whose arguments the notification cannot show whole is allowed only where they are
                 # seen whole (the Approvals page, the Questions window), as sandbox-ai's own notification does.
                 whole = not isinstance(question, dict) or backend.question_details(question)[1]
-                toast = self.notify(tr("sandbox-ai asks: {sandbox}", sandbox=run), describe(question),
+                # At a glance: the start in bold, what it asks for (the address in the accent colour), why.
+                asks = rich_notice.lines(describe_rich(question), rich_notice.recognise(why_asked(question), "why"))
+                toast = self.notify(rich_notice.fmt(tr("sandbox-ai asks: {sandbox}"), sandbox=rich_notice.session(run)),
+                                    asks,
                                     level="error" if canary else "warning",
                                     action=self.question_actions(key, canary, whole=whole))
                 if toast is not None and key is not None:

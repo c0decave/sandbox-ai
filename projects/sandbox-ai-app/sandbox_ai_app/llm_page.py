@@ -589,11 +589,14 @@ class LlmPage(QWidget):
         self.show_button.setAccessibleName(tr("Show"))
         self.show_button.setToolTip(tr("sandbox-ai llm show: the endpoint with what the agents get (no key)"))
         self.show_button.clicked.connect(lambda _=False: self.show_server())
-        self.params_button = QPushButton(tr("Parameters…"))
-        self.params_button.setAccessibleName(tr("Parameters"))
-        self.params_button.setToolTip(tr("Sampling parameters (temperature, top_k, repeat_penalty, max_tokens, "
-                                         "num_ctx …), the loop guard and the other models (sandbox-ai llm set): "
-                                         "every model's, or the model selected below"))
+        self.params_button = QPushButton(tr("Advanced settings…"))
+        self.params_button.setAccessibleName(tr("Advanced settings"))
+        self.params_button.setToolTip(tr("The server's defaults for every start (sandbox-ai llm set): sampling "
+                                         "(temperature, top_k, repeat_penalty …), max. output tokens, context length, "
+                                         "keeping the model loaded, LM Studio's load settings (Flash Attention, KV "
+                                         "cache), the agents' stream timeout - only what this kind of server takes -, "
+                                         "the loop guard and the other models: every model's, or the model selected "
+                                         "below. What only the server's own start sets (KV cache type …) is shown"))
         self.params_button.clicked.connect(lambda _=False: self.parameters())
         self.loaded_button = QPushButton(tr("Models on the server…"))
         self.loaded_button.setAccessibleName(tr("Models on the server"))
@@ -1053,6 +1056,7 @@ class LlmPage(QWidget):
                                                  "--json", timeout=PARAMS_SECONDS)
             if status != 0:
                 return view, None, (status, out, err)
+            view["server_only"] = LP.server_only(self.sai, kind)  # (this machine's knowledge of the kind)
             return view, LP.parse_catalogue(out), None
 
         background(work, owner=self, source=self.params_button, timeout=SHOW_SECONDS + PARAMS_SECONDS + 15,
@@ -1080,7 +1084,7 @@ class LlmPage(QWidget):
         # The loop guard's layers: this machine's sandbox-ai knows their ranges; a host's: the layers it shows.
         spec = LP.loop_spec(self.sai if host == LOCAL else None, view)
         dialog = LPV.ParamsDialog(view, catalogue, scope=scope, models=models, host_label=self.host_label(host),
-                                  spec=spec, parent=self)
+                                  spec=spec, server_only=view.get("server_only"), parent=self)
         self.open_params(dialog, host, name)
 
     def open_params(self, dialog, host, name):

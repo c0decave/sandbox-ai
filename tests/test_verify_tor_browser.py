@@ -167,7 +167,7 @@ def test_the_wait_never_goes_past_the_launchers():
 def test_the_checks_after_the_bootstrap_wait_for_the_circuit_too(monkeypatch):
     """gather_checks behind Tor: the echo service's name, the resolver's answer and the DNS probe (whoami.akamai.net,
     answered through Tor by an exit's resolver: still compared with this host's own) all go through the patient
-    lookups; the .onion probes are tor's own mapping (no circuit needed) and ask at once."""
+    lookups; the .onion probes (tor's own mapping, no circuit needed) are as patient."""
     clock = Clock()
     port = DNSPort(clock, circuit_at=15)
 

@@ -1104,7 +1104,7 @@ def gc(days=None, dry_run=False, expired_only=False):
     cutoff = time.time() - days * 86400 if days is not None else None
     sessions = module("sessions")
     result = {"days": days, "dry_run": dry_run, "removed": [], "leftovers": [], "histories": [], "damaged": [],
-              "skipped": [], "pods": [], "orphaned_pods": []}
+              "skipped": [], "pods": [], "orphaned_pods": [], "lends": []}
     if not expired_only:
         for key, entry in start_entries(prune=False).items():
             if entry["state"] == "damaged":
@@ -1116,6 +1116,7 @@ def gc(days=None, dry_run=False, expired_only=False):
     found = entries(True, prune=not dry_run)
     if not expired_only:
         leftover_pods(found, result, dry_run)
+        leftover_lends(result, dry_run)
     for entry in found:
         if cutoff is None or entry["kind"] == "mcp" or entry["state"] != "stopped" or not entry.get("keep"):
             continue
@@ -1172,6 +1173,28 @@ def leftover_pods(found, result, dry_run):
     result["orphaned_pods"] = liveness.unknown_live_pods(in_use) or []
 
 
+def leftover_lends(result, dry_run):
+    """The folders (macOS: and the Podman volumes) of lent VPN tunnels that starts left behind which ended without
+    their cleanup (killed, a reboot) into RESULT["lends"] - the runs' names - removed unless DRY_RUN (vpn.py
+    lend_leftovers). A run counts as ended only when its launcher holds no lock on its folder, no run of that name is
+    registered or orphaned, and Podman lists no running container in its pod; when Podman does not answer it is left
+    alone."""
+    liveness = module("liveness")
+    orphans = {}
+    live = set(module("net").running(orphans)) | set(orphans)
+
+    def alive(run):
+        if run in live:
+            return True
+        pod = liveness.pod_of({"run": run})
+        return pod is not None and liveness.pod_live(pod) is not False
+    try:
+        result["lends"] = launcher().load_vpn_module().lend_leftovers(
+            alive, ["podman"] if sys.platform == "darwin" else None, remove=not dry_run)
+    except (OSError, ValueError) as exc:
+        LOG.warning("starts", "gc: the lent VPN tunnels' leftovers were not looked at", exc)
+
+
 def show_gc(result, out=print, as_json=False):
     if as_json:
         out(json.dumps(result, indent=2))
@@ -1187,6 +1210,9 @@ def show_gc(result, out=print, as_json=False):
         out(f"{verb} the history of {', '.join(printable(name) for name in result['histories'])}")
     if result.get("pods"):
         out(f"{verb} {len(result['pods'])} Podman pod(s) of ended runs: {', '.join(map(printable, result['pods']))}")
+    if result.get("lends"):
+        out(f"{verb} what {len(result['lends'])} ended run(s) left of their lent VPN tunnel: "
+            f"{', '.join(map(printable, result['lends']))}")
     for pod in result.get("orphaned_pods") or []:
         out(f"left alone: the Podman pod {printable(pod)} still runs, but no start uses it (its launcher is gone); end "
             f"it with: sandbox-ai stop {printable(pod)}")
@@ -1194,7 +1220,8 @@ def show_gc(result, out=print, as_json=False):
         out(f"left alone: {printable(entry['name'])}: {printable(entry['reason'])}")
     for directory in result["damaged"]:
         out(f"left alone: {printable(directory)} is damaged (no readable session.json); remove it by hand")
-    if not (result["leftovers"] or result["removed"] or result["histories"] or result.get("pods")):
+    if not (result["leftovers"] or result["removed"] or result["histories"] or result.get("pods")
+            or result.get("lends")):
         out("nothing to remove" + ("" if result["days"] is not None else "; kept starts never expire on their own: "
                                    "--older-than DAYS removes those unused for that long"))
 

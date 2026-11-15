@@ -351,18 +351,44 @@ class TerminalView(QWidget):
             page = page.parentWidget()
         return page.privacy_of(self) if page is not None else argv_privacy(self.argv)
 
+    def terminals_page(self):
+        """The Terminals page of this tab (None outside one)."""
+        page = self.parentWidget()
+        while page is not None and not hasattr(page, "privacy_of"):
+            page = page.parentWidget()
+        return page
+
     def open_link(self, url, where=None):
         """Open URL (a link of the terminal): a provider's sign-in page in the login browser when Settings say so
         (WHERE "app" or "system" decides instead), everything else in the system browser. Never for a run behind
         Tor (a browser here would reach the link with this computer's own address, in clear text past Tor): Copy
-        link, for Tor Browser; behind a VPN only after a warning that it goes past the VPN."""
+        link, for Tor Browser; behind a VPN only after a warning that it goes past the VPN. Never an address of the
+        sandbox's own loopback either (a web UI in it: DSH's, Cairn's): sandbox_address."""
         if not terminal_text.plausible(url):
+            return
+        terminals = self.terminals_page()
+        if terminal_text.loopback(terminal_text.host_of(url)) and terminals is not None and \
+                terminals.sandbox_of(self):
+            self.sandbox_address(url, terminals.sandbox_browser_for(self))
             return
         privacy = self.privacy()
         if privacy is not None:
             self.refuse_link(url, where, *privacy)
             return
         self.open_now(url, where)
+
+    def sandbox_address(self, url, opener=None):
+        """URL is an address of the sandbox's loopback (`sandbox-ai dsh`'s web UI at http://127.0.0.1:3080/?token=...,
+        Cairn's at :8000): this computer's browser would reach this computer's loopback - nothing, or another
+        program listening there, which would get the token. Copy link, and with OPENER (the start has a browser of
+        its own that shows a display) Open in the sandbox's browser, which shares the sandbox's loopback."""
+        shown = terminal_text.shown_url(url, 120)
+        choices = [(tr("Copy link"), lambda: self.helper.copy_text(url)), (tr("Cancel"), lambda: None)]
+        if opener is not None:
+            choices.insert(0, (tr("Open in the sandbox's browser"), lambda: opener(url)))
+        self.bar.ask(tr("{url} is an address of the sandbox (its own loopback): this computer's browser would reach "
+                        "something else there. Open it in the sandbox's own browser (--browser).", url=shown),
+                     choices)
 
     def refuse_link(self, url, where, kind, profile):
         shown = terminal_text.shown_url(url, 120)
@@ -1459,6 +1485,49 @@ class TerminalsPage(QWidget):
         return [widget for widget in (self.tabs.widget(i) for i in range(self.tabs.count()))
                 if not isinstance(widget, vnc_view.BrowserPanel)]
 
+    def runs_of(self, view):
+        """The runs registered on this machine (run.json) that VIEW's tab shows: by the tab's tag (app_tab) or the
+        start it attaches to (session, name). [] for a tab of another host. Reads files only."""
+        tag, name = view.tab_tag, view.start_name
+        if (view.start_host or LOCAL) != LOCAL or self.sai is None or not hasattr(self.sai, "live_runs"):
+            return []
+        try:
+            records = [r for r in self.sai.live_runs().values() if isinstance(r, dict)]
+        except Exception as _exc:  # noqa: BLE001 - the listing and the command line still say it
+            applog.swallowed("terminal", "TerminalsPage.runs_of: the listing and the command line still …", _exc)
+            return []
+        return [r for r in records if (tag and r.get("app_tab") == tag) or
+                (name and name in (r.get("session"), r.get("name")))]
+
+    def sandbox_of(self, view):
+        """Whether VIEW's tab shows a sandbox (an address of its loopback is the sandbox's, not this computer's): a
+        start on another host, a run registered here for the tab, or a start of Sandboxes & sessions."""
+        if (view.start_host or LOCAL) != LOCAL or self.runs_of(view):
+            return True
+        try:
+            return self.instance_of(view) is not None
+        except (AttributeError, RuntimeError):
+            return False
+
+    def sandbox_browser_for(self, view):
+        """OPENER(url) for VIEW's start when it has a browser of its own that shows you a display: its Browser tab
+        (Sandboxes & sessions' open_browser), the URL typed into its address bar. None otherwise."""
+        from . import vnc_view
+        try:
+            instance = self.instance_of(view)
+        except (AttributeError, RuntimeError):
+            return None
+        page = self.sessions_page() if self.sessions_page is not None else None
+        if instance is None or page is None or not hasattr(page, "open_browser") or \
+                vnc_view.why_not(instance) is not None:
+            return None
+
+        def opener(url):
+            panel = page.open_browser(instance)
+            if isinstance(panel, vnc_view.BrowserPanel):
+                panel.type_address(url)
+        return opener
+
     def privacy_of(self, view):
         """How the run in VIEW's tab reaches the internet (TerminalView.privacy): from this machine's registry (its
         run.json: the tab's tag, app_tab, or the start it attaches to), else from the starts this page listed for
@@ -1469,13 +1538,8 @@ class TerminalsPage(QWidget):
 
         def mine(record, names):
             return bool((tag and record.get("app_tab") == tag) or (name and name in names))
-        if host == LOCAL and self.sai is not None and hasattr(self.sai, "live_runs"):
-            try:
-                records = [r for r in self.sai.live_runs().values() if isinstance(r, dict)]
-            except Exception as _exc:  # noqa: BLE001 - the listing and the command line still say it
-                applog.swallowed("terminal", "TerminalsPage.privacy_of: the listing and the command line still …", _exc)
-                records = []
-            matched = [r for r in records if mine(r, (r.get("session"), r.get("name")))]
+        if host == LOCAL:
+            matched = self.runs_of(view)
             if matched:  # its run says it (a run of 0.1.95 or later records both; an older one: no VPN recorded)
                 return next(filter(None, (record_privacy(r.get("vpn_type"), r.get("vpn_profile"))
                                           for r in matched)), None) or argv_privacy(view.argv)

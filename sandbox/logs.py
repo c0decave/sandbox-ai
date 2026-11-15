@@ -464,16 +464,43 @@ def report(summary, out=print):
     return 0
 
 
+def start_log_dir(name):
+    """The log directory of the start NAME (its name or id in sandbox-ai list), as sandbox-ai report finds it; None
+    when no start has that name (or the registry cannot be read)."""
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_report_for_logs", HERE / "report.py")
+        report_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(report_module)
+        entry = report_module.find_entry(report_module.start_entries(), name)
+        if entry is None or entry.get("kind") == "mcp":
+            return None
+        return Path(report_module.module("activity").session_log_dir(entry.get("id")))
+    except Exception:  # noqa: BLE001 - no start known by that name: said as such
+        return None
+
+
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-ai logs", description="Summarize a sandbox log directory.")
-    parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("directory", nargs="?", type=Path,
+                        help="a log directory, or the name or id of a start (sandbox-ai list)")
     parser.add_argument("-p", "--project", type=Path, help="Project whose wizard log directory to read")
     parser.add_argument("-j", "--json", action="store_true")
     a = parser.parse_args(argv)
     project = Path(a.project or os.getcwd()).expanduser().absolute()
     directory = a.directory or default_log_dir(project)
+    if a.directory and not directory.is_dir() and os.sep not in str(a.directory):
+        found = start_log_dir(str(a.directory))  # (a start's name or id, as sandbox-ai list shows it)
+        if found is not None:
+            directory = found
+            if not directory.is_dir():
+                print(f"sandbox-ai logs: {a.directory} has no log yet (its log directory: {directory})",
+                      file=sys.stderr)
+                return 1
     if not directory.is_dir():
-        if a.directory:
+        if a.directory and os.sep not in str(a.directory):
+            print(f"sandbox-ai logs: no log directory or start named {a.directory} (sandbox-ai list shows the "
+                  "starts)", file=sys.stderr)
+        elif a.directory:
             print(f"sandbox-ai logs: no log directory {directory}", file=sys.stderr)
         else:  # (every start with the connection proxy, the default, keeps its log there)
             print(f"sandbox-ai logs: no log directory yet: nothing has run in {project} yet (a start there keeps its "

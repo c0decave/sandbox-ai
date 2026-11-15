@@ -114,13 +114,14 @@ class Question:
     label: str
     help: str
     form: str             # "text", "path", "flag", "list" (one per line), "choice", "switches" (one of some flags),
-    #                       "model" (the agent's model names to pick, any other typed), "effort" (the agent's levels)
+    #                       "model" (the agent's model names to pick, any other typed), "effort" (the agent's levels),
+    #                       "thinking" (shown, hidden or the agent's default: thinking.py; greyed out without a switch)
     choices: tuple = ()   # (value, label): for "choice"; for "switches" the value is the flag ("" for none)
     placeholder: str = ""
     needed: bool = False  # the node means nothing without it
 
 
-FORMS = ("text", "path", "flag", "list", "choice", "switches", "model", "effort")
+FORMS = ("text", "path", "flag", "list", "choice", "switches", "model", "effort", "thinking")
 # The model names each agent knows for sure and its effort levels, as the launcher (AGENT_MODELS, AGENT_EFFORTS)
 # has them; a test keeps both the same. An empty choice is the agent's own default.
 AGENT_MODELS = {"claude": ("fable", "opus", "sonnet", "haiku"), "codex": (), "opencode": (), "hermes": (),
@@ -171,6 +172,10 @@ NODE_QUESTIONS = {
         Question("effort", N_("Effort"), N_("How hard the agent thinks (Claude Code: low to max, Codex: minimal to "
                                             "xhigh); empty: its default. OpenCode sets it in its own configuration."),
                  "effort"),
+        Question("thinking", N_("Show thinking"), N_("Whether the agent shows its model's thinking (reasoning) in its "
+                                                     "terminal: shown, hidden, or the agent's own default. Qwen Code "
+                                                     "has no setting for it (Ctrl+O unfolds it in the session)."),
+                 "thinking"),
         Question("--dangerously-skip-permissions", N_("Act without asking"),
                  N_("The agent no longer asks before it runs a tool. The sandbox still holds, but it acts on its "
                     "own."), "flag"),

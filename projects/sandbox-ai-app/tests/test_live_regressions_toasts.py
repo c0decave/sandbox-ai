@@ -76,7 +76,7 @@ def test_a_short_notice_shows_near_the_bottom_takes_no_focus_and_goes_by_itself(
     # Screen readers: its title and text as name and description; the text is plain.
     assert notice.accessibleName() == "Project configuration"
     assert notice.accessibleDescription() == "Written and trusted: /p/.sandbox-ai.json"
-    assert notice.label.textFormat() == QtCore.Qt.TextFormat.PlainText
+    assert notice.label.plain() == notice.label.accessibleName() == notice.text, "plain text for screen readers"
     assert 1000 <= SN.lifetime(notice.text) <= 1500
     assert wait(lambda: not live(notice), 5)
     took = time.monotonic() - started

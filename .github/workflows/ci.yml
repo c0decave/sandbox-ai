@@ -58,9 +58,15 @@ jobs:
   # out tried; each mode keeps exactly its part, connections open before the cut stop. An MCP server behind a VPN
   # (tests/test_mcp_vpn_live.py): a real WireGuard tunnel between two namespaces with the VPN runtime's own setup;
   # the server's process in the VPN's namespace reaches the internet only with the tunnel's address, its lookups only
-  # the VPN's resolver, nothing past the tunnel (LAN, host, IPv6), and nothing at all once the tunnel is down. Skipped
-  # elsewhere when no namespace with CAP_NET_ADMIN (and WireGuard) can be made; here sudo makes it, and the job fails
-  # if it was skipped all the same.
+  # the VPN's resolver, nothing past the tunnel (LAN, host, IPv6), and nothing at all once the tunnel is down. A
+  # start's tunnel lent to its own MCP servers (tests/test_mcp_lent_vpn_live.py): the same real WireGuard tunnel in
+  # "the start's pod" with the VPN runtime as its lender, the start's firewall as the launcher writes it, and the
+  # runtime as the borrowing VPN container of an image server and of a command server, each in a namespace of its
+  # own; a server's traffic leaves with the tunnel's address and by no other way, only the run's token is served, a
+  # second sandbox with the key is refused, `sandbox-ai net cut` (the supervisor's own kill switch) ends lent
+  # connections that were open and refuses new ones in every mode as it does the agent's, and the borrowers end when
+  # the lender is killed. Skipped elsewhere when no namespace with CAP_NET_ADMIN (and WireGuard) can be made; here
+  # sudo makes it, and the job fails if it was skipped all the same.
   killswitch:
     runs-on: ubuntu-24.04
     steps:
@@ -78,7 +84,7 @@ jobs:
         shell: bash
         run: |
           status=0
-          python -m pytest -v -rs -o faulthandler_timeout=300 tests/test_tor_killswitch_live.py tests/test_killswitch_live.py tests/test_mcp_vpn_live.py > killswitch.txt 2>&1 || status=$?
+          python -m pytest -v -rs -o faulthandler_timeout=300 tests/test_tor_killswitch_live.py tests/test_killswitch_live.py tests/test_mcp_vpn_live.py tests/test_mcp_lent_vpn_live.py > killswitch.txt 2>&1 || status=$?
           tail -n 200 killswitch.txt
           if [ "$status" -ne 0 ] || grep -q SKIPPED killswitch.txt; then
             # What failed, readable through the API (the logs are not): FAILED/SKIPPED lines and assertion messages.

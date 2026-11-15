@@ -327,14 +327,16 @@ def debug(event, **fields):
 SECRET_SETTING = re.compile(r"(?i)\b([A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|authorization|"
                             r"credential|private[_-]?key|cookie)[A-Za-z0-9_.-]*)(\s*[=:]\s*)"
                             r"(\"[^\"]*\"|'[^']*'|\S+)")
-SECRET_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|"
+SECRET_TOKEN = re.compile(r"\b(?:hf_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|pypi-AgE[A-Za-z0-9_-]{50,}|[rs]k_live_[0-9A-Za-z]{20,}|"
+                          r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|"
                           r"sk-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|"
                           r"ya29\.[A-Za-z0-9_.-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})")
 URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@")
 BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
 SECRET_OPTION = re.compile(r"(?i)^--?[A-Za-z0-9_.-]*(key|token|secret|passw|credential|auth|bearer|cookie)")
 SECRET_RUN = re.compile(r"[A-Za-z0-9_\-+/=.]{32,}")
-SECRET_PREFIXES = ("sk-", "ghp_", "gho_", "github_pat_", "glpat-", "xoxa-", "xoxb-", "xoxp-", "AKIA", "ya29.")
+SECRET_PREFIXES = ("sk-", "ghp_", "gho_", "github_pat_", "glpat-", "xoxa-", "xoxb-", "xoxp-", "AKIA", "ya29.",
+                   "hf_", "AIza", "npm_", "pypi-AgE", "sk_live_", "rk_live_")
 
 
 def looks_secret(value):

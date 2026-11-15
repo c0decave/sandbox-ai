@@ -9,9 +9,13 @@ tries every way out with the kernel's nftables. Prints one JSON report {mode: {a
   "refused"    the firewall refused it at once
   "delivered" / "held"   a connection opened before the cut: its next bytes arrived, or the firewall held them
 
+  "direct"     a TCP connection left unredirected (its SYN went out by the dummy interface: nothing answers there)
+
 The namespace has loopback and a dummy interface with the routes of a local network (192.168.1.0/24), the internet
 (default route) and IPv6. The proxy's own user cannot be tested as root (the proxy's listener here only takes what the
-redirect hands it). Standard library only.
+redirect hands it). The run is one that lends its tunnel to its own MCP servers: the connections its VPN container
+makes for them carry LEND_MARK, pass the proxy's redirect and the allow-list, and meet the cut like the agent's own
+(a TCP one is answered with a reset). Standard library only.
 Usage: killswitch_probe.py AGENT_SANDBOX_PY"""
 import errno
 import importlib.util
@@ -36,6 +40,7 @@ SETTINGS = {"host_ports": [HOST_PORT],
 TOR = {**SETTINGS, "tor": True, "bypass": [["192.168.1.20", 1234]]}
 MARK = 0xca6c  # the VPN's (here: a VPN-like tunnel's) own packets: they pass the agent's firewall and the cut
 VPN_MARK = f"meta mark {MARK:#x}"
+LEND_MARK = 0xca6e  # vpn_runtime.LEND_MARK: the start's tunnel, lent to its own MCP servers (their connections)
 
 
 def sh(*command, data=None):
@@ -61,7 +66,8 @@ sh("ip", "-6", "route", "add", "default", "via", "fd00:1::1", "dev", "d0")
 # DNS to one nameserver; every TCP connection goes to the proxy, the host's port through it too.
 table = launcher.firewall_rules(["192.168.1.0/24", "fd00:1::/64", "198.51.100.0/24"], ["192.0.2.10"],
                                 tcp=[("10.0.0.5", 11434)], dns=["1.1.1.1"],
-                                proxy={"port": PROXY_PORT, "loopback": [HOST_PORT]}, vpn_mark=VPN_MARK)
+                                proxy={"port": PROXY_PORT, "loopback": [HOST_PORT]}, vpn_mark=VPN_MARK,
+                                lend_mark=LEND_MARK)
 sh("nft", "-f", "-", data=table.encode())
 
 got = []  # what the listeners took: ("proxy" | "connected", port)
@@ -105,11 +111,13 @@ time.sleep(0.2)
 REFUSED = (errno.EACCES, errno.EPERM, errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH)
 
 
-def tcp(family, address, port):
+def tcp(family, address, port, mark=None):
     before = len(got)
     sock = socket.socket(family, socket.SOCK_STREAM)
     sock.settimeout(1.5)
     try:
+        if mark:  # as the VPN container marks a lent connection (CAP_NET_ADMIN: root here)
+            sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), mark)
         sock.connect((address, port))
     except socket.timeout:
         return "direct"
@@ -138,7 +146,7 @@ def cut(mode, settings=SETTINGS, modes=None):
     """The cut chain as the supervisor sets it: MODE (or several MODES at once: a shared server's cuts)."""
     chosen = modes or ([mode] if mode else [])
     view = {**rt.cut_settings(settings), "mode": rt.cut_label(chosen), "modes": chosen} if chosen else None
-    sh("nft", "-f", "-", data=rt.cut_rules(view, VPN_MARK).encode())
+    sh("nft", "-f", "-", data=rt.cut_rules(view, VPN_MARK, LEND_MARK).encode())
     # The kernel holds what was loaded: the cut chain jumps to each mode's chain, which ends as cut_rules made it.
     listed = sh("nft", "list", "chain", "inet", "agent_sandbox", "cut")
     for chosen_mode in rt.cut_modes({"modes": chosen}):
@@ -189,6 +197,10 @@ ATTEMPTS = {
     "udp dns 1.1.1.1:53": lambda: udp(socket.AF_INET, "1.1.1.1", 53),
     "udp dns stub 127.0.0.1:53": lambda: udp(socket.AF_INET, "127.0.0.1", 53),
     "udp other resolver 127.0.53.1:53": lambda: udp(socket.AF_INET, "127.0.53.1", 53),
+    # The start's tunnel, lent to its own MCP servers: what its VPN container sends for them.
+    "tcp lent (marked) 198.51.100.7:443": lambda: tcp(socket.AF_INET, "198.51.100.7", 443, LEND_MARK),
+    "tcp lent to the provider (marked) 192.0.2.10:443": lambda: tcp(socket.AF_INET, "192.0.2.10", 443, LEND_MARK),
+    "udp lent lookup (marked) 1.1.1.1:53": lambda: udp(socket.AF_INET, "1.1.1.1", 53, LEND_MARK),
 }
 report = {}
 for mode in (None, *rt.CUT_MODES):
@@ -209,5 +221,6 @@ report["established"] = {f"{name} {mode}": established(family, address, port, mo
                                                              ("provider", socket.AF_INET, "192.0.2.10", 443))
                          for mode in rt.CUT_MODES}
 print(json.dumps({"table": table, "report": report,
-                  "rules": {mode: rt.cut_rules({**rt.cut_settings(SETTINGS), "mode": mode, "modes": [mode]}, VPN_MARK)
+                  "rules": {mode: rt.cut_rules({**rt.cut_settings(SETTINGS), "mode": mode, "modes": [mode]}, VPN_MARK,
+                                               LEND_MARK)
                             for mode in rt.CUT_MODES}}))

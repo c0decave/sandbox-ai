@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """sandbox-ai approvals: answer what running sandboxes ask.
 
-  sandbox-ai approvals list [--json]             open questions of every running sandbox
+  sandbox-ai approvals [list] [--json]           open questions of every running sandbox
   sandbox-ai approvals show ID                   one question in full: a tool call's arguments as it will send them
   sandbox-ai approvals allow ID [--scope once|run|always] [--no-open]
   sandbox-ai approvals deny ID [--scope run|once]
@@ -1353,11 +1353,12 @@ def mac_notification(title, text, runner=None):
                                    stderr=subprocess.DEVNULL, timeout=10, check=False)
 
 
-def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, listen=None, auto=False, autos=None):
+def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, listen=None, auto=False, autos=None,
+                  session=None, host=True):
     """Take the sandbox's requests to open a URL in your browser (its xdg-open) on SOCKET_PATH and turn each
     into a question in APPROVALS_DIR; at most LIMIT open at a time. Runs on the host while the sandbox runs. AUTO
     (--ask allow): each is answered by AUTOS (auto_answer) at once, the URL opened without a question (one that
-    carries a canary token of the run is still asked about)."""
+    carries a canary token of the run is still asked about). SESSION and HOST: browser_reply's."""
     import importlib.util
     import itertools
     if listen is None:
@@ -1385,13 +1386,14 @@ def serve_browser(socket_path, approvals_dir, stop, notify=None, limit=20, liste
             except (OSError, ValueError) as exc:
                 reply = {"ok": False, "message": f"sandbox-ai: {str(exc)[:200]}"}
             else:
-                reply = browser_reply(line, approvals_dir, counter, notify, limit, auto, autos)
+                reply = browser_reply(line, approvals_dir, counter, notify, limit, auto, autos, session, host)
             with contextlib.suppress(OSError):
                 connection.sendall((json.dumps(reply) + "\n").encode())
     server.close()
 
 
-def serve_browser_files(directory, approvals_dir, stop, notify=None, limit=20, auto=False, autos=None, interval=0.3):
+def serve_browser_files(directory, approvals_dir, stop, notify=None, limit=20, auto=False, autos=None, interval=0.3,
+                        session=None, host=True):
     """macOS: the sandbox's requests to open a URL as files (DIRECTORY/ID.request, written by its supervisor in podman
     machine's VM: a Unix socket does not cross the VM's shared folders), each answered as serve_browser answers one
     (DIRECTORY/ID.reply). DIRECTORY lies in the run's control directory, which the agent cannot see."""
@@ -1413,7 +1415,7 @@ def serve_browser_files(directory, approvals_dir, stop, notify=None, limit=20, a
                 reply = {"ok": False, "message": "sandbox-ai: request too long"}
             else:
                 reply = browser_reply(data.split(b"\n", 1)[0].decode("utf-8", "replace"), approvals_dir, counter,
-                                      notify, limit, auto, autos)
+                                      notify, limit, auto, autos, session, host)
             target = directory / f"{ident}.reply"
             with contextlib.suppress(OSError):
                 temporary = directory / f".{ident}.reply"
@@ -1422,13 +1424,22 @@ def serve_browser_files(directory, approvals_dir, stop, notify=None, limit=20, a
         stop.wait(interval)
 
 
-def browser_reply(line, approvals_dir, counter, notify, limit=20, auto=False, autos=None):
+def browser_reply(line, approvals_dir, counter, notify, limit=20, auto=False, autos=None, session=None, host=True):
     """The answer to one request LINE ({"url": ...}) of the sandbox's xdg-open: the question it became in
-    APPROVALS_DIR (announced with NOTIFY), or why not."""
+    APPROVALS_DIR (announced with NOTIFY), or why not. SESSION(url): the run's session browser takes the URLs it
+    answers for (its reply; None for any other: dsh.session_opener, DeepSeek Harness' web UI on the sandbox's
+    loopback, which no browser outside the sandbox reaches). HOST: URLs may go to your browser at all (a run with
+    only SESSION's: no approvals, or behind Tor)."""
     try:
         request = json.loads(line or "{}")
         url = request.get("url", "") if isinstance(request, dict) else ""
-        if not isinstance(url, str) or not URL.fullmatch(url):
+        taken = session(url) if session is not None and isinstance(url, str) else None
+        if taken is not None:
+            reply = taken
+        elif not host:
+            reply = {"ok": False, "message": "sandbox-ai: in this run no URL goes to the human's browser; open it "
+                                             "yourself"}
+        elif not isinstance(url, str) or not URL.fullmatch(url):
             reply = {"ok": False, "message": "sandbox-ai: only http(s) URLs can be opened"}
         elif len([p for p in Path(approvals_dir).glob("*.json") if not p.with_suffix(".done").exists()]) >= limit:
             reply = {"ok": False, "message": "sandbox-ai: too many open questions; open the URL yourself"}
@@ -2233,6 +2244,9 @@ def main(argv, out=print):
     again = commands.add_parser("ask-again", help="forget what the run decided about question ID (an answer, or no "
                                                   "answer): its next request is asked again")
     again.add_argument("id")
+    argv = list(argv)
+    if not argv or argv[0] in ("-j", "--json"):  # alone: the open questions (as `sandbox-ai kits` lists the kits)
+        argv = ["list", *argv]
     args = parser.parse_args(argv)
     try:
         if args.command in ("blocked", "decided"):

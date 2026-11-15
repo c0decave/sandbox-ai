@@ -1107,27 +1107,34 @@ def build_command(profile_or_image):
     return "sandbox-ai build tor" if name == TOR_IMAGE else "sandbox-ai build vpn"
 
 
-def container_command(podman, name, profile, action="serve", pod=None, network=None, labels=()):
+def container_command(podman, name, profile, action="serve", pod=None, network=None, labels=(), lend=None):
     """podman run for the VPN container: only NET_ADMIN (NET_RAW too for tailscaled) and /dev/net/tun, a read-only
     image, nothing of the host but the runtime script and (Tailscale) the profile's own state. No secret is part of
     it: they follow on standard input. Tor needs no tun device; it binds port 53 (NET_BIND_SERVICE) as root and
-    then becomes debian-tor (SETUID, SETGID), whose data directory is a tmpfs of its own."""
+    then becomes debian-tor (SETUID, SETGID), whose data directory is a tmpfs of its own. LEND (lend_mount): the
+    folder of a start's lent tunnel - ("lender", RUN) for the start's own, ("borrower", RUN) for one of its MCP
+    servers', which has no tunnel (no tun device) and binds its relay's resolver on port 53 (NET_BIND_SERVICE)."""
     tor = profile["type"] == "tor"
+    borrower = bool(lend) and lend[0] == "borrower"
     command = [*podman, "run", "--rm", "-i", "--pull=never", "--name", name, "--user=0:0", "--read-only",
-               "--cap-drop=ALL", "--cap-add=NET_ADMIN", *([] if tor else ["--device=/dev/net/tun"]),
+               "--cap-drop=ALL", "--cap-add=NET_ADMIN", *([] if tor or borrower else ["--device=/dev/net/tun"]),
                "--security-opt=no-new-privileges",
                "--log-driver=none", "--tmpfs=/run:rw,nosuid,nodev,mode=0755", "--tmpfs=/tmp:rw,nosuid,nodev"]
-    if tor:
+    if borrower:
+        command.append("--cap-add=NET_BIND_SERVICE")
+    elif tor:
         # The data directory: a tmpfs of its own that the runtime gives to debian-tor (CHOWN) before tor starts -
         # Podman's --tmpfs takes no uid= or gid= option ("unknown mount option").
         command += ["--cap-add=SETUID", "--cap-add=SETGID", "--cap-add=NET_BIND_SERVICE", "--cap-add=CHOWN",
                     "--tmpfs=/var/lib/tor:rw,nosuid,nodev,noexec,mode=0700"]
-    if profile["type"] == "tailscale":
+    if profile["type"] == "tailscale" and not borrower:  # (a borrower has no node: never the node's state)
         command.append("--cap-add=NET_RAW")
         if profile["tailscale"].get("ephemeral"):
             command.append("--tmpfs=/var/lib/tailscale:rw,nosuid,nodev,mode=0700")
         else:
             command += ["--mount", f"type=bind,src={tailscale_state(profile)},dst=/var/lib/tailscale,rw"]
+    if lend:
+        command += lend_mount(lend[1], lend[2] if len(lend) > 2 else False, lender=not borrower)
     command += ["--pod", pod] if pod else ["--network", network or "none"]
     # Every VPN container names its profile: `vpn rotate` finds whatever uses it (agents, MCP servers, orphans).
     for label in [f"sandbox-ai.vpn-profile={profile['name']}", *labels]:
@@ -1148,21 +1155,483 @@ def tailscale_state(profile):
     return state_dir(profile["name"]) / "tailscale"
 
 
+# Whether one profile may run in several sandboxes at once (sessions, MCP servers' own VPNs, the members of a team):
+# the lock below, `sandbox-ai team start` and the app's team dialog say the same.
+#   shared  Tor (each sandbox starts a Tor of its own: its own circuits, its own exit) and an ephemeral Tailscale
+#           profile (a new node per start)
+#   once    WireGuard - Mullvad's profiles too - and a persistent Tailscale node: a second start is refused, naming the
+#           run that holds it. A start's own MCP servers behind it are no second start: the start lends them its
+#           tunnel (lends, below; vpn_runtime "the start's tunnel, lent") - one key, one tunnel.
+#   ask     OpenVPN: a second start goes on with a warning (a team asks first: team start --allow-shared-openvpn)
+SHARING_WHY = {
+    "tor": "each sandbox starts a Tor of its own (its own circuits and its own exit)",
+    "wireguard": "a WireGuard key works in one sandbox at a time: the same key twice gets the same tunnel address, and "
+                 "the server sends that address's packets to whichever tunnel spoke last, so both tunnels break",
+    "openvpn": "many OpenVPN servers take one account or certificate once: a second connection ends the first, unless "
+               "the server allows it twice (duplicate-cn)",
+    "tailscale": "a Tailscale node runs once at a time",
+}
+SHARING_FIX = {
+    "wireguard": "give each sandbox a profile of its own (Mullvad allows several devices per account, each with a key "
+                 "of its own: sandbox-ai vpn add NAME2 --mullvad), or use Tor (sandbox-ai vpn add NAME --tor)",
+    "openvpn": "give each sandbox a profile of its own if the first tunnel drops",
+    "tailscale": "add an ephemeral profile for parallel use: vpn add ... --ephemeral",
+}
+
+
+def sharing(profile):
+    """"shared", "once" or "ask": whether PROFILE may run in several sandboxes at once (see SHARING_WHY)."""
+    kind = profile["type"]
+    if kind == "tor" or kind == "tailscale" and (profile.get("tailscale") or {}).get("ephemeral"):
+        return "shared"
+    return "ask" if kind == "openvpn" else "once"
+
+
+def sharing_text(profile):
+    """(why, what to do instead or "") of PROFILE in several sandboxes at once."""
+    if profile["type"] == "tailscale" and sharing(profile) == "shared":
+        return "an ephemeral Tailscale profile is a new node in each sandbox", ""
+    return SHARING_WHY[profile["type"]], SHARING_FIX.get(profile["type"], "")
+
+
+# --- a start's tunnel, lent to its own MCP servers ----------------------------------------------------------------
+#
+# A profile that runs in one sandbox at a time (sharing "once") would be the same key twice if a networked MCP server
+# of the start brought up a tunnel of its own beside the agent's. Instead the start's VPN container (agent_up) lends
+# its tunnel through a Unix socket in lend_socket_dir(RUN) - mounted into it and into its servers' VPN containers only,
+# a folder among the private paths no workspace or mount may show (check_paths) - and each such server's VPN container
+# borrows it: no tunnel, no key, a kill switch through which nothing leaves but over loopback, and a relay to the
+# lender (vpn_runtime.Lender, Borrower). The server's own sandbox, its firewall and its rules stay its own; only its
+# way out is the start's tunnel. When the start ends, its VPN container and the lender go: the servers reach nothing,
+# their VPN containers end, and the launcher stops them (mcp.stop_lent).
+#
+# lend_dir(RUN) is the run's own folder, the user's alone: in it the folder of the socket (LEND_SOCKET_DIR: what the
+# VPN containers mount - macOS and --podman-url: a Podman volume instead, lend_volume), the run's token
+# (LEND_TOKEN_FILE: 256 random bits made for each run, never mounted anywhere; the start's launcher hands it to its
+# lender, each server's launcher reads it here and hands it to its borrower - on standard input with the secrets,
+# never in the environment, a command line or a log - and the lender serves no request without it), and, where the
+# lender could not start for a start that had no such server then, why (LEND_REFUSED_FILE: a server attached to that
+# run later is refused with it). The start's launcher holds a lock in the folder while it runs (hold_lend_folder:
+# LEND_LOCK_FILE, a lock on a file as the profile's own is - it goes with the launcher's process, however that ends),
+# which is how `sandbox-ai gc` tells a folder a killed start left behind from one in use (lend_leftovers).
+RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
+LEND_SOCKET_DIR = "socket"
+LEND_TOKEN_FILE = "token"
+LEND_REFUSED_FILE = "not-lent"
+LEND_LOCK_FILE = "lock"
+LEND_ROOT_LOCK = ".lock"  # in lend_root(): no run's name (RUN_ID)
+LEND_VOLUME_PREFIX = "sandbox-ai-lend-"
+
+
+def lends(profile):
+    """Whether a start behind PROFILE lends its tunnel to its own networked MCP servers (instead of each bringing up
+    one of its own): a profile that runs once at a time and is a way out for a server (egress_problem: a Tailscale
+    profile without an exit node carries only the tailnet)."""
+    return isinstance(profile, dict) and profile.get("type") != "tor" and sharing(profile) == "once" and \
+        egress_problem(profile) is None
+
+
+def check_run(run):
+    if not isinstance(run, str) or not RUN_ID.fullmatch(run):
+        raise ValueError(f"not a run's name: {str(run)[:40]!r}")
+    return run
+
+
+def lend_dir(run):
+    """The host folder of the run RUN's lent tunnel (the folder of its socket, its token): below the VPN's private
+    state (private_paths)."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    return data / "sandbox-ai" / "vpn" / ".lend" / check_run(run)
+
+
+def lend_socket_dir(run):
+    """The folder of the run RUN's lent tunnel that its VPN containers mount (the lender's socket): in lend_dir(RUN),
+    beside the token - which no container ever sees as a file."""
+    return lend_dir(run) / LEND_SOCKET_DIR
+
+
+def lend_volume(run):
+    """macOS: the Podman volume of the run RUN's lent tunnel (a socket does not cross podman machine's shared
+    folders; the start's and its servers' VPN containers all run in the machine's VM)."""
+    return f"{LEND_VOLUME_PREFIX}{check_run(run)}"
+
+
+def lend_mount(run, machine=False, lender=False):
+    """The --mount of the run RUN's lent tunnel for a VPN container: the lender's writable, a borrower's read-only
+    (it connects to the socket; it cannot replace it)."""
+    target = runtime().LEND_DIR
+    if machine:
+        return ["--mount", f"type=volume,src={lend_volume(run)},dst={target}" + ("" if lender else ",ro")]
+    return ["--mount", f"type=bind,src={lend_socket_dir(run)},dst={target}" + ("" if lender else ",ro")]
+
+
+def lends_by_volume(a):
+    """Whether the start A's lent tunnel lies in a Podman volume (lend_volume) instead of a folder of this host: on
+    macOS (podman machine's VM) and with a Podman engine elsewhere (--podman-url), where its VPN containers run."""
+    return bool(launcher().on_machine(a) or getattr(a, "podman_url", None))
+
+
+NOT_LENDING = "it has ended, or it began before its tunnel was lent (restart it); the server comes up with a start " \
+              "that runs"
+
+
+def lent_tunnel_problem(run, machine=False):
+    """Why the run RUN does not lend its tunnel now, or None while it does: its lender could not start (the start
+    went on without it and wrote down why: note_not_lent), or nothing of it is there (no token, no socket: it has
+    ended). In a volume (MACHINE) the socket is out of this host's sight: with the token there, the server's VPN
+    container finds it, or says that it is not there."""
+    try:
+        directory = lend_dir(run)
+    except ValueError as exc:
+        return str(exc)
+    try:
+        note = read_private(directory / LEND_REFUSED_FILE, 2000).strip()
+    except ValueError:
+        note = None
+    if note is not None:
+        return (f"its VPN container could not lend the tunnel when it started ({launcher().printable(note)[:400]}); "
+                "restart that start for a server that reaches the network")
+    try:
+        lend_token(run)
+    except ValueError:
+        return NOT_LENDING
+    if machine:
+        return None
+    try:
+        if stat.S_ISSOCK((lend_socket_dir(run) / runtime().LEND_SOCKET.name).lstat().st_mode):
+            return None
+    except OSError:
+        pass
+    return NOT_LENDING
+
+
+def lent_tunnel_up(run, machine=False):
+    """Whether the run RUN lends its tunnel now (lent_tunnel_problem finds nothing)."""
+    return lent_tunnel_problem(run, machine) is None
+
+
+def note_not_lent(run, why):
+    """The run RUN goes on without lending its tunnel: WHY, kept in its folder for whoever would borrow it later
+    (lent_tunnel_problem)."""
+    write_private(lend_dir(run) / LEND_REFUSED_FILE, str(why)[:1000] + "\n")
+
+
+def new_lend_token(run):
+    """The token of the run RUN's lent tunnel, made now: 256 random bits, kept in the run's folder as a file only
+    this user reads (0400; made anew, never through a link) - where the launchers of the run's servers read it
+    (lend_token). The folder its VPN containers mount lies beside it: no container sees the file."""
+    token = secrets.token_hex(32)
+    fd = os.open(lend_dir(run) / LEND_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+    try:
+        os.write(fd, token.encode())
+    finally:
+        os.close(fd)
+    return token
+
+
+def lend_token(run):
+    """The token of the run RUN's lent tunnel, for the launcher of one of its servers; ValueError when RUN lends no
+    tunnel now (no such file), or the file is not this user's own private one or holds no token - never showing what
+    it holds."""
+    path = lend_dir(run) / LEND_TOKEN_FILE
+    try:
+        return runtime().lend_token(read_private(path, 256).strip())
+    except ValueError as exc:
+        why = str(exc) if str(path) in str(exc) else f"{path} holds no token"
+        raise ValueError(f"the run {run} does not lend its tunnel now ({why}): {NOT_LENDING}") from None
+
+
+def lend_root():
+    """The folder of the lent tunnels' folders (lend_dir of each run)."""
+    return lend_dir("x").parent
+
+
 @contextlib.contextmanager
-def profile_lock(profile):
-    """A persistent Tailscale node can run once at a time: its state (node key) is one."""
-    if profile["type"] != "tailscale" or profile["tailscale"].get("ephemeral"):
+def lend_root_lock(make=False):
+    """One at a time among the lent tunnels' folders - a start making its own (prepare_lending), gc removing what
+    killed starts left (lend_leftovers) - so that a folder gc found left over is never one a start makes anew in that
+    moment. Yields whether the folder is there (MAKE: made as needed, a folder of this user alone and never a link;
+    else one that is a link counts as not there: nothing is done through it)."""
+    above = lend_root()
+    if make:
+        above.parent.mkdir(parents=True, exist_ok=True)  # (the VPNs' state folder: as it is)
+        if above.is_symlink():
+            raise ValueError(f"{above} is a link: the folder of the lent tunnels must be a folder of its own; "
+                             "remove it")
+        private_dir(above)
+    try:
+        if above.is_symlink():
+            raise OSError("a link")
+        fd = os.open(above / LEND_ROOT_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if make:
+            raise ValueError(f"{above} cannot be locked ({exc.strerror or exc}): the start's tunnel is not lent "
+                             "through it") from None
+        yield False
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield True
+    finally:
+        os.close(fd)
+
+
+def hold_lend_folder(directory):
+    """The lock the start's launcher holds in its lent tunnel's folder DIRECTORY while it runs (LEND_LOCK_FILE: it
+    goes with the launcher's process, however that ends): its descriptor. `sandbox-ai gc` never removes a folder
+    whose lock is held (lend_leftovers)."""
+    try:
+        fd = os.open(Path(directory) / LEND_LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        raise ValueError(f"{directory} cannot be held ({exc.strerror or exc}): the tunnel is not lent through "
+                         "it") from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise ValueError(f"{directory} is in use by another start of this run's name: the tunnel is not lent "
+                         "through it") from None
+    return fd
+
+
+def lend_folder_held(directory):
+    """Whether a launcher that runs holds the lent tunnel's folder DIRECTORY (hold_lend_folder's lock)."""
+    try:
+        fd = os.open(Path(directory) / LEND_LOCK_FILE, os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        return False  # no folder, or none a start holds (its lock is made with it)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)  # (closing drops the lock taken just now)
+    return False
+
+
+def prepare_lending(a, podman, cleanup):
+    """The folder of the start A's lent tunnel (macOS: and the volume of its socket), made now, held (hold_lend_folder)
+    and gone with the start (CLEANUP), and the run's token (new_lend_token): (the lend_mount for the start's VPN
+    container, the token for its lender). What a killed start of this run's name left goes; a folder another start
+    holds - one that runs - is never made anew (its lender's socket and its token would go)."""
+    run, machine = check_run(a.run_id), lends_by_volume(a)
+    with lend_root_lock(make=True):
+        if lend_folder_held(lend_dir(run)):
+            raise ValueError(f"the run {run} runs already and lends its tunnel ({lend_dir(run)} is held by its "
+                             "launcher): not started twice")
+        directory = lend_folder(run)
+        held = hold_lend_folder(directory)
+    cleanup.callback(os.close, held)  # (after the folder went: callbacks run last in, first out)
+    cleanup.callback(shutil.rmtree, directory, True)
+    if machine:
+        def remove_volume():
+            with contextlib.suppress(OSError, subprocess.SubprocessError):  # (gc removes what stays behind)
+                podman_run([*podman, "volume", "rm", "--force", lend_volume(run)], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cleanup.callback(remove_volume)
+    token = new_lend_token(run)
+    a.vpn_lends = True
+    return ("lender", run, machine), token
+
+
+def not_lent(a, profile, ready, required, say):
+    """The start A's VPN container came up without lending its tunnel (its "ready" says why): with servers that need
+    it now (REQUIRED) the start is refused; else it goes on - its own network needs no lender - with a warning, and
+    the reason is kept for a server attached to it later (note_not_lent: refused with it)."""
+    why = launcher().printable(str((ready.get("tunnel") or {}).get("lend_error") or
+                                   "its VPN container did not say why"))[:300]
+    if required:
+        raise ValueError(f"the tunnel of the VPN {profile['name']} could not be lent to the start's MCP servers "
+                         f"({why}): they would reach nothing")
+    a.vpn_lends = False
+    note_not_lent(a.run_id, why)
+    message = (f"the tunnel of {profile['name']} is not lent to MCP servers ({why}). The start goes on - its own "
+               "network is not affected - but an MCP server that reaches the network cannot be attached to it while "
+               "it runs (sandbox-ai mcp attach NAME START --live, sandbox-ai mcp start NAME --for START): restart "
+               "the start for that")
+    LOG.warning("vpn", f"run {a.run_id}: {message}")
+    say(f"warning: {message}")
+
+
+def lend_leftovers(alive, volumes=None, remove=True):
+    """What killed starts left of their lent tunnels (`sandbox-ai gc`): the folders in lend_root() - and, with VOLUMES
+    (the podman command, where the sockets lie in Podman volumes: macOS), the volumes sandbox-ai-lend-RUN - of runs
+    that have ended. Removed unless REMOVE is False; the runs' names. Never one of a live run: not a folder whose
+    lock a launcher holds (hold_lend_folder), not one whose run ALIVE(run) says still runs or cannot be judged
+    (asked before the lock is taken: it may ask Podman), and a volume is removed without --force, which Podman
+    refuses while a container uses it. Only a run's name is ever touched, and never through a link."""
+    root = lend_root()
+    try:
+        folders = {entry.name for entry in os.scandir(root) if RUN_ID.fullmatch(entry.name)}
+    except OSError:
+        folders = set()
+    listed = {}
+    if volumes is not None:
+        try:
+            done = podman_run([*volumes, "volume", "ls", "--format", "{{.Name}}"], capture_output=True, text=True,
+                              timeout=60, check=False)
+            names = done.stdout.split() if done.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError):
+            names = []
+        for name in names:
+            run = name[len(LEND_VOLUME_PREFIX):]
+            if name.startswith(LEND_VOLUME_PREFIX) and RUN_ID.fullmatch(run):
+                listed[run] = name
+    ended = sorted(run for run in folders | set(listed) if not alive(run))
+    found = []
+    with lend_root_lock() as there:
+        for run in ended:
+            path = root / run
+            if there and (path.is_symlink() or path.exists()):
+                if path.is_symlink() or not path.is_dir():
+                    if remove:  # (what is no folder is never followed: the entry itself goes)
+                        with contextlib.suppress(OSError):
+                            path.unlink()
+                else:
+                    try:
+                        if os.lstat(path).st_uid != os.getuid():
+                            continue
+                    except OSError:
+                        continue
+                    if lend_folder_held(path):
+                        continue  # its start runs (none begins meanwhile: this holds the lock above)
+                    if remove:
+                        shutil.rmtree(path, ignore_errors=True)
+            elif run not in listed:
+                continue  # gone meanwhile
+            if run in listed and remove:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    podman_run([*volumes, "volume", "rm", listed[run]], capture_output=True, text=True, timeout=60,
+                               check=False)
+            found.append(run)
+    if found:
+        LOG.info("vpn", f"lent tunnels of ended runs {'removed' if remove else 'found'}: {', '.join(found)}")
+    return found
+
+
+def lend_folder(run):
+    """lend_dir(RUN) made anew: a folder of this user alone (0700) with nothing in it but the empty folder of its
+    socket (lend_socket_dir, 0700) - what a killed start of this name left goes - and never a link: the lender's
+    container mounts the socket's folder writable, and whoever reaches its socket reaches the internet through the
+    tunnel, so neither it nor the folders above it are ones that lead elsewhere (a link in its place is removed, not
+    followed; the folder above as a link is refused)."""
+    directory = lend_dir(run)
+    above = directory.parent
+    above.parent.mkdir(parents=True, exist_ok=True)  # (the VPNs' state folder: as it is)
+    if above.is_symlink():
+        raise ValueError(f"{above} is a link: the folder of the lent tunnels must be a folder of its own; remove it")
+    private_dir(above)
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        directory.unlink()
+    else:
+        shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    sockets = directory / LEND_SOCKET_DIR
+    sockets.mkdir(mode=0o700, exist_ok=True)
+    for place in (above, directory, sockets):
+        info = place.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError(f"{place} is not a folder of yours: the start's tunnel is not lent through it")
+    directory.chmod(0o700)
+    sockets.chmod(0o700)
+    return directory
+
+
+def lent_agent_rules(dns_open, proxy_uid):
+    """Lines for the top of the output chain of a sandbox behind a borrowed tunnel (a command server's or helper's):
+    the relay's port takes only what its redirect handed it from the connection proxy (whose connections the proxy
+    checked), never the sandbox's programs directly; its resolver only when the start allows DNS (--dns,
+    --egress-all-allow) - as with Tor (tor_agent_rules)."""
+    rt = runtime()
+    rules = [f"ct status dnat ip daddr 127.0.0.1 tcp dport {rt.BORROW_PORT} meta skuid {int(proxy_uid)} accept",
+             f"ip daddr 127.0.0.1 tcp dport {rt.BORROW_PORT} drop"]
+    if not dns_open:
+        rules.append(f"ip daddr {rt.BORROW_DNS} drop")
+    return rules
+
+
+def holder_path(profile):
+    return state_dir(profile["name"]) / ".holder"
+
+
+def held_by(profile):
+    """Who holds PROFILE's lock ("the session review-claude, PID 4711"), as its holder wrote it; None if unknown."""
+    try:
+        data = json.loads(read_private(holder_path(profile), 4096))
+        text = f"{str(data['holder'])[:200]}, PID {int(data['pid'])}"
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+    return launcher().printable(text)
+
+
+def profile_holder(profile):
+    """Who holds PROFILE now (held_by, else "another sandbox"), or None when nobody does - asked without keeping it."""
+    if sharing(profile) == "shared":
+        return None
+    try:
+        fd = os.open(state_dir(profile["name"]) / ".lock", os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        return None  # never locked
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return held_by(profile) or "another sandbox"
+    finally:
+        os.close(fd)  # (closing drops the lock taken just now)
+    return None
+
+
+def holder_of(a):
+    """What a start A is, for the lock's holder: "the session NAME", else its run."""
+    name = getattr(a, "session", None) or getattr(a, "name", None)
+    pod = str(getattr(a, "pod_name", None) or "")
+    if pod.startswith("agent-mcp-"):  # (mcp.py names a command server's pod so)
+        return f"the MCP server {pod[len('agent-mcp-'):]}"
+    if getattr(a, "helper_of", None):
+        return f"the helper {a.helper_of}"
+    if name:
+        return f"the session {name}"
+    return f"a {getattr(a, 'agent', 'sandbox')} run {getattr(a, 'run_id', None) or ''}".strip()
+
+
+@contextlib.contextmanager
+def profile_lock(profile, holder=None, say=None):
+    """One profile in one sandbox at a time where it cannot be in two (sharing: WireGuard - Mullvad too - and a
+    persistent Tailscale node, whose key or node state is one): a second start is refused, naming the run that holds
+    it (HOLDER, "the session NAME", is written beside the lock). OpenVPN goes on with a warning (SAY); Tor and an
+    ephemeral Tailscale profile are each their own."""
+    kind = sharing(profile)
+    if kind == "shared":
         yield
         return
-    directory = private_dir(tailscale_state(profile))
-    fd = os.open(directory.parent / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    directory = private_dir(tailscale_state(profile)).parent if profile["type"] == "tailscale" else \
+        private_dir(state_dir(profile["name"]))
+    fd = os.open(directory / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    owned = False
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            owned = True
         except BlockingIOError:
-            raise ValueError(f"VPN profile {profile['name']} is in use by another sandbox; a Tailscale node runs once "
-                             "at a time (add an ephemeral profile for parallel use: vpn add ... --ephemeral)") from None
-        yield
+            who = held_by(profile)
+            where = f"another sandbox ({who})" if who else "another sandbox"
+            why, fix = sharing_text(profile)
+            if kind == "once":
+                LOG.warning("vpn", f"the start is refused: VPN profile {profile['name']} is in use by {where}")
+                raise ValueError(f"VPN profile {profile['name']} is in use by {where}; {why} ({fix})") from None
+            message = f"VPN profile {profile['name']} (OpenVPN) is in use by {where} as well: {why}; {fix}"
+            LOG.warning("vpn", message)
+            (say or (lambda text: print(f"sandbox-ai vpn: {text}", file=sys.stderr)))(message)
+        if owned:
+            with contextlib.suppress(OSError):
+                write_private(holder_path(profile), json.dumps({"holder": str(holder or "a sandbox")[:200],
+                                                                "pid": os.getpid()}))
+        try:
+            yield
+        finally:
+            if owned:
+                with contextlib.suppress(OSError):
+                    holder_path(profile).unlink()
     finally:
         os.close(fd)
 
@@ -1401,19 +1870,87 @@ def tor_agent_rules(dns_open, proxy_uid):
     return rules
 
 
+NOTE_FILE = "network.md"  # the run's network note in the session directory: /sandbox/session/network.md
+NOTE_PATH = "/sandbox/session/" + NOTE_FILE
+
+
+def agent_note(a):
+    """The run's network note: a few lines every agent sees from its start (its system prompt or managed
+    instructions; agent_sandbox.network_note says where) on how THIS run reaches the network through its --vpn
+    profile, None without one. sandbox-ai's own text: the profile's name (PROFILE_NAME), checked addresses and
+    ports, never a secret. A Tor profile: at most 12 lines with this run's facts (SocksPort, .onion lookups, what
+    lies past Tor, the exit check); any other VPN: two lines."""
+    profile = getattr(a, "vpn_profile", None)
+    if not getattr(a, "vpn", None) or not profile:
+        return None
+    name, kind = profile["name"], profile["type"]
+    if kind != "tor":
+        if kind == "tailscale" and not profile["tailscale"].get("exit_node"):
+            how = ("only its tailnet goes through the tunnel; everything else follows the sandbox's own rules as "
+                   "without a VPN")
+        else:
+            how = ("everything leaves through its tunnel, a kill switch blocks the rest (IPv6 only if the VPN carries "
+                   "it), and lookups go to the VPN's resolvers")
+        return (f"## Network of this run (sandbox-ai): the VPN {name} ({kind})\n"
+                f"- {how}; the allow-list and approvals apply as always. More: the sandbox-ai skill.\n")
+    rt, tor = runtime(), profile["tor"]
+    dns_open = bool(getattr(a, "dns", False) or getattr(a, "egress_all_allow", False))
+    lines = [f"## Network of this run (sandbox-ai): Tor (profile {name})",
+             "- Every TCP connection here goes through Tor by itself - curl, git, pip, npm, your MCP servers, the "
+             "session browser: no proxy settings or torsocks needed. The allow-list, approvals and the connection "
+             "log still apply first.",
+             '- https://check.torproject.org/api/ip answers "IsTor": true; an exit that is no Tor exit '
+             + ("ends the run." if getattr(a, "vpn_check", "stop") != "warn"
+                else "is reported to the human (--vpn-check warn)."),
+             "- Lookups go through Tor too. .onion names resolve (to " + rt.TOR_VIRTUAL_NET + ", Tor's stand-ins: "
+             "connect as usual): " + ("every one (--dns)." if dns_open else
+                                      "only those on the allow-list (no --dns at the start)."),
+             "- No UDP but DNS, no IPv6: no ping, traceroute, NTP or QUIC. Tor accepts a connection before its exit "
+             "reaches the target: a closed port or dead host shows as a reset or empty reply. Slower; some sites "
+             "refuse or challenge Tor.",
+             (f"- Tor's SocksPort: socks5h://127.0.0.1:{rt.TOR_SOCKS_PORT}, only for programs that want SOCKS "
+              "(curl --socks5-hostname, torsocks, Tor Browser with TOR_SKIP_LAUNCH=1); what goes through it passes "
+              "the connection proxy by (no allow-list, approvals or log)." if tor.get("socks") else
+              f"- No SocksPort in this run (127.0.0.1:{rt.TOR_SOCKS_PORT} is closed); nothing here needs one.")]
+    facts = len(lines)
+    bypass = list(getattr(a, "vpn_bypass_tcp", None) or [])
+    if bypass:
+        lines.append(f"- Past Tor, from the human's own address: only TCP to {', '.join(bypass)} "
+                     "(--vpn-bypass-tcp, e.g. their model server).")
+    if getattr(a, "vpn_bypass_host_ports", False):
+        ports = launcher().host_ports(a)
+        if ports:
+            lines.append(f"- The host's loopback port{'s' if len(ports) > 1 else ''} "
+                         f"{', '.join(map(str, ports))} lie{'' if len(ports) > 1 else 's'} past Tor "
+                         "(--vpn-bypass-host-ports).")
+    lines.append(f"- Nothing {'else ' if len(lines) > facts else ''}leaves past Tor (kill switch). More: the "
+                 "sandbox-ai skill.")
+    return "\n".join(lines) + "\n"
+
+
 def bring_up(profile, command, names, say, action="serve", log_dir=None, run=None, warn_only=False, podman=None,
-             bypass=(), mcp=False):
+             bypass=(), mcp=False, lend=False, borrow=None):
     """Start the container, wait for the tunnel, run the checks: (tunnel, ready event, verdict). Raises when a
     check fails, unless WARN_ONLY. PODMAN: the engine's command (a remote one: its own address is the baseline).
     BYPASS: the addresses of the local network a Tor start reaches past Tor (--vpn-bypass-tcp). MCP: the container
-    of an MCP image server (its lookups go to the VPN's resolver, vpn_runtime.mcp_dns_rules)."""
+    of an MCP image server (its lookups go to the VPN's resolver, vpn_runtime.mcp_dns_rules). LEND ({"token": the
+    run's, prepare_lending; "required": the start has servers that need it now}): the start's own container lends its
+    tunnel to its MCP servers; BORROW (the run that lends it): a server's container borrows it - no tunnel, no secret
+    of the profile but that run's token (lend_token), its checks made through the lent tunnel. The token travels with
+    the secrets, on the container's standard input only."""
     data = payload(profile, action, names, bypass)
     if mcp:
         data["mcp"] = True
+    if lend:
+        data["lend"] = {"required": bool(lend.get("required"))}
+        data["secrets"] = {**data["secrets"], "lend_token": runtime().lend_token(lend.get("token"))}
+    if borrow:
+        data["borrow"] = {"run": check_run(borrow)}
+        data["secrets"] = {"lend_token": lend_token(borrow)}  # (the key stays with the start's own container)
     tailnet = profile["type"] == "tailscale" and not profile["tailscale"].get("exit_node")
     baseline = in_background(lambda: {} if tailnet else baseline_of(data["checks"], podman))
     shown = f"the VPN {profile['name']} ({profile['type']}" + (", an MCP server's" if mcp else "") + \
-        (f", run {run})" if run else ")")
+        (f", borrowed from the run {borrow}" if borrow else "") + (f", run {run})" if run else ")")
     LOG.info("vpn", f"{shown}: its container starts ({action}); waiting up to {ready_timeout(profile)} s for its "
                     "tunnel")
     LOG.debug("vpn", f"its container: {LOG.command_line(command)}")
@@ -1494,6 +2031,8 @@ def validate(a):
             raise ValueError("--vpn-bypass-host-ports goes with --vpn (a Tor profile)")
         if getattr(a, "vpn_bypass_tcp", None):
             raise ValueError("--vpn-bypass-tcp goes with --vpn (a Tor profile)")
+        if getattr(a, "vpn_lent_by", None):
+            raise ValueError("--vpn-lent-by goes with --vpn (the profile of the start that lends its tunnel)")
         return
     check_name(a.vpn)
     # An LLM endpoint's VPN (llm.apply_vpn) is named with where it came from.
@@ -1514,6 +2053,13 @@ def validate(a):
     a.vpn_profile = profile
     a.vpn_mark = mark_expression(profile)
     a.vpn_check_mark = runtime().CHECK_MARK  # the VPN container's checks during the run pass the agent's firewall
+    # A start that lends its tunnel to its own MCP servers: those connections carry a mark of their own, which its
+    # firewall accepts only after the kill switch's chain (sandbox-ai net cut holds them too).
+    a.vpn_lend_mark = runtime().LEND_MARK if lends(profile) and not getattr(a, "mcp_socket_dir", None) and \
+        not getattr(a, "vpn_lent_by", None) else None
+    if getattr(a, "vpn_lent_by", None):
+        validate_lent(a, profile, option, l)
+        return
     if profile["type"] == "tor":
         validate_tor(a, profile, option, l)
         return
@@ -1531,6 +2077,30 @@ def validate(a):
                 raise ValueError(f"The tailnet {network} lies outside the networks the administrator's policy allows")
             if network not in a.allow:
                 a.allow.append(network)
+
+
+def validate_lent(a, profile, option, l):
+    """--vpn PROFILE --vpn-lent-by RUN (mcp.py gives it to the sandbox of a networked MCP server or helper behind its
+    start's tunnel): the tunnel is the run RUN's, borrowed (lends). Only an MCP server's or helper's sandbox borrows;
+    its connections reach the relay through the connection proxy (no --no-proxy), its lookups go to the relay's
+    resolver on loopback, and its firewall gets the relay's rules (lent_agent_rules)."""
+    rt = runtime()
+    check_run(a.vpn_lent_by)
+    if not getattr(a, "mcp_socket_dir", None):
+        raise ValueError("--vpn-lent-by is for the sandbox of an MCP server behind its start's tunnel")
+    if not lends(profile):
+        raise ValueError(f"{option} {a.vpn}: a {profile['type']} profile of this kind is not lent (each sandbox brings "
+                         "up its own)")
+    if getattr(a, "no_proxy", False):
+        raise ValueError(f"{option} {a.vpn} is the tunnel of the run {a.vpn_lent_by}, lent: its relay takes the "
+                         "connections the connection proxy hands it; drop --no-proxy")
+    if getattr(a, "vpn_bypass_tcp", None):
+        raise ValueError(f"--vpn-bypass-tcp goes with a Tor profile; {option} {a.vpn} is a {profile['type']} profile")
+    if rt.BORROW_PORT in set(l.host_ports(a)):
+        raise ValueError(f"--allow-host-port {rt.BORROW_PORT}: the relay of the lent tunnel listens there")
+    a.vpn_mark = None  # (no tunnel here: nothing of the sandbox carries the tunnel's own mark)
+    a.vpn_dns = [rt.BORROW_DNS]  # on loopback, inside the sandbox: no network to hold against the policy
+    a.vpn_firewall = lent_agent_rules(bool(a.dns or a.egress_all_allow), l.PROXY_UID)
 
 
 def validate_tor(a, profile, option, l):
@@ -1669,7 +2239,18 @@ def plan(a):
                            "dns_probe": settings["dns_probe"],
                            "dns_route": f"tor's DNSPort {rt.TOR_DNS}; a lookup sent to {rt.OUTSIDE_RESOLVER} must "
                                         f"reach it too (an .onion name maps into {rt.TOR_VIRTUAL_NET})"}}
-    return {**describe(profile), "image": image(profile),
+    if getattr(a, "vpn_lent_by", None):
+        rt = runtime()
+        return {**describe(profile), "image": image(profile), "lent_by": a.vpn_lent_by,
+                "kill_switch": f"no tunnel of its own: the tunnel of the run {a.vpn_lent_by}, lent; nothing leaves "
+                               f"but over loopback - every TCP connection over IPv4 goes to the relay "
+                               f"(127.0.0.1:{rt.BORROW_PORT}), port 53 to its resolver {rt.BORROW_DNS}; other UDP and "
+                               "all IPv6 are dropped",
+                "checks": {"on_failure": a.vpn_check, "ip_echo": settings["urls"],
+                           "dns_probe": settings["dns_probe"], "dns_route": "the relay's resolver, through the lent "
+                                                                            "tunnel"}}
+    lent = {"lends": True} if lends(profile) and not getattr(a, "mcp_socket_dir", None) else {}
+    return {**describe(profile), "image": image(profile), **lent,
             "kill_switch": "none: only the tailnet goes through the tunnel" if tailnet else
             "only the tunnel and its own packets to its endpoints leave, IPv4 and IPv6",
             "checks": {"on_failure": a.vpn_check, "ip_echo": [] if tailnet else settings["urls"],
@@ -1684,11 +2265,24 @@ def agent_up(a, session, home, names, cleanup):
     podman = l.podman_command(a)
     say = lambda text: print(f"agent-sandbox: vpn: {l.printable(text)}", file=sys.stderr)  # noqa: E731
     needed = image(profile)
-    if podman_run([*podman, "image", "exists", needed]).returncode != 0:
+    # A missing Tor or VPN image is built now, as the agent's own image is (build_missing_image: as this user, into
+    # the store the start uses; not for a dry run, a remote Podman or SANDBOX_AI_NO_AUTO_BUILD=1).
+    if podman_run([*podman, "image", "exists", needed]).returncode != 0 and \
+            not l.build_missing_image(a, f"the VPN {profile['name']}", needed):
         kind = "Tor" if needed == TOR_IMAGE else "VPN"
         LOG.warning("vpn", f"the start is refused: the image {needed} of the VPN {profile['name']} is missing")
         raise ValueError(f"The {kind} image {needed} is missing; build it with: {build_command(needed)}")
-    cleanup.enter_context(profile_lock(profile))
+    lent_by = getattr(a, "vpn_lent_by", None)
+    lend, token = None, None
+    if lent_by:
+        # An MCP server's (or helper's) sandbox behind its start's tunnel: borrowed from that start, which holds the
+        # profile - no lock of its own, no second tunnel of the key (vpn_runtime "the start's tunnel, lent").
+        lend = ("borrower", check_run(lent_by), lends_by_volume(a))
+    else:
+        cleanup.enter_context(profile_lock(profile, holder_of(a), say))
+        if lends(profile) and not getattr(a, "mcp_socket_dir", None) and getattr(a, "run_id", None):
+            # Its own networked MCP servers go through its tunnel: lent to them (and to those attached later).
+            lend, token = prepare_lending(a, podman, cleanup)
     import uuid  # here: only a start or a check names a container with it
     a.vpn_pod = a.pod_name or f"agent-{getattr(a, 'run_id', None) or a.agent + '-' + uuid.uuid4().hex[:12]}"
     create = l.pod_commands(a, a.vpn_pod, session, home)[0]
@@ -1700,12 +2294,20 @@ def agent_up(a, session, home, names, cleanup):
             podman_run([*podman, "pod", "rm", "--force", "--time", "0", a.vpn_pod],
                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     cleanup.callback(remove_pod)
-    command = container_command(podman, container_name(a.vpn_pod), profile, pod=a.vpn_pod)
+    command = container_command(podman, container_name(a.vpn_pod), profile, pod=a.vpn_pod, lend=lend)
+    lending = bool(lend) and lend[0] == "lender"
+    # A lender that cannot start stops the start only when it has servers that borrow the tunnel now (the launcher
+    # sets vpn_lend_required): any other start goes on without it (not_lent).
+    required = bool(getattr(a, "vpn_lend_required", False))
     tunnel, ready, _ = bring_up(profile, command, names, say, log_dir=a.log_dir, run=getattr(a, "run_id", None),
                                 warn_only=a.vpn_check == "warn", podman=podman,
-                                bypass=getattr(a, "vpn_bypass_tcp", None) or ())
+                                bypass=getattr(a, "vpn_bypass_tcp", None) or (),
+                                lend={"token": token, "required": required} if lending else None,
+                                borrow=lent_by if lend and lend[0] == "borrower" else None)
     LOG.info("vpn", f"{profile['name']} ({profile['type']}) is up for the pod {a.vpn_pod}")
     cleanup.callback(tunnel.close)  # before the pod goes (callbacks run last in, first out)
+    if lending and (ready.get("tunnel") or {}).get("lends") is not True:
+        not_lent(a, profile, ready, required, say)
     ending = []
     cleanup.callback(ending.append, True)  # (runs before tunnel.close: the run's own end is no lost tunnel)
 
@@ -1818,7 +2420,7 @@ def channel(name, podman_url=None, say=None):
     say = say or (lambda text: None)
     import uuid  # here: only a start or a check names a container with it
     container = f"sandbox-ai-vpn-req-{uuid.uuid4().hex[:8]}"
-    with profile_lock(profile):
+    with profile_lock(profile, "a reading of an LLM server through it (sandbox-ai llm)", say):
         command = container_command(podman, container, profile, action="serve", network=launcher().POD_NETWORK)
         settings = dict(check_settings(profile), recheck=0)  # a short use: checked once, at the start
         data = dict(payload(profile, "serve"), checks=settings)
@@ -2064,15 +2666,19 @@ def guarded_start(podman, options, image, at, vpn_id, run, popen, say):
         remove()
 
 
-def mcp_wrapper(profile_name, container, owner, command):
+def mcp_wrapper(profile_name, container, owner, command, lent_by=None):
     """--internal-mcp-vpn: the VPN container of an MCP image server (its own network namespace), checked, then the
     server's bridge, whose connections' containers join that namespace (mcp_guard: by the container's ID, checked).
     The tunnel lives as long as the bridge; a failed check stops the server, and so does the end of the VPN
-    container."""
+    container. LENT_BY (--internal-mcp-borrow): the VPN container borrows the tunnel of that run (its start's, which
+    holds the profile: no lock here, no second tunnel of the key); the run's end ends it, and the server with it."""
     profile = load_profile(profile_name)
     problem = egress_problem(profile)
     if problem:
         raise ValueError(problem)
+    if lent_by is not None and not lends(profile):
+        raise ValueError(f"the VPN profile {profile_name} ({profile['type']}) is not lent: the server brings up a "
+                         "tunnel of its own")
     podman = ["podman"]
     # One line per message: the log reader (mcp.py --internal-log) takes lines that start with the relay's
     # markers as its records, and a message can carry what the VPN's server sent.
@@ -2089,11 +2695,15 @@ def mcp_wrapper(profile_name, container, owner, command):
             raise ValueError(f"a container named {container} exists and was not created here")
         podman_run([*podman, "rm", "--force", "--time", "0", container], stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
-    with profile_lock(profile):
+    held = contextlib.nullcontext() if lent_by is not None else \
+        profile_lock(profile, f"the MCP server {container.removeprefix('sandbox-ai-vpn-mcp-')}", say)
+    with held:
         network = launcher().POD_NETWORK
+        # (this host's Podman: on macOS podman machine's VM, where the start's lender has its socket in a volume)
+        lend = ("borrower", check_run(lent_by), sys.platform == "darwin") if lent_by is not None else None
         tunnel, ready, _ = bring_up(profile, container_command(podman, container, profile, network=network,
-                                                               labels=[f"sandbox-ai.vpn-owner={owner}"]), (), say,
-                                    mcp=True)
+                                                               labels=[f"sandbox-ai.vpn-owner={owner}"], lend=lend),
+                                    (), say, mcp=True, borrow=lent_by)
         child = None
         try:
             # Its ID, checked as each connection checks it: the bridge's containers join this container, not
@@ -2299,7 +2909,7 @@ def rotate(name, account_secret=None, out=print, client=None, prompt=getpass.get
         raise ValueError(f"{name} is in use by {', '.join(using)}: a new key would cut its tunnel at once; rotate it "
                          "when they have ended")
     client = client or Mullvad()
-    with profile_lock(profile):
+    with profile_lock(profile, "sandbox-ai vpn rotate"):
         account = read_account(account_secret or mullvad.get("account_secret"), prompt)
         private = generate_private_key()
         token = client.token(account)
@@ -2474,7 +3084,7 @@ def check(name, as_json=False, podman_url=None, out=print):
     say = (lambda text: None) if as_json else (lambda text: out(f"vpn: {text}"))
     import uuid  # here: only a start or a check names a container with it
     container = f"sandbox-ai-vpn-check-{uuid.uuid4().hex[:8]}"
-    with profile_lock(profile):
+    with profile_lock(profile, "sandbox-ai vpn check", say):
         command = container_command(podman, container, profile, action="check", network=launcher().POD_NETWORK)
         data = payload(profile, "check")
         tailnet = profile["type"] == "tailscale" and not profile["tailscale"].get("exit_node")
@@ -2642,6 +3252,8 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) > 5 and sys.argv[1] == "--internal-mcp-vpn" and sys.argv[5] == "--":
             sys.exit(mcp_wrapper(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[6:]))
+        if len(sys.argv) > 6 and sys.argv[1] == "--internal-mcp-borrow" and sys.argv[6] == "--":
+            sys.exit(mcp_wrapper(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[7:], lent_by=sys.argv[5]))
         if len(sys.argv) > 4 and sys.argv[1] == "--internal-mcp-guard" and sys.argv[3] == "--":
             sys.exit(mcp_guard(sys.argv[2], sys.argv[4:]))
         sys.exit(main(sys.argv[1:]))

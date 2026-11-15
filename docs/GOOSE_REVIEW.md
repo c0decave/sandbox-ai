@@ -122,7 +122,24 @@ What sandbox-ai does in every Goose run, whatever else is enabled (sandbox/goose
 - the dry run's `"goose"` shows `"telemetry": {"switchable": false, "blocked_hosts": ["*.posthog.com"], ...}`.
 
 Measured with these settings: no dialog, no PostHog request, no OTLP request, also with a user's file that turns both
-on. Tests: tests/test_goose.py and the feature matrix's `goose-telemetry-is-never-switchable` (every feature with
+on.
+
+Not even from inside the sandbox (since 0.1.96): the variables are the agent's process', and a `goose` typed in its shell
+could do without them - `env -u GOOSE_TELEMETRY_OFF GOOSE_TELEMETRY_ENABLED=true goose`, `env -u OTEL_SDK_DISABLED
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 goose` (measured with 1.57.0: logs, traces and metrics reach a
+collector at that endpoint, or at the `otel_exporter_otlp_endpoint` of `~/.config/goose/config.yaml`, unless
+`OTEL_SDK_DISABLED=true`). So in the image `goose` is sandbox-ai's guard (sandbox/telemetry_guard.py: a shim at
+/usr/local/bin/goose runs it, `--install goose` in Containerfile.goose moves the binary to
+/usr/local/lib/sandbox-ai/real/goose; the launcher mounts the guard's current copy read-only): an opt-out variable with
+another value and any `OTEL_*`/`OTLP`/`*TELEMETRY*` variable with a value of its own are refused with "sandbox-ai:
+Goose's telemetry is always off in sandbox-ai and cannot be turned on", every opt-out is set again (`env -u` takes none
+away), then it becomes Goose. Measured with 1.57.0 through the guard: nothing reaches the collector the user's file
+names, the refusals hold, `goose --version` runs. Left: the binary started by its own path
+(/usr/local/lib/sandbox-ai/real/goose) skips the guard - the proxy still refuses PostHog, so what is left is an export
+to a collector of the agent's own in the sandbox. The image needs `sandbox-ai build goose` again.
+
+Tests: tests/test_goose.py, tests/test_telemetry_guard.py (with Goose itself: `SANDBOX_AI_TEST_GOOSE`) and the feature
+matrix's `goose-telemetry-is-never-switchable` (every feature with
 an old `--telemetry on`, which is ignored: the plan opens no telemetry host, the variables and proxy rules hold, the refusals).
 
 ### What runs when Goose starts

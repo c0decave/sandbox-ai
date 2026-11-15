@@ -57,55 +57,66 @@ def shown(value, limit=300):
 
 def describe(question):
     """What a question asks, in the app's language; everything the agent chose is escaped. A question of another
-    host is said as that host's sandbox-ai says it (escaped there and here)."""
+    host is said as that host's sandbox-ai says it (escaped there and here). Plain text: describe_rich's."""
+    return str(describe_rich(question))
+
+
+def describe_rich(question):
+    """describe() as rich_notice.Rich, for a notification: the address it asks for in the accent colour, the tool, the
+    arguments and the device monospaced, the rest recognised."""
+    from . import rich_notice as R
     if isinstance(question, backend.RemoteQuestion):
-        return printable(question.get("question") or question.get("kind") or "?")
+        return R.recognise(printable(question.get("question") or question.get("kind") or "?"))
     kind = question.get("kind")
     if kind == "connect":
-        text = tr("connect to {destination}", destination=printable(question.get("destination", "?")))
+        parts = list(R.fmt(tr("connect to {destination}"), destination=R.address(question.get("destination", "?")))
+                     .lines[0])
         protocol = question.get("protocol")
         if protocol and protocol != "tcp":
-            text += f" ({printable(protocol)[:10]})"
+            parts.append(("text", f" ({printable(protocol)[:10]})"))
         if question.get("host"):
-            text += " " + tr("(named {host} by the agent, not verified)", host=printable(question["host"]))
-        return text
+            parts += [("text", " "), *R.fmt(tr("(named {host} by the agent, not verified)"),
+                                             host=R.address(question["host"])).lines[0]]
+        return R.Rich([parts])
     if kind == "dns":
-        return tr("look up the name {name}", name=printable(question.get("name", "?")))
+        return R.fmt(tr("look up the name {name}"), name=R.address(question.get("name", "?")))
     if kind == "push":
         refs = question.get("refs") if isinstance(question.get("refs"), list) else []
-        return tr("push {refs} to {url} despite privacy warnings", refs=", ".join(printable(r) for r in refs[:10]),
-                  url=printable(question.get("url", "?")))
+        return R.fmt(tr("push {refs} to {url} despite privacy warnings"),
+                     refs=R.code(", ".join(printable(r) for r in refs[:10])), url=R.address(question.get("url", "?")))
     if kind == "browser":
-        return tr("open {url} in your browser", url=printable(question.get("url", "?")))
+        return R.fmt(tr("open {url} in your browser"), url=R.address(question.get("url", "?")))
     # Rules of the project ask for these: which call it is must be seen before it is allowed.
     rule = tr("rule {rule} of {ruleset}", rule=shown(question.get("rule", "?"), 80),
               ruleset=shown(question.get("ruleset", "?"), 120))
     if kind == "mcp":
         # Its arguments in full are below the list (ArgumentsBox): the line says it shortened them, before them (a
         # table's cell is cut after 300 characters).
-        values = {"tool": shown(question.get("tool", "?"), 128), "server": shown(question.get("server", "?"), 40),
-                  "arguments": shown(question.get("arguments", "")), "rule": rule}
+        values = {"tool": R.code(shown(question.get("tool", "?"), 128)),
+                  "server": R.code(shown(question.get("server", "?"), 40)),
+                  "arguments": R.code(shown(question.get("arguments", ""))), "rule": rule}
         if backend.arguments_whole(question):
-            return tr("call the MCP tool {tool} of {server} with {arguments} ({rule})", **values)
-        return tr("call the MCP tool {tool} of {server} (arguments shortened here: in full below) with {arguments} "
-                  "({rule})", **values)
+            return R.fmt(tr("call the MCP tool {tool} of {server} with {arguments} ({rule})"), **values)
+        return R.fmt(tr("call the MCP tool {tool} of {server} (arguments shortened here: in full below) with "
+                        "{arguments} ({rule})"), **values)
     if kind == "tool":  # as an MCP call's: its arguments in full below the list where the line shortens them
-        values = {"agent": shown(question.get("agent", "?"), 20), "tool": shown(question.get("tool", "?"), 128),
-                  "arguments": shown(question.get("arguments", "")), "rule": rule}
+        values = {"agent": shown(question.get("agent", "?"), 20), "tool": R.code(shown(question.get("tool", "?"), 128)),
+                  "arguments": R.code(shown(question.get("arguments", ""))), "rule": rule}
         if backend.arguments_whole(question):
-            return tr("let {agent} use its tool {tool} with {arguments} ({rule})", **values)
-        return tr("let {agent} use its tool {tool} (arguments shortened here: in full below) with {arguments} "
-                  "({rule})", **values)
+            return R.fmt(tr("let {agent} use its tool {tool} with {arguments} ({rule})"), **values)
+        return R.fmt(tr("let {agent} use its tool {tool} (arguments shortened here: in full below) with {arguments} "
+                        "({rule})"), **values)
     if kind == "http":
-        return f"{shown(question.get('method', '?'), 20)} {shown(question.get('url', '?'), 500)} ({rule})"
+        return R.fmt("{method} {url} ({rule})", method=R.code(shown(question.get("method", "?"), 20)),
+                     url=R.address(shown(question.get("url", "?"), 500)), rule=rule)
     if kind == "device":
         nodes = question.get("nodes") if isinstance(question.get("nodes"), list) else []
-        return tr("attach the device {device} ({rule})", device=", ".join(shown(n, 200) for n in nodes[:10])
-                  or shown(question.get("value", "?")), rule=rule)
+        device = ", ".join(shown(n, 200) for n in nodes[:10]) or shown(question.get("value", "?"))
+        return R.fmt(tr("attach the device {device} ({rule})"), device=R.code(device), rule=rule)
     if kind == "canary":
-        return tr("canary {name}: {summary}", name=shown(question.get("canary", "?"), 40),
-                  summary=shown(question.get("summary", ""), 500))
-    return printable(kind)
+        return R.fmt(tr("canary {name}: {summary}"), name=R.code(shown(question.get("canary", "?"), 40)),
+                     summary=shown(question.get("summary", ""), 500))
+    return R.Rich([[("text", printable(kind))]])
 
 
 def why_asked(question):
@@ -577,6 +588,7 @@ class ApprovalsPage(QWidget):
         self.blocked = BlockedSection(sai, self.header)
         self.allowed = AllowedSection(sai, self.header)
         self.sections = QTabWidget()
+        widgets.arrow_tabs(self.sections)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.sections.setAccessibleName(tr("Approvals"))
         self.history_box, self.always_box = history_box, always_box
         self.section_titles = {}

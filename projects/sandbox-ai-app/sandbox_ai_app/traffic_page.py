@@ -407,6 +407,7 @@ class TrafficPage(QWidget):
         right_layout.addWidget(self.heading)
         right_layout.addLayout(row)
         self.tabs = QTabWidget()
+        widgets.arrow_tabs(self.tabs)  # (the app's tab row: arrows at its end when the tabs do not fit)
         self.chat = QTextBrowser()
         self.chat.setAccessibleName(tr("Chat"))
         self.chat.setOpenLinks(False)

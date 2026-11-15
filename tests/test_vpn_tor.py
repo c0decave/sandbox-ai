@@ -829,21 +829,23 @@ def test_doctor_checks_the_images_the_profiles_need(home, tmp_path, monkeypatch)
 
 
 def test_a_tor_start_needs_the_tor_image(home, monkeypatch):
-    """The start asks for the image its profile runs in and names the build that makes it."""
+    """The start asks for the image its profile runs in, builds it as the agent's image is built (hotfix round 2),
+    and names the build that makes it when that build is not possible (or fails)."""
     v.main(["add", "anon", "--tor"])
-    asked = []
+    asked, built = [], []
 
     def podman_run(command, **kwargs):
         asked.append(command)
         return types.SimpleNamespace(returncode=1, stdout="", stderr="")
     monkeypatch.setattr(v, "podman_run", podman_run)
-    launcher = types.SimpleNamespace(podman_command=lambda a: ["podman"], printable=str)
+    launcher = types.SimpleNamespace(podman_command=lambda a: ["podman"], printable=str,
+                                     build_missing_image=lambda a, what, image: built.append(image) or False)
     monkeypatch.setattr(v, "launcher", lambda: launcher)
     a = argparse.Namespace(vpn="anon", vpn_profile=v.load_profile("anon"), vpn_check="stop")
     with pytest.raises(ValueError, match=r"The Tor image localhost/sandbox-ai-tor:latest is missing; build it with: "
                                          r"sandbox-ai build tor"):
         v.agent_up(a, "session", "/home", [], contextlib.ExitStack())
-    assert asked == [["podman", "image", "exists", v.TOR_IMAGE]]
+    assert asked == [["podman", "image", "exists", v.TOR_IMAGE]] and built == [v.TOR_IMAGE]
     assert v.plan(a)["image"] == v.TOR_IMAGE
 
 

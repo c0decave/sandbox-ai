@@ -61,7 +61,7 @@ section), the same form as Hermes' `--hermes-enable`: each opens only its own ho
 | Execution sandbox for its shell tool (`tools.executionSandbox`: bwrap/Landlock, inside this sandbox) | off | the user's choice (it confines further, inside sandbox-ai's sandbox) | - |
 | Qwen OAuth (`chat.qwen.ai` device login, inference at the token's resource URL) | on `/auth` (free tier discontinued 2026-04-15) | open as Qwen Code's provider with DashScope (`chat.qwen.ai`, `portal.qwen.ai`, `dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com`); `sandbox-ai login qwen` (`/auth` in a login sandbox; the device URL through the login browser) | on; `--no-provider-defaults` closes them |
 | API keys (OpenAI-compatible, Anthropic, Gemini, Coding Plan, OpenRouter, ...) | from variables / settings | `--api-key HOST=NAME`: the variable holds a placeholder, the proxy adds the key on the wire | `--api-key`, `--allow-host` |
-| `--llm NAME[:MODEL]` (LM Studio, Ollama, vLLM, llama.cpp, OpenAI-compatible services, OpenRouter) | - | the system settings select `openai` auth with the server's `/v1` URL, its model and context window (`modelProviders.openai`), the placeholder as key; the relay's per-model parameters and loop guard on the wire, the guard's turn limit as `model.maxSessionTurns`, its instructions with `--append-system-prompt` | `--llm` |
+| `--llm NAME[:MODEL]` (LM Studio, Ollama, vLLM, llama.cpp, OpenAI-compatible services, OpenRouter) | - | the system settings select `openai` auth with the server's `/v1` URL, its model and context window (`modelProviders.openai`), the placeholder as key; the relay's per-model parameters and loop guard on the wire, the guard's steps as `model.maxSessionTurns` where you set them (else 120, as in every start), its instructions with `--append-system-prompt`; the server's model waited for 20 minutes without a byte and per request, 60 minutes per stream, 2 retries (the entry's `generationConfig`: `streamIdleTimeoutMs`, `timeout`, `maxRetries`; `QWEN_STREAM_MAX_LIFETIME_MS`) | `--llm` |
 | Web search (DashScope Responses API, `tools.webSearch`) | on for DashScope keys | follows the provider: it reaches only the provider's own host | - |
 | Web fetch tool | on | on; every site needs `--allow-host` (or an approval) | `--allow-host` |
 | MCP servers (`mcpServers`, `--mcp-config`; remote ones with OAuth) | the user's | `--mcp` servers through the launcher's stdio bridge (`--mcp-config`), each with `alwaysLoadTools`: their tools are declared to the model, not deferred behind Qwen Code's `tool_search`/`tool_call` (its default for every MCP tool); remote servers need their host | `--mcp`, `--allow-host` |
@@ -69,7 +69,8 @@ section), the same form as Hermes' `--hermes-enable`: each opens only its own ho
 | Channels (`qwen channel`: Telegram, Discord, DingTalk ...), `qwen serve` daemon, web shell, Chrome extension / browser use, computer use (cua-driver), voice | opt-in | not offered in this release: no token, no hosts; servers would listen on the sandbox's loopback only. The image has no browser extension, cua-driver or audio capture | none yet |
 | Team memory sync (`memory.enableTeamMemorySync`: pull/commit/push of a memory repository) | off | off; would need the remote's host like any git push | - |
 | Hooks, skills, sub-agents, scheduled tasks, worktrees | the user's | inside the sandbox; the kits' skills read-only in `~/.qwen/skills` | - |
-| Approvals (`--approval-mode`, `--yolo`) | ask | ask; `--dangerously-skip-permissions` adds `--yolo` | `-D` |
+| Approvals (`--approval-mode`, `--yolo`) | ask | ask; `--dangerously-skip-permissions` adds `--yolo` and sets `tools.approvalMode: "yolo"` and `security.folderTrust.enabled: false` in the system settings (with folder trust on, Qwen Code turns `--yolo` into `default` in a folder it does not trust) | `-D` |
+| Session turn limit (`model.maxSessionTurns`: every model request of the session counts, a prompt and each tool result's follow-up) | unlimited (-1) | 120; with `--llm` the loop guard's steps where you set them | `--llm-param loop_guard.steps=N` |
 
 ### Telemetry: always off, never switchable
 
@@ -99,9 +100,26 @@ What sandbox-ai does in every Qwen Code run, whatever else is enabled (sandbox/q
   (`--egress-all-allow` with `--no-proxy`) is refused;
 - the connection proxy refuses every request to them in every Qwen Code run (the ruleset `telemetry`, rules
   `telemetry-qwen-*`), also behind `--egress-all-allow`;
-- the dry run's `"qwen"` shows `"telemetry": {"switchable": false, "blocked_hosts": [...], ...}`.
+- the dry run's `"qwen"` shows `"telemetry": {"switchable": false, "blocked_hosts": [...], ...}`;
+- not even from inside the sandbox (since 0.1.96). A `qwen` typed in the sandbox has none of the launcher's options
+  and could drop its variables, and both win over the system settings: `qwen --telemetry --telemetry-target local
+  --telemetry-outfile F` and `QWEN_USAGE_STATISTICS_ENABLED=true qwen` turned telemetry on for that run, another
+  `QWEN_CODE_SYSTEM_SETTINGS_PATH` dropped the system settings, and a `~/.qwen/settings.json` with `telemetry.enabled`
+  where no system settings are mounted (a shell with `--binary`) wrote its OpenTelemetry events to its outfile
+  (measured with 0.26.4). So the image's entry file (`cli-entry.js`, what `qwen` runs) imports sandbox-ai's guard
+  first (sandbox/telemetry_guard.py, `--install qwen` in Containerfile.qwen; the launcher mounts its current copy
+  read-only over the image's): `--telemetry*` (also camelCase, `--no-telemetry`, and in `QWEN_CODE_RELAUNCH_ARGS`,
+  which the entry reads after an update), an opt-out variable with another value (`QWEN_USAGE_STATISTICS_ENABLED`,
+  `QWEN_TELEMETRY_ENABLED`, `QWEN_CODE_SYSTEM_SETTINGS_PATH` ...) and any `QWEN_TELEMETRY_*`, `OTEL_*` or `OTLP`
+  variable with a value of its own are refused with "sandbox-ai: Qwen Code's telemetry is always off in sandbox-ai and
+  cannot be turned on"; the variables are set again in the process (its child `node --expose-gc cli.js` inherits
+  them; a `.env` file or the settings' `env` only fill unset ones). Measured with 0.26.4: through the guarded entry
+  nothing is written to that outfile, the refusals hold, `qwen --version` runs. Left: `node .../cli.js` started by
+  its own path skips the guard (the system settings and the proxy still hold where mounted; what is left is an export
+  to a local file or a collector of the agent's own in the sandbox). The image needs `sandbox-ai build qwen` again.
 
-Tests: tests/test_qwen.py and the feature matrix's `qwen-telemetry-is-never-switchable` (every feature with
+Tests: tests/test_qwen.py, tests/test_telemetry_guard.py (with Qwen Code itself: `SANDBOX_AI_TEST_QWEN_PACKAGE`) and
+the feature matrix's `qwen-telemetry-is-never-switchable` (every feature with
 an old `--telemetry on`, which is ignored: the plan opens no telemetry host, the settings, variables and proxy rules hold, the refusals).
 
 ### What runs when Qwen Code starts

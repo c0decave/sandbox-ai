@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import applog, backend, board as B, widgets
-from .prerequisites import Prerequisites
+from .prerequisites import Prerequisites, busy_now
 from . import help_view, labels as OL, project_trust as PT, rules_tools, tables, theme
 from .files import printable, printable_text
 from .name_fields import NameButton, NameField, add_line
@@ -996,6 +996,8 @@ def summary(node):
         parts = [str(props.get("model") or tr("default model"))]
         if guide.AGENT_EFFORTS.get(props.get("agent", "claude")):
             parts.append(tr("effort {level}", level=props["effort"]) if props.get("effort") else tr("default effort"))
+        if props.get("thinking") in ("on", "off"):
+            parts.append(tr("thinking shown") if props["thinking"] == "on" else tr("thinking hidden"))
         if props.get("--dangerously-skip-permissions"):
             parts.append("-D")
         return printable(" · ".join(parts))
@@ -1035,8 +1037,12 @@ def summary(node):
         return printable(" · ".join(filter(None, [str(props.get("image") or ""), where, tr("UNCHECKED")])))
     if node.kind == "llm":  # which server (and model, when named) the agent works with, on the board at a glance
         value = str(props.get("--llm") or "")
-        return printable(f"{elide(value, 40)} · {tr('its address and port only')}") if value \
-            else tr("its address and port only")
+        # Which of the server's models the agent offers besides (--llm-models; all by default).
+        offered = str(props.get("--llm-models") or "").strip()
+        models = tr("models: {models}", models=elide(offered, 30)) if offered and offered != "all" else \
+            tr("all its models") if value and "," not in value else ""
+        return printable(" · ".join(filter(None, [elide(value, 40), models, tr("its address and port only")]))) \
+            if value else tr("its address and port only")
     if node.kind == "kits" and props.get("--kit"):
         return printable(", ".join(props["--kit"]))
     if node.kind == "network":
@@ -2386,6 +2392,15 @@ class BoardPage(Prerequisites, QWidget):
                        + applog.tail(message, lines=4, limit=600), quiet="DEBUG")
         # What it refused about the MCP servers, each problem in the findings (on its part) - all of them, before Start.
         found = B.launcher_problems(self.board, message) if plan is None and error is None else []
+        # Any other refusal of this very board (a missing secret, an option the mode refuses...): Start would open a
+        # terminal that only says it again. Kept to hold Start back once what the start needs is there
+        # (start_refused), after one more check.
+        refusal = None
+        if plan is None and error is None and not found and (message or "").strip():
+            last = [line.strip() for line in str(message).splitlines() if line.strip()][-1]
+            refusal = printable(re.sub(r"^(?:agent-sandbox|sandbox-ai): ", "", last))[:800]
+        self.launcher_refusal = (refusal, getattr(self, "checking_state", None), host if host is not None
+                                 else self.host())
         if found or getattr(self, "launcher_found", None):
             self.launcher_found, self.launcher_state = found, getattr(self, "checking_state", None)
             self.fill_findings()
@@ -2611,6 +2626,8 @@ class BoardPage(Prerequisites, QWidget):
             experimental.setVisible(bool(experimental.text()))  # (in its place first: never a window of its own)
             self.llm_server_row(node)
             self.model_row(node)
+            self.thinking_row(node)
+            self.agent_llm_rows()
             self.text_row(node, "arguments", tr("Agent arguments"), tr("e.g. --verbose"))
         elif kind == "workspace":
             path = PathEdit(node.props.get("path", ""), host=self.host())
@@ -3362,6 +3379,70 @@ class BoardPage(Prerequisites, QWidget):
         self.model_combo = combo
         return combo
 
+    def thinking_row(self, node):
+        """Whether the agent shows its model's thinking in its terminal (--show-thinking on|off, the agent's own
+        switch; empty: the agent's default, said with it); greyed out with the reason for an agent without a switch
+        (Qwen Code) or a launcher without the option."""
+        from . import thinking
+        agent = node.props.get("agent", "claude")
+        combo = QComboBox()
+        combo.setAccessibleName(tr("Show thinking"))
+        for value, label in thinking.choices(agent):
+            combo.addItem(label, value)
+        combo.setCurrentIndex(max(0, combo.findData(str(node.props.get("thinking") or ""))))
+        why = thinking.reason(agent)
+        if why is None and not B.launcher_knows(self.sai, thinking.OPTION):
+            why = tr("This sandbox-ai has no --show-thinking yet: update it")
+        combo.setToolTip(safe_tooltip(why or thinking.tooltip(agent)))
+        combo.setEnabled(why is None)
+        combo.currentIndexChanged.connect(
+            lambda _i, node_id=node.id: self.set_prop(node_id, "thinking", combo.currentData() or ""))
+        self.inspector.addRow(tr("Show thinking"), combo)
+        if why is not None:
+            self.inspector.addRow("", plain_label(why, role="secondary"))
+        self.thinking_combo = combo
+        return combo
+
+    def llm_kind(self, llm):
+        """The kind (ollama, lmstudio ...) of the server the LLM part LLM names, as the model servers list says (None:
+        not read yet, or not registered here)."""
+        from . import wizard_llm as WL
+        name, _ = WL.parse_value(llm.props.get("--llm")) if llm is not None else ("", "")
+        for endpoint in self.llm_servers or []:
+            if isinstance(endpoint, dict) and endpoint.get("name") == name and isinstance(endpoint.get("kind"), str):
+                return endpoint["kind"]
+        return None
+
+    def agent_llm_rows(self):
+        """Beside the agent, with a model server of yours: the model's advanced settings for this board's start (the
+        LLM part's --llm-param values: sampling, context, keeping it loaded, LM Studio's load settings ... - what the
+        server's kind takes), folded under a button; what only the server's own start sets, shown."""
+        llm = self.board.first("llm")
+        if llm is None or not self.board.connected(llm) or not str(llm.props.get("--llm") or "").strip():
+            return
+        holder = QWidget()
+        form = QFormLayout(holder)
+        form.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton(tr("Advanced settings of the model…"))
+        button.setCheckable(True)
+        button.setAccessibleName(tr("Advanced settings of the model"))
+        button.setToolTip(tr("Temperature, context length, max. output tokens, keeping the model loaded, LM Studio's "
+                             "load settings (Flash Attention, KV cache) and more - only what this server takes - for "
+                             "this board's start, over the server's defaults (Advanced settings… on the LLM servers "
+                             "page)"))
+        opened = bool(getattr(self, "agent_llm_open", False) or (llm.props.get("params") or {}))
+        button.setChecked(opened)
+        holder.setVisible(opened)
+
+        def toggled(on):
+            self.agent_llm_open = on
+            holder.setVisible(on)
+        button.toggled.connect(toggled)
+        self.inspector.addRow("", button)
+        self.llm_param_rows(llm, form=form)
+        self.inspector.addRow(holder)
+        self.agent_llm_button, self.agent_llm_box = button, holder
+
     def text_row(self, node, key, label, placeholder):
         edit = QLineEdit(str(node.props.get(key, "") or ""))
         edit.setPlaceholderText(placeholder)
@@ -3583,7 +3664,7 @@ class BoardPage(Prerequisites, QWidget):
             background(lambda: self.sai.host_secrets(host), owner=self, done=done, timeout=60)
         return list(known[host])
 
-    def llm_param_rows(self, node):
+    def llm_param_rows(self, node, form=None):
         """The LLM node's own parameters for this board's starts (--llm-param KEY=VALUE, forced for them): empty fields
         leave the server's own (sandbox-ai llm set, the LLM servers page's Parameters…); a value typed in is checked at
         once against sandbox-ai's catalogue (names, types, ranges) and kept only when valid; Reset to defaults empties
@@ -3591,16 +3672,18 @@ class BoardPage(Prerequisites, QWidget):
         from . import llm_params as LP
         from . import llm_params_view as LPV
         node_id = node.id
-        catalogue = LP.local_catalogue(self.sai)
+        form = form if form is not None else self.inspector
+        kind = self.llm_kind(node)  # only what this kind of server takes (every parameter while not known)
+        catalogue = LP.local_catalogue(self.sai, kind)
         if catalogue is None:
-            self.inspector.addRow("", plain_label(tr("This sandbox-ai has no model parameters (sandbox-ai llm "
-                                                     "params): the server's own hold."), role="notice-warn"))
+            form.addRow("", plain_label(tr("This sandbox-ai has no model parameters (sandbox-ai llm "
+                                           "params): the server's own hold."), role="notice-warn"))
             return
         params = node.props.get("params") if isinstance(node.props.get("params"), dict) else {}
         fields = LPV.ParamsFields(catalogue, {k: v for k, v in params.items() if not k.startswith("loop_guard.")},
                                   force=False, default_text=tr("the server's own"))
         fields.setToolTip(tr("This board's model parameters (--llm-param): in place of the agent's and the server's "
-                             "own for these starts; empty: the server's (its Parameters… on the LLM servers page)."))
+                             "own for these starts; empty: the server's (its Advanced settings… on the LLM servers page)."))
         spec = LP.loop_spec(self.sai)
         layers = LPV.LoopFields(spec, {k[11:]: v for k, v in params.items() if k.startswith("loop_guard.")}) \
             if spec is not None else None
@@ -3612,17 +3695,21 @@ class BoardPage(Prerequisites, QWidget):
             values.update({f"loop_guard.{k}": v for k, v in (layers.texts() if layers is not None else {}).items()})
             self.set_prop(node_id, "params", values or None)
         fields.committed.connect(commit)
-        self.inspector.addRow(tr("Model parameters for this board"), fields)
+        form.addRow(tr("Model parameters for this board"), fields)
+        self.llm_fields = fields
+        info = LPV.server_only_box(LP.server_only(self.sai, kind))
+        if info is not None:
+            form.addRow("", info)
         if layers is not None:
             layers.committed.connect(commit)
             layers.setToolTip(tr("This board's loop guard (--llm-param loop_guard.LAYER=VALUE); empty: the server's"))
-            self.inspector.addRow(tr("Loop guard for this board"), layers)
+            form.addRow(tr("Loop guard for this board"), layers)
         if not B.launcher_knows(self.sai, "--llm-param"):
             fields.setEnabled(False)
             if layers is not None:
                 layers.setEnabled(False)
-            self.inspector.addRow("", plain_label(tr("This sandbox-ai has no --llm-param: the server's own parameters "
-                                                     "hold."), role="notice-warn"))
+            form.addRow("", plain_label(tr("This sandbox-ai has no --llm-param: the server's own parameters "
+                                           "hold."), role="notice-warn"))
 
     def mcp_names(self):
         try:
@@ -4123,8 +4210,12 @@ class BoardPage(Prerequisites, QWidget):
     def prerequisite_own_servers(self):
         return set(B.project_servers(self.board))
 
+    def prerequisite_mcp_entries(self):
+        return {n.props["name"]: n.props["entry"] for n in self.board.of_kind("mcp")
+                if isinstance(n.props.get("name"), str) and isinstance(n.props.get("entry"), str)}
+
     def prerequisite_context(self):
-        return (self.host(), id(self.board), str(getattr(self, "directory", "") or ""))
+        return (self.host(), self.board.serial, str(getattr(self, "directory", "") or ""))
 
     def say_left_to_fill(self):
         """The placeholders still to fill in, by the preset's names for them (the parts are outlined in red)."""
@@ -4159,7 +4250,7 @@ class BoardPage(Prerequisites, QWidget):
             return False
         values = {k: v for k, v in (form.values() or {}).items() if str(v or "").strip()}
         if values:
-            self.change(tr("Fill in"), lambda: B.fill(self.board, values))
+            self.change(tr("Fill in"), lambda: B.fill(self.board, values, self.sai))
         return not B.placeholders(self.board)
 
     def new_from_template(self, name=None):
@@ -4414,6 +4505,13 @@ class BoardPage(Prerequisites, QWidget):
             return False
         errors = self.errors()
         found = getattr(self, "launcher_found", [])
+        if busy_now(self) and all(problem in found for problem in errors) and \
+                self.check_prerequisites(then=lambda: self.start(embedded, session)):
+            # What it needs is made right now (an MCP server, a variant, asked for when the preset was loaded): the
+            # launcher's refusal of it ("Unknown MCP server") is about to be stale. It goes on once it is made; an
+            # error of the board itself is said at once (below), as before.
+            applog.log("INFO", "board", "the start waits for what is prepared for it now; it goes on once it is made")
+            return False
         if errors and recheck and all(problem in found for problem in errors):
             # Only what the launcher's last check refused - an image not built, an MCP server not added: it may be
             # there by now (built in a terminal meanwhile), and the check ran when the board last changed. Checked
@@ -4473,9 +4571,32 @@ class BoardPage(Prerequisites, QWidget):
                                         "missing (the prerequisites' lines say which: it goes on by itself once "
                                         "made, not when something is missing)")
             return False
+        if self.start_refused(embedded, session, recheck):
+            return False
         if servers:
             return self.start_from_project_file(servers, embedded, session)
         return self.run_start(B.launcher_argv(self.sai, self.board, local=host == LOCAL), embedded, session)
+
+    def start_refused(self, embedded, session, recheck):
+        """True (said, or checked again first) when the launcher's last check refused this very board for a reason
+        that is neither an MCP server nor an image (those are findings: errors()) - a missing secret, a mode's
+        refusal: Start would only open a terminal that says it again. Checked once more first (it may be fixed by
+        now: a secret kept in a terminal), then started or refused by that verdict."""
+        refusal, state, host = getattr(self, "launcher_refusal", (None, None, None))
+        if not refusal or state != self.board.state() or host != self.host():
+            return False
+        if recheck:
+            board_state, board_host = self.board.state(), self.host()
+            self.after_check = lambda: self.start(embedded, session, recheck=False) \
+                if self.board.state() == board_state and self.host() == board_host else None
+            self.show_notice(tr("The launcher checks the options…"))
+            applog.log("INFO", "board", "the start waits for the launcher's check again (its last check refused: "
+                       + applog.redact(refusal)[:200] + ")")
+            self.check()
+            return True
+        applog.log("INFO", "board", "not started: the launcher refuses the board: " + applog.redact(refusal)[:300])
+        warn(self, tr("Not started"), refusal)
+        return True
 
     def start_untrusted_on_host(self, path):
         """The board came from the untrusted project file PATH of this machine and starts on another host: asked first

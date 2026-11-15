@@ -44,6 +44,18 @@ LAYER_HELP = {
     "watchdog_requests": N_("Unattended runs: tool use paused after this many model requests in one turn (0: off)"),
     "watchdog_minutes": N_("Unattended runs: tool use paused after this many minutes in one turn (0: off)"),
 }
+# Each parameter in words (the form's caption; its name, as `llm set --param` takes it, beside it).
+LABELS = {
+    "temperature": N_("Temperature"), "top_p": N_("Top P"), "top_k": N_("Top K"), "min_p": N_("Min P"),
+    "repeat_penalty": N_("Repeat penalty"), "repeat_last_n": N_("Repeat window"),
+    "repetition_penalty": N_("Repetition penalty"), "presence_penalty": N_("Presence penalty"),
+    "frequency_penalty": N_("Frequency penalty"), "dry_multiplier": N_("DRY multiplier"),
+    "max_tokens": N_("Max. output tokens"), "seed": N_("Seed"), "num_ctx": N_("Context length"),
+    "cache_prompt": N_("Reuse the KV cache (cache_prompt)"), "keep_alive": N_("Keep loaded (seconds)"),
+    "ttl": N_("Idle TTL (seconds)"), "flash_attention": N_("Flash Attention (at load)"),
+    "offload_kv_cache_to_gpu": N_("KV cache in GPU memory (at load)"),
+    "stream_idle_timeout": N_("Stream idle timeout (seconds)"),
+}
 EVICT = (("never", N_("kept loaded (never unloaded for another model)")),
          ("allow", N_("the server may unload them (its own loading)")))
 # What each kind of server does about unloading models (sandbox-ai's llm.evict_notes, in words of the app).
@@ -94,6 +106,24 @@ def local_catalogue(sai, kind=None):
     except Exception as _exc:  # noqa: BLE001 - a sandbox-ai that does not load knows no parameters
         applog.swallowed("llm_params", "local_catalogue: a sandbox-ai that does not load knows no parameters", _exc)
         return None
+
+
+def caption(key):
+    """The form's caption of the parameter KEY: its words and its name (as `llm set --param` takes it)."""
+    return f"{tr(LABELS[key])} ({key})" if key in LABELS else key
+
+
+def server_only(sai, kind):
+    """[(setting, where)] of what only a server of KIND decides at its own start (this machine's sandbox-ai's
+    llm.server_only: KV cache type, context window ...), shown as information; [] for an older sandbox-ai."""
+    try:
+        found = getattr(sai.module("llm"), "server_only", None)
+        rows = found(kind) if found is not None and kind else []
+    except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai says nothing of it
+        applog.swallowed("llm_params", "server_only: an older sandbox-ai says nothing of it", _exc)
+        return []
+    return [(printable(str(row.get("setting") or ""))[:120], printable(str(row.get("where") or ""))[:300])
+            for row in rows if isinstance(row, dict)][:20]
 
 
 def check_value(entry, text):

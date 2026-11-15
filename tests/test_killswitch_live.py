@@ -3,7 +3,10 @@ the launcher writes it, with the connection proxy's redirect, in a network names
 each mode as the supervisor loads it, and tries every way out with nftables. Each mode keeps exactly its part of what
 the run may reach (judged by the destination the connection was meant for, also when the redirect handed it to the
 proxy), never more, also behind Tor, with IPv6 and with two cuts at once; the tunnel's own packets pass;
-connections opened before the cut stop at once. Needs nft, ip and a namespace with CAP_NET_ADMIN
+connections opened before the cut stop at once. The connections a start's VPN container makes for its MCP servers
+(its tunnel, lent: marked with vpn_runtime.LEND_MARK) leave unredirected and whatever the allow-list says while no
+cut holds, and meet every cut like the agent's own to the same place (a whole lent start with a real WireGuard
+tunnel: tests/test_mcp_lent_vpn_live.py). Needs nft, ip and a namespace with CAP_NET_ADMIN
 (an unprivileged user namespace, or sudo -n as in CI); skipped without them."""
 import json
 from pathlib import Path
@@ -38,20 +41,28 @@ NONE = {"tcp provider 192.0.2.10:443": "proxy", "tcp provider 192.0.2.10:80": "p
         "tcp bypass 192.168.1.20:1234": "proxy",
         "tcp internet 198.51.100.7:443": "proxy", "tcp host port 127.0.0.1:8080": "proxy",
         "udp lan 192.168.1.20:5353": "sent", "udp internet 198.51.100.7:443": "sent", "udp dns 1.1.1.1:53": "sent",
-        "udp other resolver 127.0.53.1:53": "sent", **OWN}
+        "udp other resolver 127.0.53.1:53": "sent",
+        # Lent connections (the VPN container's, for the start's MCP servers): past the proxy and the allow-list.
+        "tcp lent (marked) 198.51.100.7:443": "direct", "tcp lent to the provider (marked) 192.0.2.10:443": "direct",
+        "udp lent lookup (marked) 1.1.1.1:53": "sent", **OWN}
 LAN = {"tcp llm 10.0.0.5:11434", "tcp lan 192.168.1.20:22", "udp6 lan [fd00:1::20]:5353", "tcp6 lan [fd00:1::20]:80",
        "tcp bypass 192.168.1.20:1234", "udp lan 192.168.1.20:5353"}
+# A lent connection reaches the internet only: it fares as the agent's own traffic to the same place - cut by
+# "remote" and "all", kept by "local", and by "api" only to the start's own model API.
+LENT = {"tcp lent (marked) 198.51.100.7:443", "tcp lent to the provider (marked) 192.0.2.10:443",
+        "udp lent lookup (marked) 1.1.1.1:53"}
+LENT_API = {"tcp lent to the provider (marked) 192.0.2.10:443"}
 INTERNET = {"tcp provider 192.0.2.10:443", "tcp provider 192.0.2.10:80", "tcp internet 198.51.100.7:443",
-            "udp internet 198.51.100.7:443", "udp dns 1.1.1.1:53", "udp other resolver 127.0.53.1:53"}
+            "udp internet 198.51.100.7:443", "udp dns 1.1.1.1:53", "udp other resolver 127.0.53.1:53"} | LENT
 KEPT = {
     "remote": LAN | {"tcp host port 127.0.0.1:8080"},
     "local": INTERNET,
-    "api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"},
+    "api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"} | LENT_API,
     "all": set(),
     # Behind Tor only the bypass target is the local network: everything else lies past Tor.
     "tor remote": {"tcp bypass 192.168.1.20:1234", "tcp host port 127.0.0.1:8080"},
     "tor local": INTERNET | LAN - {"tcp bypass 192.168.1.20:1234"},
-    "tor api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"},
+    "tor api": {"tcp provider 192.0.2.10:443", "tcp llm 10.0.0.5:11434"} | LENT_API,
     "tor all": set(),
     # Two cuts at once (a server shared by two runs): only what both keep.
     "remote+api": {"tcp llm 10.0.0.5:11434"},
