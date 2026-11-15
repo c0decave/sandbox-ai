@@ -1507,7 +1507,7 @@ MODELFILE_ONLY = {"ollama": ("top_k", "min_p", "repeat_penalty", "repeat_last_n"
 #   steps        OpenCode: the most agentic steps of a turn of its build agent (plan and explore about half, general
 #                two thirds); at the last one OpenCode asks for a text answer (agent.<name>.steps; 0: OpenCode's own)
 #   compaction   OpenCode: automatic compaction with pruning of old tool output and room for it, tool output cut at
-#                1000 lines / 50 KB (compaction, tool_output)
+#                1000 lines / 128 KiB (compaction, tool_output)
 #   instructions OpenCode: rules against loops as an instruction file of its own (instructions; your AGENTS.md stays)
 #   sampling     the model family's recommended sampling as the lowest default (Qwen3, QwQ, Qwen3-Coder,
 #                DeepSeek-R1, gpt-oss), never greedy for those that warn against it
