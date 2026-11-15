@@ -12,6 +12,8 @@ graft sandbox/builtin
 graft sandbox/marketplace
 recursive-include tests *.py *.sh
 recursive-include docs *.py *.md
+# Internal notes (scripts/make_dist.py INTERNAL): never in a release file.
+exclude docs/AGENT_HOSTS.md docs/MCP_SIGNING_AXROSS.md
 recursive-include tests/golden *
 recursive-include scripts *.py *.sh
 recursive-include packaging *

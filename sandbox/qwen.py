@@ -93,6 +93,20 @@ TELEMETRY_SETTINGS = {"general": {"enableAutoUpdate": False}}
 BASE_ENV = {"QWEN_CODE_SYSTEM_SETTINGS_PATH": SETTINGS, "QWEN_SANDBOX": "false", "SANDBOX": "sandbox-ai",
             "QWEN_CODE_MODELS_DEV_REFRESH": "off", "QWEN_CODE_SYNCHRONIZED_OUTPUT": "1"}
 EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")  # model.reasoningEffort
+# -D (--dangerously-skip-permissions): Qwen Code's own approvals off - YOLO from its system settings, which win over
+# the user's and the project's, for every Qwen Code in the sandbox (not only the first process, which also gets
+# --yolo: a `qwen` typed in a shell, a restart), and folder trust off, so /work counts as trusted: with folder trust
+# on (a ~/.qwen/settings.json of the kept HOME) Qwen Code 0.26.4 turns every approval mode but default and plan into
+# default in a folder it does not trust ('Approval mode overridden to "default" because the current folder is not
+# trusted'), --yolo included. Only Qwen Code's own prompts go: the sandbox, its proxy and its rules hold as ever.
+DANGER_SETTINGS = {"tools": {"approvalMode": "yolo"}, "security": {"folderTrust": {"enabled": False}}}
+# model.maxSessionTurns in every start (the user's choice): every model request of the session counts (a prompt and
+# each tool result's follow-up; Qwen Code 0.26.4's LlmClient.sessionTurnCount); past it the session stops. --llm with
+# the loop guard's steps set (defaults.json, the server's, --llm-param loop_guard.steps=N) takes those instead.
+MAX_SESSION_TURNS = 120
+# --llm: a large local model on a long context may take minutes before its first token ("No stream activity for
+# 240000ms" was the user's LM Studio). The waits come from one value, llm.agent_wait: the provider entry's
+# generationConfig (llm.qwen_generation) and the variables (llm.qwen_wait_environment, in llm.agent_environment).
 
 
 def merge(base, over):
@@ -262,15 +276,19 @@ def mcp_args(names, bridge_args, timeouts=None):
 
 def managed_settings(a, telemetry="off", llm=None):
     """Qwen Code's /etc/qwen-code/settings.json for this start: the sandbox's defaults, the update switch (at every
-    level: telemetry is always off), what the features turn on again, --effort, --llm's model (LLM: llm.qwen_settings) and, last,
-    the telemetry pins. Later layers win."""
-    settings = merge(merge({}, BASE_SETTINGS), TELEMETRY_SETTINGS)
+    level: telemetry is always off), the session's turn limit, what the features turn on again, --effort, --llm's
+    model (LLM: llm.qwen_settings; the loop guard's steps where set), YOLO with -D and, last, the telemetry pins.
+    Later layers win."""
+    settings = merge(merge(merge({}, BASE_SETTINGS), TELEMETRY_SETTINGS), {"model": {"maxSessionTurns":
+                                                                                     MAX_SESSION_TURNS}})
     for name in features(a):
         settings = merge(settings, FEATURES[name].get("settings", {}))
     if getattr(a, "effort", None):
         settings = merge(settings, {"model": {"reasoningEffort": a.effort}})
     if llm:
         settings = merge(settings, llm)
+    if getattr(a, "dangerously_skip_permissions", False):
+        settings = merge(settings, DANGER_SETTINGS)
     return merge(settings, TELEMETRY_PINNED)  # after everything: never turned on
 
 
@@ -281,7 +299,7 @@ def files(a, settings):
 
 def environment(a):
     """Qwen Code's variables: where its system settings are, its own sandbox off, the telemetry opt-outs, no model
-    catalog download unless enabled, synchronized output also in tmux."""
+    catalog download unless enabled, synchronized output also in tmux (--llm's waits: llm.agent_environment)."""
     dropped = {variable for name in features(a) for variable in FEATURES[name].get("drops", [])}
     return {key: value for key, value in {**BASE_ENV, **TELEMETRY_ENV}.items() if key not in dropped}
 

@@ -281,6 +281,11 @@ class ModelPage(Page):
         self.effort = QComboBox()
         self.form.addRow(tr("Model"), self.model)
         self.form.addRow(tr("Effort"), self.effort)
+        # Whether the agent shows its model's thinking in its terminal (--show-thinking): for the cloud and a server
+        # of your own alike; greyed out with the reason for an agent without a switch (thinking.py).
+        self.thinking = QComboBox()
+        self.thinking.setAccessibleName(tr("Show thinking"))
+        self.form.addRow(tr("Show thinking"), self.thinking)
         # An own server.
         self.servers = widgets.table([tr("Server"), tr("Kind"), tr("URL"), tr("Agents")], stretch=2, compact=(1, 3))
         self.servers.setAccessibleName(tr("Model servers"))
@@ -341,6 +346,14 @@ class ModelPage(Page):
         for level in AGENT_EFFORTS.get(agent, ()):
             self.effort.addItem(level, level)
         self.effort.setCurrentIndex(max(0, self.effort.findData(effort)))
+        from . import thinking
+        shown = self.thinking.currentData() or "" if same else ""
+        self.thinking.clear()
+        for value, label in thinking.choices(agent):
+            self.thinking.addItem(label, value)
+        self.thinking.setCurrentIndex(max(0, self.thinking.findData(shown)) if thinking.available(agent) else 0)
+        self.thinking.setEnabled(thinking.available(agent))
+        self.thinking.setToolTip(safe_tooltip(thinking.tooltip(agent)))
         self.shown_agent = agent
         self.where_changed()
 
@@ -1001,6 +1014,8 @@ class StartPage(Page):
             if not self.confirm_cloud(model_page.existing_choice):
                 return False
             WL.clear(board)
+        if model_page.thinking.currentData() and model_page.thinking.isEnabled():
+            node.props["thinking"] = model_page.thinking.currentData()  # --show-thinking, for any model
         if not WL.uses_server(board):
             if model_page.model_name():
                 node.props["model"] = model_page.model_name()

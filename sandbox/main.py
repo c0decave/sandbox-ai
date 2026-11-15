@@ -42,7 +42,7 @@
   sandbox-ai publish-logins add|list|remove|check|kinds ...           package registry logins, used by the proxy
   sandbox-ai identities add|set|login|publish|list|show|check|remove ...  commit identities with their logins
   sandbox-ai demo-device start|serve|status|stop ...                  a virtual device to try the device rules
-  sandbox-ai images [packages|extend|check|new|remove|history|recipe|pull|build-image|list] ...  the agent images,
+  sandbox-ai images [packages|extend|check|new|remove|history|recipe|pull|build-image|list|search|derive] ...  the agent images,
                                                                       their extensions, your images (services, bases)
   sandbox-ai update [--check] [--version X.Y.Z] ...                  update an installation made by install.sh (signed)
   sandbox-ai version [--verbose]                                     version; --verbose: install place, release keys
@@ -74,6 +74,11 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
                    "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",),
                    "report": ("report.py",)}
+
+
+# The commands with a `list` that run it when given alone (approvals does it itself: also with --json alone).
+LISTED_ALONE = {"mcp", "vpn", "llm", "secrets", "identities", "hosts", "presets", "devices", "canaries", "net",
+                "git-logins", "publish-logins"}
 
 
 def version():
@@ -379,6 +384,22 @@ def build_split(args):
     return options, None, []
 
 
+BUILD_PLAIN_TARGETS = ("team", "cairn", "browser", "vpn", "tor")
+
+
+def build_several(args):
+    """The targets of `sandbox-ai build claude codex team ...` when there are two or more (agents, team, cairn,
+    browser, vpn, tor: each a build of its own, the README's way to rebuild some images), else None."""
+    options, target, extra = build_split(args)
+    if target not in (*AGENT_IMAGES, *BUILD_PLAIN_TARGETS):
+        return None
+    names = [target]
+    while extra and extra[0] in (*AGENT_IMAGES, *BUILD_PLAIN_TARGETS):
+        names.append(extra[0])
+        extra = extra[1:]
+    return names if len(names) > 1 else None
+
+
 def build_all_wanted(args):
     return build_split(args)[1] == "all"
 
@@ -386,13 +407,18 @@ def build_all_wanted(args):
 def build_all(args, run=None, out=None):
     """`sandbox-ai build all`: every image sandbox-ai builds - the seven agents, the team image, Cairn (on the team
     image), the browser, the VPN and Tor images, and every variant of yours (sandbox-ai images) - each a build of its
-    own, so one that fails stops none of the others; at the end what was built and what failed. 0 when all were."""
+    own, so one that fails stops none of the others; at the end what was built and what failed. 0 when all were.
+    `sandbox-ai build claude codex team` (build_several) is the same for the targets named, in that order."""
     import subprocess
     run = run or subprocess.run
     out = out or (lambda text: print(text, file=sys.stderr, flush=True))
     options, _, extra = build_split(args)
+    several = build_several(args)
+    word = "several" if several else "all"
+    if several:
+        extra = extra[len(several) - 1:]
     if any(option == "--pin" for option, _ in options):
-        out("sandbox-ai build: --pin applies to one agent, not all")
+        out(f"sandbox-ai build: --pin applies to one agent, not {word}")
         return 2
     allowed = {"agent": {"--podman-url", "--uv", "--node", "--extension-only"},
                "team": {"--podman-url", "--uv", "--node"}, "plain": {"--podman-url"}, "browser": set(),
@@ -400,11 +426,13 @@ def build_all(args, run=None, out=None):
     plan = [(agent, [agent], "agent") for agent in AGENT_IMAGES]
     plan += [("team", ["team"], "team"), ("cairn", ["cairn"], "plain"), ("browser", ["browser"], "browser"),
              ("vpn", ["vpn"], "plain"), ("tor", ["tor"], "plain")]
+    if several:
+        plan = [entry for name in several for entry in plan if entry[0] == name]
     try:
         spec = importlib.util.spec_from_file_location("sandbox_ai_images_for_build", HERE / "images.py")
         images = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(images)
-        found = images.variants()  # (a name several agents have: NAME@AGENT)
+        found = [] if several else images.variants()  # (a name several agents have: NAME@AGENT)
         plan += [(f"variant {name} ({agent})", ["--variant", images.shown_target(name, agent, found)], "variant")
                  for name, agent in found]
     except Exception as exc:  # noqa: BLE001 - the images themselves are still built
@@ -414,12 +442,12 @@ def build_all(args, run=None, out=None):
     for number, (label, target, kind) in enumerate(plan, 1):
         given = [part for option, value in options if option in allowed[kind]
                  for part in ([option] if value is None else [option, value])]
-        out(f"sandbox-ai build: all ({number}/{len(plan)}): {label}")
+        out(f"sandbox-ai build: {word} ({number}/{len(plan)}): {label}")
         # A note every build would say alike (no systemd user session: cgroupfs) is said by the first one only.
         status = run([executable, str(HERE / "build_image.sh"), *given, *target, *extra], check=False,
                      env={**os.environ, **({"SANDBOX_AI_BUILD_CGROUP_SAID": "1"} if number > 1 else {})}).returncode
         (built if status == 0 else failed).append(label)
-    out(f"sandbox-ai build: all: {len(built)} of {len(plan)} built" +
+    out(f"sandbox-ai build: {word}: {len(built)} of {len(plan)} built" +
         (f"; failed: {', '.join(failed)} (each said why above; build one again with sandbox-ai build NAME)"
          if failed else ""))
     return 0 if not failed else 1
@@ -448,10 +476,20 @@ def main(argv):
         print(f"sandbox-ai: {command} was removed in 0.1.92; use {REMOVED[command]}", file=sys.stderr)
         return 2
     if command in ("version", "--version", "-V"):
-        if rest[:1] in (["--verbose"], ["-v"]):
+        if rest[:1] in (["-h"], ["--help"]):
+            print("usage: sandbox-ai version [--verbose]\n\n  the installed version; --verbose (-v): also where it is "
+                  "installed, the release keys its updates must be signed by and how it is updated")
+            return 0
+        if rest[:1] in (["--verbose"], ["-v"]) and len(rest) == 1:
             return verbose_version()
+        if rest:
+            print(f"sandbox-ai version: unknown argument {rest[0]!r}; usage: sandbox-ai version [--verbose]",
+                  file=sys.stderr)
+            return 2
         print(f"sandbox-ai {version()}")
         return 0
+    if command in LISTED_ALONE and not rest:
+        rest = ["list"]  # (alone it lists, as images, kits, plugins and defaults alone do)
     if command in PYTHON_COMMANDS:
         script, *prefix = PYTHON_COMMANDS[command]
         if script in EXECUTED:  # (the launcher logs its start itself)
@@ -466,7 +504,7 @@ def main(argv):
                   "(/var/lib/containers/storage); starts by another user do not see it - run sandbox-ai build as "
                   f"the user who starts the sandboxes{' (' + who + ')' if who and who != 'root' else ''}",
                   file=sys.stderr)
-        if build_all_wanted(rest):
+        if build_all_wanted(rest) or build_several(rest):
             return logged_command(command, rest, lambda: build_all(rest))
         bash(HERE / "build_image.sh", rest)  # (it logs what it was asked and how it ended itself)
     if command == "update":

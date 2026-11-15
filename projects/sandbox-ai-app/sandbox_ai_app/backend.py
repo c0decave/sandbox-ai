@@ -89,12 +89,12 @@ GROUPS = {
     "Network": ["--ask", "--profile", "--allow-host", "--allow-domain", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",
-                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--llm-param", "--llm-traffic", "--llm-traffic-limit"],
+                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--llm-models", "--llm-param", "--llm-traffic", "--llm-traffic-limit"],
     "Proxy & privacy": ["--mode", "--mode-at-least", "--no-proxy", "--no-inspect", "--rules", "--privacy-check", "--privacy-rules",
                         "--canaries", "--no-canaries", "--telemetry", "--log-dir", "--log-debug"],
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
             "--token-proxy", "--git-credentials"],
-    "Agent": ["--model", "--effort", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
+    "Agent": ["--model", "--effort", "--show-thinking", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
               "--no-memory", "--no-plugins", "--local-config", "--env", "--secret-env", "--api-key", "--publish",
               "--hermes-enable", "--qwen-enable", "--goose-enable"],
     "Login": ["--copy-auth", "--no-auth", "--auth-file", "--import-codex-auth"],
@@ -3148,16 +3148,39 @@ class SandboxAI:
                        and isinstance(e.get("target"), str)
                        and re.fullmatch(KIT_NAME, str(e["target"]).partition("@")[0])})
 
-    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--secret-env", "--api-key",
-                     "--git-token-secret")
+    def host_agent_images(self, host):
+        """[Podman image name] of the agents' images and their variants on HOST (`sandbox-ai images --json` there:
+        localhost/claude-sandbox:latest ...), what --image takes. ValueError: not answered."""
+        data = self.host_json(host, "images", "--json", timeout=90)
+        if not isinstance(data, list):
+            raise ValueError("sandbox-ai images --json: not a list of images")
+        return sorted({str(e["image"]) for e in data if isinstance(e, dict) and isinstance(e.get("image"), str)
+                       and e["image"].strip()})
+
+    START_CHOICES = ("--vpn", "--kit", "--identity", "--mcp", "--image-variant", "--image", "--service",
+                     "--secret-env", "--api-key", "--git-token-secret")
 
     def host_start_choices(self, host):
         """({option: [name]}, {option: problem}) of what HOST has for the Start page's choosers: --vpn its VPN profiles
         (vpn list --json), --kit its kits that are named (kits list --json), --identity its identities (identities
-        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants (images --json),
+        list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants and --image the
+        agents' images (images --json, read once), --service your images (images list; this machine: their record),
         --secret-env, --api-key and --git-token-secret the names of its secrets (secrets list, read once; never a
         value). A list that could not be read is a problem (its field stays typed in)."""
-        secrets_read = []
+        secrets_read, images_read = [], []
+
+        def agent_images():
+            if not images_read:
+                try:
+                    images_read.append((self.host_json(host, "images", "--json", timeout=90), None))
+                except Exception as exc:  # noqa: BLE001 - said for both options
+                    images_read.append((None, exc))
+            data, problem = images_read[0]
+            if problem is not None:
+                raise problem
+            if not isinstance(data, list):
+                raise ValueError("sandbox-ai images --json: not a list of images")
+            return [e for e in data if isinstance(e, dict)]
 
         def secret_names():
             if not secrets_read:
@@ -3176,7 +3199,13 @@ class SandboxAI:
                               and k.get("kind") not in ("always", "default")],
             "--identity": lambda: list(self.host_identities(host)),
             "--mcp": lambda: [row[0] for row in self.host_mcp_servers(host)],
-            "--image-variant": lambda: self.host_image_variants(host),
+            # (a name several agents have a variant of is listed as NAME@AGENT: --image-variant takes NAME)
+            "--image-variant": lambda: [str(e["target"]).partition("@")[0] for e in agent_images()
+                                        if e.get("variant") and isinstance(e.get("target"), str)
+                                        and re.fullmatch(KIT_NAME, str(e["target"]).partition("@")[0])],
+            "--image": lambda: [str(e["image"]) for e in agent_images() if isinstance(e.get("image"), str)],
+            "--service": lambda: [str(row["name"]) for row in self.user_images(host)
+                                  if isinstance(row, dict) and isinstance(row.get("name"), str)],
             "--secret-env": secret_names, "--api-key": secret_names, "--git-token-secret": secret_names,
         }
         found, problems = {}, {}
@@ -3408,8 +3437,9 @@ class SandboxAI:
 
     # teams (sandbox-ai team)
     TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")
-    TEAM_LINE = re.compile(r"([a-z0-9][a-z0-9_-]{0,19})\s+((?:(?:claude|codex|opencode), )*(?:claude|codex|opencode))"
-                           r"\s+(.*)")
+    TEAM_AGENT = "(?:" + "|".join(AGENTS) + ")"
+    TEAM_LINE = re.compile(rf"([a-z0-9][a-z0-9_-]{{0,19}})\s+((?:{TEAM_AGENT}, )*{TEAM_AGENT})\s+(.*)")
+    VPN_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")  # vpn.PROFILE_NAME
     # a team whose record is damaged: NAME  (damaged)  remove it with: sandbox-ai team delete NAME --yes
     TEAM_DAMAGED_LINE = re.compile(r"([a-z0-9][a-z0-9_-]{0,19})\s+\(damaged\)(?:\s.*)?")
 
@@ -3440,14 +3470,23 @@ class SandboxAI:
             raise ValueError("not a team")
         return data
 
-    def team_start_argv(self, host, name, agents, workspace, options=()):
-        """`sandbox-ai team start --agents A,B[,C] --workspace DIR -- NAME [-- OPTIONS]` on HOST, for a terminal
-        (each member starts there, one after the other)."""
+    def team_start_argv(self, host, name, agents, workspace, options=(), vpn=None, member_vpn=None,
+                        shared_openvpn=False):
+        """`sandbox-ai team start --agents A,B[,...] --workspace DIR [--vpn PROFILE] [--member-vpn AGENT=PROFILE]...
+        [--allow-shared-openvpn] NAME [-- OPTIONS]` on HOST, for a terminal (each member starts there, one after the
+        other)."""
         if not self.TEAM_NAME.fullmatch(str(name)):
             raise ValueError("a team's name: 1-20 of a-z, 0-9, '_' and '-'")
         agents = list(dict.fromkeys(agents))
         if len(agents) < 2 or any(agent not in AGENTS for agent in agents):
-            raise ValueError("two or three agents")
+            raise ValueError("two or more agents")
+        member_vpn = dict(member_vpn or {})
+        if any(p is not None and not self.VPN_PROFILE.fullmatch(str(p)) for p in [vpn, *member_vpn.values()]) \
+                or any(agent not in agents for agent in member_vpn):
+            raise ValueError("invalid VPN profile")
+        vpn_args = [*(["--vpn", vpn] if vpn else []),
+                    *[value for agent, profile in member_vpn.items() for value in ("--member-vpn", f"{agent}={profile}")],
+                    *(["--allow-shared-openvpn"] if shared_openvpn else [])]
         if not valid_directory(workspace):
             raise ValueError("the workspace is an absolute path")
         if any(not isinstance(o, str) or "\0" in o for o in options):
@@ -3455,8 +3494,8 @@ class SandboxAI:
         # Each member's start: the team's workspace is the main one (see as_given; on another host where its launcher
         # is known to take the option).
         options = self.host_as_given(host, agents[0], ["--workspace", workspace, *options])[2:]
-        return self.host_terminal(host, "team", "start", "--agents", ",".join(agents), "--workspace", workspace, name,
-                                  *(["--", *options] if options else []))
+        return self.host_terminal(host, "team", "start", "--agents", ",".join(agents), "--workspace", workspace,
+                                  *vpn_args, name, *(["--", *options] if options else []))
 
     def team_post(self, host, name, agent, task):
         """`sandbox-ai team post -- NAME AGENT TASK` on HOST: a task for a member, from the human."""

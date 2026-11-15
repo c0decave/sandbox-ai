@@ -137,13 +137,17 @@ def test_the_start_choices_of_a_host_come_from_its_lists(sai):
                                                    {"name": "base", "kind": "always"}]}), ""),
         ("identities", "list"): (0, json.dumps({"work": {"email": "w@example.org"}}), ""),
         ("mcp", "list"): (0, json.dumps([{"name": "fetch", "status": "stopped"}]), ""),
-        ("images", "--json"): (0, json.dumps([{"target": "tor", "variant": True}, {"target": "claude"}]), ""),
+        ("images", "--json"): (0, json.dumps([{"target": "tor", "variant": True, "image": "localhost/tor:latest"},
+                                              {"target": "claude", "image": "localhost/claude-sandbox:latest"}]), ""),
+        ("images", "list"): (0, json.dumps([{"name": "redis", "kind": "pulled"}]), ""),
         ("secrets", "list"): (0, "NAME     STORE\nGH_PUSH  file\n", ""),
     })
     found, problems = sai.host_start_choices("ct1")
     assert found == {"--vpn": ["mv", "ts"], "--kit": ["egm"], "--identity": ["work"], "--mcp": ["fetch"],
-                     "--image-variant": ["tor"], "--secret-env": ["GH_PUSH"], "--api-key": ["GH_PUSH"],
+                     "--image-variant": ["tor"], "--image": ["localhost/claude-sandbox:latest", "localhost/tor:latest"],
+                     "--service": ["redis"], "--secret-env": ["GH_PUSH"], "--api-key": ["GH_PUSH"],
                      "--git-token-secret": ["GH_PUSH"]} and problems == {}
+    assert len([a for a in sai.asked if a[1:3] == ("images", "--json")]) == 1, "the agents' images read once for two"
     assert all(asked[0] == "ct1" for asked in sai.asked), "that host's lists, never this machine's"
     sai.answers[("vpn", "list")] = (1, "", "no vpn here")
     found, problems = sai.host_start_choices("ct1")

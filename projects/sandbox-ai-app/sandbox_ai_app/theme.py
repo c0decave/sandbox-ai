@@ -837,6 +837,11 @@ QTabBar#projectTabs::tab:selected {{ border-color: {c['border']}; background: {c
 QTabBar#projectTabs::tab:hover {{ color: {c['text']}; }}
 QToolButton#tabClose {{ padding: 0; border: none; }}
 QToolButton#tabClose:hover {{ background: {c['alternate']}; border-radius: {small}px; }}
+QWidget#tabArrows {{ background: {c['window']}; border: none; }}
+QToolButton#tabArrow {{ padding: 0; margin: 0; border: 1px solid transparent; border-radius: {small}px;
+                        background: transparent; }}
+QToolButton#tabArrow:hover {{ border-color: {c['border']}; background: {c['alternate']}; }}
+QToolButton#tabArrow:pressed {{ background: {c['button']}; }}
 QDockWidget {{ color: {c['title']}; }}
 QDockWidget::title {{ background: {c['alternate']}; padding: 5px 8px; border: 1px solid {c['border']}; }}
 QLabel#projectName, QComboBox#projectName {{ font-size: 14pt; font-weight: 700; color: {c['title']}; }}
@@ -1039,6 +1044,10 @@ def dot(name, size=10):
 SHIELD = [(12, 3), (20, 6), (20, 12), (12, 21), (4, 12), (4, 6)]
 # The navigation's icons: simple line drawings on a 24 x 24 grid, painted in the navigation's text colour.
 GLYPHS = {
+    # A tab row's ← → (one tab back, one on) and ▾ (the list of its tabs): widgets.TabArrows.
+    "tab-left": [("poly", [(5, 12), (20, 12)], False, 2.6), ("poly", [(11, 5), (4, 12), (11, 19)], False, 2.6)],
+    "tab-right": [("poly", [(4, 12), (19, 12)], False, 2.6), ("poly", [(13, 5), (20, 12), (13, 19)], False, 2.6)],
+    "tab-list": [("poly", [(5, 9), (12, 16), (19, 9)], False, 2.6)],
     "launch": [("poly", [(8, 5), (19, 12), (8, 19)], True)],
     "board": [("rect", (3, 4, 7, 6)), ("rect", (14, 14, 7, 6)), ("rect", (14, 4, 7, 6)),
               ("line", (10, 7, 14, 7)), ("line", (17.5, 10, 17.5, 14))],
@@ -1141,7 +1150,11 @@ def _glyph_pixmap(name, color_, size):
                 path.lineTo(QPointF(*point))
             if shape[2]:
                 path.closeSubpath()
+            if len(shape) > 3:  # a stroke of its own width (the tab arrows: bolder, readable when small)
+                painter.setPen(QPen(tint, shape[3], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                                    Qt.PenJoinStyle.RoundJoin))
             painter.drawPath(path)
+            painter.setPen(pen)
     painter.end()
     return pixmap
 

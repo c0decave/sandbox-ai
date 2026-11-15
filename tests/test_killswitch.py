@@ -145,6 +145,37 @@ def test_tors_socksport_is_the_internet_for_the_cut(tmp_path):
     assert l.killswitch_config(a, {})["tor_socks"] is None
 
 
+def test_tors_dnsport_behind_its_front_is_the_internet_for_the_cut():
+    """Regression (analysis round 1, security): since the resolver in front of tor's DNSPort (TorDnsFront, 0.1.96) tor
+    answers lookups on 127.0.53.1:9053, no longer on port 53 - which the cut's rule for lookups ("port 53 anywhere
+    but the stub") does not name. A run behind Tor with --dns or --egress-all-allow reaches that port directly, and
+    tor, whose own packets pass the cut, carried every such lookup out: names (and answers) through `net cut all`.
+    Every mode that cuts lookups cuts Tor's resolver address whole, whatever the port and protocol - in the
+    supervisor's view and in the firewall's chain; "local" keeps lookups, as before."""
+    spec = importlib.util.spec_from_file_location("sandbox_vpn_runtime_killswitch", ROOT / "sandbox/vpn_runtime.py")
+    vpn_runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vpn_runtime)
+    assert rt.TOR_DNS_ADDRESS == vpn_runtime.TOR_DNS  # (the supervisor has its own copy: it runs standalone)
+    tor = {"tor": True, "bypass": [], "host_ports": [], "api": {**SETTINGS["api"], "tcp": [], "loopback": []}}
+    places = {"the front": (vpn_runtime.TOR_DNS, 53, "udp"),
+              "tor's DNSPort": (vpn_runtime.TOR_DNS, vpn_runtime.TOR_DNS_PORT, "udp"),
+              "tor's DNSPort over TCP": (vpn_runtime.TOR_DNS, vpn_runtime.TOR_DNS_PORT, "tcp"),
+              "another port there": (vpn_runtime.TOR_DNS, 5353, "udp")}
+    assert reached(view("local", **tor), places) == set(places)
+    whole = f"ct original ip daddr {vpn_runtime.TOR_DNS} drop"  # "drop" there stands for the rejection
+    for mode in ("remote", "api", "all"):
+        assert reached(view(mode, **tor), places) == set(), mode
+        found = rules(mode, **tor)
+        assert whole in found and found.index(whole) < found.index("ct original ip daddr 127.0.0.0/8 return"), mode
+    assert not any(vpn_runtime.TOR_DNS in line for line in rules("local", **tor))
+    # In the kernel's words: rejected, as everything the cut forbids.
+    text = rt.cut_rules(view("all", **tor), vpn_mark=f"meta skuid {vpn_runtime.TOR_UID}")
+    assert f"add rule inet agent_sandbox cut_all ct original ip daddr {vpn_runtime.TOR_DNS} {rt.CUT_REJECT}" in text
+    # Without Tor the address is the sandbox's own loopback, as before (port 53 off the stub stays a lookup).
+    assert reached(view("all"), places) == {"tor's DNSPort", "tor's DNSPort over TCP", "another port there"}
+    assert not any(vpn_runtime.TOR_DNS in line for line in rules("all"))
+
+
 def test_macos_relays_to_the_mac_count_as_the_hosts_ports():
     cut = {"machine_host": "192.168.127.254"}
     assert rt.cut_allows(view("remote", **cut), "192.168.127.254", 8080)

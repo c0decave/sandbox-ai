@@ -258,11 +258,11 @@ def test_the_web_interface_ended_by_a_signal_cleans_up_and_starts_again(tmp_path
                                     "127.0.0.1:0"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True)
         try:
-            for _ in range(300):
+            for _ in range(1200):  # (60 s: a busy CI runner took longer than 15 s to start it)
                 if listen.exists() or process.poll() is not None:
                     break
                 time.sleep(0.05)
-            assert listen.exists(), process.communicate(timeout=10)[0]
+            assert listen.exists(), process.poll() if process.poll() is not None else "not up within 60 s"
             assert json.loads(listen.read_text())["pid"] == process.pid
             process.send_signal(signum)
             output = process.communicate(timeout=30)[0]

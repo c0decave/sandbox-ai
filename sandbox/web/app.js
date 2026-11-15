@@ -5583,29 +5583,71 @@ pages.teams = async (main) => {
     rows.push(el("tr", { "data-team": team.name }, el("td", { class: "mono" }, team.name), el("td", {}, team.members.join(", ")), el("td", { class: "mono" }, team.workspace || ""), actions), slot);
   }
   main.append(table([t("Team"), t("Members"), t("Workspace"), ""], rows, t("No teams on this host."), t("Teams on {host}", { host })));
-  // a new team, started in a terminal of the page
+  // a new team, started in a terminal of the page: its members (team.AGENTS) and that host's VPN profiles with their
+  // type (vpn list --json there), as the app's team dialog has them (team-choices). Whether one profile may run in
+  // several members at once is team start's to say: it refuses with its reason, shown in the terminal, and starts
+  // nothing; the page only offers the OpenVPN confirmation where one OpenVPN profile is in several members.
+  let choices;
+  try { choices = await api("GET", hostPath("/team-choices", host)); } catch (e) { choices = e; }
+  if (!live()) return;
+  const listed = choices && !(choices instanceof Error) && Array.isArray(choices.agents) ? choices.agents.filter(a => typeof a === "string" && /^[a-z][a-z0-9-]{0,19}$/.test(a)) : [];
+  const teamAgents = listed.length ? listed : AGENTS;
+  const profiles = (choices && Array.isArray(choices.profiles) ? choices.profiles : []).filter(p => p && typeof p.profile === "string");
+  const vpnKind = (p) => (typeof p.provider === "string" && p.provider && !["generic", "?"].includes(p.provider) ? p.provider : String(p.type || "?"));
+  const vpnSelect = (id, empty, label) => el("select", { id, "aria-label": label, onchange: () => changed() }, el("option", { value: "" }, empty),
+    profiles.map(p => el("option", { value: p.profile }, `${p.profile} (${vpnKind(p)})`)));
   const name = el("input", { id: "team-name", class: "mono", placeholder: "review", pattern: TEAM_NAME.source.slice(1, -1) });
-  const lead = el("select", { id: "team-lead" }, AGENTS.map(a => el("option", { value: a }, a)));
-  const others = AGENTS.map(a => el("input", { type: "checkbox", id: `team-agent-${a}`, value: a, checked: a === "codex" }));
+  const lead = el("select", { id: "team-lead", onchange: () => changed() }, teamAgents.map(a => el("option", { value: a }, a)));
+  const others = teamAgents.map(a => el("input", { type: "checkbox", id: `team-agent-${a}`, value: a, checked: a === "codex", onchange: () => changed() }));
   const workspace = el("input", { id: "team-workspace", class: "mono", placeholder: "/home/you/src/project" });
+  const vpn = vpnSelect("team-vpn", t("(none)"), t("VPN profile"));
+  vpn.setAttribute("title", t("The VPN in front of every member: each member is a sandbox of its own with its own VPN container (sandbox-ai team start --vpn)"));
+  // Per member (advanced): another profile for a member (team start --member-vpn AGENT=PROFILE), a row for each
+  // agent of the team
+  const memberVpn = Object.fromEntries(teamAgents.map(a => [a, vpnSelect(`team-vpn-${a}`, t("(the team's)"), t("VPN profile of {agent}", { agent: a }))]));
+  const memberRows = Object.fromEntries(teamAgents.map(a => [a, el("div", { class: "row", id: `team-vpn-row-${a}` }, el("label", { for: `team-vpn-${a}`, class: "mono" }, a), memberVpn[a])]));
+  const perMember = el("details", { id: "team-per-member", class: "wide" }, el("summary", {}, t("Per member (advanced)")),
+    el("p", { class: "hint" }, t("Another VPN profile for a member (sandbox-ai team start --member-vpn AGENT=PROFILE)")), Object.values(memberRows));
+  const shared = el("input", { type: "checkbox", id: "team-shared-openvpn", onchange: () => changed() });
+  const sharedRow = el("label", { class: "wide" }, shared, " ", t("Allow one OpenVPN profile in several members (your server must allow it: duplicate-cn)"));
   const options = el("textarea", { id: "team-options", rows: 2, class: "mono", placeholder: "--mode high\n--allow-pypi" });
   const status = el("div", { class: "wide" });
+  const chosen = () => [lead.value, ...others.filter(b => b.checked && b.value !== lead.value).map(b => b.value)];
+  const own = () => Object.fromEntries(chosen().filter(a => memberVpn[a] && memberVpn[a].value).map(a => [a, memberVpn[a].value]));
+  const changed = () => {
+    const agents = chosen(), mine = own(), team = vpn.value || "";
+    for (const [a, row] of Object.entries(memberRows)) row.hidden = !agents.includes(a);
+    const used = agents.map(a => mine[a] || team).filter(Boolean);
+    sharedRow.hidden = !used.some((p, i) => used.indexOf(p) !== i && (profiles.find(x => x.profile === p) || {}).type === "openvpn");
+  };
+  changed();
   const start = el("button", { class: "primary", onclick: () => {
     clear(status);
     const team = name.value.trim(), path = workspace.value.trim();
-    const agents = [lead.value, ...others.filter(b => b.checked && b.value !== lead.value).map(b => b.value)];
+    const agents = chosen();
     if (!TEAM_NAME.test(team)) { status.append(notice(t("A team's name: 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit."), "error")); return; }
-    if (agents.length < 2) { status.append(notice(t("A team has two or three agents: the lead and at least one more."), "error")); return; }
+    if (agents.length < 2) { status.append(notice(t("A team has two or more agents: the lead and at least one more."), "error")); return; }
     if (!path.startsWith("/") && !path.startsWith("~")) { status.append(notice(t("The shared workspace: an absolute path on {host}.", { host }), "error")); return; }
     let list;
-    try { list = shellWords(options.value); } catch (e) { status.append(notice(t("Options: {error}", { error: e.message }), "error")); return; }
-    openTerminal({ kind: "team-start", host, team, agents: agents.join(","), workspace: path, options: JSON.stringify(list) }, t("team {team}", { team }));
+    try { list = shellWords(options.value || ""); } catch (e) { status.append(notice(t("Options: {error}", { error: e.message }), "error")); return; }
+    changed();
+    const mine = own(), query = { kind: "team-start", host, team, agents: agents.join(","), workspace: path, options: JSON.stringify(list) };
+    if (vpn.value) query.vpn = vpn.value;
+    if (Object.keys(mine).length) query.member_vpn = JSON.stringify(mine);
+    if (!sharedRow.hidden && shared.checked) query.shared_openvpn = "1";
+    openTerminal(query, t("team {team}", { team }));
   } }, t("Start the team in a terminal"));
+  const listing = choices instanceof Error ? errorNotice(choices)
+    : choices && choices.error ? notice(t("Could not list the VPN profiles: {error}", { error: String(choices.error) }), "warn") : null;
   main.append(el("h2", {}, t("New team on {host}", { host })), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "team-name" }, t("Name")), name,
     el("label", { for: "team-lead" }, t("Lead")), lead,
-    el("span", {}, t("Members")), el("div", { class: "row" }, others.map((b, i) => el("label", {}, b, " ", AGENTS[i]))),
+    el("span", {}, t("Members")), el("div", { class: "row" }, others.map((b, i) => el("label", {}, b, " ", teamAgents[i]))),
     el("label", { for: "team-workspace" }, t("Shared workspace")), workspace,
+    el("label", { for: "team-vpn" }, t("VPN profile")), vpn,
+    listing ? el("div", { class: "wide" }, listing) : null,
+    perMember, sharedRow,
+    el("p", { class: "hint wide" }, t("Each member is a sandbox of its own with its own VPN container. Whether one profile can run in several members at once, team start checks: if not, it says why in the terminal and starts nothing.")),
     el("label", { for: "team-options" }, t("Options for every member")), options,
     status, el("span"), el("div", { class: "row" }, start, el("span", { class: "hint" }, t("The members start one after another; the terminal says how each went.")))),
   el("p", { class: "hint" }, t("The members share the workspace: nothing keeps two agents from changing the same file."))));

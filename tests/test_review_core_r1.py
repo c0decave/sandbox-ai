@@ -113,15 +113,15 @@ def test_an_ended_runs_leftovers_go_with_its_browsers_vnc_folder(tmp_path):
 
 
 def test_the_web_opens_no_terminal_for_an_agent_the_command_does_not_take():
-    """A login terminal for DSH or Goose (no sandbox-ai login of theirs), the plugin store or a team with Hermes:
-    refused with the agents that are taken, not opened to fail there; a refusal never says "claude, codex or
-    opencode" where seven agents are taken."""
+    """A login terminal for DSH or Goose (no sandbox-ai login of theirs), the plugin store with Hermes or a team with
+    an agent that is none: refused with the agents that are taken, not opened to fail there; a refusal never says
+    "claude, codex or opencode" where seven agents are taken (a team takes all seven: hotfix 0.1.96)."""
     w = load("webui")
     for query, taken in (({"kind": "login", "agent": "goose"}, "hermes or qwen"),
                          ({"kind": "login", "agent": "dsh"}, "hermes or qwen"),
                          ({"kind": "plugins", "agent": "hermes"}, "codex or opencode"),
-                         ({"kind": "team-start", "team": "t1", "agents": "claude,hermes", "workspace": "/srv/w"},
-                          "claude, codex and opencode")):
+                         ({"kind": "team-start", "team": "t1", "agents": "claude,bash", "workspace": "/srv/w"},
+                          "claude, codex, opencode, hermes, dsh, qwen, goose")):
         with pytest.raises(w.Refused, match=taken):
             w.terminal_command({"host": "local", **query})
     assert w.terminal_command({"host": "local", "kind": "login", "agent": "qwen"})[1][-1] == "qwen"

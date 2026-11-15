@@ -251,6 +251,7 @@ ACTIONS = [
     ("GET", "/presets", None, [["presets", "list", "--json"]]),
     ("GET", "/preset-categories", None, [["presets", "categories", "--json"]]),
     ("GET", "/vpn", None, [["vpn", "list", "--json"]]),
+    ("GET", "/team-choices", None, [["vpn", "list", "--json"]]),  # hotfix 0.1.96: a new team's members and VPNs
     ("POST", "/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "location": "se-sto"},
      [["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]]),
     ("POST", "/vpn/mv/check", {}, [["vpn", "check", "mv"]]),
@@ -382,8 +383,8 @@ ACTIONS = [
     ("GET", "/images-history", None, [["images", "history", "--json"]]),
     ("POST", "/images-new", {"name": "mv", "from": "codex", "empty": True}, [["images", "new", "mv", "--from=codex",
                                                                               "--empty", "--json"]]),
-    ("POST", "/images-recipe", {"recipe": "tor", "from": "claude", "as": "mv"},
-     [["images", "recipe", "tor", "--from=claude", "--as=mv"]]),
+    ("POST", "/images-recipe", {"recipe": "media", "from": "claude", "as": "mv"},
+     [["images", "recipe", "media", "--from=claude", "--as=mv"]]),
     ("GET", "/images/mv", None, [["images", "extend", "mv", "--json"]]),
     ("GET", "/images/mv/packages", None, [["images", "packages", "mv", "--json"]]),
     ("GET", "/images/mv/history", None, [["images", "history", "mv", "--json"]]),
@@ -716,6 +717,45 @@ def test_the_tool_terminals_in_every_login_state_on_every_host(web, state, host,
     found_host, _, found = sandbox_args(argv)
     assert (found_host, found) == (host, args)
     assert argv[1] == "-tt" if host == "ct1" else True, "a terminal: a tty over SSH"
+    web.assert_nothing_leaked()
+
+
+TEAM_PROFILES = json.dumps([{"profile": "anon", "type": "tor", "provider": "generic"},
+                            {"profile": "wg1", "type": "wireguard", "provider": "mullvad"}])
+
+
+@pytest.mark.parametrize("host", HOSTS)
+@pytest.mark.parametrize("state", STATES)
+def test_a_team_start_with_vpns_in_every_login_state_on_every_host(web, state, host):
+    """Hotfix 0.1.96: the team's VPN, one member's own and the OpenVPN confirmation reach team start as options with
+    their values, each profile checked against that host's `vpn list --json` (asked there, only with a full login);
+    a profile the host does not have, or a value that is an option, opens no terminal."""
+    import urllib.parse
+    headers = web.headers(state)
+    web.processes.answers[("vpn", "list", "--json")] = (0, TEAM_PROFILES, "")
+    query = {"kind": "team-start", "team": "duo", "agents": "claude,goose,qwen", "workspace": "/srv/p",
+             "vpn": "anon", "member_vpn": json.dumps({"goose": "wg1"}), "shared_openvpn": "1"}
+    sent = {"Host": HOST, "Origin": ORIGIN, **headers}
+    target = "/api/terminal?" + urllib.parse.urlencode({"host": host, "csrf": headers.get("X-CSRF-Token", "none"),
+                                                        **query})
+    if state != "full":
+        with pytest.raises(w.Refused) as refused:
+            web.svc.websocket(target, sent, "192.0.2.1")
+        assert refused.value.status == {"wrong-host": 421, "wrong-origin": 403, "wrong-csrf": 403}.get(state, 401)
+        assert web.processes.log == [], "nothing is asked without a full login"
+        return
+    argv, _ = web.svc.websocket(target, sent, "192.0.2.1")
+    found_host, _, found = sandbox_args(argv)
+    assert found_host == host
+    assert found[:found.index("--")] == ["team", "start", "--agents=claude,goose,qwen", "--workspace=/srv/p",
+                                         "--vpn=anon", "--member-vpn=goose=wg1", "--allow-shared-openvpn", "duo"]
+    assert (host, ["vpn", "list", "--json"]) in web.processes.args()
+    for wrong in ({"vpn": "nope"}, {"vpn": "-x"}, {"member_vpn": json.dumps({"goose": "--vpn"})},
+                  {"member_vpn": json.dumps({"codex": "anon"})}, {"shared_openvpn": "yes"}):
+        with pytest.raises(w.Refused) as refused:
+            web.svc.websocket("/api/terminal?" + urllib.parse.urlencode({"host": host, "csrf": web.csrf, **query,
+                                                                          **wrong}), sent, "192.0.2.1")
+        assert refused.value.status == 400, wrong
     web.assert_nothing_leaked()
 
 

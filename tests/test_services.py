@@ -590,10 +590,13 @@ def test_parse_spec_and_round_trip():
     assert service["keep"] and not service["read_only"] and service["memory"] == "1g" and service["pids"] == 512
     assert sv.parse_spec(sv.spec_text(service)) == service
     plain = sv.parse_spec("cache")
-    assert plain == sv.default_service("cache") and sv.spec_text(plain) == "cache"
+    # the image always written, even when it is the name (2026-11-15: a name silently taken as the image confused a
+    # user); the text reads back the same
+    assert plain == sv.default_service("cache") and sv.spec_text(plain) == "cache:image=cache"
+    assert sv.parse_spec(sv.spec_text(plain)) == plain
     assert sv.ready_port(plain) is None and sv.ready_port(sv.parse_spec("c:port=1,port=2")) == 1
     assert sv.ready_port(sv.parse_spec("c:port=1,ready=none")) is None
-    assert sv.spec_text(sv.parse_spec("c:port=1,ready=1")) == "c:port=1"
+    assert sv.spec_text(sv.parse_spec("c:port=1,ready=1")) == "c:image=c,port=1"
 
 
 @pytest.mark.parametrize("value, match", [
@@ -685,6 +688,28 @@ def test_check_services_edges(config):
         sv.check(a, s)
 
 
+def test_a_service_without_image_names_its_name_as_the_image_it_lacks(config):
+    """Live: --service service (no image=): the launcher said "no image service of yours" - it must say that without
+    image= a service's name is its image, and list the images there are to give with image= (or none yet)."""
+    with pytest.raises(ValueError) as refused:
+        sv.check(start("--service", "service"), s)
+    text = str(refused.value)
+    assert text.startswith("--service service: no image of yours named service")
+    assert "without image= a service's name is its image" in text
+    assert "sandbox-ai images pull REFERENCE --as service" in text and "sandbox-ai images list" in text
+    assert "your images: none yet" in text
+    add_redis()
+    with pytest.raises(ValueError) as refused:
+        sv.check(start("--service", "service"), s)
+    assert "give image=NAME of one of yours; your images: redis;" in str(refused.value)
+    with pytest.raises(ValueError) as refused:  # image= given: no word of the name, the images still listed
+        sv.check(start("--service", "db:image=postgres"), s)
+    text = str(refused.value)
+    assert text.startswith("--service db: no image postgres of yours") and "without image=" not in text
+    assert "your images: redis" in text and "--as postgres" in text
+    assert sv.check(start("--service", "redis"), s)[0]["image"] == "redis"  # the name that is an image of yours
+
+
 # -- the run line --
 
 def test_run_command(config, tmp_path, monkeypatch):
@@ -703,7 +728,7 @@ def test_run_command(config, tmp_path, monkeypatch):
     assert f"type=bind,src={tmp_path}/resolv.conf,dst=/etc/resolv.conf,ro,nodev" in joined
     assert f"type=bind,src={tmp_path}/hosts,dst=/etc/hosts,ro,nodev" in joined
     # The service's user owns its data folder (CI 2026-11-14: redis's /data, 755 in the image, was root's tmpfs).
-    assert "--tmpfs /data:rw,noexec,nosuid,nodev,size=512m,uid=999,gid=1000" in joined
+    assert "--tmpfs /data:rw,noexec,nosuid,nodev,size=512m,U" in joined and "--user 999:1000" in joined
     assert "--env MODE=dev" in joined and "--env HOST_VAR" in joined and "--env PW" in joined
     assert "s3cret" not in joined and "from-host" not in joined  # values only in the environment
     assert env == {"HOST_VAR": "from-host", "PW": "s3cret"}

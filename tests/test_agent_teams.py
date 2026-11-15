@@ -291,7 +291,7 @@ def test_team_start_takes_its_arguments_in_any_order_before_the_options(monkeypa
     """Review 5 (correctness H1): `team start app --agents A,B -w DIR -- OPTIONS` (the README's form, and what the
     web sends) failed with "required: --agents": the options' REMAINDER swallowed everything after NAME."""
     got = []
-    monkeypatch.setattr(team, "start", lambda *args: got.append(args) or 0)
+    monkeypatch.setattr(team, "start", lambda *args, **_kw: got.append(args) or 0)
     assert team.main(argv) == 0
     name, agents, workspace, options, _ = got[0]
     assert (name, agents, workspace, options) == ("app", ["claude", "codex", "opencode"], "/srv/app", ["--allow-pypi"])
@@ -305,7 +305,7 @@ def test_the_web_team_start_parses_with_the_real_command_line(monkeypatch):
     argv = web.tool_command("team-start", {"host": "local", "team": "app", "agents": "claude,codex",
                                           "workspace": "/srv/app", "options": '["--allow-pypi"]'})
     got = []
-    monkeypatch.setattr(team, "start", lambda *args: got.append(args) or 0)
+    monkeypatch.setattr(team, "start", lambda *args, **_kw: got.append(args) or 0)
     assert argv[0] == "team" and team.main(argv[1:]) == 0
     assert got[0][:4] == ("app", ["claude", "codex"], "/srv/app", ["--allow-pypi"])
 

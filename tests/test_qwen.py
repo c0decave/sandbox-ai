@@ -5,6 +5,7 @@ tests/test_feature_matrix.py (QWEN) and the launcher's contracts (test_agent_san
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -129,7 +130,8 @@ def test_features_turn_their_switches_on_and_telemetry_on_leaves_qwen_its_own():
     assert qwen.managed_settings(ns(), telemetry="on")["general"] == {"enableAutoUpdate": False}, "on is gone"
     env = qwen.environment(ns("qwen", "model-catalog"))
     assert "QWEN_CODE_MODELS_DEV_REFRESH" not in env and qwen.environment(ns())["QWEN_CODE_MODELS_DEV_REFRESH"] == "off"
-    assert qwen.managed_settings(ns(effort="max"))["model"] == {"reasoningEffort": "max"}
+    assert qwen.managed_settings(ns(effort="max"))["model"] == {"reasoningEffort": "max",
+                                                                "maxSessionTurns": qwen.MAX_SESSION_TURNS}
 
 
 def test_telemetry_is_pinned_off_whatever_is_enabled():
@@ -344,3 +346,175 @@ def test_the_docs_say_telemetry_is_never_switchable():
     for readme in ("README.md", "README_DE.md"):
         text = (ROOT / readme).read_text()
         assert "Qwen Code" in text and all(host in text for host in qwen.TELEMETRY_HOSTS), readme
+
+
+# --- fixes from live use (0.1.96) -------------------------------------------------------------------------------------
+
+def test_D_starts_qwen_in_yolo_mode_from_its_system_settings():
+    """User: "Qwen, wenn 'ohne Rückfragen' angeklickt ist, im YOLO-Modus starten." -D gave Qwen Code only --yolo on
+    the command line of its first process. Qwen Code 0.26.4 overrides every approval mode but default and plan with
+    "default" when folder trust is on and /work is not trusted (a ~/.qwen/settings.json of the kept HOME:
+    'Approval mode overridden to "default" because the current folder is not trusted', then its trust dialog), and
+    a Qwen Code started another way in the sandbox (`qwen` typed in a shell) never got the flag. With -D the system
+    settings, which win over the user's and the project's, say YOLO and trust /work; without -D nothing changes."""
+    danger = qwen.managed_settings(ns(dangerously_skip_permissions=True))
+    assert danger["tools"] == {"sandbox": False, "approvalMode": "yolo"}
+    assert danger["security"] == {"folderTrust": {"enabled": False}}
+    assert danger["privacy"] == {"usageStatisticsEnabled": False} and danger["telemetry"]["enabled"] is False
+    plain = qwen.managed_settings(ns())
+    assert plain["tools"] == {"sandbox": False} and "security" not in plain, "without -D Qwen Code still asks"
+    assert qwen.managed_settings(ns(dangerously_skip_permissions=False))["tools"] == {"sandbox": False}
+    with_llm = qwen.managed_settings(ns(dangerously_skip_permissions=True), llm={
+        "security": {"auth": {"selectedType": "openai"}}, "model": {"name": "m"}})
+    assert with_llm["security"] == {"auth": {"selectedType": "openai"}, "folderTrust": {"enabled": False}}
+    assert with_llm["tools"]["approvalMode"] == "yolo"
+
+
+def test_e2e_D_reaches_qwen_in_every_start_path(tmp_path):
+    """End to end: the real ./sandbox-ai (only Podman faked, live_fakes.py) starts Qwen Code with -D: --yolo on its
+    command and YOLO in the system settings the sandbox mounts at /etc/qwen-code; a resume keeps both; a start
+    without -D has neither."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from live_fakes import Host
+    host = Host(tmp_path / "host")
+    host.add_image("localhost/qwen-sandbox:latest")
+
+    def start(*args, kept):
+        done = host.run(*args, env={"FAKE_PODMAN_RUN": "0:0", "FAKE_PODMAN_KEEP": str(tmp_path / kept)})
+        session = tmp_path / kept / "session"
+        assert (session / "config.json").is_file(), done.stderr
+        return (done, json.loads((session / "config.json").read_text())["command"],
+                json.loads((session / "qwen/settings.json").read_text()))
+    done, command, settings = start("qwen", "--no-tmux", "--no-auth", "-D", kept="first")
+    assert done.returncode == 0, done.stderr
+    assert command == ["qwen", "--yolo"]
+    assert settings["tools"]["approvalMode"] == "yolo" and settings["security"]["folderTrust"] == {"enabled": False}
+    name = re.search(r"sandbox-ai resume (\S+?)[ )]", done.stderr).group(1)
+    _, command, settings = start("resume", name, kept="resumed")
+    assert command == ["qwen", "--yolo", "--continue"] and settings["tools"]["approvalMode"] == "yolo"
+    _, command, settings = start("qwen", "--no-tmux", "--no-auth", kept="plain")
+    assert command == ["qwen"] and "approvalMode" not in settings["tools"] and "security" not in settings
+
+
+def test_a_qwen_helper_of_a_D_lead_gets_yolo_too():
+    """A Qwen Code helper of a lead started with -D: its launcher gets --dangerously-skip-permissions (mcp.py), so its
+    system settings say YOLO as well as each task's --yolo."""
+    assert agent_mcp.command("qwen", "task", skip=True)[:2] == ["qwen", "--yolo"]
+    helper = ns(dangerously_skip_permissions=True, helper_of="lead")
+    assert qwen.managed_settings(helper)["tools"]["approvalMode"] == "yolo"
+
+
+QWEN_CLI = os.environ.get("SANDBOX_AI_QWEN_CLI")
+
+
+@pytest.mark.skipif(not QWEN_CLI, reason="SANDBOX_AI_QWEN_CLI: the pinned Qwen Code's cli-entry.js (npm ci of "
+                                         "sandbox/Containerfile.qwen.lock)")
+@pytest.mark.parametrize("danger", [True, False], ids=["D", "plain"])
+def test_real_qwen_runs_a_shell_command_unasked_only_with_D(tmp_path, danger):
+    """The pinned Qwen Code itself, in a terminal, against a scripted model that asks for one shell command, with
+    the system settings the launcher writes and a kept HOME whose own settings turn folder trust on (where --yolo
+    alone was overridden): with -D it runs the command unasked, in YOLO mode; without -D it asks."""
+    sys.path.insert(0, str(ROOT / "tests/devtools"))
+    import qwen_pty
+    settings = qwen.managed_settings(ns(dangerously_skip_permissions=danger))
+    result = qwen_pty.run(QWEN_CLI, settings, ["--yolo"] if danger else [], tmp_path,
+                          user_settings={"$version": 4, "security": {"folderTrust": {"enabled": True}}})
+    assert result["ran"] is danger and result["asked"] is not danger, result["screen"][-1500:]
+    assert result["yolo"] is danger, result["screen"][-1500:]
+
+
+def test_qwen_session_turn_limit_is_120_unless_the_loop_guard_names_its_steps():
+    """User: "Qwen settings.json anpassen: max turn 120." model.maxSessionTurns (Qwen Code 0.26.4: every model request
+    of the session counts, a prompt and each tool result's follow-up; past it Qwen Code says "The session has reached
+    the maximum number of turns") is 120 in every start, with and without --llm; the loop guard's steps replace it
+    only where they are set (defaults.json, the server's, --llm-param loop_guard.steps=N)."""
+    assert qwen.MAX_SESSION_TURNS == 120
+    assert qwen.managed_settings(ns())["model"] == {"maxSessionTurns": 120}
+    assert qwen.managed_settings(ns(effort="high"))["model"] == {"maxSessionTurns": 120, "reasoningEffort": "high"}
+    assert qwen.managed_settings(ns(), llm={"model": {"name": "m"}})["model"]["maxSessionTurns"] == 120
+    assert qwen.managed_settings(ns(), llm={"model": {"name": "m", "maxSessionTurns": 60}})["model"][
+        "maxSessionTurns"] == 60
+
+
+def llm_start(tmp_path, monkeypatch, *params, endpoint=None, user=None):
+    """A --llm start of Qwen Code at an LM Studio server, its context window not asked for."""
+    monkeypatch.setenv("SANDBOX_AI_LLM_NO_CONTEXT_FETCH", "1")
+    record = {"kind": "lmstudio", "url": "http://127.0.0.1:1234", "model": "qwen3-coder-next", **(endpoint or {})}
+    store = llm.load_store()
+    store["endpoints"]["lms"] = record
+    llm.save_store(store)
+    if user is not None:
+        path = tmp_path / "xdg_config_home/sandbox-ai/defaults.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"loop_guard": user}))
+    return ns(llm="lms", llm_param=list(params), vpn=None)
+
+
+def test_llm_turn_limit_follows_only_explicit_loop_guard_steps(tmp_path, monkeypatch):
+    a = llm_start(tmp_path, monkeypatch)
+    assert "maxSessionTurns" not in llm.qwen_settings(a)["model"], "the guard's default 40 is not Qwen Code's"
+    assert qwen.managed_settings(a, llm=llm.qwen_settings(a))["model"]["maxSessionTurns"] == 120
+    a = llm_start(tmp_path, monkeypatch, "loop_guard.steps=200")
+    assert llm.qwen_settings(a)["model"]["maxSessionTurns"] == 200
+    assert qwen.managed_settings(a, llm=llm.qwen_settings(a))["model"]["maxSessionTurns"] == 200
+    a = llm_start(tmp_path, monkeypatch, endpoint={"loop_guard": {"steps": 80}})
+    assert llm.qwen_settings(a)["model"]["maxSessionTurns"] == 80
+    a = llm_start(tmp_path, monkeypatch, user={"steps": 90})
+    assert llm.qwen_settings(a)["model"]["maxSessionTurns"] == 90
+    a = llm_start(tmp_path, monkeypatch, "loop_guard=off")
+    assert qwen.managed_settings(a, llm=llm.qwen_settings(a))["model"]["maxSessionTurns"] == 120
+
+
+def test_a_slow_local_model_is_waited_for_an_hour(tmp_path, monkeypatch):
+    """User (LM Studio, qwen3-coder-next): Qwen Code ended with "No stream activity for 240000ms" - a big model on a
+    long context takes minutes before its first token. Qwen Code 0.26.4 takes a provider model's
+    streamIdleTimeoutMs, timeout and maxRetries from its modelProviders entry ("provider configuration takes
+    precedence, so model.generationConfig is ignored"; QWEN_CODE_API_TIMEOUT_MS only where the entry has no
+    timeout), the stream's whole-life cap only from QWEN_STREAM_MAX_LIFETIME_MS (15 minutes by default). With --llm
+    at a server of your own: llm.agent_wait (an hour) idle and per request, an hour per stream, 2 retries; the
+    variables (llm.agent_environment) say the same. tests/test_llm_waits.py has the rest."""
+    a = llm_start(tmp_path, monkeypatch)
+    entry = llm.qwen_settings(a)["modelProviders"]["openai"][0]
+    assert entry["generationConfig"] == {"timeout": 3_600_000, "streamIdleTimeoutMs": 3_600_000, "maxRetries": 2}
+    env = llm.agent_environment(argparse.Namespace(**{**vars(a), "agent": "qwen", "env": [], "secret_env": []}))
+    assert env["QWEN_STREAM_IDLE_TIMEOUT_MS"] == "3600000" and env["QWEN_CODE_API_TIMEOUT_MS"] == "3600000"
+    assert env["QWEN_STREAM_MAX_LIFETIME_MS"] == "3600000"
+    assert not {"QWEN_STREAM_IDLE_TIMEOUT_MS", "QWEN_STREAM_MAX_LIFETIME_MS", "QWEN_CODE_API_TIMEOUT_MS"} & set(
+        qwen.environment(ns())), "Qwen OAuth and DashScope keep Qwen Code's own"
+
+
+def test_llm_starts_send_no_memory_extraction_after_each_turn(tmp_path, monkeypatch):
+    """Qwen Code 0.26.4's managed auto-memory (memory.enableManagedAutoMemory, on by default) sends one more request
+    with the whole conversation after every turn to extract memories, and auto-dream (enableManagedAutoDream) one to
+    consolidate them: on a local model each is a long prefill of its own. The local-model research's mock server
+    counted 6 requests for a two-turn task with them on, 4 with both off (runs/mock2_qwen, mock2_qwen_nomem). Off in
+    the system settings of every --llm start; other starts keep Qwen Code's own."""
+    a = llm_start(tmp_path, monkeypatch)
+    settings = qwen.managed_settings(a, llm=llm.qwen_settings(a))
+    assert settings["memory"] == {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}
+    assert "memory" not in qwen.managed_settings(ns())
+    dangerous = ns(llm="lms", llm_param=[], vpn=None, dangerously_skip_permissions=True)
+    assert qwen.managed_settings(dangerous, llm=llm.qwen_settings(dangerous))["memory"][
+        "enableManagedAutoMemory"] is False
+
+
+def test_qwen_is_told_the_context_window_the_server_has_loaded(tmp_path, monkeypatch):
+    """contextWindowSize is the window LM Studio has the model loaded with (llm.loaded_context, the value every
+    agent's --llm is told), not the larger one it reports as possible."""
+    a = llm_start(tmp_path, monkeypatch)
+    monkeypatch.setattr(llm, "context_window", lambda *args, **kw: 262144)
+    monkeypatch.setattr(llm, "loaded_context", lambda *args, **kw: 65536)
+    monkeypatch.setattr(llm, "keep_loaded", lambda *args, **kw: None)
+    entry = llm.qwen_settings(a)["modelProviders"]["openai"][0]
+    assert entry["generationConfig"]["contextWindowSize"] == 65536 and entry["generationConfig"]["maxRetries"] == 2
+
+
+def test_the_proxy_never_cuts_a_model_stream_qwen_still_waits_for():
+    """sandbox-ai's own path for --llm (the connection proxy and its LLM relay, the relays to the host) waits as long
+    as Qwen Code does: a connection quiet both ways ends after IDLE_TIMEOUT only, and the loop guard's watchdog is off
+    unless set."""
+    runtime = load("runtime_qwen_tests", "sandbox/runtime.py")
+    assert runtime.IDLE_TIMEOUT * 1000 >= llm.qwen_generation(llm.LOCAL_WAIT)["streamIdleTimeoutMs"]
+    assert runtime.IDLE_TIMEOUT * 1000 >= llm.qwen_generation(llm.LOCAL_WAIT)["timeout"]
+    assert runtime.relay.__defaults__[0] == runtime.IDLE_TIMEOUT
+    assert llm.LOOP_DEFAULTS["watchdog_minutes"] == 0 and llm.LOOP_DEFAULTS["watchdog_requests"] == 0

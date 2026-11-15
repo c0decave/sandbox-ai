@@ -600,7 +600,7 @@ BUILD_NETWORK_NOTE = ("its RUN steps reach the network from this host directly -
 
 
 def build(name, file, context=None, replace=False, podman=None, run=None, out=print, trust_agent_written=False,
-          network=False, builtin=None):
+          network=False, builtin=None, derived=None):
     """Build your Containerfile FILE (in CONTEXT, default its folder) as your image NAME: each image it takes from
     outside pulled once and pinned by digest in the Containerfile that is built (podman build --pull=never), the
     result recorded by its image ID. A Containerfile or context where a sandbox can write (an agent could have
@@ -675,10 +675,13 @@ def build(name, file, context=None, replace=False, podman=None, run=None, out=pr
     data = inspect_image(tag, podman, run)
     if data is None:
         raise ValueError(f"{tag} was built but cannot be inspected")
-    entry = {"kind": "built", "image": tag, "containerfile": str(path), "context": str(folder),
+    # derived (images derive): its Containerfile was generated in a folder of its own, gone after the build
+    entry = {"kind": "built", "image": tag,
+             "containerfile": f"{derived['from']} + {' '.join(derived['packages'])}" if derived else str(path),
+             "context": None if derived else str(folder),
              "containerfile_sha256": hashlib.sha256(text.encode()).hexdigest(), "from": sources, "reviewed": False,
              "build_network": bool(network), "agent_written": agent_written,
-             **({"builtin": builtin} if builtin else {}),
+             **({"builtin": builtin} if builtin else {}), **({"derived": derived} if derived else {}),
              "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
              **describe_image(data, podman, str(data.get("Id") or tag), run)}
     record_entry(name, entry, replace)
@@ -909,11 +912,10 @@ def parse_spec(value):
 
 
 def spec_text(service):
-    """The --service value of SERVICE (parse_spec's result, or the same keys): only what differs from the defaults,
-    in a fixed order, so that parse_spec(spec_text(s)) == s."""
-    items = []
-    if service.get("image") and service["image"] != service["name"]:
-        items.append(f"image={service['image']}")
+    """The --service value of SERVICE (parse_spec's result, or the same keys): its image always (without image= its
+    name is its image, which surprised a user who never named one), then only what differs from the defaults, in a
+    fixed order, so that parse_spec(spec_text(s)) == s."""
+    items = [f"image={service.get('image') or service['name']}"]
     items += [f"port={port}" for port in service.get("ports", [])]
     ready = service.get("ready")
     if ready not in (None, "") and not (service.get("ports") and ready == service["ports"][0]):
@@ -962,6 +964,22 @@ def reserved_ports(l, a):
     return found
 
 
+def service_record(value, service, found):
+    """The record of the image of SERVICE (parse_spec of the --service VALUE) in FOUND (read_registry), else ValueError
+    naming the service, the image it looked for (without image= its name is its image), how to add that image and
+    which images there are to name instead."""
+    if service["image"] in found:
+        return found[service["image"]]
+    image, name = service["image"], service["name"]
+    given = any(item.partition("=")[0].strip() == "image" for item in value.partition(":")[2].split(",") if item)
+    mine = ", ".join(sorted(found)[:20]) + (", ..." if len(found) > 20 else "") if found else "none yet"
+    lacks = (f"no image {image} of yours" if given else
+             f"no image of yours named {image} (without image= a service's name is its image)")
+    raise ValueError(f"--service {name}: {lacks}; add it with: sandbox-ai images pull REFERENCE --as {image} (or "
+                     f"sandbox-ai images build-image {image} --file Containerfile), or give image=NAME of one of "
+                     f"yours; your images: {mine}; see sandbox-ai images list")
+
+
 def check(a, l=None, found=None):
     """The services of the start A (a.service: the --service values), checked; a.services gets them, each with its
     image's record ("record") and its user. ValueError for whatever the launcher refuses."""
@@ -991,7 +1009,7 @@ def check(a, l=None, found=None):
         service = parse_spec(value)
         if service["name"] in {s["name"] for s in services}:
             raise ValueError(f"--service {service['name']} is given twice")
-        entry = record(service["image"], found)
+        entry = service_record(value, service, found)
         user = service["user"] or entry.get("user")
         if user is None:
             raise ValueError(f"--service {service['name']}: the user its image runs as ({entry.get('config_user')!r}) "
@@ -1089,15 +1107,14 @@ def create_command(a, pod, service, session, l=None, limits=None):
     # The sandbox's own resolver and pinned names: its lookups meet the same DNS (stub, allow-list) as the agent's.
     for name in ("resolv.conf", "hosts"):
         argv += l.mount_option(Path(session) / name, f"/etc/{name}", "ro")
-    uid, _, gid = service["user"].partition(":")  # (numbers: check() made them so)
     for path, kind, volume in data_mounts(a, service):
         if kind == "volume":
             argv += ["--volume", f"{volume}:{path}:rw,nosuid,nodev,U"]
         else:
             # The service's own: the runtime gives a tmpfs the mode of the image's folder but keeps it root's -
-            # redis's /data (755, its user's in the image) was not writable for the service (CI 2026-11-14).
-            argv += ["--tmpfs", f"{path}:rw,noexec,nosuid,nodev,size={service['memory']},uid={int(uid)},"
-                                f"gid={int(gid or uid)}"]
+            # redis's /data (755, its user's in the image) was not writable for the service (CI 2026-11-14). Podman
+            # refuses the kernel's uid=/gid= ("unknown mount option", CI 2026-11-15); U chowns it to --user.
+            argv += ["--tmpfs", f"{path}:rw,noexec,nosuid,nodev,size={service['memory']},U"]
     env = {}
     for item in service.get("env", []):
         if item.get("from_host"):

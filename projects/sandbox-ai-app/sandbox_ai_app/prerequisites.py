@@ -142,30 +142,47 @@ def start_mounts(argv, name):
     return mounts
 
 
-def mcp_add_args(argv, name, folders=()):
+def mcp_add_args(argv, name, folders=(), entry=None, network=False):
     """`sandbox-ai mcp add NAME` for a server the start ARGV uses, with the folders the start gives it (--mcp-mount
     NAME:TARGET=HOST[:MODE]) and FOLDERS (TARGET=HOST, asked for: ask_mcp_folders) as its --mount: a catalog server
     that must have a folder (engram, memory, exiftool) is not added without one, and the start's is the one it
-    asked for."""
+    asked for. ENTRY: the catalog entry a preset names for it (hub:binwalk), added as NAME. NETWORK: with the outside
+    network (--network full), which a server whose entry lists the hosts it needs must be given (ask_mcp_network)."""
     mounts = []
     for value in [*start_mounts(argv, name), *folders]:
         mounts += ["--mount", value]
-    return ("mcp", "add", name, *mounts)
+    return ("mcp", "add", entry or name, *mounts, *(["--network", "full"] if network else []))
 
 
-def required_folders(entries, name):
-    """The folders (targets in the server's container) the catalog entry NAME ("binwalk", "hub:binwalk") requires,
-    from ENTRIES (catalog_entries' [(prefix, entry)], or the entries of `mcp catalog --json`); None when no catalog
-    read has it (nothing known: `mcp add` says what it misses)."""
+def catalog_entry(entries, name):
+    """The catalog entry NAME ("binwalk", "hub:binwalk") of ENTRIES (catalog_entries' [(prefix, entry)], or the
+    entries of `mcp catalog --json`), or None when no catalog read has it."""
     prefix, _, bare = str(name).rpartition(":")
     for item in entries or []:
         found_prefix, entry = item if isinstance(item, tuple) and len(item) == 2 else \
             ((item or {}).get("prefix"), item)
-        if not isinstance(entry, dict) or entry.get("name") != bare or (prefix and found_prefix != prefix):
-            continue
-        return [m["target"] for m in entry.get("mounts", []) if isinstance(m, dict) and m.get("required")
-                and isinstance(m.get("target"), str)]
+        if isinstance(entry, dict) and entry.get("name") == bare and (not prefix or found_prefix == prefix):
+            return entry
     return None
+
+
+def required_folders(entries, name):
+    """The folders (targets in the server's container) the catalog entry NAME ("binwalk", "hub:binwalk") requires,
+    from ENTRIES (catalog_entry); None when no catalog read has it (nothing known: `mcp add` says what it misses)."""
+    entry = catalog_entry(entries, name)
+    if entry is None:
+        return None
+    return [m["target"] for m in entry.get("mounts", []) if isinstance(m, dict) and m.get("required")
+            and isinstance(m.get("target"), str)]
+
+
+def needed_hosts(entries, name):
+    """The hosts ("html.duckduckgo.com:443") the catalog entry NAME needs when it lists them (its network
+    "allowlist", which sandbox-ai cannot limit a server to yet: `mcp add` wants --network full), else []."""
+    entry = catalog_entry(entries, name)
+    if entry is None or entry.get("network") != "allowlist":
+        return []
+    return [str(h) for h in entry.get("hosts") or [] if isinstance(h, str)][:20] or ["?"]
 
 
 def start_workspace(argv):
@@ -235,6 +252,11 @@ class Prerequisites:
         """What the start is about (a board, a project, a host): a continuation made for another is dropped."""
         return self.host()
 
+    def prerequisite_mcp_entries(self):
+        """{server: catalog entry} for the MCP servers the start's preset names by their catalog (hub:binwalk): added
+        from that entry when missing; the rest by their name."""
+        return {}
+
     def check_prerequisites(self, then=None, why="start"):
         """Everything the board needs that its host does not have yet - an identity, an image variant (made, or only
         not built), a VPN profile, an MCP server: a preset's "investigation" identity, "media" variant and Tor profile,
@@ -253,6 +275,8 @@ class Prerequisites:
             applog.log("INFO", "prerequisites", f"{why} on {printable(host)} waits: what it needs is still being "
                        f"prepared for {printable(context)} ({stage}"
                        + (f", for {applog.seconds(time.monotonic() - since)}" if since else "") + ")")
+            if then is not None:  # (a Start pressed while a preset's needs are made: it goes on once they are)
+                self.__dict__.setdefault("preparing_waiters", {})[context] = then
             # What runs now and how far, as information (a Start pressed again is no warning), seen on the Board.
             self.prerequisite_notice(self.still_preparing(), "secondary", status=True, link=True)
             self.preparing_refresh(shown=True)
@@ -314,6 +338,7 @@ class Prerequisites:
                 applog.log("INFO", "prerequisites", f"{why}: the page shows another start now - nothing is made or "
                                                     f"started for {printable(context)}")
                 busy.discard(context)
+                self.drop_waiter(context, why)
                 stages.pop(context, None)
                 return
             if error is not None:
@@ -350,7 +375,11 @@ class Prerequisites:
                            + ("; the start goes on" if then is not None and same() else ""))
                 busy.discard(context)
                 stages.pop(context, None)
+                waiter = self.__dict__.get("preparing_waiters", {}).pop(context, None)
                 go_on()
+                if then is None and waiter is not None and same():  # (a Start pressed while this was read)
+                    applog.log("INFO", "prerequisites", f"{why}: the start that waited for this check goes on")
+                    waiter()
                 return
             applog.log("INFO", "prerequisites", f"{why} on {printable(host)}: missing "
                        f"{needs_text(missing) or 'nothing'}"
@@ -361,6 +390,13 @@ class Prerequisites:
         background(read, owner=self, timeout=180, done=done,
                    what=f"the prerequisites check: whether {host} has {needs_text(needs)}")
         return True
+
+    def drop_waiter(self, context, why):
+        """A Start that waited for the preparation of CONTEXT (check_prerequisites kept it) is not started: nothing
+        was made, or another start is shown - said in the log; the Board's notes say why already."""
+        if self.__dict__.get("preparing_waiters", {}).pop(context, None) is not None:
+            applog.log("INFO", "prerequisites", f"{why}: the start that waited for this preparation is not started "
+                                                "(nothing was made for it)")
 
     def provide(self, missing, unbuilt, host, key, then, why, context=None, agent=None, yes=()):
         """Make what MISSING ({option: [names]}) lacks on HOST: identities at once (empty: no logins, none of yours);
@@ -443,17 +479,21 @@ class Prerequisites:
                     applog.log("INFO", "prerequisites", f"{why}: the page shows another start now - the MCP servers "
                                                         f"{', '.join(servers)} are not added for {printable(context)}")
                     busy.discard(context)
+                    self.drop_waiter(context, why)
                     self.__dict__.setdefault("preparing_stages", {}).pop(context, None)
                     return
                 if error is not None:
                     applog.log("WARN", "board", f"the MCP catalogs could not be read for the folders of "
                                                 f"{', '.join(servers)}: {error}")
                 folders, dropped = self.ask_mcp_folders(host, servers, argv, None if error is not None else entries)
+                networks, declined = self.ask_mcp_network(host, [n for n in servers if n not in dropped],
+                                                          None if error is not None else entries)
+                dropped.update(declined)
                 self.provide_rest(identities, variants, to_build, tor_profiles,
                                   [n for n in servers if n not in dropped], folders,
                                   problems + [(text, [(tr("Add MCP server"), again("--mcp", [name]))])
                                               for name, text in dropped.items()],
-                                  host, key, then, why, context, agent, argv)
+                                  host, key, then, why, context, agent, argv, networks)
             self.__dict__.setdefault("preparing_stages", {})[context] = (
                 time.monotonic(), f"reading the MCP catalogs for the folders of {', '.join(servers)}")
             background(read_catalog, owner=self, timeout=200, done=catalog_read,
@@ -473,7 +513,8 @@ class Prerequisites:
         folders, dropped = {}, {}
         workspace = start_workspace(argv)
         for server in servers:
-            required = required_folders(entries, server) if entries is not None else None
+            entry = self.prerequisite_mcp_entries().get(server) or server
+            required = required_folders(entries, entry) if entries is not None else None
             given = {value.partition("=")[0] for value in start_mounts(argv, server)}
             for target in [t for t in required or [] if t not in given]:
                 title = tr("MCP server {name}", name=printable(server))
@@ -501,10 +542,35 @@ class Prerequisites:
                 applog.log("INFO", "board", f"MCP server {server}: {target} gets the folder {path}")
         return folders, dropped
 
+    def ask_mcp_network(self, host, servers, entries):
+        """({servers added with the outside network}, {server: why it is not added}) for SERVERS whose catalog entry
+        (of ENTRIES, None: not read) lists the hosts it needs: sandbox-ai cannot limit a server to them yet, so
+        `mcp add` refuses it without --network full - asked for each, the hosts named; no: not added, and said."""
+        networks, dropped = set(), {}
+        mapped = self.prerequisite_mcp_entries()
+        for server in servers:
+            hosts = needed_hosts(entries, mapped.get(server) or server) if entries is not None else []
+            if not hosts:
+                continue
+            if confirm(self, tr("MCP server {name}", name=printable(server)), tr(
+                    "The MCP server {name} needs {hosts}. sandbox-ai cannot limit a server to these hosts yet: it is "
+                    "added with the outside network (--network full), or not at all. Give it the outside network?",
+                    name=printable(server), hosts=printable(", ".join(hosts))), tr("Give it the network")):
+                networks.add(server)
+                applog.log("INFO", "board", f"MCP server {server}: added with the outside network (it needs "
+                                            f"{', '.join(hosts)})")
+            else:
+                dropped[server] = tr("MCP server {name}: not added - it needs the outside network for {hosts} "
+                                     "(the MCP page adds it with --network full).", name=printable(server),
+                                     hosts=printable(", ".join(hosts)))
+                applog.log("INFO", "board", f"MCP server {server}: not added (the outside network it needs for "
+                                            f"{', '.join(hosts)} was declined)")
+        return networks, dropped
+
     def provide_rest(self, identities, variants, to_build, tor_profiles, servers, folders, problems, host, key, then,
-                     why, context, agent, argv):
+                     why, context, agent, argv, networks=()):
         """provide(), once the MCP servers' folders are known (FOLDERS: {server: [TARGET=HOST]}). PROBLEMS: [(what
-        is not made, [(button, function)])]."""
+        is not made, [(button, function)])]. NETWORKS: the servers added with the outside network (a yes to it)."""
         busy = self.__dict__.setdefault("preparing_contexts", set())
         problems = [p if isinstance(p, tuple) else (p, []) for p in problems]
         stages = self.__dict__.setdefault("preparing_stages", {})
@@ -514,6 +580,7 @@ class Prerequisites:
             if not (identities or variants or to_build or tor_profiles or servers):
                 applog.log("INFO", "prerequisites", f"{why}: not started, nothing can be made for it here")
                 busy.discard(context)
+                self.drop_waiter(context, why)
                 stages.pop(context, None)
                 return
             then = None  # what can be made is made; the start waits for the rest
@@ -530,8 +597,10 @@ class Prerequisites:
         if not steps:  # nothing to make here (each part said above why): no "Preparing: ." whose end never came
             applog.log("INFO", "prerequisites", f"{why}: nothing is made (each part declined or not possible)")
             busy.discard(context)
+            self.drop_waiter(context, why)
             stages.pop(context, None)
             return
+        entries = self.prerequisite_mcp_entries()  # (a preset's hub:binwalk: never `mcp add binwalk`, in two catalogs)
         stages[context] = (time.monotonic(), "making " + ", ".join(steps))
         applog.log("INFO", "prerequisites", f"{why} on {printable(host)}: making " + printable(", ".join(steps)))
         self.prerequisite_notice(tr("Preparing what the start needs: {list}.", list=printable(", ".join(steps))) + " "
@@ -540,7 +609,8 @@ class Prerequisites:
         slow = [("build", name, tr("building the image variant {name}", name=name),
                  ("build", "--variant", self.variant_target(name, agent))) for name in to_build] + \
             [("mcp", name, tr("adding the MCP server {name} (its image is pulled)", name=name),
-              mcp_add_args(argv, name, folders.get(name, ()))) for name in servers]
+              mcp_add_args(argv, name, folders.get(name, ()), entries.get(name), name in networks))
+             for name in servers]
         in_tab = self.prerequisite_terminal() if slow else None
         if in_tab is not None:
             to_build, servers = [], []
@@ -602,7 +672,8 @@ class Prerequisites:
                     preparation.finish(index, status == 0, status)
                 said.append(("vpn", name, status, text))
             for name in servers:
-                said.append(("mcp", name, *step("mcp", name, *mcp_add_args(argv, name, folders.get(name, ())),
+                said.append(("mcp", name, *step("mcp", name, *mcp_add_args(argv, name, folders.get(name, ()),
+                                                                           entries.get(name), name in networks),
                                                 timeout=900)))
             return said
 
@@ -620,7 +691,21 @@ class Prerequisites:
                            f"the start ended with exit status {status}: " + ", ".join(t for _, _, t, _ in slow))
                 text = "" if status == 0 else tr("see the terminal tab Preparing the start (exit status {status})",
                                                  status=status)
-                made(said + [(kind, name, 0 if status == 0 else status, text) for kind, name, _, _ in slow], None)
+                # The tab stops at its first failure: by its status file, a step done is made, one never begun is
+                # said as not tried - not each as failed.
+                preparation.read()
+                items = {(item.kind, item.name): item for item in preparation.items if item.in_tab}
+                stopped = status != 0 and any(item.state == "failed" for item in items.values())
+                results = []
+                for kind, name, _, _ in slow:
+                    item = items.get((kind, name))
+                    if status == 0 or (item is not None and item.state == "done"):
+                        results.append((kind, name, 0, ""))
+                    elif stopped and item is not None and item.state == "waiting":
+                        results.append((kind, name, -1, tr("not tried: an earlier step failed")))
+                    else:
+                        results.append((kind, name, status, text))
+                made(said + results, None)
             stages[context] = (time.monotonic(), "in the terminal tab Preparing the start: "
                                + ", ".join(t for _, _, t, _ in slow))
             applog.log("INFO", "prerequisites", f"{why}: the slow part runs in the terminal tab Preparing the start: "
@@ -631,6 +716,13 @@ class Prerequisites:
 
         def made(said, error):
             busy.discard(context)
+            # A Start pressed meanwhile (check_prerequisites kept it): it goes on with this preparation's end.
+            waiter = self.__dict__.get("preparing_waiters", {}).pop(context, None)
+            nonlocal then
+            if then is None and waiter is not None:
+                then = waiter
+                applog.log("INFO", "prerequisites", f"{why}: a start waits for this preparation: it goes on when "
+                                                    "everything is made, not when something failed")
             self.untrack(preparation, error is None and all(status == 0 for _, _, status, _ in said))
             stages.pop(context, None)
             applog.log("INFO" if error is None and all(s == 0 for _, _, s, _ in said) else "WARNING", "prerequisites",

@@ -1092,7 +1092,7 @@ def ask_server(p, answers, fetch, current=None):
 
 def ask_llm_models(p, endpoint, models=None, current=None, models_of=None):
     """NAME:MODEL[,MODEL...] for --llm: the server lists its models (with its key, from the host) when it answers,
-    else the ones it listed last time are offered; several can be chosen (the first is the agent's; OpenCode
+    else the ones it listed last time are offered; several can be chosen (the first is the agent's; the agent
     offers exactly these), a model name can be typed, and name, size or loaded sorts the list."""
     printable = launcher().printable
     if models is None:

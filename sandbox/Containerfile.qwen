@@ -51,6 +51,11 @@ RUN printf '{"name":"sandbox-ai-qwen","private":true,"dependencies":{"@qwen-code
     && npm cache clean --force \
     && test "$(node -p 'require("/opt/qwen/node_modules/@qwen-code/qwen-code/package.json").version')" = "${QWEN_VERSION}" \
     && ln -s /opt/qwen/node_modules/@qwen-code/qwen-code/cli-entry.js /usr/local/bin/qwen
+# sandbox-ai's telemetry guard (telemetry_guard.py): Qwen Code's entry file (cli-entry.js) imports it first. Whatever
+# starts the agent in the sandbox - the launcher, a shell, another agent - it refuses what would turn its telemetry on
+# and pins the opt-out variables first; the launcher mounts its current copy read-only over this one.
+COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py
+RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install qwen
 # Its system settings are mounted here by the launcher (read-only, sandbox/qwen.py).
 RUN mkdir -p -m 755 /etc/qwen-code && QWEN_HOME=/tmp/qwen-check qwen --version && rm -rf /tmp/qwen-check
 ENV HOME=/root

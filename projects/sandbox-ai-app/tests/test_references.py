@@ -126,7 +126,7 @@ BLOCKING_SAI = {"call", "_call", "answer", "dry_run", "doctor", "mcp_catalog", "
                 "host_trust_defaults", "host_web_users", "host_web_user_remove", "host_web_cert", "host_answer",
                 "host_mcp_detach", "stop_mcp", "stop_run", "secrets_backend", "add_login", "checked",
                 "cut_run", "cut_everywhere", "cut_every_host",  # the kill switch: sandbox-ai net cut, here or over SSH
-                "host_command_options", "require_options", "host_image_variants",
+                "host_command_options", "require_options", "host_image_variants", "host_agent_images",
                 # sandbox-ai's registry of what runs (net.running) asks Podman whether the pod of a run whose launcher
                 # is gone still runs (up to its timeout) and removes the directories of runs that ended; the sessions'
                 # rows ask Podman about stopped ones: so does everything that reads them

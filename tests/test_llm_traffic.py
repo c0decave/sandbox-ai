@@ -215,14 +215,16 @@ def test_the_relay_changes_are_listed_and_the_note_does_not_hide_what_is_new():
     digests = rt.llm_digests(sent, "chat", done["note"])
     assert digests == [rt.llm_digest("")] + [rt.llm_digest(m) for m in original["messages"]]
     assert "[sandbox-ai loop guard]" in sent["messages"][-1]["content"]  # put back after the digests
+    # The block step changes no tool_choice and no tools (a server would render the prompt anew): the note only.
     paused, done = relayed(history(6))
     changes = rt.llm_changes(done.pop("before"), paused, done)
-    assert {"field": "tool_choice", "to": "none", "why": "loop guard"} in changes
+    assert not [c for c in changes if c["field"] in ("tool_choice", "tools")]
+    assert [c for c in changes if c["field"] == "messages" and c["why"] == "loop guard"]
     ollama = {**loop_entry(), "kind": "ollama"}
     document = {**history(6), "tools": [{"type": "function", "function": {"name": "bash"}}]}
-    removed, done = relayed(document, ollama)
-    changes = rt.llm_changes(done.pop("before"), removed, done)
-    assert {"field": "tools", "from": "1 tools", "why": "loop guard", "note": "taken away for this answer"} in changes
+    kept, done = relayed(document, ollama)
+    changes = rt.llm_changes(done.pop("before"), kept, done)
+    assert kept["tools"] and not [c for c in changes if c["field"] in ("tool_choice", "tools")]
     # Nothing changed: no changes; extra_params nested.
     assert rt.llm_changes(rt.llm_snapshot({"a": 1}), {"a": 1}, {"params": {}}) == []
     assert rt.llm_changes(rt.llm_snapshot({"extra_params": {"k": 1}}), {"extra_params": {"k": 2}}, {"boost": ["k"]}) == \

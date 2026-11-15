@@ -316,7 +316,9 @@ def test_the_names_are_the_agents_own():
     """The switches as the sources name them (README, Privacy: telemetry)."""
     assert set(s.TELEMETRY_ENV["claude"]["off"]) - set(s.TELEMETRY_TOOLS) == {
         "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING", "DISABLE_BUG_COMMAND", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
-        "DISABLE_AUTOUPDATER", "CLAUDE_CODE_ENABLE_TELEMETRY"}
+        "DISABLE_AUTOUPDATER", "CLAUDE_CODE_ENABLE_TELEMETRY",
+        # its beta tracing exports to BETA_TRACING_ENDPOINT whatever CLAUDE_CODE_ENABLE_TELEMETRY says (2.1.322)
+        "ENABLE_BETA_TRACING_DETAILED"}
     assert [(t, k) for t, k, _, _ in s.codex_telemetry_keys("strict")] == [
         (None, "check_for_update_on_startup"), ("analytics", "enabled"), ("feedback", "enabled"),
         ("otel", "metrics_exporter"), ("otel", "exporter"), ("otel", "trace_exporter"), ("features", "plugins")]

@@ -118,6 +118,7 @@ class RfbClient(QObject):
         self.image = QImage()
         self.buffer = bytearray()
         self.parser, self.need, self.ready, self.dead = None, 0, False, False
+        self.protocol_error = False  # the last failure was the server's protocol (not its socket: closed, refused)
 
     def open(self, path):
         problem = socket_problem(path)
@@ -125,6 +126,7 @@ class RfbClient(QObject):
             self.fail(tr("The browser's display socket {path} is refused: {why}", path=str(path), why=problem))
             return False
         self.parser, self.buffer, self.ready, self.dead = self.protocol(), bytearray(), False, False
+        self.protocol_error = False
         self.need = next(self.parser)
         applog.log("DEBUG", "browser", f"connecting to the browser's display at {path}")
         self.socket.connectToServer(str(path))
@@ -166,6 +168,7 @@ class RfbClient(QObject):
                 del self.buffer[:self.need]
                 self.need = self.parser.send(chunk)
         except (RfbError, struct.error, StopIteration) as exc:
+            self.protocol_error = True
             self.fail(str(exc) or tr("the server ended the protocol"))
 
     # -- the protocol --
@@ -423,6 +426,7 @@ class BrowserPanel(QWidget):
         self.path, self.control, self.retries, self.title = str(path), control, 0, title
         self.tor = tor  # behind Tor: the browser's kind (chromium, firefox), else None
         self.instance_key, self.name, self.ended_at, self.down = None, "", None, False
+        self.address = None  # a URL to type into its address bar once connected (type_address)
         self.setObjectName("browserPanel")
         self.client = RfbClient(self)
         self.view = VncView(self.client, self)
@@ -453,8 +457,8 @@ class BrowserPanel(QWidget):
         layout.addWidget(self.view, 1)
         self.set_in_window(in_window)
         self.client.connected.connect(self.on_connected)
-        self.client.failed.connect(self.on_failed)
-        self.client.closed.connect(lambda: self.on_failed(tr("The browser's display was closed (the run ended?)")))
+        self.client.failed.connect(self.lost)
+        self.client.closed.connect(lambda: self.lost(tr("The browser's display was closed (the run ended?)")))
         self.client.cut_text.connect(self.on_cut_text)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -510,9 +514,46 @@ class BrowserPanel(QWidget):
             self.view.setFocus()
         if self.share.isChecked():
             self.clipboard_changed()
+        if self.address:
+            self.type_address(self.address)
+
+    def type_address(self, url):
+        """URL into the browser's address bar - Ctrl+L, the URL, Enter (Chromium's and Firefox's) - now, or once
+        connected: an address of the sandbox's loopback from its terminal (a web UI in it), which only this browser
+        reaches."""
+        if not self.client.ready:
+            self.address = str(url)
+            return
+        self.address = None
+        applog.log("INFO", "browser", f"the browser of {self.name or '?'}: an address of the sandbox typed into its "
+                                      "address bar")
+        control, letter = KEYSYMS[Qt.Key.Key_Control], ord("l")
+        for symbol, down in ((control, True), (letter, True), (letter, False), (control, False)):
+            self.client.key(symbol, down)
+        for char in str(url):
+            symbol = ord(char) if ord(char) < 0x100 else 0x01000000 | ord(char)
+            self.client.key(symbol, True)
+            self.client.key(symbol, False)
+        self.client.key(KEYSYMS[Qt.Key.Key_Return], True)
+        self.client.key(KEYSYMS[Qt.Key.Key_Return], False)
 
     def on_failed(self, why):
         self.status.setText(why)
+
+    def lost(self, why):
+        """The connection failed or was closed. While its start runs the display may come back (the browser's
+        container starts it again when its x11vnc or Xvfb ended, on the same socket): connected again by itself,
+        RETRIES times RETRY_MS apart at most; a server that breaks the protocol is not asked again."""
+        if self.down:
+            return
+        if not self.running or self.client.protocol_error or self.retries >= RETRIES:
+            self.on_failed(why)
+            return
+        self.retries += 1
+        applog.log("DEBUG", "browser", f"the browser's display {self.path}: {applog.redact(why)}; connecting again "
+                                       f"(try {self.retries} of {RETRIES})")
+        self.status.setText(tr("{why} - connecting again…", why=why))
+        self.timer.start(RETRY_MS)
 
     def share_toggled(self, on):
         if on:

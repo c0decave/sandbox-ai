@@ -309,7 +309,11 @@ def judge(sums, signature, trust, what):
     if verdict[0] == "good":
         return f"good {verdict[1]}"
     if trust.policy or not trust.allow_unsigned:
-        hint = "" if trust.policy else "; --allow-unsigned installs it anyway (not recommended)"
+        # (--verify asks for a good signature whatever --allow-unsigned says: naming that would send you in a circle)
+        hint = "" if trust.policy else \
+            ("; --verify installs only a bundle a trusted key signed (without --verify a local bundle is installed "
+             "unchecked)") if getattr(trust, "verifying", False) else \
+            "; --allow-unsigned installs it anyway (not recommended)"
         fail(f"{verdict[1]}; nothing installed. Trusted release keys: {trust.describe()}{hint}")
     warn(f"{verdict[1]}.\nInstalling it anyway because of --allow-unsigned: whoever controls the release, the "
          "account or the download could have changed it.")
@@ -521,7 +525,7 @@ def cmd_verify(bundle, given, *trust):
         fail("--verify: no release key is trusted (neither the installed tree nor install.sh lists one)")
     sums = read(sums_path, "rb")
     signature = read(sums_path + ".sig", "rb") if os.path.isfile(sums_path + ".sig") else None
-    trust.allow_unsigned = False
+    trust.allow_unsigned, trust.verifying = False, True
     status = judge(sums, signature, trust, name)
     if checksums(sums.decode(errors="replace")).get(name) != hashlib.sha256(read(bundle, "rb")).hexdigest():
         fail(f"checksum mismatch for {name} (or SHA256SUMS does not list it); nothing installed")

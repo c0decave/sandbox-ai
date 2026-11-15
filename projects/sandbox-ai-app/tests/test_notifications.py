@@ -68,14 +68,20 @@ def test_a_toast_is_painted_in_the_theme(qapp, notifier, name):
     assert f"border: 1px solid {s['bad']}" in error.styleSheet() and error.text.isHidden(), "no empty text line"
 
 
-def test_title_and_text_are_plain_text_escaped_and_shortened(qapp, notifier):
-    from PySide6.QtCore import Qt
+def test_title_and_text_are_escaped_and_shortened(qapp, notifier):
+    """The toast is rich text now (rich_notice.py's colours), made from escaped parts only: what came as markup is
+    shown as it is, never read as markup, and no link is opened."""
+    from PySide6.QtGui import QTextDocument
     toast = notifier.show("info", "<b>bold</b>\x1b[31m", "<a href='https://evil.example'>x</a>\x00" + "y" * 900)
-    assert toast.title.textFormat() == Qt.TextFormat.PlainText == toast.text.textFormat()
-    assert toast.title.text() == "<b>bold</b>\\x1b[31m", "control characters shown escaped, markup as it is"
-    assert toast.text.text().startswith("<a href='https://evil.example'>x</a>\\x00")
-    assert len(toast.text.text()) == N.TEXT_LIMIT and toast.text.text().endswith("…")
-    assert not toast.title.openExternalLinks() and not toast.text.openExternalLinks()
+    assert toast.title.plain() == "<b>bold</b>\\x1b[31m", "control characters shown escaped, markup as it is"
+    assert toast.text.plain().startswith("<a href='https://evil.example'>x</a>\\x00")
+    assert len(toast.text.plain()) == N.TEXT_LIMIT and toast.text.plain().endswith("…")
+    for label in (toast.title, toast.text):
+        shown = QTextDocument()
+        shown.setHtml(label.html())
+        assert shown.toPlainText() == label.plain() == label.toPlainText(), "what is seen is the text, not markup"
+        assert "<a " not in label.html() and "<b>" not in label.html()
+        assert label.isReadOnly()
 
 
 def test_toasts_stack_in_the_corner_newest_at_the_bottom(qapp, notifier):
@@ -100,12 +106,16 @@ def test_toasts_stack_in_the_corner_newest_at_the_bottom(qapp, notifier):
     assert notifier.toasts == more and first not in notifier.toasts
 
 
-def test_toast_windows_take_no_focus(qapp, notifier):
+def test_toast_windows_take_no_focus_until_clicked(qapp, notifier):
+    """A toast never takes the keyboard when it appears; it bypasses the window manager (no task bar entry, no
+    tiling), and a click into it gives it the keyboard (Ctrl+C, Tab, Esc)."""
     from PySide6.QtCore import Qt
     toast = notifier.show("info", "t", "x", seconds=60)
     flags = toast.windowFlags()
     assert flags & Qt.WindowType.ToolTip == Qt.WindowType.ToolTip
     assert flags & Qt.WindowType.FramelessWindowHint and flags & Qt.WindowType.WindowStaysOnTopHint
+    assert flags & Qt.WindowType.X11BypassWindowManagerHint
+    assert not flags & Qt.WindowType.WindowDoesNotAcceptFocus, "a click may give it the keyboard"
     assert toast.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
 

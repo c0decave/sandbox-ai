@@ -35,6 +35,7 @@ import base64
 import concurrent.futures
 import contextlib
 import errno
+import functools
 import fcntl
 import getpass
 import hashlib
@@ -90,10 +91,10 @@ NEW_START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # a name given 
 MCP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 APPROVAL_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")  # never a leading "-": read as an option there
 AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
-# The agents of the commands that take fewer: sandbox-ai login (login.AGENTS), plugins (plugins.py) and team
-# (team.AGENTS); a terminal for another one is refused here, not opened to fail there.
+# The agents of the commands that take fewer: sandbox-ai login (login.AGENTS) and plugins (plugins.py); a terminal
+# for another one is refused here, not opened to fail there. A team's members are team.AGENTS (team_agents()).
 LOGIN_AGENTS = ("claude", "codex", "opencode", "hermes", "qwen")
-PLUGIN_AGENTS = TEAM_AGENTS = ("claude", "codex", "opencode")
+PLUGIN_AGENTS = ("claude", "codex", "opencode")
 
 
 def agent_words(agents=AGENTS):
@@ -162,6 +163,19 @@ def module(name):
 
 def printable(text):
     return module("hosts").printable(text)
+
+
+def team_agents():
+    """The agents a team may have as members: team.py's own list (team.AGENTS), never a copy of it."""
+    return module("team").AGENTS
+
+
+@functools.lru_cache(maxsize=1)
+def team_line():
+    """A line of team list: NAME  MEMBERS  WORKSPACE (the members of team_agents())."""
+    agent = "(?:" + "|".join(map(re.escape, team_agents())) + ")"
+    return re.compile(rf"(?P<name>[a-z0-9][a-z0-9_-]{{0,19}})\s+(?P<members>{agent}(?:, {agent})*)"
+                      r"\s+(?P<workspace>/.*)")
 
 
 def write_private(path, data):
@@ -428,7 +442,17 @@ def asks_allow(args):
                for word, following in zip(words, words[1:] + [""]))
 
 
+def team_start_words(args):
+    """The words of a `team start` ARGS before its "--" (its own options and NAME), else []."""
+    return args[2:args.index("--") if "--" in args else len(args)] if args[:2] == ["team", "start"] else []
+
+
 NEWER = (
+    ((0, 1, 96), "team start --vpn, --member-vpn and --allow-shared-openvpn", lambda a: any(
+        x.startswith(("--vpn=", "--member-vpn=")) or x == "--allow-shared-openvpn" for x in team_start_words(a))),
+    ((0, 1, 96), "team members hermes, dsh, qwen and goose", lambda a: any(
+        x.startswith("--agents=") and set(x[len("--agents="):].split(",")) - {"claude", "codex", "opencode"}
+        for x in team_start_words(a))),
     ((0, 1, 95), "mcp catalog --json", lambda a: a[:2] == ["mcp", "catalog"] and "--json" in a),
     ((0, 1, 95), "mcp add --env NAME=VALUE and NAME@SECRET", lambda a: a[:2] == ["mcp", "add"] and any(
         x.startswith("--env=") and re.search(r"[=@]", x[len("--env="):]) for x in a)),
@@ -758,15 +782,12 @@ TS_HOSTNAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PROVIDER = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 DOCTOR_BACKENDS = ("podman", "bwrap", "both")
 TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # team.TEAM_NAME
-# a line of team list: NAME  MEMBERS  WORKSPACE
-TEAM_LINE = re.compile(r"(?P<name>[a-z0-9][a-z0-9_-]{0,19})\s+"
-                       r"(?P<members>(?:claude|codex|opencode)(?:, (?:claude|codex|opencode))*)\s+(?P<workspace>/.*)")
 # a team whose record is damaged: NAME  (damaged)  remove it with: sandbox-ai team delete NAME --yes
 TEAM_DAMAGED_LINE = re.compile(r"(?P<name>[a-z0-9][a-z0-9_-]{0,19})\s+\(damaged\)(?:\s.*)?")
 IMAGE_KINDS = ("apt", "npm", "pip")  # images extend --add-KIND / --remove-KIND
 IMAGE_PACKAGE = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._+~=<>!*^:\[\],-]{0,200}")  # images.py checks each kind's own
 IMAGE_MODE = re.compile(r"0?[0-7]{3}")
-IMAGE_RECIPES = ("media", "tor")
+IMAGE_RECIPES = ("media",)  # images.RECIPES the web UI offers (the recipe tor is gone: its container carries Tor)
 FRAGMENT_LIMIT = 64 << 10  # images.FRAGMENT_LIMIT
 
 
@@ -1259,6 +1280,7 @@ class Api:
             ("POST", H + r"/demo-device/stop", self.demo_stop, ()),
             # teams of agents (sandbox-ai team; a team starts in a terminal: kind=team-start)
             ("GET", H + r"/teams", self.teams, ()),
+            ("GET", H + r"/team-choices", self.team_choices, ()),
             ("GET", H + r"/teams/(?P<name>[^/]+)", self.team_show, ()),
             ("POST", H + r"/teams/(?P<name>[^/]+)/post", self.team_post, ()),
             ("POST", H + r"/teams/(?P<name>[^/]+)/stop", self.team_stop, ("team-stop",)),
@@ -3205,7 +3227,7 @@ class Api:
             raise self.failed(params["host"], ["team", "list"], status, out, err)
         found = []
         for line in out.splitlines():
-            match = TEAM_LINE.fullmatch(line.rstrip())
+            match = team_line().fullmatch(line.rstrip())
             if match:
                 found.append({"name": match["name"], "members": match["members"].split(", "),
                               "workspace": printable(match["workspace"].strip())[:4096]})
@@ -3215,6 +3237,21 @@ class Api:
                 found.append({"name": match["name"], "members": [], "workspace": "", "damaged": True})
         return found
 
+    def team_choices(self, params, body):
+        """What a new team on that host can have: its members (team.AGENTS) and the host's VPN profiles with their
+        type (`vpn list --json` there, as the app's team dialog lists them). A listing that fails is said ("error");
+        the team can still start without a VPN."""
+        host = host_name(params["host"])
+        try:
+            profiles = list(team_vpn_profiles(host, lambda name, args, timeout=120, input=None:
+                                              self.run(name, args, timeout, input)).values())
+            error = None
+        except Refused as exc:
+            if exc.status != 502:  # no such host, ...: that, not an empty picker
+                raise
+            profiles, error = [], str(exc)
+        return {"agents": list(team_agents()), "profiles": profiles, "error": error}
+
     def team_show(self, params, body):
         """team show NAME --json: its record, each member's state and the board's tasks."""
         return self.json_of(params["host"], ["team", "show", self.team_name(params["name"]), "--json"], 60, ok=(0,))
@@ -3222,8 +3259,8 @@ class Api:
     def team_post(self, params, body):
         """team post NAME AGENT TASK: a task for a member, from you (after "--": a task is never an option)."""
         name, agent, task = self.team_name(params["name"]), body.get("agent"), body.get("task")
-        if agent not in TEAM_AGENTS:
-            raise Refused(400, agent_words(TEAM_AGENTS))
+        if agent not in team_agents():
+            raise Refused(400, agent_words(team_agents()))
         if not (isinstance(task, str) and task.strip() and len(task) <= 8000
                 and all(c in "\n\t" or c.isprintable() for c in task)):
             raise Refused(400, "the task is text of at most 8000 characters (lines and tabs, no other control "
@@ -3331,7 +3368,7 @@ class Api:
                                              *(["--empty"] if flag(body, "empty") else []), "--json"], 60, ok=(0,))
 
     def image_recipe(self, params, body):
-        """images recipe media|tor --from AGENT [--as VARIANT]: a variant with a ready extension."""
+        """images recipe media --from AGENT [--as VARIANT]: a variant with a ready extension."""
         recipe, agent, variant = body.get("recipe"), body.get("from"), body.get("as")
         if recipe not in IMAGE_RECIPES or agent not in AGENTS:
             raise Refused(400, f"recipe is {' or '.join(IMAGE_RECIPES)}, from {', '.join(AGENTS)}")
@@ -3473,6 +3510,71 @@ def terminal_confirmed(query, action, detail):
         raise Refused(400, f"{detail}: {NEEDS_CONFIRM[action]}: confirm=1", confirm=action)
 
 
+def team_vpn_profiles(host, runner=None):
+    """{name: {"profile", "type", "provider", "ephemeral"}} of `vpn list --json` on HOST (RUNNER: Api.runner's
+    form, default hosts.run): what a new team's form offers, and what its --vpn and --member-vpn are checked against.
+    An entry whose name is no profile name (agent_sandbox.VPN_PROFILE_NAME: never a leading "-") is left out.
+    Refused when the listing fails."""
+    runner = runner or (lambda name, args, timeout=120, input=None:
+                        module("hosts").run(name, args, input=input, timeout=timeout))
+    try:
+        status, out, err = runner(host, ["vpn", "list", "--json"], timeout=30)
+    except ValueError as exc:  # hosts.run: no such host, or hosts.json cannot be read
+        raise Refused(400, printable(exc)[:600]) from None
+    try:
+        data = json.loads(out) if status == 0 else None
+    except (ValueError, RecursionError):
+        data = None
+    if not isinstance(data, list):
+        said = printable((err or out or "").strip())[-300:] or f"exit status {status}"
+        raise Refused(502, f"the VPN profiles of {host} could not be listed: {said}")
+    pattern, found = module("agent_sandbox").VPN_PROFILE_NAME, {}
+    for entry in data:
+        if not (isinstance(entry, dict) and isinstance(entry.get("profile"), str)
+                and re.fullmatch(pattern, entry["profile"])):
+            continue
+        word = {key: printable(entry[key])[:32] if isinstance(entry.get(key), str) else "?"
+                for key in ("type", "provider")}
+        found[entry["profile"]] = {"profile": entry["profile"], **word, "ephemeral": entry.get("ephemeral") is True}
+    return found
+
+
+def team_vpn_args(host, agents, query, runner=None):
+    """The VPN options of a team start from QUERY: vpn (the profile in front of every member), member_vpn (a JSON
+    object {agent: profile}: another one for a member of AGENTS) and shared_openvpn (1: one OpenVPN profile in
+    several members, confirmed). Each profile is one of HOST's (team_vpn_profiles, asked only when one is named);
+    whether one may run in several members is team start's to say (vpn.sharing), with its own reason."""
+    def profile_name(value):
+        if not (isinstance(value, str) and re.fullmatch(module("agent_sandbox").VPN_PROFILE_NAME, value)):
+            raise Refused(400, "a VPN profile name is 1-32 letters, digits, '_' or '-', starting with a letter or "
+                               "digit")
+        return value
+
+    vpn = query.get("vpn") or None
+    try:
+        own = json.loads(query.get("member_vpn") or "{}")
+    except (ValueError, RecursionError):
+        own = None
+    if not isinstance(own, dict) or not all(isinstance(value, str) for value in own.values()):
+        raise Refused(400, "member_vpn is a JSON object {agent: profile}")
+    for agent in own:
+        if agent not in agents:
+            raise Refused(400, f"member_vpn: {printable(agent)[:40]} is no member of this team ({', '.join(agents)})")
+    own = {agent: profile_name(profile) for agent, profile in own.items() if profile}
+    shared = {"1": True, "0": False, None: False, "": False}.get(query.get("shared_openvpn"), "bad")
+    if shared == "bad":
+        raise Refused(400, "shared_openvpn is 1 or 0")
+    named = [profile_name(vpn)] if vpn is not None else []
+    named += own.values()
+    if named:
+        known = team_vpn_profiles(host, runner)
+        missing = next((profile for profile in named if profile not in known), None)
+        if missing:
+            raise Refused(400, f"no VPN profile {missing} on {host}; see: sandbox-ai vpn list")
+    return [*([f"--vpn={vpn}"] if vpn else []), *[f"--member-vpn={agent}={profile}" for agent, profile in own.items()],
+            *(["--allow-shared-openvpn"] if shared else [])]
+
+
 def tool_command(kind, query, runner=None):
     """The sandbox-ai arguments of the interactive tools a terminal runs (None: no such kind): an agent's login (or
     its logout, asked first), the plugin store, an image build, a kit's hooks trusted (asked first; the command
@@ -3540,15 +3642,16 @@ def tool_command(kind, query, runner=None):
         return ["kits", "trust-hooks", *[f"--agent={a}" for a in dict.fromkeys(agents)],
                 *(["--revoke"] if revoke else []), "--", kit]
     if kind == "team-start":
-        # sandbox-ai team start NAME --agents A,B[,C] [--workspace DIR] -- OPTIONS: the first agent leads; the
-        # options (as a start's: strings, never a shell line) hold for every member
+        # sandbox-ai team start --agents=A,B[,...] --workspace=DIR [--vpn=PROFILE] [--member-vpn=AGENT=PROFILE]...
+        # [--allow-shared-openvpn] NAME -- OPTIONS: the first agent leads; the options (as a start's: strings, never
+        # a shell line) hold for every member
         name = query.get("team")
         if not (isinstance(name, str) and TEAM_NAME.fullmatch(name)):
             raise Refused(400, "a team's name is 1-20 of a-z, 0-9, '_' and '-', starting with a letter or digit",
                           code="bad-name", params={"what": "team"})
-        agents = (query.get("agents") or "").split(",")
-        if not 2 <= len(agents) <= 3 or len(set(agents)) != len(agents) or not set(agents) <= set(TEAM_AGENTS):
-            raise Refused(400, "agents: two or three of claude, codex and opencode, comma-separated; the first leads")
+        agents, members = (query.get("agents") or "").split(","), team_agents()
+        if len(agents) < 2 or len(set(agents)) != len(agents) or not set(agents) <= set(members):
+            raise Refused(400, f"agents: two or more of {', '.join(members)}, comma-separated; the first leads")
         workspace = query.get("workspace") or ""
         if not workspace.startswith(("/", "~")) or "\0" in workspace:  # never the service's own directory (team's ".")
             raise Refused(400, "the shared workspace is an absolute path (or ~/...)")
@@ -3556,15 +3659,16 @@ def tool_command(kind, query, runner=None):
             options = strings(json.loads(query.get("options") or "[]"), "options")
         except (ValueError, RecursionError):
             raise Refused(400, "options is a JSON list of strings") from None
-        # Every member's /work is the team's workspace (team.py passes --workspaces-as-given itself from 0.1.78 on;
-        # a remote host of that version whose team.py is older gets it here).
         hosts = module("hosts")
         host = host_name(query.get("host") or hosts.LOCAL)
+        vpns = team_vpn_args(host, agents, query, runner)
+        # Every member's /work is the team's workspace (team.py passes --workspaces-as-given itself from 0.1.78 on;
+        # a remote host of that version whose team.py is older gets it here).
         given = ["--workspaces-as-given"] if host != hosts.LOCAL and as_given_on(host, runner) \
             and "--workspaces-as-given" not in options else []
         # NAME after the options: 0.1.76 and 0.1.77 took everything after NAME as NAME's own (their team start
         # refused "--agents" then); this order works on every version, as the app's does.
-        return ["team", "start", f"--agents={','.join(agents)}", f"--workspace={workspace}", name,
+        return ["team", "start", f"--agents={','.join(agents)}", f"--workspace={workspace}", *vpns, name,
                 "--", *given, *options]
     if kind == "demo-device":
         port = query.get("port")

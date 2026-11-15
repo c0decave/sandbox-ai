@@ -6,7 +6,8 @@ that a sandbox turns off, the switches that turn each part on again (--goose-ena
 Goose reads its configuration from the environment first (a variable of the key's name in capitals wins over every
 file), then from /etc/goose/config.yaml (the system's), the files of GOOSE_ADDITIONAL_CONFIG_FILES and last the
 user's ~/.config/goose/config.yaml, each laid over the one before (crates/goose/src/config/base.rs). So everything
-that must hold is a variable of the agent's process (the agent cannot change its own environment), and the system
+that must hold is a variable of the agent's process (the agent cannot change its own environment; a `goose` it
+starts from its shell is sandbox-ai's guard, which sets them again: telemetry_guard.py), and the system
 file, which the launcher writes into the session directory and mounts read-only at /etc/goose, carries the
 sandbox's defaults: approvals, the --mcp servers as extensions. The user's own file stays theirs.
 
@@ -317,6 +318,14 @@ def api_provider(a):
     return found.pop() if len(found) == 1 else None
 
 
+def thinking(a):
+    """--show-thinking of this start: True (on), False (off), None (Goose's own default: hidden). Goose 1.57.0 shows
+    its model's thinking when GOOSE_CLI_SHOW_THINKING is set to any value, else when its configuration says true
+    (crates/goose-cli/src/session/output.rs: thinking_enabled)."""
+    value = getattr(a, "show_thinking", None)
+    return None if value is None or getattr(a, "helper_of", None) else value == "on"
+
+
 def managed_config(a, mcp=None):
     """Goose's /etc/goose/config.yaml for this start: the sandbox's defaults, the provider of the start's --api-key,
     the --mcp servers (MCP: their extensions) and, last, the telemetry pin (the variables pin it as well, and they
@@ -327,6 +336,8 @@ def managed_config(a, mcp=None):
         config["GOOSE_PROVIDER"] = provider
     if mcp:
         config = merge(config, {"extensions": mcp})
+    if thinking(a) is not None:  # --show-thinking: the configuration's boolean (the variable is set only for on)
+        config["GOOSE_CLI_SHOW_THINKING"] = thinking(a)
     return merge(config, TELEMETRY_PINNED)
 
 
@@ -347,6 +358,8 @@ def environment(a):
         env["GOOSE_MODEL"] = a.model
     if getattr(a, "effort", None):
         env["GOOSE_THINKING_EFFORT"] = a.effort
+    if thinking(a):
+        env["GOOSE_CLI_SHOW_THINKING"] = "1"  # (off: never set - any value of it is on)
     return env
 
 

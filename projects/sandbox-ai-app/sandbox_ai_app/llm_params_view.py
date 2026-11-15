@@ -16,8 +16,8 @@ from PySide6.QtWidgets import (
 from .files import printable, printable_text
 from .i18n import tr
 from .llm_params import (
-    EVICT, EVICT_NOTES, LAYER_HELP, MODEL, SCOPE_ALL, check_layer, check_value, layer_text, loop_changes, scope_of,
-    set_argv, value_text,
+    EVICT, EVICT_NOTES, LAYER_HELP, MODEL, SCOPE_ALL, caption as param_caption, check_layer, check_value, layer_text,
+    loop_changes, scope_of, set_argv, value_text,
 )
 from .mcp_fields import mark
 from .widgets import plain_label, safe_tooltip
@@ -60,7 +60,7 @@ class ParamsFields(QWidget):
                 field.textChanged.connect(lambda _text, k=key: self.check(k))
                 field.editingFinished.connect(self.commit)
             field.setAccessibleName(key)
-            caption = QLabel(key)
+            caption = QLabel(param_caption(key))
             caption.setBuddy(field)
             tip = entry["help"] + ("\n" + tr("A ceiling: the agent's own lower value stays.") if entry["ceiling"]
                                    else "") + ("\n" + tr("Never sent: the agents' configuration gets it (the "
@@ -159,6 +159,21 @@ class ParamsFields(QWidget):
             if key in self.forces:
                 self.forces[key].setChecked(False)
         self.committed.emit()
+
+
+def server_only_box(rows):
+    """What only the server's own start decides (llm_params.server_only: [(setting, where)]), as information: a
+    read-only list under the parameters. None without rows."""
+    if not rows:
+        return None
+    box = QWidget()
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(plain_label(tr("Set on the server only (shown, not set by sandbox-ai):"), role="secondary"))
+    for setting, where in rows:
+        layout.addWidget(plain_label(f"• {setting}: {where}", role="secondary", selectable=True))
+    box.setAccessibleName(tr("Set on the server only"))
+    return box
 
 
 class LoopFields(QWidget):
@@ -277,17 +292,20 @@ class ParamsDialog(QDialog):
     its loop guard and whether the server may unload its other models: OK only once every field is valid; ON_SAVE
     (a list of `llm set` argument lists, one per scope changed) does the saving and calls finish() or failed()."""
 
-    def __init__(self, view, catalogue, scope=SCOPE_ALL, models=(), host_label="", spec=None, parent=None):
+    def __init__(self, view, catalogue, scope=SCOPE_ALL, models=(), host_label="", spec=None, server_only=None,
+                 parent=None):
         super().__init__(parent)
         self.view, self.catalogue, self.saved, self.on_save = view, list(catalogue), False, None
         self.spec = spec  # the loop guard's layers (llm_params.loop_spec); None: a sandbox-ai without them
         self.name = str(view.get("name") or "")
-        self.setWindowTitle(tr("Parameters of {name}", name=printable(self.name)))
+        self.setWindowTitle(tr("Advanced settings of {name}", name=printable(self.name)))
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(tr(
-            "Sampling parameters the connection proxy applies to this server's requests only, whatever agent sends "
-            "them: set where the agent's request has none, forced ones in place of the agent's own; max_tokens is a "
-            "ceiling, num_ctx the context window the agents are told."), role="secondary"))
+            "The server's defaults for every start (a board's values win for its start). Sampling parameters the "
+            "connection proxy applies to this server's requests only, whatever agent sends them: set where the "
+            "agent's request has none, forced ones in place of the agent's own; max_tokens is a ceiling, num_ctx "
+            "the context window the agents are told. Only what this kind of server takes is offered: per request, "
+            "at the model's load (LM Studio) or in the agents' configuration."), role="secondary"))
         if host_label:
             layout.addWidget(plain_label(tr("on {host}", host=host_label), role="secondary"))
         form = QFormLayout()
@@ -306,6 +324,9 @@ class ParamsDialog(QDialog):
         layout.addLayout(form)
         self.holder = QVBoxLayout()
         layout.addLayout(self.holder)
+        self.server_only = server_only_box(server_only)
+        if self.server_only is not None:
+            layout.addWidget(self.server_only)
         self.pending = {}  # scope: (texts, forced) edited and not saved yet
         self.fields, self.current = None, None
         other = QFormLayout()

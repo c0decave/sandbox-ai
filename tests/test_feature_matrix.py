@@ -98,10 +98,10 @@ class Matrix:
         return [self.agent, "--backend", self.backend, "--workspace", str(self.work), "--no-tmux", *options,
                 *(["--", *agent_args] if agent_args else [])]
 
-    def plan(self, *options):
-        """The dry-run plan (JSON) of a start with OPTIONS."""
+    def plan(self, *options, agent_args=()):
+        """The dry-run plan (JSON) of a start with OPTIONS (and the agent's AGENT_ARGS)."""
         self.capsys.readouterr()
-        assert s.launch(self.argv(*options, "--dry-run")) == 0
+        assert s.launch(self.argv(*options, "--dry-run", agent_args=agent_args)) == 0
         return json.loads(self.capsys.readouterr().out)
 
     def refused(self, *options, match):
@@ -2002,11 +2002,16 @@ def llm_agent_configuration(m):
     elif m.agent == "codex":
         profile = run.home_text[".codex/sandbox-ai-llm.config.toml"]
         assert 'base_url = "http://10.0.0.5:11434/v1"' in profile and 'model = "qwen3-coder:30b"' in profile
+        # A server of your own: the provider waits an hour for a long prefill (llm.LOCAL_WAIT).
+        assert "\nstream_idle_timeout_ms = 3600000\n" in profile.partition("[model_providers.")[2].partition("\n[")[0]
         assert run.config["command"][1:3] == ["--profile", "sandbox-ai-llm"] and run.env["SANDBOX_AI_LLM_KEY"] == PLACEHOLDER
     else:
         config = json.loads(run.home_text[".config/opencode/sandbox-ai-llm.json"])
         assert run.env["OPENCODE_CONFIG"] == "/root/.config/opencode/sandbox-ai-llm.json"
-        assert config["provider"]["llm-gpu"]["options"] == {"baseURL": "http://10.0.0.5:11434/v1", "apiKey": PLACEHOLDER}
+        # A server of your own: an hour for the response headers and each chunk, no limit for the whole request.
+        assert config["provider"]["llm-gpu"]["options"] == {"baseURL": "http://10.0.0.5:11434/v1", "apiKey": PLACEHOLDER,
+                                                            "timeout": False, "headerTimeout": 3_600_000,
+                                                            "chunkTimeout": 3_600_000}
         assert config["model"] == "llm-gpu/qwen3-coder:30b"
     assert not any(s.AUTH_TARGETS[m.agent] == name for name in run.home_files)  # no cloud login handed over
 
@@ -2713,7 +2718,11 @@ def hermes_starts_with_its_managed_configuration(hm):
     assert run.env["HERMES_HOME"] == "/root/.hermes" and "HERMES_YOLO_MODE" not in run.env
     # Mounted read-only at /etc/hermes, where Hermes reads its managed scope.
     assert ("dst=/etc/hermes,ro" if hm.backend == "podman" else "/hermes /etc/hermes") in run.joined
-    assert run.config["command"][0].endswith("hermes")
+    # First the answer to Hermes' shared-metrics question (hermes.start_command), then Hermes itself.
+    command = run.config["command"]
+    assert command[:2] == ["/bin/sh", "-c"] and command[3].endswith("hermes")
+    assert f"/etc/hermes/{HERMES_MODULE.TELEMETRY_ANSWER}" in command[2] and command[2].endswith('exec "$0" "$@"')
+    assert run.hermes[HERMES_MODULE.TELEMETRY_ANSWER] == HERMES_MODULE.TELEMETRY_ANSWER_SCRIPT
     assert "note: Hermes: not live-tested yet" in run.err
 
 
@@ -2765,7 +2774,14 @@ def hermes_telemetry_is_never_switchable(hm):
     run = hm.run("--hermes-enable", every, "--telemetry", "on")
     assert run.env["TELEGRAM_BOT_TOKEN"] == TOKEN and TOKEN not in json.dumps(run.hermes)
     config = hermes_config(run)
-    assert config["telemetry"] == {"shared_metrics": {"enabled": False, "send": False}}
+    assert config["telemetry"] == {"shared_metrics": {"enabled": False}}  # the answer: in ~/.hermes (TELEMETRY_ANSWER)
+    assert plan["hermes"]["telemetry"]["refused_arguments"] == [
+        "setup telemetry", "config set|unset telemetry", "config set|unset monitoring",
+        "config set|unset computer_use.cua_telemetry"]
+    hm.refused("--", "setup", "telemetry", match="telemetry is always off")
+    hm.refused("--", "config", "set", "telemetry.shared_metrics.send", "true", match="telemetry is always off")
+    # Inside the sandbox too: the guard, read-only in Hermes' site-packages (tests/test_hermes_telemetry_guard.py).
+    assert plan["hermes"]["telemetry"]["guard"] == f"{HERMES_MODULE.SITE_PACKAGES}/{HERMES_MODULE.GUARD_PTH}"
     assert config["monitoring"]["export"]["otlp"]["enabled"] is False and config["computer_use"]["cua_telemetry"] is False
     assert run.env["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "0" and run.env["OTEL_SDK_DISABLED"] == "true"
     refused = [rule for source in run.proxy["rules"] if source["name"] == "telemetry" for rule in source["http"]
@@ -2789,7 +2805,7 @@ def hermes_gets_the_mcp_servers_through_the_bridge(hm):
 @hermes_scenario
 def hermes_model_effort_and_skip_permissions(hm):
     run = hm.run("--model", "anthropic/claude-sonnet-4.5", "--effort", "high", "--dangerously-skip-permissions")
-    assert run.config["command"][1:5] == ["--model", "anthropic/claude-sonnet-4.5", "--reasoning", "high"]
+    assert run.config["command"][4:8] == ["--model", "anthropic/claude-sonnet-4.5", "--reasoning", "high"]
     assert run.env["HERMES_YOLO_MODE"] == "1"
     hm.refused("--effort", "ultra-max", match="--effort for hermes is one of")
 
@@ -2980,7 +2996,14 @@ def qwen_model_effort_and_skip_permissions(qm):
     run = qm.run("--model", "qwen3-coder-plus", "--effort", "high", "--dangerously-skip-permissions")
     command = run.config["command"]
     assert "--yolo" in command and command[command.index("--model") + 1] == "qwen3-coder-plus"
-    assert "--effort" not in command and qwen_settings(run)["model"] == {"reasoningEffort": "high"}
+    assert "--effort" not in command and qwen_settings(run)["model"] == {
+        "reasoningEffort": "high", "maxSessionTurns": QWEN_MODULE.MAX_SESSION_TURNS}
+    # -D: YOLO in the system settings too, folder trust off (Qwen Code turns --yolo alone into default in a folder
+    # it does not trust); without -D neither.
+    assert qwen_settings(run)["tools"] == {"sandbox": False, "approvalMode": "yolo"}
+    assert qwen_settings(run)["security"] == {"folderTrust": {"enabled": False}}
+    plain = qwen_settings(qm.run("--model", "qwen3-coder-plus"))
+    assert plain["tools"] == {"sandbox": False} and "security" not in plain
     qm.refused("--effort", "minimal", match="--effort for qwen is one of")
 
 
@@ -3001,14 +3024,24 @@ def qwen_with_a_local_model(qm):
     assert settings["security"] == {"auth": {"selectedType": "openai"}} and settings["model"]["name"] == "qwen3:8b"
     entry = settings["modelProviders"]["openai"][0]
     assert entry["id"] == "qwen3:8b" and entry["baseUrl"] == url and entry["envKey"] == "OPENAI_API_KEY"
-    assert settings["model"]["skipLoopDetection"] is False and settings["model"]["maxSessionTurns"] > 0
+    assert settings["model"]["skipLoopDetection"] is False
+    assert settings["model"]["maxSessionTurns"] == QWEN_MODULE.MAX_SESSION_TURNS, "the guard's steps only when set"
+    # A slow local model: an hour idle and per request in the entry (it wins over model.generationConfig), the same in
+    # the variables (llm.agent_wait); no memory extraction after every turn.
+    assert {"timeout": 3_600_000, "streamIdleTimeoutMs": 3_600_000, "maxRetries": 2}.items() <= \
+        entry["generationConfig"].items()
+    assert run.env["QWEN_STREAM_MAX_LIFETIME_MS"] == "3600000" and run.env["QWEN_STREAM_IDLE_TIMEOUT_MS"] == "3600000"
+    assert run.env["QWEN_CODE_API_TIMEOUT_MS"] == "3600000"
+    assert settings["memory"] == {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}
     assert run.env["OPENAI_API_KEY"] == PLACEHOLDER and run.env["OPENAI_BASE_URL"] == url
     command = run.config["command"]
     assert command[command.index("--append-system-prompt") + 1] == s.load_llm_module().LOOP_TEXT
     assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
     off = qm.run("--llm", "gpu", "--llm-param", "loop_guard=off")
     assert "--append-system-prompt" not in off.config["command"]
-    assert "maxSessionTurns" not in qwen_settings(off)["model"]
+    assert qwen_settings(off)["model"]["maxSessionTurns"] == QWEN_MODULE.MAX_SESSION_TURNS
+    steps = qm.run("--llm", "gpu", "--llm-param", "loop_guard.steps=200")
+    assert qwen_settings(steps)["model"]["maxSessionTurns"] == 200
 
 
 @qwen_scenario
@@ -3057,16 +3090,35 @@ def dsh_patch(run):
 
 
 @dsh_scenario
-def dsh_starts_its_web_ui_with_the_patch(dm):
-    """A plain start: DeepSeek's API and platform open, the web UI on the sandbox's loopback with sandbox-ai's patch
-    right after the profile, the patch read-only at /etc/dsh with the telemetry rows disabled."""
+def dsh_starts_its_chat_with_the_patch(dm):
+    """A plain start: DeepSeek's API and platform open, sandbox-ai's chat in the terminal (/etc/dsh/chat.py), which
+    runs DSH's headless profile for each message with the chat's patch and sandbox-ai's own last, both read-only at
+    /etc/dsh with the telemetry rows disabled; the start says what the chat is. -- web: the web UI on the sandbox's
+    loopback through its window's script (/etc/dsh/web.py), which says how to reach it (--browser)."""
     plan = dm.plan()
     assert plan["https_hosts"] == s.PROVIDERS["dsh"] and plan["image"] == "localhost/dsh-sandbox:latest"
-    assert plan["dsh"]["experimental"] and plan["dsh"]["profile"] == "web" and plan["dsh"]["web_ui"] == DSH_MODULE.WEB_URL
+    assert plan["dsh"]["experimental"] and plan["dsh"]["profile"] == "chat" and plan["dsh"]["web_ui"] is None
+    assert plan["dsh"]["terminal_ui"] is True and plan["dsh"]["note"] == DSH_MODULE.CHAT_NOTE
     run = dm.run()
     command = run.config["command"]
-    assert command[0].endswith("dsh") and command[1:] == ["web", "--patch", DSH_MODULE.PATCH, "--no-open", "--host",
+    assert command[:6] == ["python3", "-I", DSH_MODULE.CHAT_SCRIPT, "--notice", DSH_MODULE.CHAT_NOTE, "--"]
+    assert command[6].endswith("dsh") and command[7:] == ["headless", "--patch", DSH_MODULE.CHAT_PATCH, "--patch",
+                                                         DSH_MODULE.PATCH]
+    assert run.managed["dsh"]["chat.py"] == (Path(s.__file__).parent / "dsh_chat.py").read_text()
+    assert json.loads(run.managed["dsh"]["sandbox-ai-chat.patch.yml"]) == DSH_MODULE.CHAT_ROWS
+    assert f"note: {DSH_MODULE.CHAT_NOTE}" in run.err
+    web = dm.run(agent_args=["web"])
+    command = web.config["command"]
+    assert command[:6] == ["python3", "-I", DSH_MODULE.WEB_SCRIPT, "--notice", DSH_MODULE.WEB_ONLY, "--"]
+    assert command[6].endswith("dsh") and command[7:] == ["web", "--patch", DSH_MODULE.PATCH, "--no-open", "--host",
                                                          "127.0.0.1", "--port", "3080"]
+    assert web.managed["dsh"]["web.py"] == (Path(s.__file__).parent / "dsh_web.py").read_text()
+    assert f"note: {DSH_MODULE.WEB_ONLY}" in web.err
+    assert dm.plan(agent_args=["web"])["dsh"]["web_ui"] == DSH_MODULE.WEB_URL
+    if dm.backend == "podman":  # the host's port 3080 relayed into the sandbox: the web UI moves aside
+        moved = dm.run("--allow-host-port", "3080", agent_args=["web"])
+        assert moved.config["command"][-2:] == ["--port", "3081"] and "3080" in moved.firewall
+        assert dm.plan("--allow-host-port", "3080", agent_args=["web"])["dsh"]["web_ui"] == "http://127.0.0.1:3081/"
     assert dsh_patch(run) == DSH_MODULE.TELEMETRY_PINNED
     assert run.env["DSH_TELEMETRY_DISABLED"] == "1" and run.env["DSH_HOME"] == "/root/.dsh"
     assert "DSH_PERMISSION_MODE" not in run.env

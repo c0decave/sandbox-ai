@@ -233,10 +233,10 @@ def test_a_sessions_terminal_is_noticed_soon_after_it_is_up(tmp_path, monkeypatc
         pauses.append(seconds)
         if len(pauses) == 3:
             (directory / "tmux" / "attach.sock").touch()  # the relay is up during the third pause
-    monkeypatch.setattr(sessions.time, "sleep", sleep)
-    sessions.wait_ready(directory, Mock(poll=Mock(return_value=None)))
+    # wait_ready's own SLEEP: time.sleep patched for the whole process also counted other threads' pauses (CI: 0.25)
+    sessions.wait_ready(directory, Mock(poll=Mock(return_value=None)), sleep=sleep)
     assert pauses == [0.05] * 3  # noticed at most 0.05 s after it was there
     pauses.clear()
     looks = iter([False, False, True])
-    sessions.wait_ready(directory, Mock(poll=Mock(return_value=None)), ready=lambda: next(looks))
+    sessions.wait_ready(directory, Mock(poll=Mock(return_value=None)), ready=lambda: next(looks), sleep=sleep)
     assert pauses == [0.2, 0.2]

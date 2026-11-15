@@ -42,6 +42,12 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 RUN python3 -m pip --version && uv --version
 RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
     && npm cache clean --force
+# sandbox-ai's telemetry guard (telemetry_guard.py): `claude` is a shim that checks, then becomes Claude Code (its
+# program stays where npm put it, linked from /usr/local/lib/sandbox-ai/real). Whatever starts the agent in the
+# sandbox - the launcher, a shell, another agent - it refuses what would turn its telemetry on and pins the opt-out
+# variables first; the launcher mounts its current copy read-only over this one.
+COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py
+RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install claude
 RUN claude --version
 ENV HOME=/root
 WORKDIR /work

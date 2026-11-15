@@ -102,6 +102,8 @@ class World:
         self.vpn.check_vpn_container = lambda podman, ref, name=None, run=None: \
             self.proven.append(("container", ref, name)) or {"id": VPN_ID, "started": "t"}
         self.vpn.check_pod_vpn = lambda podman, pod, name=None, run=None: self.proven.append(("pod", pod, name)) or {}
+        # (the start's lender runs)
+        self.vpn.lent_tunnel_problem = lambda run, machine=False: None if run == RUN else "it has ended"
         monkeypatch.setattr(l, "load_vpn_module", lambda: self.vpn)
         monkeypatch.setattr(m, "definitions", lambda project=None: servers)
         monkeypatch.setattr(l, "mcp_gateway", lambda a, name, directory: None)
@@ -153,13 +155,23 @@ SOURCES = {
 PATHS = ("start", "helper", "attach", "attach-live", "mcp-start", "restart", "limits")
 
 
+RUN = "codex-0123abcd"  # the start's run: it lends its tunnel of a profile that runs once at a time
+ONCE = {"wg", "wg2", "tsx", "tsx2"}  # WireGuard and a persistent Tailscale node with an exit node (vpn.lends)
+
+
 def oracle(kind, own, start, explicit):
     """What must happen, written from the promise, not from the code: ("refused", pattern) or
-    {"vpn": the profile its packets leave through or None, "form": "podman" | "bwrap" | "launcher"}."""
+    {"vpn": the profile its packets leave through or None, "form": "podman" | "bwrap" | "launcher", "lent": whether
+    it borrows the start's tunnel instead of bringing up one of its own}. One key, one tunnel: a server that reaches
+    the network behind the start's profile that runs once at a time (WireGuard, a persistent Tailscale node) - the
+    start's VPN in front of it, its own definition naming that same profile, or mcp start --for START --vpn naming
+    it - borrows the start's tunnel."""
     reaches = kind in REACHES
     type_of = lambda name: profile(name)["type"] if name else None  # noqa: E731
     # The start's VPN goes in front of a server that reaches the network and has none of its own.
     behind = start if start and reaches and not own else None
+    lent = bool(start in ONCE and reaches and (behind or own == start or explicit == start) and
+                (explicit is None or explicit == start))
     if start and own and reaches and type_of(start) == "tor" and type_of(own) != "tor":
         return ("refused", "not through Tor")
     if kind == "rootfs-only" and behind:
@@ -176,8 +188,8 @@ def oracle(kind, own, start, explicit):
         return ("refused", "carries only the tailnet")
     if kind in ("image-full", "image-none", "image-and-rootfs", "rootfs-only"):
         return {"vpn": chosen, "form": "podman" if chosen or kind not in ("image-and-rootfs", "rootfs-only")
-                else "bwrap"}
-    return {"vpn": chosen, "form": "launcher"}
+                else "bwrap", "lent": lent}
+    return {"vpn": chosen, "form": "launcher", "lent": lent}
 
 
 def cases():
@@ -198,6 +210,7 @@ def cases():
 def start_args(backend, start):
     a = l.parse_args(["codex", "--backend", backend])
     a.vpn, a.vpn_profile, a.project_document = start, (profile(start) if start else None), None
+    a.run_id = RUN if start else None
     return a
 
 
@@ -216,9 +229,10 @@ def bring_up(path, name, a, explicit):
         return m.ensure_running(name, a, explicit)  # mcp.cli: mcp start NAME --vpn PROFILE
     if path == "restart":
         m.ensure_running(name, a, vpn=m.vpn_for_servers(a, [name]).get(name))
-        state = m.load_state(name)
+        instance = m.instance_of(a, name)  # (the one it started: NAME, or the start's own - borrowed, limits)
+        state = m.load_state(instance)
         # Its supervisor ended (the start was restarted): the server comes up again as the start brings it up.
-        m.save_state(name, {**state, "pid": 999999})
+        m.save_state(instance, {**state, "pid": 999999})
         return m.ensure_running(name, a, vpn=m.vpn_for_servers(a, [name]).get(name))
     raise AssertionError(path)
 
@@ -259,6 +273,10 @@ def test_every_way_up_every_server_every_vpn(kind, source, vpn_kind, path, monke
     instance = m.instance_of(a, "srv")
     assert (instance != "srv") == (path == "limits")
     want = oracle(kind, own, start, explicit)
+    if isinstance(want, dict) and want["lent"] and kind != "helper":
+        # Borrowed: an instance of the start's run alone (NAME.HASH of it), never one another start reaches.
+        instance = m.start_instance("srv", a, lent_by=RUN)[0]
+        assert instance not in ("srv", m.instance_of(a, "srv")) and m.server_of(instance) == "srv"
     if isinstance(want, tuple):
         with pytest.raises(ValueError, match=want[1]):
             bring_up(path, "srv", a, explicit)
@@ -271,9 +289,13 @@ def test_every_way_up_every_server_every_vpn(kind, source, vpn_kind, path, monke
             vpn, check, vpns = launcher_vpn(cmd)
             assert vpn == want["vpn"], cmd
             assert "--network" not in network_options(cmd[:cmd.index("--")]), "a launcher-run server gets no network"
-            if want["vpn"] and want["vpn"] != own:
+            if want["vpn"] and (want["vpn"] != own or want["lent"]):
                 assert check == "stop" and vpns[-1] == want["vpn"], "behind a VPN put in front: a failed check stops it"
             options = cmd[:cmd.index("--")]
+            # Borrowed: the start's run lends its tunnel, and this sandbox brings up none of its own (no second
+            # tunnel of the key); a tunnel of its own otherwise - never borrowed.
+            lent = [options[i + 1] for i, token in enumerate(options) if token == "--vpn-lent-by"]
+            assert lent == ([RUN] if want["lent"] else []), options
             assert options[options.index("--pod-name") + 1] == m.pod_name(instance), "the instance's own pod"
             if path == "limits":
                 assert options[len(options) - 1 - options[::-1].index("--memory") + 1] == "2g", "its limits"
@@ -297,9 +319,14 @@ def test_every_way_up_every_server_every_vpn(kind, source, vpn_kind, path, monke
         if path == "limits":
             assert "--memory=2g" in connection and "--pids-limit=256" in connection, "its limits, in the plan's line"
         container = f"sandbox-ai-vpn-mcp-{instance}"
-        # The supervisor is the VPN wrapper of that profile; each connection goes through the guard, whose run
-        # line names exactly the VPN container's namespace and nothing else.
-        assert cmd[2:6] == [str(SANDBOX / "vpn.py"), "--internal-mcp-vpn", want["vpn"], container], cmd
+        # The supervisor is the VPN wrapper of that profile (borrowed: the wrapper of a VPN container that borrows
+        # the start's tunnel, from its run); each connection goes through the guard, whose run line names exactly
+        # the VPN container's namespace and nothing else.
+        if want["lent"]:
+            assert cmd[2:6] == [str(SANDBOX / "vpn.py"), "--internal-mcp-borrow", want["vpn"], container], cmd
+            assert cmd[7:9] == [RUN, "--"], cmd
+        else:
+            assert cmd[2:6] == [str(SANDBOX / "vpn.py"), "--internal-mcp-vpn", want["vpn"], container], cmd
         assert connection[2:6] == [str(SANDBOX / "vpn.py"), "--internal-mcp-guard", container, "--"], connection
         run_line = connection[6:]
         assert run_line[:2] == ["podman", "run"] and network_options(run_line) == {"--network": [f"container:{container}"]}
@@ -310,6 +337,7 @@ def test_every_way_up_every_server_every_vpn(kind, source, vpn_kind, path, monke
         assert v.guarded_options(watched, container)[1][0] == "--cidfile=/state/watch/1.cid"
     state = m.load_state(instance)
     assert state["vpn"] == want["vpn"], "the server's state names the VPN it leaves through"
+    assert state.get("lent_by") == (RUN if want["lent"] else None), "a borrowed tunnel names the run that lends it"
     # After the start the VPN is proven, not assumed (a server without network has nothing to prove).
     if want["vpn"] and kind in REACHES:
         expected = ("container", f"sandbox-ai-vpn-mcp-{instance}", want["vpn"]) if want["form"] == "podman" else \
@@ -327,6 +355,17 @@ def test_the_matrix_covers_every_server_kind_and_vpn_kind():
     assert {source for _, source, _ in seen} == set(SOURCES)
     assert {c.values[3] for c in cases()} == set(PATHS)
     assert len(list(cases())) > 300
+    # The start's tunnel, borrowed (one key, one tunnel), on every way up and for every kind of server that reaches
+    # the network and can have a VPN; never for Tor, OpenVPN, a tailnet-only profile or without a start.
+    lent = set()
+    for kind, source, vpn_kind, path in (c.values for c in cases()):
+        want = oracle(kind, *SOURCES[source](KINDS[vpn_kind]))
+        if isinstance(want, dict) and want["lent"]:
+            lent.add((kind, source, vpn_kind, path))
+    assert {kind for kind, *_ in lent} == {"image-full", "image-and-rootfs", "command", "helper"}
+    assert {vpn_kind for _, _, vpn_kind, _ in lent} == {"wireguard", "tailscale-exit"}
+    assert {source for _, source, _, _ in lent} == {"start", "both"}
+    assert {path for *_, path in lent} == set(PATHS) - {"mcp-start"}
 
 
 # --- the structure: one place names a server's network ---------------------------------------------------------
@@ -603,6 +642,22 @@ def test_the_guard_creates_the_server_in_the_checked_vpn_containers_namespace_by
     assert order[-1] == "rm" and said == []
 
 
+def test_a_vpn_container_that_ends_once_the_server_runs_stops_it_and_says_so():
+    """The VPN container killed right after the server's start (CI's Tor live test): the server is stopped, and the
+    guard says it as the wrapper does ("...: MCP server stopped"), not "refused" - it had run."""
+    world = {}
+
+    def end_the_vpn():
+        world["podman"].containers[VPN_ID].update(running=False)
+    podman, processes, popen = guard_world(on_start=end_the_vpn)
+    world["podman"] = podman
+    said = []
+    with pytest.raises(ValueError, match="does not run"):
+        v.mcp_guard("sandbox-ai-vpn-mcp-srv", run_line(), {v.MCP_VPN_ID: VPN_ID}, podman, popen, said.append)
+    assert processes[0].killed and len(said) == 1
+    assert said[0].endswith(": MCP server stopped") and "refused" not in said[0], said
+
+
 @pytest.mark.parametrize("network", ["pasta", f"container:{OTHER_ID}", "host", "", "slirp4netns", "none",
                                      f"container:{VPN_ID[:12]}", f"container:{VPN_ID}0", f"container:{INFRA_ID}"])
 def test_a_server_container_in_another_network_is_removed_unstarted(network):
@@ -807,6 +862,47 @@ def test_the_wrapper_stops_the_server_when_the_vpn_container_ends_or_its_tunnel_
         assert any("MCP server stopped" in line for line in said), said
 
 
+def test_the_borrowing_wrapper_takes_no_lock_brings_up_no_tunnel_and_ends_with_its_lender(monkeypatch, tmp_path):
+    """--internal-mcp-borrow: an image server behind its start's tunnel, lent. Its VPN container borrows (no tun
+    device, the lent folder read-only, the borrow payload), the profile's lock is the start's (not taken here: it
+    would be refused), and when the start's tunnel goes ("down": its lender is gone) the server is stopped."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    vpn = LOAD_VPN()
+    vpn.load_profile = lambda name: {**profile("wg"), "name": name, "wireguard": {}}
+    podman = Podman()
+    monkeypatch.setattr(vpn, "podman_run", lambda command, **kwargs: podman(command, **kwargs)
+                        if command[1:3] != ["container", "inspect"] or "{{json .Config.Labels}}" not in command
+                        else types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+    monkeypatch.setattr(vpn, "profile_lock", lambda *args, **kwargs: pytest.fail("a borrower takes no lock"))
+    podman.add(VPN_ID, "sandbox-ai-vpn-mcp-srv.0123abcd")
+    brought = []
+
+    class Tunnel:
+        def close(self):
+            pass
+
+        def follow(self, on_event, on_end=None):
+            on_event({"event": "down", "message": "the start that lent its tunnel is gone"})
+
+    def bring_up(profile, command, names, say, **kwargs):
+        brought.append((command, kwargs))
+        return Tunnel(), {"tunnel": {}}, {}
+    monkeypatch.setattr(vpn, "bring_up", bring_up)
+    said = []
+    monkeypatch.setattr(sys, "stderr", types.SimpleNamespace(write=said.append, flush=lambda: None))
+    code = vpn.mcp_wrapper("wg", "sandbox-ai-vpn-mcp-srv.0123abcd", "/owner",
+                           [sys.executable, "-c", "import time; time.sleep(60)"], lent_by=RUN)
+    assert code != 0 and any("MCP server stopped" in line for line in said), said
+    (command, kwargs), = brought
+    assert kwargs["borrow"] == RUN and kwargs["mcp"] is True
+    assert "--device=/dev/net/tun" not in command and "--cap-add=NET_BIND_SERVICE" in command
+    assert f"type=bind,src={vpn.lend_socket_dir(RUN)},dst=/run/sandbox-ai-lend,ro" in command
+    with pytest.raises(ValueError, match="is not lent"):  # (Tor: each sandbox its own)
+        vpn.load_profile = lambda name: {**profile("tor"), "name": name, "tor": {}}
+        vpn.mcp_wrapper("tor", "sandbox-ai-vpn-mcp-srv.0123abcd", "/owner", ["true"], lent_by=RUN)
+
+
 # --- the VPN container's side: the kill switch's check, the lookups of an MCP server ---------------------------
 
 LISTING = """table inet sandbox_ai_vpn {
@@ -894,6 +990,46 @@ def test_a_redirected_lookup_passes_the_kill_switch_only_through_the_tunnel():
     assert rt.killswitch_problem(rt.killswitch_rules("wg0") + rules) is None
 
 
+def test_a_redirected_lookup_leaves_with_the_tunnels_own_address():
+    """CI's killswitch job (0.1.96, the redirected lookup past the kill switch for the first time): an MCP server's
+    lookup at the resolver on the uplink's own network (pasta's, the host's: 192.168.50.1) got "no answer". The
+    kernel chose the lookup's source address with its first route - the uplink's own, to a resolver on the uplink's
+    network - and the redirect changes the destination only: the lookup went into the tunnel with the uplink's
+    address, which the VPN's server drops (WireGuard: not one of the peer's allowed addresses; any provider: not the
+    address it gave). A postrouting NAT chain gives a redirected lookup that leaves by the tunnel the tunnel's own
+    address; the answer comes back through the same connection."""
+    rules = rt.mcp_dns_rules("10.66.0.1", "wg0", source="10.66.0.2")
+    table = rules[:rules.index(f"add chain inet {rt.TABLE}")].splitlines()
+    assert " chain dns_source { type nat hook postrouting priority 100; policy accept;" in table
+    for proto in ("udp", "tcp"):
+        assert f'  ct status dnat ip daddr 10.66.0.1 {proto} dport 53 oifname "wg0" snat ip to 10.66.0.2' in table
+    # Only what was redirected, and only into the tunnel: nothing else gets another address.
+    assert [line.split(" snat ")[0].strip() for line in rules.splitlines() if " snat " in line] == [
+        f'ct status dnat ip daddr 10.66.0.1 {proto} dport 53 oifname "wg0"' for proto in ("udp", "tcp")]
+    assert "masquerade" not in rules  # (snat is of the redirect's own kernel module: nothing new to load)
+    # Without an IPv4 address of the tunnel there is nothing to give: the rules are as before.
+    plain = rt.mcp_dns_rules("10.66.0.1", "wg0")
+    assert "dns_source" not in plain and " snat " not in plain
+    assert rt.mcp_dns_rules("10.66.0.1", "wg0", source=None) == plain
+    # The kill switch's own part is the same with it, and stays a kill switch.
+    assert [line for line in rules.splitlines() if f"inet {rt.TABLE} " in line] == \
+        [line for line in plain.splitlines() if f"inet {rt.TABLE} " in line]
+    assert rt.killswitch_problem(rt.killswitch_rules("wg0") + rules) is None
+    for wrong in ("fd00::2", "10.66.0.2/32", "10.66.0.2 accept", ""):
+        with pytest.raises(ValueError):
+            rt.mcp_dns_rules("10.66.0.1", "wg0", source=wrong)
+
+
+@pytest.mark.parametrize("addresses, expected", [
+    (["10.66.0.2/32"], "10.66.0.2"),                                # WireGuard: as the profile writes it
+    (["fd00::2/128", "10.64.0.9/32"], "10.64.0.9"),                 # the first IPv4 one
+    (["100.101.102.103", "fd7a:115c:a1e0::1"], "100.101.102.103"),  # Tailscale, OpenVPN: bare addresses
+    (["fd00::2/128"], None), ([], None), (None, None), (["not an address", 7], None)])
+def test_the_tunnels_own_ipv4_address(addresses, expected):
+    assert rt.mcp_dns_source({"addresses": addresses}) == expected
+    assert rt.mcp_dns_source({}) is None
+
+
 class Recorder:
     def __init__(self):
         self.commands, self.children = [], []
@@ -922,6 +1058,25 @@ def test_the_runtime_loads_the_redirect_only_for_an_mcp_servers_container(monkey
         assert loaded == [rt.mcp_dns_rules("10.66.0.1", "wg0")] and ready["tunnel"]["mcp_dns"] == "10.66.0.1"
     else:
         assert loaded == [] and "mcp_dns" not in ready["tunnel"]
+
+
+def test_the_runtime_gives_the_redirect_the_tunnels_address(monkeypatch):
+    """(the tunnel as up_wireguard returns it: its addresses as the profile has them)"""
+    runner = Recorder()
+    tunnel = {"interface": "wg0", "dns": ["10.66.0.1"], "addresses": ["fd00:66::2/128", "10.66.0.2/32"],
+              "ipv4": True, "ipv6": True}
+    monkeypatch.setattr(rt, "up_wireguard", lambda payload, runner: dict(tunnel))
+    monkeypatch.setattr(rt, "gather_checks", lambda payload, tunnel, runner: {})
+    monkeypatch.setattr(rt, "resolve_hosts", lambda names, tunnel, tailnet=False: {})
+    payload = {"profile": {"type": "wireguard"}, "secrets": {}, "mcp": True}
+    out = []
+    stdin = types.SimpleNamespace(readline=lambda: json.dumps(payload))
+    assert rt.main(["check"], stdin=stdin, out=types.SimpleNamespace(write=out.append, flush=lambda: None),
+                   runner=runner) == 0
+    loaded = [data for command, data in runner.commands if command == ["nft", "-f", "-"]]
+    assert loaded == [rt.mcp_dns_rules("10.66.0.1", "wg0", source="10.66.0.2")]
+    assert 'oifname "wg0" snat ip to 10.66.0.2' in loaded[0]
+    assert json.loads(out[-1])["tunnel"]["mcp_dns_source"] == "10.66.0.2"
 
 
 def test_the_runtime_refuses_a_tailnet_only_profile_for_an_mcp_server(monkeypatch):
@@ -963,6 +1118,9 @@ def test_the_mcp_wrapper_and_the_guard_are_entry_points_of_vpn_py():
     source = (SANDBOX / "vpn.py").read_text()
     assert 'sys.argv[1] == "--internal-mcp-guard" and sys.argv[3] == "--"' in source
     assert re.search(r"mcp_guard\(sys\.argv\[2\], sys\.argv\[4:\]\)", source)
+    # The borrowing wrapper: PROFILE CONTAINER OWNER RUN -- BRIDGE (mcp.ensure_running_locked builds it).
+    assert 'sys.argv[1] == "--internal-mcp-borrow" and sys.argv[6] == "--"' in source
+    assert "mcp_wrapper(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[7:], lent_by=sys.argv[5])" in source
 
 
 def test_a_service_container_beside_the_agent_is_proven_the_same_way():
@@ -1000,11 +1158,18 @@ def test_on_macos_a_server_behind_the_starts_vpn_runs_in_its_pod_and_is_proven_t
     assert bring_up("start", "srv", a, None) == "started"
     vpn, check, _ = launcher_vpn(world.started[-1])
     assert (vpn, check) == (start, "stop")
-    assert seen == [(["podman"], "agent-mcp-srv", start)]
+    # WireGuard and a persistent Tailscale node: the start's tunnel, borrowed in the VM too (its lent tunnel's socket
+    # in a Podman volume there: vpn.lend_mount), in the pod of the run's own instance.
+    lent = start in ONCE
+    options = world.started[-1][:world.started[-1].index("--")]
+    assert ("--vpn-lent-by" in options) == lent and (not lent or options[options.index("--vpn-lent-by") + 1] == RUN)
+    instance = m.instance_of(a, "srv")
+    assert (instance != "srv") == (lent and kind != "helper")
+    assert seen == [(["podman"], m.pod_name(instance), start)]
     a.podman_url = "ssh://core@machine/run/podman.sock"
-    m.save_state("srv", {"pid": 999999})
+    m.save_state(instance, {**m.load_state(instance), "pid": 999999})
     seen.clear()
-    m.ensure_running("srv", a, vpn=start)
+    m.ensure_running("srv", a, vpn=m.vpn_for_servers(a, ["srv"])["srv"])
     assert seen[0][0] == ["podman", "--remote", "--url", a.podman_url]
     before = len(world.started)
     with pytest.raises(ValueError, match="on macOS such servers are not supported yet"):
@@ -1155,6 +1320,7 @@ def test_the_rules_an_mcp_vpn_container_loads_parse():
     job). Each rule set the VPN container loads goes through nft's own parser here."""
     killswitch = rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)])
     for rules in (killswitch + rt.mcp_dns_rules("10.66.0.1", "wg0"),  # (it adds to the kill switch's table)
+                  killswitch + rt.mcp_dns_rules("10.66.0.1", "wg0", source="10.66.0.2"),
                   killswitch,
                   rt.killswitch_rules("wg0", [("203.0.113.10", "udp", 51820)], mask=0xff00, any_marked=True,
                                       tunnel_ipv6=False)):
