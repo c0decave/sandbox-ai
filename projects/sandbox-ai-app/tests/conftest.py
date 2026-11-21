@@ -233,7 +233,9 @@ def the_theme_it_found():
     never here - an order of tests no local run had). The themes' own tests choose theirs."""
     found = _look()
     yield
-    if found is not None and _look() != found:
+    now = _look()
+    # (no app after the test - one that ran main() and ended it, GitHub CI part 1: nothing to put back)
+    if found is not None and now is not None and now != found:
         from PySide6 import QtWidgets
         from sandbox_ai_app import theme
         app = QtWidgets.QApplication.instance()

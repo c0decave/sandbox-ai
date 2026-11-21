@@ -34,12 +34,19 @@ def remove(root):
     """ROOT and everything in it - also the read-only folders a started .pyz unpacks into ~/.cache/sandbox-ai/pyz
     (0500: rmtree alone left some 70 MB behind per session, in a TMPDIR on a nearly full disk)."""
     def writable(function, path, _info):
+        # Made writable, then removed again - never `function(path)`: rmtree's failing call may be os.open or
+        # os.scandir, which take more than a path (TypeError on GitHub's runner: rootless Podman's storage below the
+        # test HOME has folders 000). What still cannot go (files of Podman's mapped users) stays: a clean-up of a
+        # temporary HOME never fails a session whose tests passed.
         with contextlib.suppress(OSError):
             os.chmod(os.path.dirname(path), 0o700)
+        with contextlib.suppress(OSError):
             if os.path.isdir(path) and not os.path.islink(path):
                 os.chmod(path, 0o700)
-            function(path)
-    with contextlib.suppress(OSError):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.unlink(path)
+    with contextlib.suppress(Exception):
         shutil.rmtree(root, **({"onexc": writable} if sys.version_info >= (3, 12) else {"onerror": writable}))
 
 

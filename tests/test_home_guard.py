@@ -171,3 +171,33 @@ def test_a_test_with_its_own_ssh_server_opts_in(stubs):
     for argv in (["ssh", "runner@192.0.2.11", "true"], ["scp", "a", "192.0.2.11:b"], ["sftp", "192.0.2.11"]):
         assert stubs(*argv, SANDBOX_AI_TEST_REAL_SSH="1").stdout.startswith(f"REAL {argv[0]} ")
         assert stubs(*argv, SANDBOX_AI_TEST_REAL_SSH="0").returncode == 255
+
+
+def test_remove_survives_a_folder_it_may_not_open_and_removes_the_rest(tmp_path, monkeypatch):
+    """GitHub's runner (0.1.188's CI): rootless Podman's storage below the test HOME had a folder 000
+    (overlay/.../work/work); rmtree's os.open failed, the handler called os.open(path) without flags (TypeError), and
+    a part whose 1298 tests had all passed exited 1. Now the folder is made writable and removed, and nothing raises."""
+    import home_guard
+    root = tmp_path / "home"
+    (root / "storage" / "work" / "work").mkdir(parents=True)
+    (root / "storage" / "file").write_text("x")
+    real, failed = os.open, []
+
+    def refusing(name, flags, *args, **kwargs):
+        if str(name).endswith("work") and len(failed) < 2:
+            failed.append(name)
+            raise PermissionError(13, "Permission denied", name)
+        return real(name, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", refusing)
+    home_guard.remove(root)
+    monkeypatch.undo()
+    assert failed, "the stand-in refused an open"
+    assert not root.exists()
+
+
+def test_remove_never_raises_where_something_stays(tmp_path, monkeypatch):
+    import home_guard
+    root = tmp_path / "home"
+    (root / "a").mkdir(parents=True)
+    monkeypatch.setattr(home_guard.shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(TypeError("not this")))
+    home_guard.remove(root)  # a clean-up of a temporary HOME never fails the session
