@@ -275,15 +275,36 @@ def wrapped(text, font, width, lines):
 def wrapped_title(text, font, width, lines):
     """A node's title in at most LINES lines (wrapped()); a title naming a path ("Project folder: /a/b/c") that does
     not fit keeps the path's end - the folder's own name - and is cut in the middle: "Project folder:" over
-    "/a/…/b/c" (design review 0.1.95: the end was cut, and the folder's name was never shown)."""
+    "/a/…/b/c" (design review 0.1.95: the end was cut, and the folder's name was never shown) - in a theme's large
+    font too, whose "Project folder:" does not fit its line: "Project fol…" over "/a/…/c"."""
     shown = wrapped(text, font, width, lines)
     head, colon, path = str(text).partition(": ")
     if not colon or not path.startswith(("/", "~")) or lines < 2 or not shown or not shown[-1].endswith("…"):
         return shown
     first = wrapped(head + ":", font, width, 1)
-    if not first or first[0].endswith("…"):
+    if not first:
         return shown
-    return [first[0], QFontMetricsF(font).elidedText(" ".join(path.split()), Qt.TextElideMode.ElideMiddle, width)]
+    # (a label too long for its line in a large font, fallout's: cut itself - the folder's name matters more)
+    return [first[0], elided_path(" ".join(path.split()), font, width)]
+
+
+def elided_path(path, font, width):
+    """PATH cut in the middle to WIDTH in FONT, its last part - the folder's own name with its "/" - kept whole when
+    it fits: "/tmp/py…/project", not "/tmp/py…project" (Qt's middle cut halves the room, and in a wide font, a
+    monospace theme's, the half was too short for the name)."""
+    metrics = QFontMetricsF(font)
+    middle = metrics.elidedText(path, Qt.TextElideMode.ElideMiddle, width)
+    cut = path.rstrip("/").rfind("/")
+    name = path[cut:] if cut > 0 else ""
+    if not name or middle == path or middle.endswith(name):
+        return middle
+    room = width - metrics.horizontalAdvance(name)
+    while room > metrics.horizontalAdvance("…"):
+        start = metrics.elidedText(path[:cut], Qt.TextElideMode.ElideRight, room)
+        if start.endswith("…") and metrics.horizontalAdvance(start + name) <= width:
+            return start + name
+        room -= 1  # (kerning: the two parts together a pixel wider than each alone)
+    return middle
 
 
 MIME_PART = "application/x-sandbox-ai-part"  # a part dragged from the palette: its kind

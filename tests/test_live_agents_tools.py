@@ -99,6 +99,51 @@ def test_no_tool_to_call_and_unknown_paths(model):
         post(url + "/v1/responses", {})
 
 
+# Letta Code 0.34.36's reminder, as buildMcpServersReminderText writes it (src/reminders), and some of its own tools.
+LETTA_REMINDER = ("<system-reminder>\nMCP servers with available tools: other-server, demo\nDo not automatically store "
+                  "results of principal-restricted operations in shared memory.\nFind tools (with schemas) with "
+                  "`letta mcp search \"<what you want to do>\"`, ...\n</system-reminder>")
+LETTA_TOOLS = [{"type": "function", "function": {"name": name}} for name in
+               ("EnterWorktree", "Agent", "Skill", "Memory", "CodeMode", "Workflow", "exec_command", "write_stdin")]
+
+
+def test_letta_codes_mcp_tools_are_called_through_its_shell(model):
+    """CI 0.1.187 (agents-live letta: "the model was never offered the demo server's tool version"): Letta Code
+    0.34.36 offers MCP tools not as the model's tools but through `letta mcp call`, named in a system reminder. The
+    scripted model calls the demo server's version that way (Letta's exec_command), then answers with its output; no
+    reminder (or "None"), no shell: no call."""
+    url, log = model
+    messages = [{"role": "system", "content": "You are Letta Code."},
+                {"role": "user", "content": [{"type": "text", "text": LETTA_REMINDER}, {"type": "text", "text": "go"}]}]
+    first = json.loads(post(url + "/v1/chat/completions", {"model": "m", "tools": LETTA_TOOLS, "messages": messages}))
+    call = first["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "exec_command"
+    arguments = json.loads(call["function"]["arguments"])
+    assert arguments["cmd"] == "letta mcp call mcp__demo__version --args '{}'" and arguments["description"]
+    streamed = events(post(url + "/v1/chat/completions", {"stream": True, "messages": messages, "tools": [
+        {"type": "function", "function": {"name": "Bash"}}]}))
+    assert json.loads(streamed[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"])["command"] == \
+        "letta mcp call mcp__demo__version --args '{}'"
+    output = '{"content": [{"type": "text", "text": "{\\"server\\": \\"sandbox-ai-demo\\"}"}]}'
+    second = json.loads(post(url + "/v1/chat/completions", {"model": "m", "tools": LETTA_TOOLS, "messages": [
+        *messages, {"role": "assistant", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": call["id"], "content": output}]}))
+    assert "sandbox-ai-demo" in second["choices"][0]["message"]["content"]
+    for other in ([{"role": "user", "content": "go"}],
+                  [{"role": "user", "content": "<system-reminder>\nMCP servers with available tools: None\n"}]):
+        reply = json.loads(post(url + "/v1/chat/completions", {"tools": LETTA_TOOLS, "messages": other}))
+        assert reply["choices"][0]["message"]["content"] == "LIVE-CHECK-ANSWER no tool"
+    no_shell = json.loads(post(url + "/v1/chat/completions", {"tools": LETTA_TOOLS[:2], "messages": messages}))
+    assert no_shell["choices"][0]["message"]["content"] == "LIVE-CHECK-ANSWER no tool"
+    records = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["called"] for r in records] == ["exec_command", "Bash", None, None, None, None]
+    assert records[0]["mcp_listed"] == ["other-server", "demo"] and records[3]["mcp_listed"] == []
+    # A tool of the MCP server's own among the model's tools is still the one called, without arguments.
+    direct = json.loads(post(url + "/v1/chat/completions", {"tools": [*LETTA_TOOLS, *TOOLS], "messages": messages}))
+    assert direct["choices"][0]["message"]["tool_calls"][0]["function"] == {"name": "mcp__demo__version",
+                                                                            "arguments": "{}"}
+
+
 def test_a_runs_logs_say_what_it_reached_and_what_was_refused(tmp_path):
     (tmp_path / "connections-20261113-run.jsonl").write_text("\n".join(json.dumps(r) for r in [
         {"event": "tls", "host": "127.0.0.1:40000"}, {"event": "denied", "sni": "us.i.posthog.com"},

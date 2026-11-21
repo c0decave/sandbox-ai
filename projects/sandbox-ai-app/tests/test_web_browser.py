@@ -239,8 +239,11 @@ def test_without_chromiums_sandbox_or_webengine_the_system_browser_opens(qapp, m
 PAGE = b"""<!doctype html><title>start</title><script>
 async function probe() {
   let clip = "none", geo = "none", pasted = "none";
+  document.title = "waiting for the clipboard";
   try { clip = "read:" + await navigator.clipboard.readText(); } catch (e) { clip = "refused"; }
+  document.title = "waiting for the paste";
   try { pasted = document.execCommand("paste") ? "pasted" : "refused"; } catch (e) { pasted = "refused"; }
+  document.title = "waiting for the location";
   try {
     geo = await new Promise(done => navigator.geolocation.getCurrentPosition(
       () => done("granted"), () => done("refused"), {timeout: 3000}));
@@ -329,13 +332,18 @@ def test_a_download_is_asked_about_and_saved_where_the_human_says_never_opened(b
 
 def test_a_page_cannot_read_the_clipboard_nor_get_a_permission(browser, files, wait):
     """End to end: a page asks for the clipboard (the Clipboard API and paste) and for the location - refused, with
-    something on the clipboard."""
+    something on the clipboard. Every question is refused at once (the page's settings, its permission handlers): a
+    page that still waits after 30 s fails, naming the question it waits for (its title). (CI 0.1.187 named this test
+    as where the app job hung - wrongly: those were the warnings summary's lines, see test_ci_annotations.py.)"""
     from PySide6.QtGui import QGuiApplication
     QGuiApplication.clipboard().setText("secret on the clipboard")
     tab = browser.current()
     tab.load(files.origin + "/page")
-    assert wait(lambda: tab.page.title() not in ("", "start") and "127.0.0.1" not in tab.page.title(), 30), \
-        tab.page.title()
+
+    def answered():
+        title = tab.page.title()
+        return title not in ("", "start") and "127.0.0.1" not in title and not title.startswith("waiting")
+    assert wait(answered, 30), f"no answer within 30 s: {tab.page.title()!r}"
     assert tab.page.title() == "refused refused refused"
 
 

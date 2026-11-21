@@ -280,6 +280,27 @@ def test_a_long_text_wraps_to_three_lines_inside_the_node_and_is_whole_in_the_to
     assert "host-number-2.example.org" in item.toolTip()
 
 
+@pytest.mark.parametrize("look", [None, "light", "hacker", "amber", "fallout"])
+@pytest.mark.parametrize("name", ["project", "web-shop"])
+def test_a_long_path_keeps_the_folder_s_name_whole_in_every_theme_s_font(qapp, look, name):
+    """The folder's own name stays whole after the "…" in the font of every theme, a monospace one too (GitHub CI
+    0.1.187, after a test had left the hacker theme on: Qt's middle cut gave "/tmp/py…project" - the half of the
+    room after the "…" was too short for "/project")."""
+    from PySide6.QtGui import QFont
+    from sandbox_ai_app import theme
+    from sandbox_ai_app.board_view import ICON_ROOM, TITLE_LINES, wrapped_title
+    font = QFont(theme.font(look)) if look else QFont()
+    font.setBold(True)
+    room = NODE_W - 2 * NODE_PAD - ICON_ROOM - help_view.SIZE - 6
+    path = "/tmp/pytest-of-runner/pytest-0/" + "a-folder-with-a-rather-long-name-" * 4 + "/and-deeper-still/" + name
+    titles = wrapped_title("Project folder: " + path, font, room, TITLE_LINES)
+    metrics = QFontMetricsF(font)
+    assert titles[0] in ("Project folder:", metrics.elidedText("Project folder:", Qt.TextElideMode.ElideRight, room))
+    assert "…" in titles[-1] and titles[-1].endswith("/" + name), titles
+    assert titles[-1].startswith("/tmp/"), "its start stays too"
+    assert all(metrics.horizontalAdvance(line) <= room for line in titles)
+
+
 def test_a_node_paints_nothing_outside_itself(page, qapp, tmp_path):
     """Rendered on its own: no pixel of its text outside the node (the frame of a hint and the shadow aside)."""
     from PySide6.QtGui import QImage, QPainter

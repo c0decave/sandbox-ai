@@ -297,3 +297,68 @@ def test_a_hung_test_of_any_pytest_step_prints_where_it_waits():
     app = text[text.index("name: Tests (offscreen, Qt required)"):]
     app = app[:app.index("exit \"$status\"")]
     assert "grep -E -A20000 '^Timeout \\(' tests.txt" in app and '"$hung"' in app
+
+
+# What pytest -v printed when 0.1.187's app job ran into its timeout (shortened): the progress up to the test the
+# SIGINT stopped, then the warnings summary - which names an earlier test once per warning - and the counts.
+INTERRUPTED = """============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-8.3.5, pluggy-1.5.0
+collecting ... collected 5892 items
+
+tests/test_web_browser.py::test_a_page_cannot_read_the_clipboard_nor_get_a_permission PASSED [ 97%]
+tests/test_web_browser.py::test_closing_the_tab_drops_a_held_download PASSED [ 97%]
+tests/test_wizard_llm.py::test_any_agent_with_an_own_server_on_the_board[a-claude] PASSED [ 98%]
+tests/test_wizard_llm.py::test_any_agent_with_an_own_server_on_the_board[a-codex] 
+
+=============================== warnings summary ===============================
+tests/test_web_browser.py::test_a_page_cannot_read_the_clipboard_nor_get_a_permission
+  sandbox_ai_app/login_browser.py:254: DeprecationWarning: Function: 'QWebEnginePage.setFeaturePermission'
+
+tests/test_web_browser.py::test_a_page_cannot_read_the_clipboard_nor_get_a_permission
+  sandbox_ai_app/login_browser.py:254: DeprecationWarning: Enum value 'QWebEnginePage::Feature.Geolocation'
+
+tests/test_web_browser.py::test_a_page_cannot_read_the_clipboard_nor_get_a_permission
+  sandbox_ai_app/login_browser.py:254: DeprecationWarning: Enum value 'PermissionPolicy.PermissionDeniedByUser'
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+/home/runner/work/sandbox-ai/sandbox-ai/sandbox/agent_sandbox.py:841: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+=========================== short test summary info ============================
+FAILED tests/test_layout.py::test_the_board_fits - AssertionError
+================= 1 failed, 5800 passed, 3 warnings in 4199.12s =================
+"""
+
+
+@pytest.mark.parametrize("name, output", [("test", "pytest.txt"), ("app", "tests.txt")])
+def test_the_last_tests_of_a_stopped_run_are_those_it_was_running(tmp_path, name, output):
+    """CI 0.1.187: the app job ran into its timeout and its annotation's "last tests" were one test three times -
+    test_a_page_cannot_read_the_clipboard_nor_get_a_permission, long done: the lines were the warnings summary's,
+    which names the test of each warning. The last tests are taken from pytest's progress only: the one the SIGINT
+    stopped (its line has no outcome yet) and the two before it."""
+    text = job(name)
+    line = next(line.strip() for line in text.splitlines() if line.strip().startswith("last=$("))
+    (tmp_path / output).write_text(INTERRUPTED)
+    done = subprocess.run(["bash", "-c", line + '\nprintf "%s" "$last"'], cwd=tmp_path, capture_output=True,
+                          text=True, timeout=60)
+    assert done.returncode == 0 and done.stderr == "", done.stderr
+    assert done.stdout.splitlines() == [
+        "tests/test_web_browser.py::test_closing_the_tab_drops_a_held_download PASSED [ 97%]",
+        "tests/test_wizard_llm.py::test_any_agent_with_an_own_server_on_the_board[a-claude] PASSED [ 98%]",
+        "tests/test_wizard_llm.py::test_any_agent_with_an_own_server_on_the_board[a-codex] "], done.stdout
+
+
+def test_the_app_suite_runs_in_four_parts_as_the_core_tests_do():
+    """5892 app tests (3379 at 0.1.96, whose one job already needed 45-70 minutes) ran into the job's 4200 s at 0.1.187:
+    the app job is a matrix of four parts of the test files, chosen as the core tests' parts are, each under a timeout
+    of its own that says so in the annotation; the gdb repetition of the board's drop tests runs in one part only."""
+    core, app = job("test"), job("app")
+    split = "ls tests/test_*.py | awk -v part=${{ matrix.%s }} 'NR %% 4 == part'"
+    assert split % "shard" in core and "shard: [0, 1, 2, 3]" in core
+    assert split % "part" in app and "part: [0, 1, 2, 3]" in app and "fail-fast: false" in app
+    assert "-o faulthandler_timeout=300 $files > tests.txt" in app and " tests > tests.txt" not in app
+    assert "name: app (part ${{ matrix.part }})" in app and "app tests failed (part ${{ matrix.part }})" in app
+    assert app.count("if: matrix.part == 0") == 1
+    gdb = app[app.index("repeated under gdb"):]
+    assert gdb.index("if: matrix.part == 0") < gdb.index("run: |")
+    assert "timeout --signal=INT --kill-after=60 2700 " in app and "timeout of 2700 s" in app

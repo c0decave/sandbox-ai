@@ -221,13 +221,23 @@ def test_login_session_and_logout():
     assert events == ["login", "logout"]
 
 
+def wrong_code(secret):
+    """A six-digit code that is valid in none of the periods the server accepts now (the one before, now, the one
+    after): a fixed "000000" is the real code about 3 times in a million, which with hundreds of cases a run made
+    the check of a wrong code fail now and then (0.1.187's CI: 200 == 401)."""
+    current = int(time.time() // w.TOTP_PERIOD)
+    valid = {w.totp(secret, counter) for counter in range(current - 2, current + 3)}
+    return next(code for code in ("000000", "111111", "222222", "333333", "444444", "555555") if code not in valid)
+
+
 def test_every_part_of_a_login_is_needed():
     secret = add_user()
     svc = service()
     assert login(svc, secret, password="wrong password!!")[0] == 401
     assert login(svc, secret, user="nobody")[0] == 401
     status, _, body = svc.handle("POST", "/api/login", HEADERS, json.dumps(
-        {"user": "admin", "password": "correct horse battery", "code": "000000"}).encode(), "192.0.2.9")
+        {"user": "admin", "password": "correct horse battery", "code": wrong_code(secret)}).encode(),
+        "192.0.2.9")
     assert status == 401 and body and json.loads(body)["error"] == "wrong user, password or code"
     assert login(svc, secret, offset=-3)[0] == 401, "an old code"
     status, _, body = login(svc, secret)

@@ -264,10 +264,11 @@ def mkdir(path, *args, **kwargs):
     if under(path) and not os.path.isdir(path):
         full(path)
     return _mkdir(path, *args, **kwargs)
-# functools.partial, not the functions: Python 3.9's pathlib takes os.open and os.mkdir as attributes of its
-# _NormalAccessor class, where a plain function is bound as a method (TypeError: open() takes at most 3
-# positional arguments (4 given)); a partial is never bound.
-builtins.open, io.open = open_, open_
+# functools.partial, not the functions: Python 3.9's and 3.10's pathlib take os.open, os.mkdir (3.9) and io.open
+# (3.10) as attributes of their _NormalAccessor class, where a plain function is bound as a method (TypeError:
+# open() takes at most 3 positional arguments (4 given); open() argument 'mode' must be str, not PosixPath);
+# a partial is never bound.
+builtins.open, io.open = functools.partial(open_), functools.partial(open_)
 os.open, os.mkdir = functools.partial(osopen), functools.partial(mkdir)
 if os.environ.get("FAKE_FULL_EUID"):
     os.geteuid = lambda: 1000

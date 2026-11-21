@@ -226,6 +226,43 @@ def no_widgets_left():
 
 
 @pytest.fixture(autouse=True)
+def the_theme_it_found():
+    """A test that switched the app's theme (or its fonts) leaves the look it found - style sheet, style, palette,
+    font: the theme's style sheet and font stayed on for every later test (GitHub CI 0.1.187: the node titles, the
+    Credentials page and the device code window were measured in another theme's font, their tests failed there and
+    never here - an order of tests no local run had). The themes' own tests choose theirs."""
+    found = _look()
+    yield
+    if found is not None and _look() != found:
+        from PySide6 import QtWidgets
+        from sandbox_ai_app import theme
+        app = QtWidgets.QApplication.instance()
+        sheet, style, palette, font, current, fonts, style_name = found
+        app.setStyleSheet("")
+        if (theme._style_name or app.style().name()).lower() != style.lower():
+            app.setStyle(style)
+        app.setPalette(palette)
+        app.setFont(font)
+        app.setStyleSheet(sheet)
+        theme._current, theme._style_name = current, style_name
+        theme._fonts.clear()
+        theme._fonts.update(fonts)
+
+
+def _look():
+    """The app's look as the_theme_it_found compares it (None: no app, no theme module)."""
+    theme = sys.modules.get("sandbox_ai_app.theme")
+    if theme is None or "PySide6.QtWidgets" not in sys.modules:
+        return None
+    from PySide6 import QtGui, QtWidgets
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return None
+    return (app.styleSheet(), theme._style_name or app.style().name(), QtGui.QPalette(app.palette()), QtGui.QFont(app.font()),
+            theme._current, dict(theme._fonts), theme._style_name)
+
+
+@pytest.fixture(autouse=True)
 def no_modifiers_held():
     """QTest's key clicks with Ctrl or Shift leave them as the application's keyboard modifiers (offscreen, until the
     next key event): a later selectRow() in a list that takes several rows (Ctrl, Shift) would add to the selection

@@ -54,11 +54,17 @@ class DeviceCodeWindow(QDialog):
         self.code_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.code_label.setAccessibleName(tr("One-time code"))
         font = self.code_label.font()
-        font.setPointSizeF(max(font.pointSizeF(), 10.0) * 2.4)
+        size = max(font.pointSizeF(), 10.0) * 2.4
+        font.setPointSizeF(size)
         font.setBold(True)
         font.setFamily("monospace")
         font.setLetterSpacing(font.SpacingType.AbsoluteSpacing, 2.0)
         self.code_label.setFont(font)
+        # A theme's style sheet gives every widget its font size ("QWidget { font-size: 10pt; }"), and a style sheet
+        # wins over setFont(): the code was as small as the text around it in every theme but the system's. Its own
+        # rule wins over the theme's.
+        self.code_label.setStyleSheet(f"font-family: monospace; font-size: {size:.1f}pt; font-weight: 700; "
+                                      "letter-spacing: 2px;")
         layout.addWidget(self.code_label)
         row = QHBoxLayout()
         self.copy_button = QPushButton(tr("Copy the code"))

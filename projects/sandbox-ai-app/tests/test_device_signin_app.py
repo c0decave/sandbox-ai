@@ -12,6 +12,8 @@ Codex's lines are its own: the device code prompt of codex-rs' login as the @ope
 version and the hints in gray, the link and the code in blue)."""
 import sys
 
+import pytest
+
 from test_terminal_tools import open_view, screen, settings, terminal, web  # noqa: F401 - the tabs' fixtures
 
 GRAY, BLUE, RESET = "\x1b[90m", "\x1b[94m", "\x1b[0m"
@@ -68,6 +70,31 @@ def test_the_sign_in_codex_draws_on_its_own_screen_is_read_too():
     plain_watch = T.LoginWatch()
     plain_watch.feed(drawn.encode())
     assert plain_watch.code is None, "without rows the link and the next line are one word"
+
+
+@pytest.mark.parametrize("look", ["system", "light", "dark", "hacker", "fallout"])
+def test_the_code_is_large_in_every_theme(qapp, look):
+    """The one-time code is drawn large in every theme: a theme's style sheet sets every widget's font size, and that
+    won over the code's own font - it was as small as the text around it (GitHub CI 0.1.187, after a test had left
+    a theme on)."""
+    from PySide6.QtGui import QFontInfo
+    from sandbox_ai_app import device_window, theme
+    theme.apply(look, qapp)
+    window = None
+    try:
+        window = device_window.DeviceCodeWindow(URL, "ABCD-12345", "codex", opener=lambda url: True)
+        window.show()
+        qapp.processEvents()
+        label = window.code_label
+        assert label.text() == "ABCD-12345"
+        assert label.font().pointSizeF() >= 20 and label.font().bold(), (look, label.font().toString())
+        assert QFontInfo(label.font()).fixedPitch(), "a monospace font: 0 and O, 1 and l told apart"
+        lead = window.lead.font().pointSizeF()
+        assert label.fontMetrics().height() >= 2 * window.lead.fontMetrics().height(), (look, lead)
+    finally:
+        if window is not None:
+            window.close()
+        theme.apply("system", qapp)
 
 
 def test_login_codex_opens_the_page_in_the_system_browser_and_shows_the_code(terminal, web, wait, settings,

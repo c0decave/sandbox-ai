@@ -71,7 +71,10 @@ agent's entry in `~/.letta/settings.json`; no flag or variable names them), so t
 (each the launcher's stdio bridge) into every agent there, takes out the ones an earlier start laid in that this one
 has not, and on a first start creates the agent Letta Code would create (`letta agents create`, local, no model
 call) so its servers are there from the first turn. It never follows a symlink; if anything goes wrong, Letta Code
-starts all the same. Measured: `letta mcp tools` lists the bridged server's tools, the model receives them.
+starts all the same. Measured: `letta mcp tools` lists the bridged server's tools. Letta Code 0.34.36 does not
+offer MCP tools as the model's own tools: a system reminder names the agent's servers ("MCP servers with
+available tools: demo") and the model calls one through its shell, `letta mcp call mcp__demo__version --args
+'{}'` (src/cli/subcommands/mcp.ts, src/reminders; the live check's scripted model does the same).
 
 - `-D` is `--yolo` (no approvals; Letta Code asks before what changes something, upstream's default).
 - `--model MODEL` is Letta Code's `--model` (a handle such as `anthropic/claude-sonnet-4-5`).

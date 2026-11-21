@@ -29,6 +29,15 @@ HOST, ORIGIN = "localhost:8443", "https://localhost:8443"
 REMOTE = {"ssh": "admin@192.0.2.10", "port": 2222}
 HOSTS = ("local", "ct1")
 AGENTS = ("claude", "codex", "opencode")
+def wrong_code(secret):
+    """A six-digit code that is valid in none of the periods the server accepts now (the one before, now, the one
+    after): a fixed "000000" is the real code about 3 times in a million, which with hundreds of cases a run made
+    the check of a wrong code fail now and then (0.1.187's CI: 200 == 401)."""
+    current = int(time.time() // w.TOTP_PERIOD)
+    valid = {w.totp(secret, counter) for counter in range(current - 2, current + 3)}
+    return next(code for code in ("000000", "111111", "222222", "333333", "444444", "555555") if code not in valid)
+
+
 STATES = ("none", "password-only", "full", "expired", "wrong-csrf", "wrong-origin", "wrong-host")
 
 
@@ -135,7 +144,7 @@ class Web:
             status, headers, data = self.login(code=False)
             assert status == 400 and "Set-Cookie" not in headers
             status, headers, _ = self.request("POST", "/api/login", {"user": "admin", "password": PASSWORD,
-                                                                     "code": "000000"})
+                                                                     "code": wrong_code(self.secret)})
             assert status == 401 and "Set-Cookie" not in headers
             return {}
         status, headers, data = self.login()

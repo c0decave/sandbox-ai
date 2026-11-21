@@ -326,14 +326,17 @@ def check_agent_answers_with_one_mcp_tool(tmp_path, agent):
             "agent": agent, "exit": status, "answered": "LIVE-CHECK-ANSWER" in stdout,
             "model_requests": len(requests), "tools_offered": sorted({t for r in requests for t in r.get("tools") or []}),
             "tool_called": [r.get("called") for r in requests if r.get("called")],
+            "mcp_listed": sorted({n for r in requests for n in r.get("mcp_listed") or []}),  # (Letta's reminder)
             "tool_result": (results[-1]["tool_result"] if results else None),
             "mcp_gateway_calls": [c.get("tool") for c in calls], "reached": sorted(reached),
             "refused": sorted(refused), "telemetry_reached": telemetry_in(module, reached),
             "telemetry_refused": telemetry_in(module, refused)})
         assert status == 0, f"{spec['name']} did not end cleanly\n{text}"
         assert requests, f"{spec['name']} never asked the model (--llm {LLM})\n{text}"
+        # (Letta Code: through its shell, `letta mcp call`, for a server its reminder lists - agent_model.py)
         assert any(r.get("called") for r in requests), \
-            f"the model was never offered the demo server's tool version (tools: {requests[0].get('tools')})\n{text}"
+            f"the model was never offered the demo server's tool version (tools: {requests[0].get('tools')}; MCP " \
+            f"servers a reminder listed: {sorted({n for r in requests for n in r.get('mcp_listed') or []})})\n{text}"
         assert results and "sandbox-ai-demo" in results[-1]["tool_result"], \
             f"the tool's result never came back to the model\n{json.dumps(requests, indent=1)[-3000:]}\n{text}"
         assert any(c.get("tool") == "version" for c in calls), \

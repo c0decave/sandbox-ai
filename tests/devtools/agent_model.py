@@ -12,6 +12,11 @@ not; /v1/messages/count_tokens), which Claude Code uses (Cairn's workers):
 - a chat request that offers a tool whose name holds --tool (default "version"; one that names "demo" too is
   preferred: sandbox-ai's demo MCP server, as each agent names its tools) and carries no tool result yet is answered
   with a call of that tool, without arguments;
+- Letta Code (0.34.36) offers MCP tools not as tools of the model but through its shell: a system reminder "MCP
+  servers with available tools: NAME, ..." and `letta mcp call mcp__SERVER__TOOL` (src/cli/subcommands/mcp.ts). A
+  request without such a tool whose messages carry that reminder and that offers Letta's shell (exec_command, or
+  Bash) is answered with a shell call of `letta mcp call mcp__SERVER__WORD --args '{}'` (SERVER: the listed one
+  that holds "demo", else the first);
 - every other request is answered with text: ANSWER, then what the last tool result said (its first 300 characters)
   or "no tool".
 
@@ -23,6 +28,7 @@ sandbox (which reaches the server through --llm) can wait for what it caused.
 import argparse
 import http.server
 import json
+import re
 import socketserver
 import sys
 import threading
@@ -89,12 +95,47 @@ def tool_result(messages):
     return found
 
 
+MCP_REMINDER = re.compile(r"MCP servers with available tools: ([^\n<]*)")
+SHELLS = {"exec_command": "cmd", "Bash": "command"}  # Letta Code's shell tools: the argument with the command
+
+
+def mcp_servers_listed(messages):
+    """The MCP servers Letta Code's reminder lists in MESSAGES ("MCP servers with available tools: a (2 tools), b"),
+    in its order; [] for none ("None") or no reminder."""
+    found = []
+    for message in messages if isinstance(messages, list) else []:
+        if isinstance(message, dict):
+            for match in MCP_REMINDER.finditer(text_of(message.get("content"))):
+                for entry in match.group(1).split(","):
+                    name = entry.strip().split(" (", 1)[0].strip()
+                    if name and name != "None" and name not in found:
+                        found.append(name)
+    return found
+
+
+def shell_call(names, messages, word):
+    """(Letta's shell tool, its arguments) that runs `letta mcp call` of WORD's tool of a server Letta's reminder in
+    MESSAGES lists, or None."""
+    shell = next((name for name in SHELLS if name in names), None)
+    servers = mcp_servers_listed(messages)
+    if shell is None or not servers:
+        return None
+    server = next((name for name in servers if "demo" in name.lower()), servers[0])
+    alias = re.sub(r"_{2,}", "_", re.sub(r"[^a-zA-Z0-9_-]", "_", server)) or "tool"  # (Letta's alias of a server)
+    command = f"letta mcp call mcp__{alias}__{word} --args '{{}}'"
+    return shell, {SHELLS[shell]: command, "description": f"Call the {server} MCP server's {word} tool"}
+
+
 def decide(body, word):
-    """(tool to call or None, the answer's text, the tool result seen or None) for a request BODY."""
+    """(tool to call or None, its arguments, the answer's text, the tool result seen or None) for a request BODY."""
     result = tool_result(body.get("messages"))
-    tool = chosen_tool(tool_names(body.get("tools")), word) if result is None else None
+    names = tool_names(body.get("tools"))
+    tool = chosen_tool(names, word) if result is None else None
+    arguments = {}
+    if result is None and tool is None:
+        tool, arguments = shell_call(names, body.get("messages"), word) or (None, {})
     text = f"{ANSWER} " + (f"the tool said: {result[:300]}" if result is not None else "no tool")
-    return tool, text, result
+    return tool, arguments, text, result
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -168,20 +209,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         token = bool(self.options.token) and self.options.token.encode() in raw
         if path.endswith("/messages/count_tokens"):
             return self.send_json(200, {"input_tokens": 10})
-        tool, text, result = decide(body, self.options.tool)
+        tool, arguments, text, result = decide(body, self.options.tool)
         self.record(model=body.get("model"), stream=bool(body.get("stream")), tools=tool_names(body.get("tools")),
-                    called=tool, tool_result=None if result is None else result[:2000], token=token)
+                    called=tool, arguments=arguments or None, mcp_listed=mcp_servers_listed(body.get("messages")),
+                    tool_result=None if result is None else result[:2000], token=token)
         if path.endswith("/messages"):
-            return self.anthropic(body, tool, text)
+            return self.anthropic(body, tool, text, arguments)
         if path.endswith("/chat/completions"):
-            return self.chat(body, tool, text)
+            return self.chat(body, tool, text, arguments)
         return self.send_json(404, {"error": {"message": f"no {path} here (Chat Completions and Messages only)"}})
 
-    def chat(self, body, tool, text):
+    def chat(self, body, tool, text, arguments=None):
         ident, created, model = f"chatcmpl-live-{time.time_ns()}", int(time.time()), body.get("model") or \
             self.options.model
         usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-        call = {"id": "call_live_1", "type": "function", "function": {"name": tool, "arguments": "{}"}} if tool else None
+        encoded = json.dumps(arguments or {})
+        call = {"id": "call_live_1", "type": "function", "function": {"name": tool, "arguments": encoded}} if tool \
+            else None
         if not body.get("stream"):
             message = {"role": "assistant", "content": None if call else text, **({"tool_calls": [call]} if call else {})}
             return self.send_json(200, {"id": ident, "object": "chat.completion", "created": created, "model": model,
@@ -195,7 +239,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if call:
             events = [chunk({"role": "assistant", "content": None, "tool_calls": [
                 {"index": 0, "id": call["id"], "type": "function", "function": {"name": tool, "arguments": ""}}]}),
-                chunk({"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}), chunk({}, "tool_calls")]
+                chunk({"tool_calls": [{"index": 0, "function": {"arguments": encoded}}]}), chunk({}, "tool_calls")]
         else:
             half = len(text) // 2
             events = [chunk({"role": "assistant", "content": text[:half]}), chunk({"content": text[half:]}),
@@ -205,10 +249,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                            "choices": [], "usage": usage})
         self.send_events([(None, event) for event in events] + [(None, "[DONE]")])
 
-    def anthropic(self, body, tool, text):
+    def anthropic(self, body, tool, text, arguments=None):
         ident, model = f"msg_live_{time.time_ns()}", body.get("model") or self.options.model
         usage = {"input_tokens": 10, "output_tokens": 5}
-        block = {"type": "tool_use", "id": "toolu_live_1", "name": tool, "input": {}} if tool else \
+        block = {"type": "tool_use", "id": "toolu_live_1", "name": tool, "input": arguments or {}} if tool else \
             {"type": "text", "text": text}
         stop = "tool_use" if tool else "end_turn"
         if not body.get("stream"):
@@ -216,7 +260,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                         "content": [block], "stop_reason": stop, "stop_sequence": None,
                                         "usage": usage})
         start = {**block, "input": {}} if tool else {"type": "text", "text": ""}
-        delta = {"type": "input_json_delta", "partial_json": "{}"} if tool else {"type": "text_delta", "text": text}
+        delta = {"type": "input_json_delta", "partial_json": json.dumps(arguments or {})} if tool else \
+            {"type": "text_delta", "text": text}
         self.send_events([
             ("message_start", {"type": "message_start", "message": {
                 "id": ident, "type": "message", "role": "assistant", "model": model, "content": [],
